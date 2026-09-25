@@ -303,6 +303,12 @@ impl AppModel {
             Some(buf)
         };
 
+        // Tracks whether MPD itself reports `Playing`, for the PipeWire
+        // capture thread's default-sink-monitor fallback gating (see
+        // `AppModel::mpd_playing`'s doc comment).
+        #[cfg(feature = "visualizer")]
+        let mpd_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // Command channel to the projectM render thread — replaces the
         // old `next_preset_signal: AtomicBool` flag so the UI can also
         // request specific-preset loads, lock state, and beat sensitivity.
@@ -450,6 +456,8 @@ impl AppModel {
             },
             #[cfg(feature = "visualizer")]
             pcm_buffer,
+            #[cfg(feature = "visualizer")]
+            mpd_playing,
             #[cfg(feature = "visualizer")]
             viz_cmd_tx,
             #[cfg(feature = "visualizer")]

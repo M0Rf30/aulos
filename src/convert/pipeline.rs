@@ -16,12 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::picture::{Picture, PictureType};
-use lofty::prelude::*;
-use lofty::probe::Probe;
-use lofty::tag::Tag;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -31,10 +25,12 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 
+use crate::library::tags::{self as track_tags, Picture};
 use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 
 use super::cue;
 use super::encoder;
+use super::tag_writer::{self, WriteTags};
 use super::{ConvertError, ConvertJob, JobId, JobKind};
 
 /// Runs `job` to completion: decodes, optionally resamples, encodes, and
@@ -50,7 +46,7 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
             let stem = job.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
             let out_path = unique_out_path(&job.out_dir, stem, job.format.extension());
             transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
-            copy_tags(&job.source, &out_path);
+            copy_tags(&job.source, &out_path, job.format);
             Ok(())
         }
         JobKind::CueSplit => cue_split(job),
@@ -78,10 +74,7 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
     // Read the whole album's tag once so every track can carry over the
     // fields the CUE sheet itself doesn't encode (album, genre, date, cover
     // art), rather than each track ending up untagged beyond its title.
-    let src_tag = Probe::open(&audio_path)
-        .ok()
-        .and_then(|p| p.read().ok())
-        .and_then(|f| f.primary_tag().or_else(|| f.first_tag()).cloned());
+    let src_tags = track_tags::probe(&audio_path, true).map(|p| p.tags);
 
     let track_count = tracks.len();
     for (i, track) in tracks.iter().enumerate() {
@@ -96,15 +89,14 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         let (progress_base, progress_span) = track_progress_range(i, track_count);
         transcode(job, &audio_path, &out_path, Some(start), end, progress_base, progress_span)?;
 
-        let mut tag = Tag::new(detect_tag_type(&out_path));
-        tag.set_title(track.title.clone());
-        tag.set_artist(track.performer.clone());
-        tag.set_track(track.number);
-        tag.set_track_total(track_count as u32);
-        if let Some(src_tag) = &src_tag {
-            copy_shared_tag_fields(src_tag, &mut tag);
-        }
-        write_tag(&out_path, tag);
+        let write = WriteTags {
+            title: Some(track.title.as_str()),
+            artist: Some(track.performer.as_str()),
+            track_number: Some(track.number),
+            track_total: Some(track_count as u32),
+            ..src_tags.as_ref().map(shared_tags).unwrap_or_default()
+        };
+        write_output_tags(&out_path, job.format, &write);
     }
     Ok(())
 }
@@ -260,86 +252,57 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Copies title/artist/track/disk plus the shared album/genre/date/cover
-/// art fields (see [`copy_shared_tag_fields`]) from `src` to `dst`,
-/// best-effort — a missing source tag or an unwritable field is skipped,
-/// never a hard error, since the encoded output is already valid without it.
-fn copy_tags(src: &Path, dst: &Path) {
-    let Some(src_tag) = Probe::open(src)
-        .ok()
-        .and_then(|p| p.read().ok())
-        .and_then(|f| f.primary_tag().or_else(|| f.first_tag()).cloned())
-    else {
+/// Copies title/artist/track/disc plus the shared album/genre/date/cover
+/// art fields (see [`shared_tags`]) from `src` to `dst`, best-effort — a
+/// missing source tag or an unwritable field is skipped, never a hard
+/// error, since the encoded output is already valid without it.
+fn copy_tags(src: &Path, dst: &Path, format: encoder::OutputFormat) {
+    let Some(src_tags) = track_tags::probe(src, true).map(|p| p.tags) else {
         return;
     };
 
-    let tag_type = detect_tag_type(dst);
-    let mut tag = Tag::new(tag_type);
-
-    if let Some(v) = src_tag.title() {
-        tag.set_title(v.into_owned());
-    }
-    if let Some(v) = src_tag.artist() {
-        tag.set_artist(v.into_owned());
-    }
-    if let Some(v) = src_tag.track() {
-        tag.set_track(v);
-    }
-    if let Some(v) = src_tag.disk() {
-        tag.set_disk(v);
-    }
-    copy_shared_tag_fields(&src_tag, &mut tag);
-
-    write_tag(dst, tag);
+    let write = WriteTags {
+        title: src_tags.title.as_deref(),
+        artist: src_tags.artist.as_deref(),
+        track_number: src_tags.track_number,
+        disc_number: src_tags.disc_number,
+        ..shared_tags(&src_tags)
+    };
+    write_output_tags(dst, format, &write);
 }
 
-/// Copies the release-level fields both `copy_tags` (whole-file convert)
+/// Builds the release-level fields both `copy_tags` (whole-file convert)
 /// and `cue_split` (per-track rip) need from the same source tag — album,
 /// genre, release date, and front-cover artwork — but neither title,
 /// artist, nor track number, since those differ per output (CUE tracks get
 /// their own title/artist/number from the cue sheet, not the source tag).
-/// Best-effort: a missing field is skipped, never an error.
-fn copy_shared_tag_fields(src_tag: &Tag, dst_tag: &mut Tag) {
-    if let Some(v) = src_tag.album() {
-        dst_tag.set_album(v.into_owned());
-    }
-    if let Some(v) = src_tag.genre() {
-        dst_tag.set_genre(v.into_owned());
-    }
-    if let Some(v) = src_tag.date() {
-        dst_tag.set_date(v);
-    }
-    if let Some(picture) = front_cover(src_tag) {
-        dst_tag.push_picture(picture.clone());
+fn shared_tags(src_tags: &track_tags::AudioTags) -> WriteTags<'_> {
+    WriteTags {
+        album: src_tags.album.as_deref(),
+        genre: src_tags.genre.as_deref(),
+        date: src_tags.date.as_deref(),
+        picture: front_cover(&src_tags.pictures),
+        ..Default::default()
     }
 }
 
-/// Returns `tag`'s front-cover picture, falling back to the first embedded
-/// picture if none is explicitly typed as the front cover — most rips only
-/// embed a single (untyped-as-front) picture, and that's still the one
-/// users expect to see as artwork.
-fn front_cover(tag: &Tag) -> Option<&Picture> {
-    let pictures = tag.pictures();
-    pictures.iter().find(|p| p.pic_type() == PictureType::CoverFront).or_else(|| pictures.first())
+/// Returns `pictures`'s front-cover picture, falling back to the first
+/// embedded picture if none is explicitly typed as the front cover — most
+/// rips only embed a single (untyped-as-front) picture, and that's still
+/// the one users expect to see as artwork.
+fn front_cover(pictures: &[Picture]) -> Option<&Picture> {
+    pictures.iter().find(|p| p.is_front_cover).or_else(|| pictures.first())
 }
 
-/// Probes `path` for the tag type its container actually supports, falling
-/// back to Vorbis comments (used by FLAC, our most common output) if the
-/// probe fails.
-fn detect_tag_type(path: &Path) -> lofty::tag::TagType {
-    Probe::open(path)
-        .ok()
-        .and_then(|p| p.read().ok())
-        .map(|f| f.primary_tag_type())
-        .unwrap_or(lofty::tag::TagType::VorbisComments)
-}
-
-/// Inserts `tag` into `path`'s tagged file and saves, ignoring failures —
-/// tagging is best-effort per the caller's contract.
-fn write_tag(path: &Path, tag: Tag) {
-    if let Ok(mut tagged) = Probe::open(path).and_then(|p| p.read()) {
-        tagged.insert_tag(tag);
-        let _ = tagged.save_to_path(path, WriteOptions::default());
+/// Dispatches to the FLAC or WAV tag writer for `format`'s output
+/// container. Best-effort per the callers' contract — see
+/// `super::tag_writer`.
+fn write_output_tags(path: &Path, format: encoder::OutputFormat, tags: &WriteTags<'_>) {
+    match format {
+        encoder::OutputFormat::Flac => tag_writer::write_flac_tags(path, tags),
+        encoder::OutputFormat::Wav16 | encoder::OutputFormat::Wav24 | encoder::OutputFormat::Wav32Float => {
+            tag_writer::write_wav_tags(path, tags)
+        }
     }
 }
 
@@ -580,9 +543,8 @@ mod tests {
     use super::*;
     use std::f32::consts::TAU;
 
-    /// Writes a mono 44.1kHz sine WAV of `num_frames` samples, tagged with a
-    /// title, so an end-to-end job (decode → encode → tag copy) can be
-    /// exercised without needing a fixture file on disk.
+    /// Writes a mono 44.1kHz sine WAV of `num_frames` samples (no tags —
+    /// used only by tests that don't care about tag round-tripping).
     fn write_test_wav_frames(path: &Path, num_frames: u32) {
         let spec = hound::WavSpec {
             channels: 1,
@@ -596,26 +558,44 @@ mod tests {
             writer.write_sample((s * f32::from(i16::MAX)) as i16).unwrap();
         }
         writer.finalize().unwrap();
-
-        let mut tagged = Probe::open(path).and_then(|p| p.read()).unwrap();
-        let mut tag = Tag::new(tagged.primary_tag_type());
-        tag.set_title("Pipeline Test Track".to_owned());
-        tagged.insert_tag(tag);
-        tagged.save_to_path(path, WriteOptions::default()).unwrap();
     }
 
     /// One second of `write_test_wav_frames`, used by tests that don't care
-    /// about the exact clip length.
+    /// about the exact clip length or about tags.
     fn write_test_wav(path: &Path) {
         write_test_wav_frames(path, 44_100);
+    }
+
+    /// Writes a mono 44.1kHz sine FLAC of `num_frames` samples, untagged —
+    /// used as a fixture for tests that then tag it themselves via
+    /// `tag_writer::write_flac_tags`, exercising the same read-then-write
+    /// path a real source file goes through (`crate::library::tags::probe`
+    /// for reading, since FLAC — unlike this fork's WAV reader, see
+    /// `tag_writer`'s module docs — round-trips tags end to end).
+    fn write_test_flac_frames(path: &Path, num_frames: u32) {
+        let mut sink =
+            encoder::create_sink(encoder::OutputFormat::Flac, path, 1, 44_100, Some(16)).unwrap();
+        let samples: Vec<f32> =
+            (0..num_frames).map(|i| (TAU * 440.0 * i as f32 / 44_100.0).sin()).collect();
+        sink.write(&samples).unwrap();
+        sink.finish().unwrap();
+    }
+
+    /// One second of `write_test_flac_frames`.
+    fn write_test_flac(path: &Path) {
+        write_test_flac_frames(path, 44_100);
     }
 
     #[test]
     fn run_converts_and_copies_tags_end_to_end() {
         let dir = std::env::temp_dir().join(format!("lyra-pipeline-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("source.wav");
-        write_test_wav(&source);
+        let source = dir.join("source.flac");
+        write_test_flac(&source);
+        tag_writer::write_flac_tags(
+            &source,
+            &WriteTags { title: Some("Pipeline Test Track"), ..Default::default() },
+        );
 
         let out_dir = dir.join("out");
         let job = ConvertJob::new(
@@ -632,38 +612,36 @@ mod tests {
         let out_path = out_dir.join("source.flac");
         assert!(out_path.exists(), "expected {out_path:?} to exist");
 
-        let tagged = Probe::open(&out_path).unwrap().read().unwrap();
-        let duration = tagged.properties().duration();
+        let probed = track_tags::probe(&out_path, false).expect("probe should succeed");
         assert!(
-            (duration.as_secs_f64() - 1.0).abs() < 0.05,
-            "expected ~1s, got {duration:?}"
+            (probed.properties.duration.as_secs_f64() - 1.0).abs() < 0.05,
+            "expected ~1s, got {:?}",
+            probed.properties.duration
         );
-        let tag = tagged.primary_tag().expect("output should have a tag");
-        assert_eq!(tag.title().map(|c| c.into_owned()), Some("Pipeline Test Track".to_owned()));
+        assert_eq!(probed.tags.title.as_deref(), Some("Pipeline Test Track"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_copies_date_and_cover_art_end_to_end() {
-        use lofty::picture::{MimeType, Picture};
-        use lofty::tag::items::Timestamp;
-
         let dir = std::env::temp_dir().join(format!("lyra-pipeline-art-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("source.wav");
-        write_test_wav(&source);
+        let source = dir.join("source.flac");
+        write_test_flac(&source);
 
-        // Layer a date and a front-cover picture onto the tag `write_test_wav`
-        // already wrote, so this test exercises exactly the fields
-        // `copy_shared_tag_fields` is responsible for.
-        let mut tagged = Probe::open(&source).and_then(|p| p.read()).unwrap();
-        let mut tag = tagged.primary_tag().cloned().unwrap();
-        tag.set_date(Timestamp { year: 2024, ..Default::default() });
+        // Tag the source with exactly the fields `shared_tags` is
+        // responsible for carrying over: release date and a front-cover
+        // picture (title/artist/track number are deliberately left unset,
+        // since those come from elsewhere for CUE tracks and shouldn't be
+        // conflated with the shared fields this test exercises).
         let cover_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xD9]; // minimal fake JPEG payload
-        tag.push_picture(Picture::unchecked(cover_bytes.clone()).mime_type(MimeType::Jpeg).build());
-        tagged.insert_tag(tag);
-        tagged.save_to_path(&source, WriteOptions::default()).unwrap();
+        let picture =
+            Picture { mime_type: "image/jpeg".to_string(), is_front_cover: true, data: cover_bytes.clone() };
+        tag_writer::write_flac_tags(
+            &source,
+            &WriteTags { date: Some("2024"), picture: Some(&picture), ..Default::default() },
+        );
 
         let out_dir = dir.join("out");
         let job = ConvertJob::new(
@@ -676,12 +654,10 @@ mod tests {
         );
         run(&job).expect("conversion job should succeed");
 
-        let out_tagged = Probe::open(out_dir.join("source.flac")).unwrap().read().unwrap();
-        let out_tag = out_tagged.primary_tag().expect("output should have a tag");
-        assert_eq!(out_tag.date().map(|t| t.year), Some(2024), "release date should carry over");
-        let pictures = out_tag.pictures();
-        assert_eq!(pictures.len(), 1, "expected exactly one carried-over picture");
-        assert_eq!(pictures[0].data(), &cover_bytes[..], "cover art bytes should be preserved");
+        let probed = track_tags::probe(&out_dir.join("source.flac"), true).expect("probe should succeed");
+        assert_eq!(probed.tags.date.as_deref(), Some("2024"), "release date should carry over");
+        assert_eq!(probed.tags.pictures.len(), 1, "expected exactly one carried-over picture");
+        assert_eq!(probed.tags.pictures[0].data, cover_bytes, "cover art bytes should be preserved");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -763,11 +739,11 @@ mod tests {
         run(&job).expect("resampled conversion job should succeed");
 
         let out_path = out_dir.join("source.flac");
-        let tagged = Probe::open(&out_path).unwrap().read().unwrap();
-        let duration = tagged.properties().duration();
+        let probed = track_tags::probe(&out_path, false).expect("probe should succeed");
         assert!(
-            duration.as_secs_f64() > 0.0,
-            "resampled short clip should not be flushed away entirely, got {duration:?}"
+            probed.properties.duration.as_secs_f64() > 0.0,
+            "resampled short clip should not be flushed away entirely, got {:?}",
+            probed.properties.duration
         );
 
         std::fs::remove_dir_all(&dir).ok();

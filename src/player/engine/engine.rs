@@ -19,6 +19,12 @@
 //! The decode thread applies ReplayGain, [`EqFilter`], and [`VolumeFilter`]
 //! directly, then hands samples straight to [`CpalOutput::write`] /
 //! [`DopOutput::write`] — no `MultiOutput`-equivalent fan-out type exists.
+//! With the `visualizer` feature, [`CpalOutput`]'s cpal device callback
+//! (in `output.rs`, downstream of the ~500ms-deep buffered `sync_channel`
+//! `CpalOutput::write` sends into) additionally taps the exact samples it
+//! just handed to the device — deliberately *not* on this decode thread,
+//! which would otherwise let the visualizer see/react to audio up to that
+//! whole buffer depth before it's actually heard.
 //!
 //! The whole module is deliberately synchronous — no `tokio`/`async`
 //! anywhere — since [`crate::player::backend::PlaybackBackend`] is a fully
@@ -732,10 +738,16 @@ enum PcmOutcome {
     Done,
 }
 
-/// The live PCM output pipeline: hardware output, EQ, volume, and the
-/// visualizer tap, bundled together since every decoded chunk (normal
-/// decode or a crossfade blend) runs through the exact same
-/// gain → EQ → volume → tap → write sequence.
+/// The live PCM output pipeline: hardware output, EQ, and volume, bundled
+/// together since every decoded chunk (normal decode or a crossfade blend)
+/// runs through the exact same gain → EQ → volume → write sequence.
+///
+/// The visualizer tap no longer lives in this pipeline: it moved to
+/// [`CpalOutput`]'s cpal device callback (see `output.rs`'s module docs),
+/// wired once via `CpalOutput::set_viz_tap` in [`Self::new`] below, so it
+/// sees exactly what's handed to the device, at the moment it's handed
+/// over — not whatever left the decode thread up to
+/// [`DEFAULT_BUFFER_TIME_MS`] sooner.
 struct PcmSink {
     eq: EqFilter,
     volume: VolumeFilter,
@@ -767,6 +779,11 @@ impl PcmSink {
                 DEFAULT_BUFFER_TIME_MS,
             )?,
         };
+        // Wire the visualizer tap before `start()` builds the cpal stream
+        // closures below — they capture a clone of this slot at build
+        // time, so it must be set first.
+        #[cfg(feature = "visualizer")]
+        output.set_viz_tap(ctx.pcm_buffer.clone());
         output.start()?;
 
         let channels =
@@ -779,18 +796,15 @@ impl PcmSink {
         })
     }
 
-    /// Apply EQ, volume, the visualizer tap, and write — for a buffer that
-    /// already carries its final gain (e.g. an already-blended crossfade
-    /// chunk, or a plain decode chunk after `process` scales it).
+    /// Apply EQ, volume, and write — for a buffer that already carries its
+    /// final gain (e.g. an already-blended crossfade chunk, or a plain
+    /// decode chunk after `process` scales it). `ctx` isn't read here
+    /// anymore (the visualizer tap moved to `CpalOutput`'s callback — see
+    /// the struct docs above) but stays a parameter so every call site
+    /// looks the same regardless.
     fn finish(&mut self, buf: &mut [f32], ctx: &ThreadContext) -> Result<()> {
         self.eq.apply(buf);
         self.volume.apply(buf);
-        #[cfg(feature = "visualizer")]
-        tap_visualizer(ctx, buf);
-        // `ctx` is only read by the visualizer tap above; without that
-        // feature it's unused, but keeping the parameter (rather than two
-        // diverging signatures) keeps every call site identical either way.
-        #[cfg(not(feature = "visualizer"))]
         let _ = ctx;
         self.output.write(buf).map(|_| ())
     }
@@ -1155,16 +1169,6 @@ fn apply_seek(
                 .store(position.as_nanos() as u64, Ordering::Release);
         }
         Err(e) => tracing::error!("seek failed: {e}"),
-    }
-}
-
-#[cfg(feature = "visualizer")]
-fn tap_visualizer(ctx: &ThreadContext, chunk: &[f32]) {
-    let guard = ctx.pcm_buffer.lock();
-    if let Some(buf) = guard.as_ref()
-        && let Ok(mut pcm) = buf.try_lock()
-    {
-        pcm.write(chunk);
     }
 }
 

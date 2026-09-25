@@ -135,6 +135,51 @@ impl AppModel {
             ));
         }
 
+        // MPD PipeWire capture subscription — feeds the same PCM buffer as
+        // the render subscription above, but from MPD's own PipeWire
+        // playback stream instead of the local engine's tap, since lyra
+        // only remote-controls MPD (no PCM otherwise reaches this
+        // process). Gated on the same active+expanded condition as the
+        // render subscription, further restricted to when MPD is actually
+        // the backend in charge and its server resolves to this machine
+        // (its own audio can only appear on *this* PipeWire graph when
+        // it's local) — see `player::pw_capture` for the capture and
+        // matching rules.
+        #[cfg(feature = "visualizer")]
+        if self.visualizer_active
+            && self.expand_progress > 0.0
+            && let Some(pcm_buf) = &self.pcm_buffer
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd)
+            && let Some(provider) = self.active_mpd_provider()
+        {
+            if crate::player::pw_capture::is_local_mpd_host(provider.host()) {
+                let pcm = Arc::clone(pcm_buf);
+                let mpd_playing = Arc::clone(&self.mpd_playing);
+                subs.push(Subscription::run_with(
+                    MpdCaptureKey { pcm, mpd_playing },
+                    mpd_capture_stream,
+                ));
+            } else {
+                // Logged at most once per process — this `if`
+                // re-evaluates on every `update()` while a remote MPD
+                // server is active and expanded/visualizing, which
+                // would otherwise spam.
+                static REMOTE_WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !REMOTE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!(
+                        "MPD server '{}' is not local; visualizer audio capture is \
+                         unavailable (MPD's own audio only appears on this machine's \
+                         PipeWire graph when the server itself runs on it)",
+                        provider.host()
+                    );
+                }
+            }
+        }
+
         // Filesystem watcher subscription — only when the Local provider is active.
         // Uses notify::RecommendedWatcher to watch music_dirs recursively.
         // Debounces events with a 2-second quiet timer before emitting
@@ -553,6 +598,36 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                     // created once, in `AppModel::init`.
                     let mut cmd_rx = cmd_rx_slot.lock().ok().and_then(|mut slot| slot.take());
 
+                    // Cursor into the shared PCM ring buffer (see
+                    // `PcmBuffer::read_since`). Starting at 0 is safe even
+                    // when playback is already well underway: `read_since`
+                    // clamps a cursor that's fallen behind to the most
+                    // recent window rather than replaying stale history,
+                    // so activation just catches straight up to "now".
+                    let mut pcm_cursor: u64 = 0;
+                    // Wall-clock time PCM last actually arrived. Used to
+                    // decay to silence — instead of freezing on the last
+                    // window forever — when nothing new shows up for a
+                    // while (paused, stopped, or MPD idle). `read_since`
+                    // legitimately returns empty between ordinary callback
+                    // periods too, so only a *sustained* gap past
+                    // `PCM_STALE_TIMEOUT` triggers the silence fallback;
+                    // a merely-empty-this-frame read just feeds nothing
+                    // and lets projectM's own internal smoothing carry on.
+                    let mut last_pcm_at = std::time::Instant::now();
+                    // How long PCM may go quiet before we push explicit
+                    // silence rather than just skipping this frame's feed.
+                    const PCM_STALE_TIMEOUT: Duration = Duration::from_millis(100);
+                    // One render period's worth of stereo silence
+                    // (44.1kHz / ~30fps), fed to projectM while stale so
+                    // it decays toward an idle visualization instead of
+                    // replaying the last real window forever.
+                    const SILENCE_FRAME_SAMPLES: usize = (44_100 / 30) * 2;
+                    // projectM's own cap on samples per feed — computed
+                    // once (it never changes for a given instance) rather
+                    // than re-querying every frame.
+                    let max_pcm_samples = projectm::core::ProjectM::pcm_get_max_samples() as usize;
+
                     loop {
                         // ~30 fps
                         std::thread::sleep(Duration::from_millis(33));
@@ -589,12 +664,30 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                             }
                         }
 
-                        // Read PCM from shared buffer
-                        let pcm_data = pcm
-                            .lock()
-                            .ok()
-                            .map(|buf| buf.read_recent(2048))
-                            .unwrap_or_default();
+                        // Read whatever new PCM has arrived since the last
+                        // frame, capped to what projectM will accept.
+                        // Empty is normal between callback periods (see
+                        // the `last_pcm_at` docs above) — only sustained
+                        // silence falls back to explicit zeros below.
+                        let pcm_data = {
+                            let fresh = pcm
+                                .lock()
+                                .ok()
+                                .map(|buf| buf.read_since(&mut pcm_cursor, max_pcm_samples))
+                                .unwrap_or_default();
+                            if !fresh.is_empty() {
+                                last_pcm_at = std::time::Instant::now();
+                                fresh
+                            } else if last_pcm_at.elapsed() >= PCM_STALE_TIMEOUT {
+                                // Sustained silence: push explicit zeros so
+                                // projectM's beat detection decays to idle
+                                // instead of replaying the last real audio
+                                // window forever.
+                                vec![0.0f32; SILENCE_FRAME_SAMPLES]
+                            } else {
+                                Vec::new()
+                            }
+                        };
 
                         // Render a frame (GL calls, ~3-5ms)
                         let rgba = renderer.render_frame(&pcm_data);
@@ -628,6 +721,57 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
             while frame_rx.recv().await.is_some() {
                 _ = emitter.send(Message::VisualizerFrameReady).await;
             }
+        },
+    )
+}
+
+/// Identity key for the MPD PipeWire capture subscription. Hashes to a
+/// constant (mirrors `VizRenderKey`) so there's only ever one active
+/// instance; starting/stopping is entirely driven by whether the `if` in
+/// `build_subscription` includes this subscription at all, never by the
+/// key's contents changing.
+#[cfg(feature = "visualizer")]
+struct MpdCaptureKey {
+    pcm: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+    mpd_playing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "visualizer")]
+impl Hash for MpdCaptureKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "mpd-pw-capture".hash(state);
+    }
+}
+
+/// Captures MPD's own PipeWire playback stream into the shared PCM ring
+/// buffer, so the projectM visualizer reacts to audio while MPD (not the
+/// in-process local engine) is the active backend — see
+/// `player::pw_capture` for the capture itself, its node-matching rules,
+/// and the default-sink-monitor fallback.
+///
+/// The `PwCapture` handle is created *inside* this async block and held
+/// for as long as the returned future runs. iced drops that future (and
+/// with it, the handle — whose `Drop` joins the PipeWire thread) the
+/// moment this subscription's gating `if` in `build_subscription` goes
+/// false, so capture starts and stops exactly when a render subscription
+/// would actually want PCM data sourced from MPD.
+#[cfg(feature = "visualizer")]
+fn mpd_capture_stream(key: &MpdCaptureKey) -> impl Stream<Item = Message> + use<> {
+    let pcm = Arc::clone(&key.pcm);
+    let mpd_playing = Arc::clone(&key.mpd_playing);
+    cosmic::iced::stream::channel(
+        1,
+        move |_emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            let _capture = match crate::player::pw_capture::PwCapture::spawn(pcm, mpd_playing) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    tracing::warn!("MPD visualizer capture unavailable: {e}");
+                    return;
+                }
+            };
+            // Held alive by this future until iced drops it (see the doc
+            // comment above) — never resolves on its own.
+            futures_util::future::pending::<()>().await;
         },
     )
 }

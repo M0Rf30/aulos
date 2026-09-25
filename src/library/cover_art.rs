@@ -2,9 +2,8 @@
 
 //! Cover art extraction from audio files and directory images.
 
+use super::tags;
 use image::{ImageBuffer, Rgba, RgbaImage};
-use lofty::prelude::*;
-use lofty::probe::Probe;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
@@ -17,20 +16,13 @@ impl CoverArt {
     /// Extract embedded cover art from an audio file.
     /// Returns the raw image bytes (JPEG/PNG) if found.
     pub fn extract_from_file(path: &Path) -> Option<Vec<u8>> {
-        let tagged_file = Probe::open(path).ok()?.read().ok()?;
+        let probed = tags::probe(path, true)?;
+        let pictures = probed.tags.pictures;
 
-        let tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag())?;
+        // Prefer front cover, but take any picture.
+        let pic = pictures.iter().find(|p| p.is_front_cover).or_else(|| pictures.first())?;
 
-        // Prefer front cover, but take any picture
-        let pictures = tag.pictures();
-        let pic = pictures
-            .iter()
-            .find(|p| p.pic_type() == lofty::picture::PictureType::CoverFront)
-            .or_else(|| pictures.first())?;
-
-        Some(pic.data().to_vec())
+        Some(pic.data.clone())
     }
 
     /// Look for cover art files in the same directory as the audio file.

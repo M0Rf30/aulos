@@ -481,6 +481,18 @@ impl AppModel {
                         mpd.update_status(position, duration, state, volume);
                     }
 
+                    // Real MPD-server playback state (not gated on which
+                    // backend Lyra currently considers "active" — see the
+                    // early-return below and `AppModel::mpd_playing`'s doc
+                    // comment): the PipeWire capture thread's monitor
+                    // fallback must only feed the visualizer while MPD
+                    // itself is actually the one making sound.
+                    #[cfg(feature = "visualizer")]
+                    {
+                        self.mpd_playing
+                            .store(state == PlaybackState::Playing, std::sync::atomic::Ordering::Relaxed);
+                    }
+
                     // The poll runs whenever an MPD backend exists, which
                     // includes while Lyra plays a local file, radio stream
                     // or podcast through the local backend (opening a file

@@ -10,6 +10,8 @@ pub mod equalizer;
 mod http_range_reader;
 pub mod local_backend;
 pub mod mpd_backend;
+#[cfg(feature = "visualizer")]
+pub mod pw_capture;
 
 use crate::config::ReplayGainMode;
 use crate::library::{Track, TrackSource};

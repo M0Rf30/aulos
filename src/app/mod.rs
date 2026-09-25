@@ -293,6 +293,17 @@ pub struct AppModel {
     viz_frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
+    /// Whether MPD itself is currently reporting `Playing` state — set from
+    /// `Message::MpdStatusUpdate`. Read by the MPD PipeWire capture thread
+    /// (`player::pw_capture`) to gate writes made while it's using the
+    /// default-sink-monitor fallback (no MPD stream found on the graph
+    /// yet), so other applications' audio doesn't drive the visualizer
+    /// while MPD itself is paused/stopped. `Arc<AtomicBool>` rather than a
+    /// plain field so the capture thread (spawned fresh by the MPD capture
+    /// subscription each time it (re)activates) can share it without
+    /// touching `AppModel` from off the UI thread.
+    #[cfg(feature = "visualizer")]
+    mpd_playing: Arc<std::sync::atomic::AtomicBool>,
     /// Sender half of the command channel to the render thread (see
     /// `VizCommand`); the `Receiver` lives in `viz_cmd_rx_slot`.
     #[cfg(feature = "visualizer")]

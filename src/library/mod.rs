@@ -10,6 +10,7 @@ pub mod palette;
 pub mod quality;
 mod scanner;
 pub mod smart_playlist;
+pub mod tags;
 
 pub use cover_art::CoverArt;
 pub use db::LibraryDb;

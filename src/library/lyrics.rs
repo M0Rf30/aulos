@@ -2,8 +2,7 @@
 
 //! Lyrics fetching from embedded tags and online sources.
 
-use lofty::prelude::*;
-use lofty::probe::Probe;
+use super::tags;
 use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -93,13 +92,8 @@ impl LyricsProvider {
     /// If the embedded text contains LRC timestamps it is parsed into
     /// [`Lyrics::Synced`]; otherwise it is returned as [`Lyrics::Unsynced`].
     pub fn from_tags(path: &Path) -> Option<Lyrics> {
-        let tagged_file = Probe::open(path).ok()?.read().ok()?;
-
-        let tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag())?;
-
-        let text = tag.get_string(ItemKey::Lyrics)?.to_string();
+        let probed = tags::probe(path, false)?;
+        let text = probed.tags.lyrics?;
 
         if text.trim().is_empty() {
             return None;

@@ -1,27 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0
 
-//! Scans directories for audio files and extracts metadata via lofty.
+//! Scans directories for audio files and extracts metadata via symphonia
+//! (see `super::tags`).
 
+use super::tags;
 use super::{Track, db::LibraryDb};
-use lofty::prelude::*;
-use lofty::probe::Probe;
-use lofty::tag::ItemKey;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
-
-/// Parse a ReplayGain value string like "-6.5 dB" or "-6.5" into an f32.
-fn parse_replay_gain(s: &str) -> Option<f32> {
-    let s = s.trim();
-    // Strip optional " dB" suffix (case-insensitive).
-    let s = s
-        .strip_suffix(" dB")
-        .or_else(|| s.strip_suffix(" db"))
-        .or_else(|| s.strip_suffix("dB"))
-        .or_else(|| s.strip_suffix("db"))
-        .unwrap_or(s);
-    s.trim().parse::<f32>().ok()
-}
 
 /// Supported audio file extensions.
 const AUDIO_EXTENSIONS: &[&str] = &[
@@ -192,77 +178,20 @@ impl LibraryScanner {
             .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
     }
 
-    /// Read metadata from an audio file using lofty.
+    /// Read metadata from an audio file via symphonia (see `super::tags`).
     pub fn read_metadata(path: &Path) -> Result<Track, String> {
-        let tagged_file = Probe::open(path)
-            .map_err(|e| format!("Cannot open: {e}"))?
-            .read()
-            .map_err(|e| format!("Cannot read: {e}"))?;
+        let probed = tags::probe(path, false).ok_or_else(|| "Cannot probe file".to_string())?;
+        let t = probed.tags;
 
-        let tag = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag());
+        // Use filename as title if tag is missing.
+        let title = t.title.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string()
+        });
 
-        let properties = tagged_file.properties();
-        let duration = properties.duration();
+        let artist = t.artist.unwrap_or_default();
 
-        let (title, artist, album_artist, album, genre, track_number, disc_number, year) =
-            if let Some(tag) = tag {
-                (
-                    tag.title().map(|s| s.to_string()).unwrap_or_default(),
-                    tag.artist().map(|s| s.to_string()).unwrap_or_default(),
-                    tag.get_string(ItemKey::AlbumArtist)
-                        .unwrap_or_default()
-                        .to_string(),
-                    tag.album().map(|s| s.to_string()).unwrap_or_default(),
-                    tag.genre().map(|s| s.to_string()).unwrap_or_default(),
-                    tag.track().unwrap_or(0),
-                    tag.disk().unwrap_or(0),
-                    tag.get_string(ItemKey::Year)
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0),
-                )
-            } else {
-                (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    0,
-                    0,
-                    0,
-                )
-            };
-
-        // Use filename as title if tag is missing
-        let title = if title.is_empty() {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string()
-        } else {
-            title
-        };
-
-        // Fall back album_artist -> artist
-        let album_artist = if album_artist.is_empty() {
-            artist.clone()
-        } else {
-            album_artist
-        };
-
-        // Extract ReplayGain tags (stored as strings like "-6.5 dB" or "-6.5").
-        // Re-fetch the tag reference since the outer `tag` was consumed above.
-        let tag2 = tagged_file
-            .primary_tag()
-            .or_else(|| tagged_file.first_tag());
-        let rg_track_gain = tag2
-            .and_then(|t| t.get_string(ItemKey::ReplayGainTrackGain))
-            .and_then(parse_replay_gain);
-        let rg_album_gain = tag2
-            .and_then(|t| t.get_string(ItemKey::ReplayGainAlbumGain))
-            .and_then(parse_replay_gain);
+        // Fall back album_artist -> artist.
+        let album_artist = t.album_artist.filter(|s| !s.is_empty()).unwrap_or_else(|| artist.clone());
 
         let source_uri = path.to_string_lossy().to_string();
         Ok(Track {
@@ -271,20 +200,20 @@ impl LibraryScanner {
             title,
             artist,
             album_artist,
-            album,
-            genre,
-            track_number,
-            disc_number,
-            year,
-            duration,
-            bitrate: properties.audio_bitrate().unwrap_or(0),
-            sample_rate: properties.sample_rate().unwrap_or(0),
+            album: t.album.unwrap_or_default(),
+            genre: t.genre.unwrap_or_default(),
+            track_number: t.track_number.unwrap_or(0),
+            disc_number: t.disc_number.unwrap_or(0),
+            year: t.year.unwrap_or(0),
+            duration: probed.properties.duration,
+            bitrate: probed.properties.bitrate,
+            sample_rate: probed.properties.sample_rate,
             provider_id: Arc::from("local"),
             source_uri,
             is_favorite: false,
             rating: None,
-            rg_track_gain,
-            rg_album_gain,
+            rg_track_gain: t.rg_track_gain,
+            rg_album_gain: t.rg_album_gain,
         })
     }
 }

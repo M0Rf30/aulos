@@ -14,6 +14,7 @@
 pub mod cue;
 pub mod encoder;
 pub mod pipeline;
+pub mod tag_writer;
 
 use std::path::PathBuf;
 use std::sync::Arc;

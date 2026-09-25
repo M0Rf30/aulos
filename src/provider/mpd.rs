@@ -330,6 +330,15 @@ impl MpdProvider {
         Arc::clone(&self.provider_id)
     }
 
+    /// The configured server hostname (or unix-socket path). Used by the
+    /// visualizer's MPD PipeWire capture subscription to decide whether
+    /// this server can plausibly be found on the local PipeWire graph at
+    /// all — see `player::pw_capture::is_local_mpd_host`.
+    #[cfg(feature = "visualizer")]
+    pub(crate) fn host(&self) -> &str {
+        &self.config.host
+    }
+
     /// Run an async block on the tokio runtime (bridging sync MusicProvider to async mpd_client).
     fn block_on<F, T>(&self, future: F) -> T
     where

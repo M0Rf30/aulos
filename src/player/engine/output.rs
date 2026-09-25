@@ -8,16 +8,35 @@
 //! is the actual backpressure primitive pacing the decode thread to
 //! real-time. The small `AudioOutput`/`PauseState` seam lives in this file
 //! too since `engine/mod.rs` doesn't declare a separate module for it.
+//!
+//! With the `visualizer` feature, each of the three callback closures also
+//! taps the exact samples it just handed to the device this period into
+//! [`crate::views::now_playing::visualizer::PcmBuffer`] (see
+//! [`CpalOutput::set_viz_tap`]/`tap_viz`) — deliberately *here*, in the
+//! realtime device callback, rather than on the decode thread that fills
+//! the ~500ms-deep `sync_channel` above: tapping on the decode side would
+//! let the visualizer see (and react to) audio up to that whole buffer
+//! depth before it's actually heard.
 
 use crate::player::backend::PlayerError;
 use crate::player::engine::conversion::{self, SampleBuffer};
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
 use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
+#[cfg(feature = "visualizer")]
+use crate::views::now_playing::visualizer::PcmBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
+#[cfg(feature = "visualizer")]
+use std::sync::Arc;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
+
+/// The engine's shared visualizer tap slot (`ThreadContext::pcm_buffer`):
+/// the outer lock is shared with the controlling side, and the inner
+/// `Option` is flipped on visualizer activate/deactivate.
+#[cfg(feature = "visualizer")]
+pub type VizTapSlot = Arc<parking_lot::Mutex<Option<Arc<std::sync::Mutex<PcmBuffer>>>>>;
 
 /// Minimal decoded-stream format descriptor: sample rate, channel count, and
 /// bit depth. Self-contained here (no dependency on `decoder.rs`, which is a
@@ -100,6 +119,15 @@ pub struct CpalOutput {
     resampler: Option<StreamResampler>,
     /// Output buffer time in milliseconds; sizes the sync-channel depth.
     buffer_time_ms: u32,
+    /// Visualizer tap slot, wired via [`Self::set_viz_tap`] before
+    /// [`Self::start`]. Doubly-`Option`-wrapped: the outer `Arc<Mutex<_>>`
+    /// is `ThreadContext::pcm_buffer` itself, shared with the controlling
+    /// side, so UI-side visualizer activate/deactivate (flipping the
+    /// *inner* `Option`) takes effect on the very next cpal callback with
+    /// no stream rebuild. `None` for a `CpalOutput` that never opts in
+    /// (visualizer feature/tap not wired, or DoP/test callers).
+    #[cfg(feature = "visualizer")]
+    viz_tap: Option<VizTapSlot>,
 }
 
 impl CpalOutput {
@@ -171,7 +199,24 @@ impl CpalOutput {
             pause_state: PauseState::new(),
             resampler,
             buffer_time_ms,
+            #[cfg(feature = "visualizer")]
+            viz_tap: None,
         })
+    }
+
+    /// Wire the shared visualizer tap slot (`ThreadContext::pcm_buffer`).
+    /// Must be called before [`Self::start`]: the cpal callback closures
+    /// capture a clone of this at stream-build time, so a call after
+    /// `start()` has no effect on the already-built stream. Cloning only
+    /// the outer `Arc` is enough — the render side flips the *inner*
+    /// `Option` on visualizer activate/deactivate, which the callback
+    /// observes on its very next invocation.
+    #[cfg(feature = "visualizer")]
+    pub fn set_viz_tap(
+        &mut self,
+        tap: VizTapSlot,
+    ) {
+        self.viz_tap = Some(tap);
     }
 
     /// Whether the default output device natively supports `rate`. Lets callers
@@ -183,6 +228,32 @@ impl CpalOutput {
     /// The default output device's preferred sample rate (Hz), if known.
     pub fn default_output_rate() -> Option<u32> {
         CpalDeviceConfig::default_output_rate()
+    }
+
+    /// Feed `channels`-interleaved samples that were just handed to the
+    /// device this callback period into the visualizer's ring buffer, if a
+    /// tap is wired and both locks are free.
+    ///
+    /// This runs on the realtime cpal callback thread, which must never
+    /// block or allocate in steady state: both locks are `try_lock`, so a
+    /// render thread that's mid-read just costs this period's
+    /// contribution rather than stalling the audio device, and callers
+    /// pass in the exact slice/scratch buffer they already have — no
+    /// allocation happens here.
+    #[cfg(feature = "visualizer")]
+    #[inline]
+    fn tap_viz(
+        tap: &Option<VizTapSlot>,
+        samples: &[f32],
+        channels: usize,
+    ) {
+        if let Some(slot) = tap
+            && let Some(inner) = slot.try_lock()
+            && let Some(buf) = inner.as_ref()
+            && let Ok(mut pcm) = buf.try_lock()
+        {
+            pcm.write_interleaved(samples, channels);
+        }
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -217,6 +288,10 @@ impl CpalOutput {
         let stream = match sample_format {
             SampleFormat::F32 => {
                 let mut buf = SampleBuffer::new(rx);
+                #[cfg(feature = "visualizer")]
+                let viz_tap = self.viz_tap.clone();
+                #[cfg(feature = "visualizer")]
+                let viz_channels = self.config.channels as usize;
                 self.device
                     .build_output_stream(
                         self.config,
@@ -224,6 +299,13 @@ impl CpalOutput {
                             for sample in data.iter_mut() {
                                 *sample = buf.next_sample();
                             }
+                            // Tap AFTER filling `data`: this is exactly
+                            // what was just handed to the device this
+                            // period, at the moment it was handed over —
+                            // see the module docs for why the tap lives
+                            // here now instead of on the decode thread.
+                            #[cfg(feature = "visualizer")]
+                            Self::tap_viz(&viz_tap, data, viz_channels);
                         },
                         |err| {
                             tracing::error!("pcm output error: {}", err);
@@ -234,13 +316,37 @@ impl CpalOutput {
             }
             SampleFormat::I16 => {
                 let mut buf = SampleBuffer::new(rx);
+                #[cfg(feature = "visualizer")]
+                let viz_tap = self.viz_tap.clone();
+                #[cfg(feature = "visualizer")]
+                let viz_channels = self.config.channels as usize;
+                // Scratch buffer holding this period's f32 values before
+                // I16 conversion, so the tap sees the same samples handed
+                // to the device. Lives in the closure and only grows (via
+                // `resize`, never shrinks) when the callback period
+                // itself grows — no steady-state allocation.
+                #[cfg(feature = "visualizer")]
+                let mut viz_scratch: Vec<f32> = Vec::new();
                 self.device
                     .build_output_stream(
                         self.config,
                         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                            for sample in data.iter_mut() {
-                                *sample = conversion::f32_to_i16(buf.next_sample());
+                            #[cfg(feature = "visualizer")]
+                            if viz_scratch.len() < data.len() {
+                                viz_scratch.resize(data.len(), 0.0);
                             }
+                            #[cfg(feature = "visualizer")]
+                            let mut viz_iter = viz_scratch.iter_mut();
+                            for sample in data.iter_mut() {
+                                let s = buf.next_sample();
+                                #[cfg(feature = "visualizer")]
+                                if let Some(slot) = viz_iter.next() {
+                                    *slot = s;
+                                }
+                                *sample = conversion::f32_to_i16(s);
+                            }
+                            #[cfg(feature = "visualizer")]
+                            Self::tap_viz(&viz_tap, &viz_scratch[..data.len()], viz_channels);
                         },
                         |err| {
                             tracing::error!("pcm output error: {}", err);
@@ -251,13 +357,34 @@ impl CpalOutput {
             }
             SampleFormat::I32 => {
                 let mut buf = SampleBuffer::new(rx);
+                #[cfg(feature = "visualizer")]
+                let viz_tap = self.viz_tap.clone();
+                #[cfg(feature = "visualizer")]
+                let viz_channels = self.config.channels as usize;
+                // See the I16 branch above for why this scratch buffer
+                // exists and how its allocation is bounded.
+                #[cfg(feature = "visualizer")]
+                let mut viz_scratch: Vec<f32> = Vec::new();
                 self.device
                     .build_output_stream(
                         self.config,
                         move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
-                            for sample in data.iter_mut() {
-                                *sample = conversion::f32_to_i32(buf.next_sample());
+                            #[cfg(feature = "visualizer")]
+                            if viz_scratch.len() < data.len() {
+                                viz_scratch.resize(data.len(), 0.0);
                             }
+                            #[cfg(feature = "visualizer")]
+                            let mut viz_iter = viz_scratch.iter_mut();
+                            for sample in data.iter_mut() {
+                                let s = buf.next_sample();
+                                #[cfg(feature = "visualizer")]
+                                if let Some(slot) = viz_iter.next() {
+                                    *slot = s;
+                                }
+                                *sample = conversion::f32_to_i32(s);
+                            }
+                            #[cfg(feature = "visualizer")]
+                            Self::tap_viz(&viz_tap, &viz_scratch[..data.len()], viz_channels);
                         },
                         |err| {
                             tracing::error!("pcm output error: {}", err);
