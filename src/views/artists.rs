@@ -3,7 +3,7 @@
 //! Artists view - list of artists with album sub-views.
 
 use crate::fl;
-use crate::library::{Album, Artist, CoverArt};
+use crate::library::{Album, Artist, CoverArt, Track};
 use crate::views::common;
 use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -26,6 +26,10 @@ pub enum ArtistMessage {
     FilterByGenre(String),
     /// Toggle between grid and list layout.
     ToggleViewMode,
+    /// Insert this album's tracks right after the currently playing one.
+    PlayNext(Vec<Track>),
+    /// Append this album's tracks to the end of the queue.
+    AddToQueue(Vec<Track>),
 }
 
 /// Card artwork/label width for the grid layout — the avatar frame and
@@ -199,6 +203,22 @@ pub fn artist_detail_view<'a>(
             .push(
                 widget::button::suggested(fl!("play"))
                     .on_press(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
+            )
+            .push(
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
+                        .on_press(ArtistMessage::PlayNext(album.tracks.clone())),
+                    widget::text::caption(fl!("queue-play-next")),
+                    widget::tooltip::Position::Top,
+                ),
+            )
+            .push(
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
+                        .on_press(ArtistMessage::AddToQueue(album.tracks.clone())),
+                    widget::text::caption(fl!("queue-add")),
+                    widget::tooltip::Position::Top,
+                ),
             )
             .spacing(12)
             .align_y(Alignment::Center);

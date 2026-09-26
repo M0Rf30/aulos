@@ -186,6 +186,14 @@ pub struct Config {
     pub artists_view_mode: ViewMode,
     /// Layout mode for the genres view.
     pub genres_view_mode: ViewMode,
+    /// Output directory for local file conversion jobs. `None` uses
+    /// `dirs::audio_dir()/Converted` (falling back to `~/Converted`).
+    pub convert_out_dir: Option<PathBuf>,
+    /// Output format for local file conversion jobs.
+    pub convert_format: crate::convert::OutputFormat,
+    /// Output sample rate for local file conversion jobs; `None` keeps
+    /// each source's original rate.
+    pub convert_sample_rate: Option<u32>,
 }
 
 impl Default for Config {
@@ -220,6 +228,9 @@ impl Default for Config {
             albums_view_mode: ViewMode::Grid,
             artists_view_mode: ViewMode::List,
             genres_view_mode: ViewMode::Grid,
+            convert_out_dir: None,
+            convert_format: crate::convert::OutputFormat::Flac,
+            convert_sample_rate: None,
         }
     }
 }

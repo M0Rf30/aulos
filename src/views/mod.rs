@@ -12,6 +12,7 @@ pub mod now_playing;
 pub mod playlists;
 pub mod podcasts;
 pub mod providers;
+pub mod queue;
 pub mod radio;
 pub mod settings;
 pub mod smart_playlists;

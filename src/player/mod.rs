@@ -10,15 +10,17 @@ pub mod equalizer;
 mod http_range_reader;
 pub mod local_backend;
 pub mod mpd_backend;
+pub mod queue;
 #[cfg(feature = "visualizer")]
 pub mod pw_capture;
 
-use crate::config::ReplayGainMode;
+use crate::config::{RepeatMode, ReplayGainMode};
 use crate::library::{Track, TrackSource};
 use backend::PlaybackBackend;
 pub use eq_source::EqController;
 use local_backend::LocalBackend;
 use mpd_backend::MpdBackend;
+use queue::{PlayQueue, PreviousAction};
 use std::time::Duration;
 
 /// Represents the current playback state.
@@ -70,6 +72,34 @@ pub enum ActiveBackend {
     Mpd,
 }
 
+/// What a queue-list edit (`remove`/`insert_next`/`append`) did to
+/// playback. Mirrors `queue::RemoveOutcome` but folded with the
+/// backend-driving decision `Player` makes on top of it, so `update.rs`
+/// gets one simple three-way result regardless of which edit caused it.
+#[derive(Debug)]
+// Short-lived return values, consumed immediately — boxing would only add an allocation.
+#[allow(clippy::large_enum_variant)]
+pub enum QueueEditOutcome {
+    /// The edit didn't touch the currently-playing entry.
+    Unchanged,
+    /// The currently-playing entry changed; the backend is now playing
+    /// this track.
+    NowPlaying(Track),
+    /// The queue emptied out entirely; the backend is stopped.
+    Stopped,
+}
+
+/// What `Player::previous` did — restarted the current track in place, or
+/// moved to (and started playing) a different one.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum PreviousResult {
+    /// Seeked back to the start of the current track.
+    Restarted,
+    /// Now playing this track.
+    Track(Track),
+}
+
 /// Core audio player that manages playback through concrete backends.
 ///
 /// Instead of dynamic dispatch via `Box<dyn PlaybackBackend>`, we hold
@@ -80,8 +110,9 @@ pub struct Player {
     active_backend: ActiveBackend,
     current_track: Option<NowPlaying>,
     volume: f32,
-    queue: Vec<Track>,
-    queue_index: usize,
+    /// The play queue — the single source of truth for shuffle/repeat and
+    /// "what plays next". See `queue::PlayQueue` for the actual logic.
+    queue: PlayQueue,
     /// Whether the next track has been pre-queued in the sink for gapless playback.
     next_pre_queued: bool,
     /// Replay gain mode for volume normalization.
@@ -101,8 +132,7 @@ impl Player {
             active_backend: ActiveBackend::Local,
             current_track: None,
             volume: 0.8,
-            queue: Vec::new(),
-            queue_index: 0,
+            queue: PlayQueue::new(),
             next_pre_queued: false,
             replay_gain_mode: ReplayGainMode::Off,
         })
@@ -195,7 +225,7 @@ impl Player {
         if album.is_empty() {
             return false;
         }
-        let same_album_count = self.queue.iter().filter(|t| t.album == *album).count();
+        let same_album_count = self.queue.order().iter().filter(|t| t.album == *album).count();
         same_album_count > self.queue.len() / 2
     }
 
@@ -209,11 +239,12 @@ impl Player {
         }
     }
 
-    /// Stop playback entirely.
+    /// Stop playback entirely. Keeps the queue and `current_track` intact
+    /// (position 0, state `Stopped`) so a later `resume_queue()` picks up
+    /// exactly where the user left off — see the `Message::Stop` contract.
     pub fn stop(&mut self) -> Result<(), String> {
         self.active_mut().stop().map_err(|e| e.to_string())?;
-        self.current_track = None;
-        self.next_pre_queued = false;
+        self.invalidate_pre_queue();
         Ok(())
     }
 
@@ -264,23 +295,135 @@ impl Player {
 
     // -- Queue management --
 
-    /// Set the play queue from a list of tracks.
-    pub fn set_queue(&mut self, tracks: Vec<Track>) {
-        self.queue = tracks;
-        self.queue_index = 0;
+    /// Clear the engine's/local-backend's gapless look-ahead slot. Call
+    /// after ANY queue edit, shuffle/repeat toggle, or jump — the upcoming
+    /// track may no longer be what was pre-queued.
+    fn invalidate_pre_queue(&mut self) {
         self.next_pre_queued = false;
+        self.local_backend.clear_pre_queued();
     }
 
-    /// Append tracks to the end of the play queue, leaving the current
-    /// track and queue position untouched.
-    ///
-    /// Clears `next_pre_queued` because appending invalidates the gapless
-    /// look-ahead decision: when the queue was previously exhausted at the
-    /// current index, the engine's pre-queued "next" slot no longer matches
-    /// what now follows.
-    pub fn extend_queue(&mut self, tracks: impl IntoIterator<Item = Track>) {
-        self.queue.extend(tracks);
+    /// Re-evaluate and (re-)install the gapless look-ahead slot for
+    /// whatever `peek_next_auto()` now predicts. Cheap no-op when nothing
+    /// changed; called after every queue mutation so edits made mid-track
+    /// don't leave a stale pre-queued track sitting in the engine.
+    fn refresh_pre_queue(&mut self) {
+        self.invalidate_pre_queue();
+        self.pre_queue_next();
+    }
+
+    /// Play whatever the queue's current entry is, without changing queue
+    /// position. Used by `set_queue`, `resume_queue`, and the
+    /// was-queue-empty paths of `queue_append`/`queue_insert_next`.
+    fn play_current(&mut self) -> Result<Option<Track>, String> {
+        let Some(track) = self.queue.current().cloned() else {
+            return Ok(None);
+        };
+        let source = resolve_track_source(&track);
+        self.play_track(&track, source)?;
+        self.pre_queue_next();
+        Ok(Some(track))
+    }
+
+    /// Replace the queue with `tracks`, position at `start_index`
+    /// (respecting the current shuffle setting), and start playing it.
+    pub fn set_queue(&mut self, tracks: Vec<Track>, start_index: usize) -> Result<Option<Track>, String> {
+        self.queue.set(tracks, start_index);
         self.next_pre_queued = false;
+        self.local_backend.clear_pre_queued();
+        self.play_current()
+    }
+
+    /// Resume playback of the queue's current entry (used when
+    /// `TogglePlayback` fires from `Stopped` and the queue already holds
+    /// something — e.g. after `Stop` or after the queue ran out under
+    /// `RepeatMode::None`).
+    pub fn resume_queue(&mut self) -> Result<Option<Track>, String> {
+        self.play_current()
+    }
+
+    /// Append tracks to the end of the queue. If the queue was empty,
+    /// starts playing the first of them immediately (an empty "add to
+    /// queue" would otherwise queue tracks nothing could ever reach).
+    pub fn queue_append(&mut self, tracks: Vec<Track>) -> Result<Option<Track>, String> {
+        let was_empty = self.queue.is_empty();
+        self.queue.append(tracks);
+        if was_empty {
+            return self.play_current();
+        }
+        self.refresh_pre_queue();
+        Ok(None)
+    }
+
+    /// Insert tracks right after the currently-playing entry. If the queue
+    /// was empty, starts playing the first of them immediately.
+    pub fn queue_insert_next(&mut self, tracks: Vec<Track>) -> Result<Option<Track>, String> {
+        let was_empty = self.queue.is_empty();
+        self.queue.insert_next(tracks);
+        if was_empty {
+            return self.play_current();
+        }
+        self.refresh_pre_queue();
+        Ok(None)
+    }
+
+    /// Remove the entry at play-order index `play_idx`. If it was the
+    /// currently-playing entry, plays whatever slid into its place, or
+    /// stops if the queue is now empty.
+    pub fn queue_remove(&mut self, play_idx: usize) -> Result<QueueEditOutcome, String> {
+        let Some(outcome) = self.queue.remove(play_idx) else {
+            return Ok(QueueEditOutcome::Unchanged);
+        };
+        self.invalidate_pre_queue();
+        if !outcome.was_current {
+            if !self.queue.is_empty() {
+                self.pre_queue_next();
+            }
+            return Ok(QueueEditOutcome::Unchanged);
+        }
+        match outcome.new_current {
+            Some(track) => {
+                let source = resolve_track_source(&track);
+                self.play_track(&track, source)?;
+                self.pre_queue_next();
+                Ok(QueueEditOutcome::NowPlaying(track))
+            }
+            None => {
+                self.active_mut().stop().map_err(|e| e.to_string())?;
+                self.current_track = None;
+                Ok(QueueEditOutcome::Stopped)
+            }
+        }
+    }
+
+    /// Move a queue entry from one play-order position to another.
+    pub fn queue_move(&mut self, from: usize, to: usize) {
+        self.queue.move_item(from, to);
+        self.refresh_pre_queue();
+    }
+
+    /// Drop every queue entry except the one currently playing.
+    pub fn queue_clear_upcoming(&mut self) {
+        self.queue.clear_upcoming();
+        // Only the current track remains — nothing left to pre-queue.
+        self.invalidate_pre_queue();
+    }
+
+    /// Jump to and play the entry at play-order index `play_idx`.
+    pub fn jump_to(&mut self, play_idx: usize) -> Result<Option<Track>, String> {
+        if !self.queue.jump(play_idx) {
+            return Ok(None);
+        }
+        self.invalidate_pre_queue();
+        let track = self
+            .queue
+            .current()
+            .cloned()
+            .expect("jump succeeded, current must exist");
+        let source = resolve_track_source(&track);
+        self.play_track(&track, source)?;
+        self.pre_queue_next();
+        Ok(Some(track))
     }
 
     /// Whether the queue holds no tracks.
@@ -288,52 +431,167 @@ impl Player {
         self.queue.is_empty()
     }
 
-    /// Play the next track in the queue.
-    /// Returns the track that is now playing, or None if queue is empty.
-    ///
-    /// If gapless pre-queuing was used (`pre_queue_next()` was called earlier),
-    /// the audio is already playing in the sink — this just advances the index
-    /// and updates metadata. Otherwise, it does a full `play_track()`.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<&Track>, String> {
+    /// The full queue in PLAY order (shuffle already applied).
+    pub fn queue(&self) -> &[Track] {
+        self.queue.order()
+    }
+
+    /// Current position in PLAY order.
+    pub fn queue_index(&self) -> usize {
+        self.queue.index()
+    }
+
+    /// Whether shuffle is currently enabled.
+    pub fn shuffle_enabled(&self) -> bool {
+        self.queue.shuffle_enabled()
+    }
+
+    /// Current repeat mode.
+    pub fn repeat_mode(&self) -> RepeatMode {
+        self.queue.repeat()
+    }
+
+    /// Whether an explicit "Next" has anywhere to go.
+    pub fn has_next(&self) -> bool {
+        self.queue.has_next()
+    }
+
+    /// Whether "Previous" has anywhere to go.
+    pub fn has_previous(&self) -> bool {
+        self.queue.has_previous()
+    }
+
+    /// Enable/disable shuffle for the play queue.
+    pub fn set_shuffle(&mut self, enabled: bool) {
+        self.queue.set_shuffle(enabled);
+        self.refresh_pre_queue();
+    }
+
+    /// Change the repeat mode for the play queue.
+    pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        self.queue.set_repeat(mode);
+        self.refresh_pre_queue();
+    }
+
+    /// Advance the queue, either because the track ended naturally
+    /// (`auto = true`) or because the user/MPRIS explicitly asked for the
+    /// next track (`auto = false`). Returns the new current track, or
+    /// `None` only when the queue itself is empty — reaching the end under
+    /// `RepeatMode::None` still returns `Some` (the backend stops, but
+    /// `current_track` is kept per the `Message::Stop`-style contract).
+    fn advance_track(&mut self, auto: bool) -> Result<Option<Track>, String> {
         if self.queue.is_empty() {
             return Ok(None);
         }
-        self.queue_index = (self.queue_index + 1) % self.queue.len();
 
-        // If the next track was already pre-queued into the sink, we just
-        // update the metadata without restarting playback.
-        if self.next_pre_queued {
+        // Gapless fast path: the engine already has the predicted next
+        // track loaded in its look-ahead slot (see `pre_queue_next`, which
+        // always follows `peek_next_auto`) — on a natural end this is
+        // exactly what `advance(true)` selects, so just move the
+        // bookkeeping index/metadata instead of a full `play_track()`
+        // (which would restart audio that's already playing).
+        if auto && self.next_pre_queued {
             self.next_pre_queued = false;
-            let track = self.queue[self.queue_index].clone();
-            self.current_track = Some(NowPlaying {
-                duration: track.duration,
-                track,
-            });
-            // Pre-queue the track after this one for continued gapless.
-            self.pre_queue_next();
-            return Ok(self.queue.get(self.queue_index));
+            if let Some(next) = self.queue.advance(true) {
+                self.current_track = Some(NowPlaying {
+                    duration: next.duration,
+                    track: next.clone(),
+                });
+                self.pre_queue_next();
+                return Ok(Some(next));
+            }
+            // `peek_next_auto`/`advance` disagreed with what got
+            // pre-queued — shouldn't happen, but stay safe and stop
+            // cleanly using the same "queue finished" bookkeeping as the
+            // non-preloaded path below.
+            self.local_backend.clear_pre_queued();
+            self.active_mut().stop().map_err(|e| e.to_string())?;
+            let kept = self.queue.current().cloned();
+            self.current_track = kept
+                .clone()
+                .map(|t| NowPlaying { duration: t.duration, track: t });
+            return Ok(kept);
         }
 
-        let track = self.queue[self.queue_index].clone();
-        let source = resolve_track_source(&track);
-        self.play_track(&track, source)?;
-        // After starting a new track, pre-queue the next one for gapless.
-        self.pre_queue_next();
-        Ok(self.queue.get(self.queue_index))
+        self.invalidate_pre_queue();
+        match self.queue.advance(auto) {
+            Some(track) => {
+                let source = resolve_track_source(&track);
+                self.play_track(&track, source)?;
+                self.pre_queue_next();
+                Ok(Some(track))
+            }
+            None => {
+                // `RepeatMode::None` reached the end of the queue: stop
+                // the backend but keep the queue and `current_track`
+                // intact (`queue.advance` already rewound its index to 0)
+                // so a later resume restarts the queue from the top.
+                self.active_mut().stop().map_err(|e| e.to_string())?;
+                let kept = self.queue.current().cloned();
+                self.current_track = kept
+                    .clone()
+                    .map(|t| NowPlaying { duration: t.duration, track: t });
+                Ok(kept)
+            }
+        }
     }
 
-    /// Pre-queue the next track in the queue for gapless playback.
+    /// Play the next track in the queue (explicit "Next" — user pressed
+    /// next / MPRIS `Next`). See `advance_track`'s `auto` parameter.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<Track>, String> {
+        self.advance_track(false)
+    }
+
+    /// Natural end-of-track advance: the active backend reports the track
+    /// finished on its own. `RepeatMode::One` replays here only; explicit
+    /// `next()` always moves on regardless of repeat mode.
+    pub fn advance_on_finish(&mut self) -> Result<Option<Track>, String> {
+        self.advance_track(true)
+    }
+
+    /// Play the previous track, honoring the standard 3-second restart
+    /// rule: `position` is how far into the current track playback has
+    /// gotten.
+    pub fn previous(&mut self, position: Duration) -> Result<Option<PreviousResult>, String> {
+        if self.queue.is_empty() {
+            return Ok(None);
+        }
+        match self.queue.previous(position) {
+            Some(PreviousAction::Restart) => {
+                self.active_mut()
+                    .seek(Duration::ZERO)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(PreviousResult::Restarted))
+            }
+            Some(PreviousAction::Track(track)) => {
+                self.invalidate_pre_queue();
+                let source = resolve_track_source(&track);
+                self.play_track(&track, source)?;
+                self.pre_queue_next();
+                Ok(Some(PreviousResult::Track(track)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Pre-queue the predicted next track (per `peek_next_auto`, which
+    /// honors shuffle/repeat) for gapless playback.
     ///
-    /// Only works for `LocalBackend` with local files (not HTTP streams or MPD).
-    /// No-op if the queue has only one track or the active backend isn't local.
+    /// Only works for `LocalBackend`; MPD's own backend has no gapless
+    /// pre-queue support, and a queue entry resolving to an MPD source
+    /// can't be gapless-preloaded through the local engine either.
     pub fn pre_queue_next(&mut self) {
-        if self.queue.len() <= 1 || self.active_backend != ActiveBackend::Local {
+        if self.active_backend != ActiveBackend::Local {
             return;
         }
-        let next_idx = (self.queue_index + 1) % self.queue.len();
-        let next_track = &self.queue[next_idx];
-        let source = resolve_track_source(next_track);
+        let Some(next_track) = self.queue.peek_next_auto().cloned() else {
+            return;
+        };
+        let source = resolve_track_source(&next_track);
+        if matches!(source, TrackSource::MpdFile(_)) {
+            return;
+        }
         match self.local_backend.queue_next(source) {
             Ok(()) => {
                 self.next_pre_queued = true;
@@ -343,46 +601,6 @@ impl Player {
                 self.next_pre_queued = false;
             }
         }
-    }
-
-    /// Play the previous track in the queue.
-    pub fn previous(&mut self) -> Result<Option<&Track>, String> {
-        if self.queue.is_empty() {
-            return Ok(None);
-        }
-        self.next_pre_queued = false;
-        if self.queue_index == 0 {
-            self.queue_index = self.queue.len() - 1;
-        } else {
-            self.queue_index -= 1;
-        }
-        let track = self.queue[self.queue_index].clone();
-        let source = resolve_track_source(&track);
-        self.play_track(&track, source)?;
-        self.pre_queue_next();
-        Ok(self.queue.get(self.queue_index))
-    }
-
-    /// Play a specific index in the queue.
-    pub fn play_index(&mut self, index: usize) -> Result<(), String> {
-        if index >= self.queue.len() {
-            return Err("Index out of bounds".into());
-        }
-        self.next_pre_queued = false;
-        self.queue_index = index;
-        let track = self.queue[index].clone();
-        let source = resolve_track_source(&track);
-        self.play_track(&track, source)?;
-        self.pre_queue_next();
-        Ok(())
-    }
-
-    pub fn queue(&self) -> &[Track] {
-        &self.queue
-    }
-
-    pub fn queue_index(&self) -> usize {
-        self.queue_index
     }
 
     /// Which backend type is currently active.

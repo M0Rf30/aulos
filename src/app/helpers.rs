@@ -20,6 +20,36 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Buffers a non-destructive library refresh: batches accumulate here
+/// while the previously loaded library stays fully visible on screen, so
+/// switching pages, opening a menu, etc. never sees an empty view mid
+/// reload. `Message::LibraryLoadComplete` swaps this into
+/// `all_tracks`/`all_albums`/`cover_images`/`cover_art_bytes` atomically
+/// once the whole reload finishes -- see `AppModel::reload_library` and
+/// the `Message::LibraryBatch`/`LibraryLoadComplete` handlers.
+pub(super) struct LibraryReloadStaging {
+    pub(super) generation: u64,
+    pub(super) tracks: Vec<Track>,
+    pub(super) albums: Vec<Album>,
+    pub(super) cover_images: HashMap<String, widget::icon::Handle>,
+    pub(super) cover_art_bytes: HashMap<String, Vec<u8>>,
+}
+
+/// Build a `widget::icon::Handle` for a cover-art byte blob, preferring a
+/// pre-decoded, downscaled RGBA thumbnail (`from_raster_pixels`) over the
+/// original encoded bytes (`from_raster_bytes`) -- the latter forces a
+/// full-resolution JPEG/PNG decode on the UI thread every time iced's
+/// wgpu raster cache evicts and re-uploads the handle (e.g. every page
+/// switch). Falls back to the encoded bytes if decoding fails, so a
+/// corrupt/unusual cover blob is not silently dropped.
+fn cover_thumbnail_handle(bytes: &[u8]) -> widget::icon::Handle {
+    match crate::library::CoverArt::decode_thumbnail(bytes, crate::library::CoverArt::GRID_THUMBNAIL_MAX_DIM)
+    {
+        Some((w, h, pixels)) => widget::icon::from_raster_pixels(w, h, pixels),
+        None => widget::icon::from_raster_bytes(bytes.to_vec()),
+    }
+}
+
 impl AppModel {
     /// Rebuild `provider_list` and `active_provider_index` from the registry.
     ///
@@ -93,7 +123,17 @@ impl AppModel {
         })
     }
 
-    /// Dispatch an async MPD play command for a URI (ClearQueue + Add + Play).
+    /// Dispatch an async MPD play command for a URI (ClearQueue + Add +
+    /// Play).
+    ///
+    /// Lyra drives MPD one track at a time from its own [`crate::player`]
+    /// queue — shuffle/repeat live entirely in that queue, never in MPD
+    /// itself. Forcing `random`/`repeat`/`single` off on every dispatch
+    /// guards against a stale `repeat 1` (set by an external MPD client,
+    /// or left over from before Lyra started driving this server): with a
+    /// single-song MPD queue, `repeat 1` would otherwise loop that one
+    /// song forever and `is_finished()` would never fire, silently
+    /// freezing playback on the current track.
     pub(super) fn dispatch_mpd_play(&self, uri: String) -> Task<cosmic::Action<Message>> {
         if let Some(client) = self.mpd_client() {
             self.dispatch_mpd(async move {
@@ -105,6 +145,20 @@ impl AppModel {
                     .command(mpd_client::commands::Add::uri(&uri))
                     .await
                     .map_err(|e| format!("MPD add: {e}"))?;
+                client
+                    .command(mpd_client::commands::SetRandom(false))
+                    .await
+                    .map_err(|e| format!("MPD set_random: {e}"))?;
+                client
+                    .command(mpd_client::commands::SetRepeat(false))
+                    .await
+                    .map_err(|e| format!("MPD set_repeat: {e}"))?;
+                client
+                    .command(mpd_client::commands::SetSingle(
+                        mpd_client::commands::SingleMode::Disabled,
+                    ))
+                    .await
+                    .map_err(|e| format!("MPD set_single: {e}"))?;
                 client
                     .command(mpd_client::commands::Play::current())
                     .await
@@ -174,13 +228,30 @@ impl AppModel {
         match provider_type {
             crate::provider::ProviderType::Local => self.reload_library_local(provider, generation),
             crate::provider::ProviderType::Mpd | crate::provider::ProviderType::Subsonic => {
-                // Clear existing data before incremental loading begins.
-                self.all_tracks.clear();
-                self.all_albums.clear();
-                self.all_artists.clear();
-                self.cover_images.clear();
-                self.artist_avatars.clear();
                 self.library_scanning = true;
+                if self.all_tracks.is_empty() && self.all_albums.is_empty() {
+                    // First load (or the library is genuinely empty): there
+                    // is nothing on screen to flash away from, so populate
+                    // progressively straight into the visible fields as
+                    // batches arrive, same as before.
+                    self.library_reload_staging = None;
+                    self.all_artists.clear();
+                    self.cover_images.clear();
+                    self.artist_avatars.clear();
+                } else {
+                    // A library is already showing: keep it fully visible
+                    // and accumulate the refreshed data off to the side.
+                    // `Message::LibraryLoadComplete` swaps it in atomically
+                    // once the whole reload finishes, so the view never
+                    // goes empty mid-reload (see `LibraryReloadStaging`).
+                    self.library_reload_staging = Some(LibraryReloadStaging {
+                        generation,
+                        tracks: Vec::new(),
+                        albums: Vec::new(),
+                        cover_images: HashMap::new(),
+                        cover_art_bytes: HashMap::new(),
+                    });
+                }
                 self.reload_library_incremental(provider, provider_type, generation)
             }
         }
@@ -221,17 +292,24 @@ impl AppModel {
                     album.tracks.first().map(|track| (key, track.path.clone()))
                 })
                 .map(|(key, path)| {
-                    tokio::task::spawn_blocking(move || {
-                        crate::library::CoverArt::get_cover_art(&path).map(|bytes| (key, bytes))
-                    })
+                    tokio::task::spawn_blocking(
+                        move || -> Option<(String, widget::icon::Handle, Vec<u8>)> {
+                            let bytes = crate::library::CoverArt::get_cover_art(&path)?;
+                            // Decode + downscale here too -- this is CPU-bound
+                            // work and must stay off the async task (which
+                            // runs on a tokio worker thread shared with other
+                            // futures, not a dedicated blocking thread).
+                            let handle = cover_thumbnail_handle(&bytes);
+                            Some((key, handle, bytes))
+                        },
+                    )
                 })
                 .collect();
 
             let mut cover_images = HashMap::new();
             let mut cover_art_bytes = HashMap::new();
             for task in cover_tasks {
-                if let Ok(Some((key, bytes))) = task.await {
-                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                if let Ok(Some((key, handle, bytes))) = task.await {
                     cover_images.insert(key.clone(), handle);
                     cover_art_bytes.insert(key, bytes);
                 }
@@ -240,8 +318,9 @@ impl AppModel {
             // Generate artist avatars (fast, keep sequential)
             let mut artist_avatars = HashMap::new();
             for artist in &artists {
-                let bytes = crate::library::CoverArt::generate_artist_avatar(&artist.name, 64);
-                let handle = widget::icon::from_raster_bytes(bytes);
+                let (w, h, pixels) =
+                    crate::library::CoverArt::generate_artist_avatar_pixels(&artist.name, 64);
+                let handle = widget::icon::from_raster_pixels(w, h, pixels);
                 artist_avatars.insert(artist.name.clone(), handle);
             }
 
@@ -343,7 +422,16 @@ impl AppModel {
                                     let prov2 = Arc::clone(&prov);
                                     let hint = album.cover_hint();
                                     tokio::task::spawn_blocking(move || {
-                                        let result = prov2.get_cover_art(&hint);
+                                        // Decode + downscale here too, inside
+                                        // the blocking closure -- CPU-bound
+                                        // work must not run on the async
+                                        // task's tokio worker thread.
+                                        let result = prov2.get_cover_art(&hint).map(|opt| {
+                                            opt.map(|bytes| {
+                                                let handle = cover_thumbnail_handle(&bytes);
+                                                (handle, bytes)
+                                            })
+                                        });
                                         (key, result)
                                     })
                                 })
@@ -352,8 +440,7 @@ impl AppModel {
                             let mut cover_images = HashMap::new();
                             let mut cover_art_bytes = HashMap::new();
                             for task in cover_tasks {
-                                if let Ok((key, Ok(Some(bytes)))) = task.await {
-                                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                if let Ok((key, Ok(Some((handle, bytes))))) = task.await {
                                     cover_images.insert(key.clone(), handle);
                                     cover_art_bytes.insert(key, bytes);
                                 }
@@ -419,7 +506,16 @@ impl AppModel {
                                     let prov2 = Arc::clone(&prov);
                                     let hint = album.cover_hint();
                                     tokio::task::spawn_blocking(move || {
-                                        let result = prov2.get_cover_art(&hint);
+                                        // Decode + downscale here too, inside
+                                        // the blocking closure -- CPU-bound
+                                        // work must not run on the async
+                                        // task's tokio worker thread.
+                                        let result = prov2.get_cover_art(&hint).map(|opt| {
+                                            opt.map(|bytes| {
+                                                let handle = cover_thumbnail_handle(&bytes);
+                                                (handle, bytes)
+                                            })
+                                        });
                                         (key, result)
                                     })
                                 })
@@ -428,8 +524,7 @@ impl AppModel {
                             let mut cover_images = HashMap::new();
                             let mut cover_art_bytes = HashMap::new();
                             for task in cover_tasks {
-                                if let Ok((key, Ok(Some(bytes)))) = task.await {
-                                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                if let Ok((key, Ok(Some((handle, bytes))))) = task.await {
                                     cover_images.insert(key.clone(), handle);
                                     cover_art_bytes.insert(key, bytes);
                                 }
@@ -755,9 +850,9 @@ impl AppModel {
                     if let std::collections::hash_map::Entry::Vacant(slot) =
                         self.artist_avatars.entry(name)
                     {
-                        let bytes =
-                            crate::library::CoverArt::generate_artist_avatar(slot.key(), 64);
-                        slot.insert(widget::icon::from_raster_bytes(bytes));
+                        let (w, h, pixels) =
+                            crate::library::CoverArt::generate_artist_avatar_pixels(slot.key(), 64);
+                        slot.insert(widget::icon::from_raster_pixels(w, h, pixels));
                     }
                 }
             }
@@ -797,26 +892,40 @@ impl AppModel {
             None => Task::none(),
         };
 
-        if let Some(ref mut player) = self.player {
-            let current = tracks.get(start_index).cloned();
-            player.set_queue(tracks);
-            if player.play_index(start_index).is_ok() {
-                self.current_track = current;
-                self.playback_position = Duration::ZERO;
-                self.lyrics_text = None;
-                self.scrobble_now_playing_sent = false;
-                self.scrobble_sent = false;
-                #[cfg(feature = "visualizer")]
-                {
-                    self.viz_metadata_opacity = 1.0;
+        if let Some(player) = &mut self.player {
+            match player.set_queue(tracks, start_index) {
+                Ok(Some(track)) => {
+                    self.current_track = Some(track);
+                    self.playback_position = Duration::ZERO;
+                    let track_changed_task = self.on_track_changed();
+                    return Task::batch([podcast_save_task, track_changed_task]);
                 }
-                let mpd_task = self.dispatch_mpd_after_play();
-                let blur_task = self.maybe_update_blurred_cover();
-                let mpris_task = self.publish_mpris();
-                return Task::batch([podcast_save_task, mpd_task, blur_task, mpris_task]);
+                Ok(None) => {}
+                Err(e) => tracing::error!("play_track_list failed: {e}"),
             }
         }
         podcast_save_task
+    }
+
+    /// Common bookkeeping whenever the current track changes (queue
+    /// advance/jump/edit, MPD adopting an externally-changed song, ...).
+    /// Resets lyrics/scrobble state and the visualizer metadata fade-in,
+    /// then kicks off the blur + async-MPD-dispatch + MPRIS-publish
+    /// follow-up tasks. Callers must already have set `self.current_track`
+    /// (and typically `self.playback_position = Duration::ZERO`) before
+    /// calling this.
+    pub(super) fn on_track_changed(&mut self) -> Task<cosmic::Action<Message>> {
+        self.lyrics_text = None;
+        self.scrobble_now_playing_sent = false;
+        self.scrobble_sent = false;
+        #[cfg(feature = "visualizer")]
+        {
+            self.viz_metadata_opacity = 1.0;
+        }
+        let mpd_task = self.dispatch_mpd_after_play();
+        let blur_task = self.maybe_update_blurred_cover();
+        let mpris_task = self.publish_mpris();
+        Task::batch([mpd_task, blur_task, mpris_task])
     }
 
     /// Builds an `MprisSnapshot` from current player/config state and
@@ -855,7 +964,8 @@ impl AppModel {
             },
             None => (None, Task::none()),
         };
-        let has_queue = !self.all_tracks.is_empty();
+        let can_go_next = self.player.as_ref().is_some_and(|p| p.has_next());
+        let can_go_previous = self.player.as_ref().is_some_and(|p| p.has_previous());
 
         handle.publish(crate::mpris::MprisSnapshot {
             status,
@@ -875,8 +985,8 @@ impl AppModel {
                 .unwrap_or(self.config.volume as f64),
             shuffle: self.config.shuffle,
             loop_mode,
-            can_go_next: track.is_some() && has_queue,
-            can_go_previous: track.is_some() && has_queue,
+            can_go_next,
+            can_go_previous,
             can_seek: track.is_some_and(|t| &*t.provider_id != "radio"),
             can_play: track.is_some(),
         });
@@ -1007,6 +1117,8 @@ impl AppModel {
                 // No track — clear everything.
                 self.blurred_cover = None;
                 self.blurred_cover_key = None;
+                self.blur_pending_key = None;
+                self.current_cover_large = None;
                 self.accent = None;
                 return Task::none();
             }
@@ -1026,6 +1138,15 @@ impl AppModel {
             return Task::none();
         }
 
+        // A blur job for this exact album is already in flight (spawned
+        // by an earlier call -- e.g. the previous `LibraryBatch` in an
+        // incremental reload -- but `BlurReady` hasn't arrived yet).
+        // Don't spawn a duplicate: each spawn would build a brand-new
+        // (if identical) handle, defeating the point of caching by key.
+        if self.blur_pending_key.as_ref() == Some(&key) {
+            return Task::none();
+        }
+
         // Look up raw bytes. If they are not available yet (still loading),
         // reset the key so we retry when bytes arrive, but keep the current
         // blurred_cover showing (previous track's blur) rather than blanking
@@ -1040,28 +1161,39 @@ impl AppModel {
             }
         };
 
-        // Bytes are available — start the async blur+accent computation.
-        // Clear the key now so a concurrent track change will not skip
-        // the next blur computation (BlurReady carries the key and will
-        // only apply if it still matches the current track).
+        // Bytes are available — start the async blur+accent+large-cover
+        // computation. Clear the cached-result key now so a concurrent
+        // track change will not skip the next blur computation (BlurReady
+        // carries the key and will only apply if it still matches the
+        // current track); mark this key as pending so a second call
+        // before the job finishes (see the guard above) does not spawn a
+        // duplicate.
         self.blurred_cover_key = None;
+        self.blur_pending_key = Some(key.clone());
 
         let key_clone = key.clone();
         cosmic::task::future(async move {
-            // Compute blur and accent in the same blocking task, off the
-            // async runtime, from the same bytes. Accent extraction is
-            // bounded-cost (fixed 32x32 working set) regardless of source
-            // resolution, so it adds no meaningful overhead next to the blur.
-            let (blurred, accent) = tokio::task::spawn_blocking(move || {
+            // Compute blur, accent and a larger expanded-view cover in the
+            // same blocking task, off the async runtime, from the same
+            // bytes. Accent extraction is bounded-cost (fixed 32x32
+            // working set) regardless of source resolution, so it adds no
+            // meaningful overhead next to the blur/resize work.
+            let (blurred, accent, cover_large) = tokio::task::spawn_blocking(move || {
                 let blurred = crate::views::now_playing::blur::compute_blurred_cover(&bytes);
                 let accent = crate::library::palette::extract(&bytes);
-                (blurred, accent)
+                let cover_large = crate::library::CoverArt::decode_thumbnail(
+                    &bytes,
+                    crate::library::CoverArt::EXPANDED_COVER_MAX_DIM,
+                );
+                (blurred, accent, cover_large)
             })
             .await
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
 
-            let handle = blurred.map(widget::icon::from_raster_bytes);
-            cosmic::Action::App(Message::BlurReady(key_clone, handle, accent))
+            let handle = blurred.map(|(w, h, pixels)| widget::icon::from_raster_pixels(w, h, pixels));
+            let large_handle =
+                cover_large.map(|(w, h, pixels)| widget::icon::from_raster_pixels(w, h, pixels));
+            cosmic::Action::App(Message::BlurReady(key_clone, handle, accent, large_handle))
         })
     }
 
@@ -1118,23 +1250,6 @@ impl AppModel {
         })
     }
 
-    /// Load saved radio stations from the online store.
-    pub(super) fn load_radio_stations(&self) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(|| {
-                open_online_store()
-                    .and_then(|store| store.list_radio_stations())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_radio_stations failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
-            cosmic::Action::App(Message::RadioStationsLoaded(stations))
-        })
-    }
-
     /// Fetch each not-yet-cached icon URL and dispatch `OnlineIconLoaded` for
     /// it, used for podcast artwork and radio station favicons alike.
     pub(super) fn load_online_icons(&self, urls: Vec<String>) -> Task<cosmic::Action<Message>> {
@@ -1144,18 +1259,29 @@ impl AppModel {
             .map(|url| {
                 let fetch_url = url.clone();
                 cosmic::task::future(async move {
-                    let bytes = tokio::task::spawn_blocking(move || {
-                        HTTP_CLIENT.clone()
+                    // Fetch and decode/downscale in the same blocking task —
+                    // both are CPU/IO work that must never run on the async
+                    // runtime's reactor thread, and there's nothing useful
+                    // to do with the raw bytes on the way back except decode
+                    // them, so there is no reason to hop back to `.await`
+                    // in between.
+                    let decoded = tokio::task::spawn_blocking(move || {
+                        let bytes = HTTP_CLIENT
+                            .clone()
                             .get(&fetch_url)
                             .send()
                             .ok()
                             .and_then(|r| r.bytes().ok())
-                            .map(|b| b.to_vec())
-                            .unwrap_or_default()
+                            .map(|b| b.to_vec())?;
+                        crate::library::CoverArt::decode_thumbnail(
+                            &bytes,
+                            crate::library::CoverArt::ONLINE_ICON_MAX_DIM,
+                        )
                     })
                     .await
-                    .unwrap_or_default();
-                    cosmic::Action::App(Message::OnlineIconLoaded(url, bytes))
+                    .ok()
+                    .flatten();
+                    cosmic::Action::App(Message::OnlineIconLoaded(url, decoded))
                 })
             })
             .collect();

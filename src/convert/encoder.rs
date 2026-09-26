@@ -13,8 +13,9 @@ use super::ConvertError;
 /// Output container/codec choices. FLAC always writes 16-bit for 16-bit (or
 /// unknown) sources and 24-bit otherwise (see [`flac_bit_depth`]) — good
 /// enough fidelity without needlessly doubling the size of a 16-bit rip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OutputFormat {
+    #[default]
     Flac,
     Wav16,
     Wav24,

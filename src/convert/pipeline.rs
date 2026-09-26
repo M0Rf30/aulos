@@ -31,7 +31,16 @@ use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 use super::cue;
 use super::encoder;
 use super::tag_writer::{self, WriteTags};
-use super::{ConvertError, ConvertJob, JobId, JobKind};
+use super::{ConvertError, ConvertJob, JobId, JobKind, JobSettings};
+
+/// The settings `job` is running with. Panics if called before
+/// [`super::ConvertJob::start`] set them — every job passed to `run` here
+/// has already transitioned `Queued` -> `Running`, which always sets them.
+fn settings(job: &ConvertJob) -> &JobSettings {
+    job.settings
+        .as_ref()
+        .expect("pipeline::run called on a job without settings (not yet started)")
+}
 
 /// Runs `job` to completion: decodes, optionally resamples, encodes, and
 /// tags the output(s). Checks `job.cancel` between packets. Encoding
@@ -40,13 +49,13 @@ use super::{ConvertError, ConvertJob, JobId, JobKind};
 /// real output path is never touched, so nothing partial is ever left
 /// behind at the name the caller asked for.
 pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
-    std::fs::create_dir_all(&job.out_dir)?;
+    std::fs::create_dir_all(&settings(job).out_dir)?;
     match job.kind {
         JobKind::Convert => {
             let stem = job.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
-            let out_path = unique_out_path(&job.out_dir, stem, job.format.extension());
+            let out_path = unique_out_path(&settings(job).out_dir, stem, settings(job).format.extension());
             transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
-            copy_tags(&job.source, &out_path, job.format);
+            copy_tags(&job.source, &out_path, settings(job).format);
             Ok(())
         }
         JobKind::CueSplit => cue_split(job),
@@ -83,7 +92,7 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         }
 
         let stem = format!("{:02} - {}", track.number, sanitize_filename(&track.title));
-        let out_path = unique_out_path(&job.out_dir, &stem, job.format.extension());
+        let out_path = unique_out_path(&settings(job).out_dir, &stem, settings(job).format.extension());
         let start = track.start.as_secs_f64();
         let end = track.end.map(|d| d.as_secs_f64());
         let (progress_base, progress_span) = track_progress_range(i, track_count);
@@ -96,7 +105,7 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
             track_total: Some(track_count as u32),
             ..src_tags.as_ref().map(shared_tags).unwrap_or_default()
         };
-        write_output_tags(&out_path, job.format, &write);
+        write_output_tags(&out_path, settings(job).format, &write);
     }
     Ok(())
 }
@@ -142,7 +151,7 @@ fn transcode(
 
     let src_rate = source.sample_rate;
     let channels = source.channels;
-    let dst_rate = job.target_rate.unwrap_or(src_rate);
+    let dst_rate = settings(job).target_rate.unwrap_or(src_rate);
     let mut resampler = (dst_rate != src_rate)
         .then(|| StreamResampler::new(src_rate, dst_rate, channels as usize, ResamplerQuality::SincMedium))
         .flatten();
@@ -150,7 +159,7 @@ fn transcode(
     let tmp_path = temp_out_path(out_path, job.id);
     let mut tmp_guard = TempFileGuard::new(tmp_path.clone());
     let mut sink = encoder::create_sink(
-        job.format,
+        settings(job).format,
         &tmp_path,
         channels,
         dst_rate,
@@ -598,14 +607,12 @@ mod tests {
         );
 
         let out_dir = dir.join("out");
-        let job = ConvertJob::new(
-            1,
-            source,
-            JobKind::Convert,
-            encoder::OutputFormat::Flac,
-            None,
-            out_dir.clone(),
-        );
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings {
+            format: encoder::OutputFormat::Flac,
+            target_rate: None,
+            out_dir: out_dir.clone(),
+        });
 
         run(&job).expect("conversion job should succeed");
 
@@ -644,14 +651,12 @@ mod tests {
         );
 
         let out_dir = dir.join("out");
-        let job = ConvertJob::new(
-            1,
-            source,
-            JobKind::Convert,
-            encoder::OutputFormat::Flac,
-            None,
-            out_dir.clone(),
-        );
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings {
+            format: encoder::OutputFormat::Flac,
+            target_rate: None,
+            out_dir: out_dir.clone(),
+        });
         run(&job).expect("conversion job should succeed");
 
         let probed = track_tags::probe(&out_dir.join("source.flac"), true).expect("probe should succeed");
@@ -696,16 +701,13 @@ mod tests {
         write_test_wav(&source);
 
         let out_dir = dir.join("out");
-        let job = ConvertJob::new(
-            1,
-            source,
-            JobKind::Convert,
-            encoder::OutputFormat::Wav16,
-            None,
-            out_dir.clone(),
-        );
-        job.request_cancel();
-
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings {
+            format: encoder::OutputFormat::Wav16,
+            target_rate: None,
+            out_dir: out_dir.clone(),
+        });
+        job.cancel();
         let result = run(&job);
         assert!(matches!(result, Err(ConvertError::Cancelled)), "expected Cancelled, got {result:?}");
 
@@ -728,14 +730,12 @@ mod tests {
         write_test_wav_frames(&source, 441);
 
         let out_dir = dir.join("out");
-        let job = ConvertJob::new(
-            1,
-            source,
-            JobKind::Convert,
-            encoder::OutputFormat::Flac,
-            Some(48_000),
-            out_dir.clone(),
-        );
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings {
+            format: encoder::OutputFormat::Flac,
+            target_rate: Some(48_000),
+            out_dir: out_dir.clone(),
+        });
         run(&job).expect("resampled conversion job should succeed");
 
         let out_path = out_dir.join("source.flac");

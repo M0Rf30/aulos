@@ -45,7 +45,10 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        self.view_page()
+        let start = std::time::Instant::now();
+        let element = self.view_page();
+        log_elapsed("view", "view", start.elapsed());
+        element
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -53,10 +56,79 @@ impl cosmic::Application for AppModel {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
-        self.handle_message(message)
+        let label = message_label(&message);
+        let start = std::time::Instant::now();
+        let task = self.handle_message(message);
+        log_elapsed("update", label, start.elapsed());
+        task
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
         self.select_nav(id)
+    }
+}
+
+/// `update()`/`view()` timing threshold (ms) above which the log escalates
+/// from `debug` to `warn` -- a rough "this frame likely dropped below a
+/// 60fps budget" marker, not a hard SLA.
+const SLOW_THRESHOLD_MS: f64 = 30.0;
+
+/// Logs how long a `view()`/`update()` call took. `debug` below
+/// `SLOW_THRESHOLD_MS`, `warn` at or above it, so slow page/menu switches
+/// (the "strangely slow" bug reports) surface in a plain `RUST_LOG=warn`
+/// run without needing debug-level logging enabled everywhere.
+fn log_elapsed(kind: &str, label: &str, elapsed: std::time::Duration) {
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    if elapsed_ms >= SLOW_THRESHOLD_MS {
+        tracing::warn!("{kind}({label}) took {elapsed_ms:.2}ms");
+    } else {
+        tracing::debug!("{kind}({label}) took {elapsed_ms:.2}ms");
+    }
+}
+
+/// Cheap textual label for a message, for `update()` timing logs. Only
+/// matches variants worth distinguishing (hot/frequent paths, and ones
+/// prone to doing real work); everything else collapses to a generic
+/// bucket rather than `format!("{:?}", message)` over the whole enum,
+/// which would force rendering the full payload (e.g. `LibraryLoaded`'s
+/// vectors) on every single `update()` call just to get a label.
+fn message_label(message: &Message) -> &'static str {
+    match message {
+        Message::PlaybackTick => "PlaybackTick",
+        Message::TogglePlayback => "TogglePlayback",
+        Message::NextTrack => "NextTrack",
+        Message::PreviousTrack => "PreviousTrack",
+        Message::SeekPreview(_) => "SeekPreview",
+        Message::SeekCommit => "SeekCommit",
+        Message::SetVolume(_) => "SetVolume",
+        Message::VolumeCommit => "VolumeCommit",
+        Message::Stop => "Stop",
+        Message::ToggleShuffle => "ToggleShuffle",
+        Message::CycleRepeat => "CycleRepeat",
+        Message::MpdIdleEvent(..) => "MpdIdleEvent",
+        Message::MpdStatusUpdate { .. } => "MpdStatusUpdate",
+        Message::MpdConnected(_) => "MpdConnected",
+        Message::MpdConnectionFailed(..) => "MpdConnectionFailed",
+        Message::ScanLibrary => "ScanLibrary",
+        Message::LibraryScanComplete { .. } => "LibraryScanComplete",
+        Message::LibraryLoaded { .. } => "LibraryLoaded",
+        Message::LibraryBatch { .. } => "LibraryBatch",
+        Message::LibraryLoadComplete { .. } => "LibraryLoadComplete",
+        Message::FilesChanged(_) => "FilesChanged",
+        Message::SwitchProvider(_) => "SwitchProvider",
+        Message::ToggleContextPage(_) => "ToggleContextPage",
+        Message::LibrarySearchChanged(_) => "LibrarySearchChanged",
+        Message::BlurReady(..) => "BlurReady",
+        Message::OnlineIconLoaded(..) => "OnlineIconLoaded",
+        Message::ExpandAnimTick => "ExpandAnimTick",
+        Message::ExpandNowPlaying => "ExpandNowPlaying",
+        Message::CollapseNowPlaying => "CollapseNowPlaying",
+        Message::Mpris(_) => "Mpris",
+        Message::Shortcut(_) => "Shortcut",
+        Message::QueueJump(_) => "QueueJump",
+        Message::QueueRemove(_) => "QueueRemove",
+        Message::QueueMove { .. } => "QueueMove",
+        Message::QueueClear => "QueueClear",
+        _ => "Other",
     }
 }

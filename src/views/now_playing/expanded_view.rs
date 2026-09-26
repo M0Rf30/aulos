@@ -7,6 +7,7 @@ use crate::library::Track;
 use crate::library::palette::Accent;
 use crate::player::PlaybackState;
 use crate::views::common;
+use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
@@ -149,6 +150,35 @@ fn accent_slider_class(accent: &Accent) -> cosmic::theme::iced::Slider {
     }
 }
 
+/// Small "LIVE" pill shown in place of the elapsed/remaining time labels
+/// for a stream with no known duration (radio) — same row slot as the
+/// time labels, just different content, so `seek_bar_row`'s tree shape
+/// never changes between a normal track and a live stream.
+fn live_badge<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
+    let pill = widget::Row::new()
+        .push(widget::icon::from_name("media-record-symbolic").size(12))
+        .push(widget::text::body(fl!("now-playing-live")))
+        .spacing(6)
+        .align_y(Alignment::Center);
+    widget::container(pill)
+        .padding([2, 10])
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            let accent = cosmic.accent_color();
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(accent.with_alpha(0.16).into())),
+                text_color: Some(accent.into()),
+                icon_color: Some(accent.into()),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_xs.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
 /// Standard collapse-to-compact-bar control, pinned top-right. 24px icon +
 /// `space_xs` padding on every side gives a >= 32px hit target (24 + 2×8 =
 /// 40px) — comfortably above the minimum, not just meeting it.
@@ -205,7 +235,7 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
         .align_y(Alignment::Center);
 
     // Same left-to-right order as the compact bar and the playing-state
-    // transport row: shuffle, previous, play, next, repeat.
+    // transport row: shuffle, previous, play, stop, next, repeat.
     let transport = widget::Row::new()
         .push(transport_button::<NowPlayingMessage>(
             "media-playlist-shuffle-symbolic",
@@ -226,6 +256,13 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
             36,
             false,
             fl!("play"),
+            None,
+        ))
+        .push(transport_button::<NowPlayingMessage>(
+            "media-playback-stop-symbolic",
+            28,
+            false,
+            fl!("stop"),
             None,
         ))
         .push(transport_button::<NowPlayingMessage>(
@@ -273,42 +310,64 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
 
 /// Elapsed-time label, drag/seek slider, and total-duration label — shared
 /// by the two-column and fullscreen layouts so both stay in perfect sync.
+/// For a live stream (`is_live`, no known duration), the same three slots
+/// render a "LIVE" badge and a non-interactive progress bar instead, so the
+/// row's tree shape never changes when a live stream starts or ends.
 fn seek_bar_row<'a>(
     display_position: Duration,
     duration: Duration,
     progress: f32,
     space_s: f32,
     accent: Option<&Accent>,
+    is_live: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
-    let mut seek_slider = widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-        .step(0.001_f32)
-        .on_release(NowPlayingMessage::SeekCommit)
-        .width(Length::Fill);
-    if let Some(accent) = accent {
-        seek_slider = seek_slider.class(accent_slider_class(accent));
-    }
+    let seek_widget: cosmic::Element<'_, NowPlayingMessage> = if is_live {
+        widget::determinate_linear(0.0).width(Length::Fill).into()
+    } else {
+        let mut seek_slider = widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
+            .step(0.001_f32)
+            .on_release(NowPlayingMessage::SeekCommit)
+            .width(Length::Fill);
+        if let Some(accent) = accent {
+            seek_slider = seek_slider.class(accent_slider_class(accent));
+        }
+        seek_slider.into()
+    };
+    let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
+        live_badge()
+    } else {
+        widget::text::body(format_time(display_position)).into()
+    };
+    let time_end_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
+        widget::Space::new().width(0).height(0).into()
+    } else {
+        widget::text::body(format_time(duration)).into()
+    };
     widget::Row::new()
-        .push(widget::text::body(format_time(display_position)))
-        .push(seek_slider)
-        .push(widget::text::body(format_time(duration)))
+        .push(time_start_slot)
+        .push(seek_widget)
+        .push(time_end_slot)
         .spacing(space_s)
         .align_y(Alignment::Center)
         .into()
 }
 
-/// Shuffle / previous / play-pause / next / repeat transport controls, in
-/// the same left-to-right order as the compact bar. The prev/play/next
-/// "core" triplet stays tightly grouped; shuffle and repeat sit a much
-/// wider gap away on either side so they read as secondary controls, not
-/// same-weight siblings of the core triplet — and the play/pause button
-/// itself renders as the row's one primary/filled action via
-/// `play_pause_button` below.
+/// Shuffle / previous / play-pause / stop / next / repeat transport
+/// controls, in the same left-to-right order as the compact bar. The
+/// prev/play/stop/next "core" cluster stays tightly grouped; shuffle and
+/// repeat sit a much wider gap away on either side so they read as
+/// secondary controls, not same-weight siblings of the core cluster — and
+/// the play/pause button itself renders as the row's one primary/filled
+/// action via `play_pause_button` below. `is_live` disables shuffle/prev/
+/// next/repeat (meaningless for a stream with no queue position to shift)
+/// without removing them, so the row's shape never changes.
 fn transport_row<'a>(
     state: PlaybackState,
     shuffle: bool,
     repeat_mode: RepeatMode,
     space_xxs: f32,
     accent: Option<&Accent>,
+    is_live: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let play_icon = if state == PlaybackState::Playing {
         "media-playback-pause-symbolic"
@@ -322,10 +381,11 @@ fn transport_row<'a>(
     } else {
         fl!("play")
     };
+    let stop_enabled = state != PlaybackState::Stopped;
 
-    // Wider than the core triplet's own `space_xxs` gap, so shuffle/repeat
+    // Wider than the core cluster's own `space_xxs` gap, so shuffle/repeat
     // read as clearly-separate secondary controls instead of two more
-    // same-weight siblings of prev/play/next.
+    // same-weight siblings of prev/play/stop/next.
     let group_gap = f32::from(cosmic::theme::active().cosmic().spacing.space_l);
 
     let core = widget::Row::new()
@@ -334,7 +394,7 @@ fn transport_row<'a>(
             28,
             false,
             fl!("previous"),
-            Some(NowPlayingMessage::Previous),
+            (!is_live).then_some(NowPlayingMessage::Previous),
         ))
         .push(play_pause_button(
             play_icon,
@@ -344,11 +404,18 @@ fn transport_row<'a>(
             accent,
         ))
         .push(transport_button(
+            "media-playback-stop-symbolic",
+            28,
+            false,
+            fl!("stop"),
+            stop_enabled.then_some(NowPlayingMessage::Stop),
+        ))
+        .push(transport_button(
             "media-skip-forward-symbolic",
             28,
             false,
             fl!("next"),
-            Some(NowPlayingMessage::Next),
+            (!is_live).then_some(NowPlayingMessage::Next),
         ))
         .spacing(space_xxs)
         .align_y(Alignment::Center);
@@ -359,7 +426,7 @@ fn transport_row<'a>(
             24,
             shuffle,
             fl!("shuffle"),
-            Some(NowPlayingMessage::ToggleShuffle),
+            (!is_live).then_some(NowPlayingMessage::ToggleShuffle),
         ))
         .push(
             widget::Space::new()
@@ -377,22 +444,25 @@ fn transport_row<'a>(
             24,
             repeat_mode != RepeatMode::None,
             fl!("repeat"),
-            Some(NowPlayingMessage::CycleRepeat),
+            (!is_live).then_some(NowPlayingMessage::CycleRepeat),
         ))
         .align_y(Alignment::Center)
         .into()
 }
 
 /// Compact variant of `transport_row` for the fullscreen-visualizer HUD
-/// card: same shuffle/prev/play/next/repeat set, but at the bottom compact
-/// bar's icon scale (24/24/32/24/24, `spacing(4)`, see `compact_bar.rs`)
-/// instead of the hero layout's larger icons and wide grouping gaps — the
-/// HUD card sits over the visualizer and must stay visually light, not a
-/// shrunk copy of the two-panel layout's control cluster.
+/// card: same shuffle/prev/play/stop/next/repeat set, but at the bottom
+/// compact bar's icon scale (24/24/32/24/24/24, `spacing(4)`, see
+/// `compact_bar.rs`) instead of the hero layout's larger icons and wide
+/// grouping gaps — the HUD card sits over the visualizer and must stay
+/// visually light, not a shrunk copy of the two-panel layout's control
+/// cluster. `is_live` disables shuffle/prev/next/repeat, same as
+/// `transport_row`.
 fn compact_transport_row<'a>(
     state: PlaybackState,
     shuffle: bool,
     repeat_mode: RepeatMode,
+    is_live: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let play_icon = if state == PlaybackState::Playing {
         "media-playback-pause-symbolic"
@@ -404,6 +474,7 @@ fn compact_transport_row<'a>(
     } else {
         fl!("play")
     };
+    let stop_enabled = state != PlaybackState::Stopped;
 
     widget::Row::new()
         .push(transport_button(
@@ -411,14 +482,14 @@ fn compact_transport_row<'a>(
             24,
             shuffle,
             fl!("shuffle"),
-            Some(NowPlayingMessage::ToggleShuffle),
+            (!is_live).then_some(NowPlayingMessage::ToggleShuffle),
         ))
         .push(transport_button(
             "media-skip-backward-symbolic",
             24,
             false,
             fl!("previous"),
-            Some(NowPlayingMessage::Previous),
+            (!is_live).then_some(NowPlayingMessage::Previous),
         ))
         .push(transport_button(
             play_icon,
@@ -428,32 +499,40 @@ fn compact_transport_row<'a>(
             Some(NowPlayingMessage::TogglePlayback),
         ))
         .push(transport_button(
+            "media-playback-stop-symbolic",
+            24,
+            false,
+            fl!("stop"),
+            stop_enabled.then_some(NowPlayingMessage::Stop),
+        ))
+        .push(transport_button(
             "media-skip-forward-symbolic",
             24,
             false,
             fl!("next"),
-            Some(NowPlayingMessage::Next),
+            (!is_live).then_some(NowPlayingMessage::Next),
         ))
         .push(transport_button(
             repeat_mode.icon_name(),
             24,
             repeat_mode != RepeatMode::None,
             fl!("repeat"),
-            Some(NowPlayingMessage::CycleRepeat),
+            (!is_live).then_some(NowPlayingMessage::CycleRepeat),
         ))
         .spacing(4)
         .align_y(Alignment::Center)
         .into()
 }
 
-/// Volume icon + slider and the lyrics toggle, plus (visualizer builds) the
-/// visualizer on/off toggle and, while active, the next-preset and
-/// preset-browser-toggle buttons.
+/// Volume icon + slider, the lyrics toggle and the Up Next queue-drawer
+/// toggle, plus (visualizer builds) the visualizer on/off toggle and,
+/// while active, the next-preset and preset-browser-toggle buttons.
 /// Identical wiring to the view's original inline `bottom_row`.
 fn utility_row<'a>(
     volume: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
     #[cfg(feature = "visualizer")] viz_browser_open: bool,
+    is_queue_open: bool,
     space_xs: f32,
     space_xxs: f32,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
@@ -488,6 +567,13 @@ fn utility_row<'a>(
             false,
             fl!("lyrics"),
             Some(NowPlayingMessage::ShowLyrics),
+        ))
+        .push(transport_button(
+            "media-playlist-consecutive-symbolic",
+            24,
+            is_queue_open,
+            fl!("queue"),
+            Some(NowPlayingMessage::ToggleQueue),
         ));
 
     #[cfg(feature = "visualizer")]
@@ -529,6 +615,7 @@ pub fn expanded_now_playing<'a>(
     cover_art: Option<&'a widget::icon::Handle>,
     blurred_cover: Option<&'a widget::icon::Handle>,
     accent: Option<&'a Accent>,
+    is_queue_open: bool,
     seeking_preview: Option<f32>,
     expand_progress: f32,
     lyrics_overlay_active: bool,
@@ -555,6 +642,11 @@ pub fn expanded_now_playing<'a>(
     let Some(track) = current_track else {
         return empty_expanded_view();
     };
+
+    // Radio/other zero-duration streams: no seek slider, and shuffle/prev/
+    // next/repeat are meaningless (there is nothing to shuffle or skip to)
+    // so they render disabled rather than disappearing.
+    let is_live = super::is_live_stream(track);
 
     let spacing = cosmic::theme::active().cosmic().spacing;
     let space_xxs = f32::from(spacing.space_xxs);
@@ -669,7 +761,7 @@ pub fn expanded_now_playing<'a>(
             .align_y(Alignment::Center);
 
         let transport_centered: cosmic::Element<'_, NowPlayingMessage> =
-            widget::container(compact_transport_row(state, shuffle, repeat_mode))
+            widget::container(compact_transport_row(state, shuffle, repeat_mode, is_live))
                 .align_x(Horizontal::Center)
                 .width(Length::Fill)
                 .into();
@@ -680,6 +772,7 @@ pub fn expanded_now_playing<'a>(
             visualizer_active,
             #[cfg(feature = "visualizer")]
             viz_browser_open,
+            is_queue_open,
             space_xs,
             space_xxs,
         );
@@ -692,6 +785,7 @@ pub fn expanded_now_playing<'a>(
                 progress,
                 space_s,
                 accent,
+                is_live,
             ))
             .push(transport_centered)
             .push(utility_full)
@@ -900,6 +994,7 @@ pub fn expanded_now_playing<'a>(
             progress,
             space_s,
             accent,
+            is_live,
         ));
 
         right_col = right_col.push(
@@ -914,6 +1009,7 @@ pub fn expanded_now_playing<'a>(
             repeat_mode,
             space_xxs,
             accent,
+            is_live,
         ));
 
         right_col = right_col.push(
@@ -928,6 +1024,7 @@ pub fn expanded_now_playing<'a>(
             visualizer_active,
             #[cfg(feature = "visualizer")]
             viz_browser_open,
+            is_queue_open,
             space_xs,
             space_xxs,
         ));

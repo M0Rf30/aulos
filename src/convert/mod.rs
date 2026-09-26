@@ -16,7 +16,7 @@ pub mod encoder;
 pub mod pipeline;
 pub mod tag_writer;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -63,6 +63,22 @@ pub enum ConvertError {
     Cancelled,
 }
 
+/// Output format/sample-rate/directory a job runs (or ran) with.
+///
+/// Captured onto a [`ConvertJob`] only once it actually starts (see
+/// [`ConvertJob::start`]), not when the job is added to the queue — a
+/// queued job previously froze these at add time, so changing the
+/// dropdowns afterwards silently did nothing. Now a still-queued job has
+/// no `JobSettings` at all and the UI previews it against whatever the
+/// dropdowns currently say; only a running/finished job's row reflects
+/// what it actually used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobSettings {
+    pub format: OutputFormat,
+    pub target_rate: Option<u32>,
+    pub out_dir: PathBuf,
+}
+
 /// A single conversion/rip job tracked by the UI and run by [`run_job`].
 ///
 /// `progress` and `cancel` are shared (`Arc`) with whichever async task is
@@ -73,30 +89,20 @@ pub struct ConvertJob {
     pub id: JobId,
     pub source: PathBuf,
     pub kind: JobKind,
-    pub format: OutputFormat,
-    pub target_rate: Option<u32>,
-    pub out_dir: PathBuf,
+    /// `None` while `Queued` — see [`JobSettings`]'s docs.
+    pub settings: Option<JobSettings>,
     pub progress: Arc<AtomicU32>,
     pub cancel: Arc<AtomicBool>,
     pub state: JobState,
 }
 
 impl ConvertJob {
-    pub fn new(
-        id: JobId,
-        source: PathBuf,
-        kind: JobKind,
-        format: OutputFormat,
-        target_rate: Option<u32>,
-        out_dir: PathBuf,
-    ) -> Self {
+    pub fn new(id: JobId, source: PathBuf, kind: JobKind) -> Self {
         Self {
             id,
             source,
             kind,
-            format,
-            target_rate,
-            out_dir,
+            settings: None,
             progress: Arc::new(AtomicU32::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
             state: JobState::Queued,
@@ -108,18 +114,80 @@ impl ConvertJob {
         self.progress.load(Ordering::Relaxed)
     }
 
-    /// Request cancellation; the running job checks this cooperatively and
-    /// stops at the next packet boundary.
-    pub fn request_cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+    /// Transitions `Queued` -> `Running`, capturing `settings` as what
+    /// this run actually uses. No-op if the job isn't currently queued
+    /// (e.g. a stale message for an already-started job).
+    pub fn start(&mut self, settings: JobSettings) {
+        if self.state != JobState::Queued {
+            return;
+        }
+        self.settings = Some(settings);
+        self.state = JobState::Running;
+    }
+
+    /// Cancels or dequeues the job, whichever applies to its current
+    /// state. A still-queued job has no async task to signal, so it's
+    /// simply marked `Cancelled` directly; a running job gets the
+    /// cooperative flag `pipeline` checks between packets. No-op once the
+    /// job has already reached a terminal state.
+    pub fn cancel(&mut self) {
+        match self.state {
+            JobState::Queued => self.state = JobState::Cancelled,
+            JobState::Running => self.cancel.store(true, Ordering::Relaxed),
+            JobState::Done | JobState::Failed(_) | JobState::Cancelled => {}
+        }
+    }
+
+    /// Requeues a failed/cancelled job so `Start` picks it up again with
+    /// whatever settings are current at that point. No-op for a job
+    /// that's still queued or running.
+    pub fn retry(&mut self) {
+        if !matches!(self.state, JobState::Failed(_) | JobState::Cancelled) {
+            return;
+        }
+        self.settings = None;
+        self.progress.store(0, Ordering::Relaxed);
+        self.cancel.store(false, Ordering::Relaxed);
+        self.state = JobState::Queued;
+    }
+
+    /// Best-effort preview of what this job will produce with
+    /// `format`/`out_dir` — cheap, filesystem-free, so it's safe to call
+    /// from `view()`. For [`JobKind::Convert`] this may not exactly match
+    /// the final unique-ified filename `pipeline`'s collision-avoidance
+    /// picks at run time (that check needs a `stat` call); for
+    /// [`JobKind::CueSplit`] the per-track filenames come from the CUE
+    /// sheet itself, which would need parsing (real file I/O) to preview,
+    /// so this just names the destination folder.
+    pub fn destination_preview(&self, format: OutputFormat, out_dir: &Path) -> PathBuf {
+        match self.kind {
+            JobKind::Convert => {
+                let stem = self.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+                out_dir.join(format!("{stem}.{}", format.extension()))
+            }
+            JobKind::CueSplit => out_dir.to_path_buf(),
+        }
     }
 }
 
-/// Runs a single job to completion on a blocking thread, capped at `N=2`
-/// concurrently-running jobs via `semaphore` (shared across all in-flight
-/// job futures). Returns the job id and the terminal state to report back
-/// to the UI through a `Message`, mirroring how library scans report
-/// completion.
+/// Number of conversion jobs allowed to run concurrently: the system's
+/// available parallelism, clamped to a sane range so a single-core box
+/// still gets one and a many-core one doesn't oversubscribe the disk/CPU
+/// for what's ultimately background batch work.
+pub fn concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(2)
+        .clamp(1, 4)
+}
+
+/// Runs a single job to completion on a blocking thread, capped at
+/// [`concurrency`] concurrently-running jobs via `semaphore` (shared
+/// across all in-flight job futures). Returns the job id and the terminal
+/// state to report back to the UI through a `Message`, mirroring how
+/// library scans report completion. `job` must already be `Running` with
+/// `settings` set (see [`ConvertJob::start`]) — `pipeline::run` panics
+/// otherwise.
 pub async fn run_job(job: ConvertJob, semaphore: Arc<tokio::sync::Semaphore>) -> (JobId, JobState) {
     let id = job.id;
     let permit = match semaphore.acquire_owned().await {
@@ -139,4 +207,124 @@ pub async fn run_job(job: ConvertJob, semaphore: Arc<tokio::sync::Semaphore>) ->
     .unwrap_or_else(|e| JobState::Failed(format!("job panicked: {e}")));
 
     (id, state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(out_dir: &str) -> JobSettings {
+        JobSettings { format: OutputFormat::Flac, target_rate: None, out_dir: PathBuf::from(out_dir) }
+    }
+
+    #[test]
+    fn new_job_is_queued_with_no_settings() {
+        let job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        assert_eq!(job.state, JobState::Queued);
+        assert!(job.settings.is_none());
+        assert_eq!(job.progress_permille(), 0);
+    }
+
+    #[test]
+    fn start_captures_settings_and_transitions_to_running() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.start(settings("/out"));
+        assert_eq!(job.state, JobState::Running);
+        assert_eq!(job.settings.as_ref().unwrap().out_dir, PathBuf::from("/out"));
+    }
+
+    #[test]
+    fn start_is_a_no_op_once_already_running() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.start(settings("/first"));
+        // A second `start` (e.g. a stale re-dispatch) must not clobber the
+        // settings the job actually started with.
+        job.start(settings("/second"));
+        assert_eq!(job.settings.as_ref().unwrap().out_dir, PathBuf::from("/first"));
+    }
+
+    #[test]
+    fn cancel_dequeues_a_queued_job_directly() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.cancel();
+        assert_eq!(job.state, JobState::Cancelled);
+        // No async task is running yet, so the cooperative flag is never set.
+        assert!(!job.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancel_sets_the_cooperative_flag_on_a_running_job() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.start(settings("/out"));
+        job.cancel();
+        // State stays `Running` until the async task reports back; only the
+        // flag `pipeline` checks between packets is set here.
+        assert_eq!(job.state, JobState::Running);
+        assert!(job.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancel_is_a_no_op_on_a_terminal_job() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.state = JobState::Done;
+        job.cancel();
+        assert_eq!(job.state, JobState::Done);
+    }
+
+    #[test]
+    fn retry_requeues_a_failed_job_and_clears_its_settings_and_progress() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.start(settings("/out"));
+        job.progress.store(500, std::sync::atomic::Ordering::Relaxed);
+        job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        job.state = JobState::Failed("boom".to_owned());
+
+        job.retry();
+
+        assert_eq!(job.state, JobState::Queued);
+        assert!(job.settings.is_none());
+        assert_eq!(job.progress_permille(), 0);
+        assert!(!job.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn retry_requeues_a_cancelled_job() {
+        let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        job.state = JobState::Cancelled;
+        job.retry();
+        assert_eq!(job.state, JobState::Queued);
+    }
+
+    #[test]
+    fn retry_is_a_no_op_on_a_queued_or_running_job() {
+        let mut queued = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
+        queued.retry();
+        assert_eq!(queued.state, JobState::Queued);
+
+        let mut running = ConvertJob::new(2, PathBuf::from("b.wav"), JobKind::Convert);
+        running.start(settings("/out"));
+        running.retry();
+        assert_eq!(running.state, JobState::Running);
+        assert!(running.settings.is_some());
+    }
+
+    #[test]
+    fn destination_preview_names_a_sibling_file_for_convert_jobs() {
+        let job = ConvertJob::new(1, PathBuf::from("/music/track.mp3"), JobKind::Convert);
+        let dest = job.destination_preview(OutputFormat::Flac, Path::new("/out"));
+        assert_eq!(dest, PathBuf::from("/out/track.flac"));
+    }
+
+    #[test]
+    fn destination_preview_names_the_folder_for_cue_split_jobs() {
+        let job = ConvertJob::new(1, PathBuf::from("/music/album.cue"), JobKind::CueSplit);
+        let dest = job.destination_preview(OutputFormat::Wav16, Path::new("/out"));
+        assert_eq!(dest, PathBuf::from("/out"));
+    }
+
+    #[test]
+    fn concurrency_is_always_in_range() {
+        let n = concurrency();
+        assert!((1..=4).contains(&n), "expected 1..=4, got {n}");
+    }
 }

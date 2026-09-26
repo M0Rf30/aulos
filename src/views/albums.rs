@@ -4,7 +4,7 @@
 
 use crate::config::ViewMode;
 use crate::fl;
-use crate::library::{Album, CoverArt, Playlist};
+use crate::library::{Album, CoverArt, Playlist, Track};
 use crate::views::common;
 use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -33,6 +33,12 @@ pub enum AlbumMessage {
     AddToPlaylist(String, String),
     /// Toggle between grid and list layout.
     ToggleViewMode,
+    /// Insert these tracks right after the currently playing one. Carries
+    /// the already-resolved tracks (whole album, or a single row) so
+    /// `view.rs` needs no extra index lookup.
+    PlayNext(Vec<Track>),
+    /// Append these tracks to the end of the queue.
+    AddToQueue(Vec<Track>),
 }
 
 /// Card artwork/label width — the grid, art frame, and clipped labels all
@@ -287,6 +293,18 @@ pub fn album_detail_view<'a>(
             widget::button::suggested(fl!("play-album"))
                 .on_press(AlbumMessage::PlayAlbum(album_index)),
         )
+        .push(
+            widget::Row::new()
+                .push(
+                    widget::button::standard(fl!("queue-play-next"))
+                        .on_press(AlbumMessage::PlayNext(album.tracks.clone())),
+                )
+                .push(
+                    widget::button::standard(fl!("queue-add"))
+                        .on_press(AlbumMessage::AddToQueue(album.tracks.clone())),
+                )
+                .spacing(8),
+        )
         .width(Length::Fill)
         .spacing(8);
 
@@ -378,6 +396,19 @@ pub fn album_detail_view<'a>(
             32.0,
         );
 
+        let play_next_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
+                .on_press(AlbumMessage::PlayNext(vec![track.clone()])),
+            widget::text::caption(fl!("queue-play-next")),
+            widget::tooltip::Position::Top,
+        );
+        let queue_add_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
+                .on_press(AlbumMessage::AddToQueue(vec![track.clone()])),
+            widget::text::caption(fl!("queue-add")),
+            widget::tooltip::Position::Top,
+        );
+
         let row = widget::button::custom(
             widget::Row::new()
                 .push(
@@ -402,6 +433,8 @@ pub fn album_detail_view<'a>(
                 .push(quality_row)
                 .push(genre_widget)
                 .push(playlist_btn)
+                .push(play_next_btn)
+                .push(queue_add_btn)
                 .push(common::duration_cell(track.duration.as_secs()))
                 .spacing(8)
                 .width(Length::Fill)

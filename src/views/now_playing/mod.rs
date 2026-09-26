@@ -17,6 +17,7 @@ pub mod visualizer;
 #[cfg(feature = "visualizer")]
 pub mod viz_shader;
 
+use crate::library::Track;
 use std::time::Duration;
 
 /// Messages from the now-playing controls.
@@ -34,6 +35,11 @@ pub enum NowPlayingMessage {
     VolumeCommit,
     ToggleShuffle,
     CycleRepeat,
+    /// Stop playback entirely (transport button / `Stop` shortcut). Maps
+    /// to `Message::Stop`, which keeps the queue for a later resume.
+    Stop,
+    /// Toggle the "Up Next" queue drawer (`ContextPage::Queue`).
+    ToggleQueue,
     ShowLyrics,
     /// Click on bar background — expand to full view.
     ExpandToggle,
@@ -84,4 +90,61 @@ pub fn format_time(d: Duration) -> String {
 /// Truncate a string to `max_chars`, appending `…` if it exceeds the limit.
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     super::common::truncate_str(s, max_chars)
+}
+
+/// A track that should be presented as a live stream rather than a normal,
+/// seekable recording: radio (`provider_id == "radio"`) or anything else
+/// reporting zero duration. Shared by the compact bar and expanded view so
+/// both hide/disable the same controls (seek slider, shuffle, prev/next,
+/// repeat) for the same tracks.
+pub fn is_live_stream(track: &Track) -> bool {
+    &*track.provider_id == "radio" || track.duration.is_zero()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_live_stream;
+    use crate::library::Track;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn track(provider_id: &str, duration_secs: u64) -> Track {
+        Track {
+            id: 1,
+            path: PathBuf::new(),
+            title: String::new(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::from_secs(duration_secs),
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from(provider_id),
+            source_uri: String::new(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        }
+    }
+
+    #[test]
+    fn radio_provider_is_live_even_with_a_nonzero_duration() {
+        assert!(is_live_stream(&track("radio", 180)));
+    }
+
+    #[test]
+    fn zero_duration_track_is_live_regardless_of_provider() {
+        assert!(is_live_stream(&track("local", 0)));
+    }
+
+    #[test]
+    fn normal_local_track_is_not_live() {
+        assert!(!is_live_stream(&track("local", 180)));
+    }
 }

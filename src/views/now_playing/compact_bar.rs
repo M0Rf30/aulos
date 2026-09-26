@@ -15,6 +15,7 @@ use crate::library::Track;
 use crate::library::palette::Accent;
 use crate::player::PlaybackState;
 use crate::views::common;
+use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::{Alignment, ContentFit, Length};
@@ -118,11 +119,40 @@ fn inert_seek_track<'a, M: 'a>() -> cosmic::Element<'a, M> {
         .into()
 }
 
+/// Small "LIVE" pill shown in place of the elapsed/remaining time labels
+/// for a stream with no known duration (radio) — same row slot as the
+/// time labels, just different content, so the seek-bar row's tree shape
+/// never changes between a normal track and a live stream.
+fn live_badge<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
+    let pill = widget::Row::new()
+        .push(widget::icon::from_name("media-record-symbolic").size(10))
+        .push(widget::text::caption(fl!("now-playing-live")))
+        .spacing(4)
+        .align_y(Alignment::Center);
+    widget::container(pill)
+        .padding([2, 8])
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            let accent = cosmic.accent_color();
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(accent.with_alpha(0.16).into())),
+                text_color: Some(accent.into()),
+                icon_color: Some(accent.into()),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_xs.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
 /// Render the compact bottom playback bar.
 ///
 /// Layout (left to right):
 /// ```text
-/// [Cover] [Title/Artist] [♥] | [Shuffle Prev Play Next Repeat] / [Seek bar] | [Vol slider] [Lyrics]
+/// [Cover] [Title/Artist] [♥] | [Shuffle Prev Play Stop Next Repeat] / [Seek bar] | [Vol slider] [Lyrics] [Up Next]
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn playback_bar<'a>(
@@ -137,8 +167,14 @@ pub fn playback_bar<'a>(
     seeking_preview: Option<f32>,
     _blurred_cover: Option<&'a widget::icon::Handle>,
     accent: Option<&'a Accent>,
+    is_queue_open: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let has_track = current_track.is_some();
+    // Radio/other zero-duration streams: no seek slider, and shuffle/prev/
+    // next/repeat are meaningless (there is nothing to shuffle or skip to)
+    // so they render disabled rather than disappearing.
+    let is_live = current_track.is_some_and(super::is_live_stream);
+    let stop_enabled = has_track && state != PlaybackState::Stopped;
 
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -265,14 +301,14 @@ pub fn playback_bar<'a>(
             shuffle_icon,
             24,
             shuffle,
-            has_track,
+            has_track && !is_live,
             fl!("shuffle"),
             NowPlayingMessage::ToggleShuffle,
         ))
         .push(transport_icon_button(
             "media-skip-backward-symbolic",
             24,
-            has_track,
+            has_track && !is_live,
             fl!("previous"),
             NowPlayingMessage::Previous,
         ))
@@ -284,9 +320,16 @@ pub fn playback_bar<'a>(
             NowPlayingMessage::TogglePlayback,
         ))
         .push(transport_icon_button(
+            "media-playback-stop-symbolic",
+            24,
+            stop_enabled,
+            fl!("stop"),
+            NowPlayingMessage::Stop,
+        ))
+        .push(transport_icon_button(
             "media-skip-forward-symbolic",
             24,
-            has_track,
+            has_track && !is_live,
             fl!("next"),
             NowPlayingMessage::Next,
         ))
@@ -294,16 +337,27 @@ pub fn playback_bar<'a>(
             repeat_icon,
             24,
             repeat_active,
-            has_track,
+            has_track && !is_live,
             fl!("repeat"),
             NowPlayingMessage::CycleRepeat,
         ))
         .spacing(4)
         .align_y(Alignment::Center);
 
+    let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
+        live_badge()
+    } else {
+        common::cell_caption(format_time(display_position)).into()
+    };
+    let time_end_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
+        widget::Space::new().width(0).height(0).into()
+    } else {
+        common::cell_caption(format_time(duration)).into()
+    };
+
     let seek_bar = widget::Row::new()
-        .push(common::cell_caption(format_time(display_position)))
-        .push(if has_track {
+        .push(time_start_slot)
+        .push(if has_track && !is_live {
             let mut seek_slider =
                 widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
                     .step(0.001_f32)
@@ -316,7 +370,7 @@ pub fn playback_bar<'a>(
         } else {
             inert_seek_track()
         })
-        .push(common::cell_caption(format_time(duration)))
+        .push(time_end_slot)
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
@@ -359,6 +413,14 @@ pub fn playback_bar<'a>(
             has_track,
             fl!("lyrics"),
             NowPlayingMessage::ShowLyrics,
+        ))
+        .push(toggle_icon_button(
+            "media-playlist-consecutive-symbolic",
+            20,
+            is_queue_open,
+            true,
+            fl!("queue"),
+            NowPlayingMessage::ToggleQueue,
         ))
         .spacing(4)
         .align_y(Alignment::Center);

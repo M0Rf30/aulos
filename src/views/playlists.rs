@@ -4,7 +4,7 @@
 //! and a detail view showing tracks in a selected playlist.
 
 use crate::fl;
-use crate::library::Playlist;
+use crate::library::{Playlist, Track};
 use crate::views::common;
 use crate::views::list_row_button_class;
 use cosmic::iced::core::text::Wrapping;
@@ -34,6 +34,11 @@ pub enum PlaylistMessage {
     NewPlaylistNameChanged(String),
     /// The rename input changed (playlist index, new text).
     RenameInputChanged(usize, String),
+    /// Insert every track in this playlist right after the currently
+    /// playing one.
+    PlayNext(Vec<Track>),
+    /// Append every track in this playlist to the end of the queue.
+    AddToQueue(Vec<Track>),
 }
 
 /// Render the playlist list view.
@@ -199,6 +204,20 @@ pub fn playlist_detail_view<'a>(
                 .push(
                     widget::button::suggested(fl!("play-all"))
                         .on_press(PlaylistMessage::PlayPlaylist(playlist_index)),
+                )
+                .push(
+                    widget::Row::new()
+                        .push(
+                            widget::button::standard(fl!("queue-play-next")).on_press(
+                                PlaylistMessage::PlayNext(playlist.tracks.clone()),
+                            ),
+                        )
+                        .push(
+                            widget::button::standard(fl!("queue-add")).on_press(
+                                PlaylistMessage::AddToQueue(playlist.tracks.clone()),
+                            ),
+                        )
+                        .spacing(8),
                 )
                 .spacing(8)
                 .width(Length::Fill),

@@ -9,7 +9,7 @@ use crate::player::PlaybackState;
 use crate::views::radio as radio_view;
 use crate::views::{
     albums, artists, convert, equalizer, genres, lyrics, now_playing, playlists, podcasts,
-    providers, settings, songs,
+    providers, queue, settings, songs,
 };
 use cosmic::app::context_drawer;
 use cosmic::iced::{Alignment, Length};
@@ -47,6 +47,7 @@ impl AppModel {
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
                         menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
                         menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
+                        menu::Item::Button(fl!("queue"), None, MenuAction::Queue),
                         menu::Item::Button(fl!("about"), None, MenuAction::About),
                     ],
                 ),
@@ -295,6 +296,31 @@ impl AppModel {
                 )
                 .title(fl!("lyrics"))
             }
+            ContextPage::Queue => {
+                let queue_data = self.player.as_ref().map(|p| (p.queue(), p.queue_index()));
+                let queue_content = queue::queue_view(
+                    queue_data,
+                    self.current_track.as_ref(),
+                    self.player.as_ref().map(|p| p.state()).unwrap_or(PlaybackState::Stopped),
+                    &self.cover_images,
+                )
+                .map(|msg| match msg {
+                    queue::QueueMessage::Jump(i) => Message::QueueJump(i),
+                    queue::QueueMessage::MoveUp(i) => Message::QueueMove {
+                        from: i,
+                        to: i.saturating_sub(1),
+                    },
+                    queue::QueueMessage::MoveDown(i) => Message::QueueMove { from: i, to: i + 1 },
+                    queue::QueueMessage::Remove(i) => Message::QueueRemove(i),
+                    queue::QueueMessage::Clear => Message::QueueClear,
+                });
+
+                context_drawer::context_drawer(
+                    queue_content,
+                    Message::ToggleContextPage(ContextPage::Queue),
+                )
+                .title(fl!("queue"))
+            }
         })
     }
 
@@ -434,6 +460,15 @@ impl AppModel {
                     songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
                     songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
                     songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
+                    // `i` indexes `tracks_data` (the slice actually shown,
+                    // filtered or not), so resolve it there directly —
+                    // `unfilter_index` maps into `all_tracks` instead.
+                    songs::SongMessage::PlayNext(i) => {
+                        Message::PlayNext(tracks_data.get(i).cloned().into_iter().collect())
+                    }
+                    songs::SongMessage::AddToQueue(i) => {
+                        Message::AddToQueue(tracks_data.get(i).cloned().into_iter().collect())
+                    }
                 })
             }
 
@@ -471,6 +506,12 @@ impl AppModel {
                             }
                             playlists::PlaylistMessage::RenameInputChanged(i, n) => {
                                 Message::RenamePlaylistInput(i, n)
+                            }
+                            playlists::PlaylistMessage::PlayNext(tracks) => {
+                                Message::PlayNext(tracks)
+                            }
+                            playlists::PlaylistMessage::AddToQueue(tracks) => {
+                                Message::AddToQueue(tracks)
                             }
                         })
                     } else {
@@ -517,6 +558,12 @@ impl AppModel {
                             }
                             playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
                                 Message::RemovePlaylistTrack(unfilter_index(playlist_map, pi), ti)
+                            }
+                            playlists::PlaylistMessage::PlayNext(tracks) => {
+                                Message::PlayNext(tracks)
+                            }
+                            playlists::PlaylistMessage::AddToQueue(tracks) => {
+                                Message::AddToQueue(tracks)
                             }
                         },
                     )
@@ -614,31 +661,47 @@ impl AppModel {
             },
 
             Page::Radio => {
-                let current_radio_url = self
-                    .current_track
-                    .as_ref()
-                    .filter(|t| &*t.provider_id == "radio")
-                    .map(|t| t.source_uri.as_str());
-                radio_view::radio_view(
-                    &self.radio_stations,
-                    &self.radio_search_query,
-                    &self.radio_search_results,
-                    self.radio_search_loading,
-                    &self.radio_add_name,
-                    &self.radio_add_url,
-                    &self.online_icons,
-                    current_radio_url,
-                )
-                .map(Message::from)
+                let props = radio_view::RadioViewProps {
+                    stations: &self.radio_stations,
+                    tab: self.radio_tab,
+                    filter: &self.radio_filter,
+                    add_open: self.radio_add_open,
+                    add_name: &self.radio_add_name,
+                    add_url: &self.radio_add_url,
+                    add_error: self.radio_add_error.as_deref(),
+                    renaming_id: self.radio_renaming_id,
+                    rename_input: &self.radio_rename_input,
+                    search_query: &self.radio_search_query,
+                    search_tag: self.radio_search_tag,
+                    search_country: &self.radio_search_country,
+                    locale_country: &self.radio_locale_country,
+                    sort: self.radio_search_sort,
+                    results: &self.radio_search_results,
+                    results_loading: self.radio_search_loading,
+                    results_error: self.radio_search_error.as_deref(),
+                    icons: &self.online_icons,
+                    current_track: self.current_track.as_ref(),
+                    playback_state: self.player.as_ref().map(|p| p.state()),
+                    now_playing_favicon: &self.radio_now_playing_favicon,
+                    now_playing_key: &self.radio_now_playing_key,
+                };
+                radio_view::radio_view(props).map(|msg| match msg {
+                    radio_view::RadioMessage::Stop => Message::Stop,
+                    other => Message::Radio(other),
+                })
             }
 
-            Page::Convert => convert::convert_view(
-                &self.convert_jobs,
-                &self.convert_out_dir,
-                self.convert_format_index,
-                self.convert_rate_index,
-            )
-            .map(Message::from),
+            Page::Convert => {
+                let out_dir = self.convert_out_dir();
+                convert::convert_view(
+                    &self.convert_jobs,
+                    &out_dir,
+                    self.config.convert_format,
+                    self.config.convert_sample_rate,
+                    self.convert_dir_error.as_deref(),
+                )
+                .map(Message::Convert)
+            }
         };
 
         // Build bottom playback bar
@@ -657,7 +720,7 @@ impl AppModel {
             .as_ref()
             .map(|p| p.volume())
             .unwrap_or(self.config.volume);
-        let current_cover = self.current_track.as_ref().and_then(|track| {
+        let current_cover_key = self.current_track.as_ref().map(|track| {
             // Use album_artist to match how albums store cover art.
             // Falls back to track.artist when album_artist is empty.
             let artist = if track.album_artist.is_empty() {
@@ -665,9 +728,30 @@ impl AppModel {
             } else {
                 &track.album_artist
             };
-            let key = crate::library::CoverArt::album_key(artist, &track.album);
-            self.cover_images.get(&key)
+            crate::library::CoverArt::album_key(artist, &track.album)
         });
+        let current_cover = current_cover_key
+            .as_ref()
+            .and_then(|key| self.cover_images.get(key));
+
+        // Whether the Up Next queue drawer is the currently open context
+        // page — drives the toggle button's `selected` state in both
+        // now-playing views.
+        let is_queue_open =
+            self.context_page == ContextPage::Queue && self.core.window.show_context;
+        // Separately decoded, higher-resolution cover for the expanded
+        // now-playing view (see `AppModel::maybe_update_blurred_cover`) --
+        // `cover_images` only holds grid-thumbnail-sized handles now, which
+        // would look soft blown up to the expanded view's much larger art
+        // area. Only used while it belongs to the current track's album;
+        // falls back to the grid thumbnail until the larger decode
+        // completes (e.g. right after a track change).
+        let current_cover_large = self
+            .current_cover_large
+            .as_ref()
+            .filter(|(key, _)| current_cover_key.as_ref() == Some(key))
+            .map(|(_, handle)| handle)
+            .or(current_cover);
 
         // Helper closure to map NowPlayingMessage to Message
         let map_now_playing_msg = |msg| match msg {
@@ -684,6 +768,10 @@ impl AppModel {
             now_playing::NowPlayingMessage::ExpandToggle => Message::ExpandNowPlaying,
             now_playing::NowPlayingMessage::Collapse => Message::CollapseNowPlaying,
             now_playing::NowPlayingMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+            now_playing::NowPlayingMessage::Stop => Message::Stop,
+            now_playing::NowPlayingMessage::ToggleQueue => {
+                Message::ToggleContextPage(ContextPage::Queue)
+            }
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::ToggleVisualizer => Message::ToggleVisualizer,
             #[cfg(feature = "visualizer")]
@@ -724,6 +812,7 @@ impl AppModel {
             self.seeking_preview,
             self.blurred_cover.as_ref(),
             self.accent.as_ref(),
+            is_queue_open,
         )
         .map(map_now_playing_msg);
 
@@ -743,9 +832,10 @@ impl AppModel {
                 volume,
                 self.config.shuffle,
                 self.config.repeat_mode,
-                current_cover,
+                current_cover_large,
                 self.blurred_cover.as_ref(),
                 self.accent.as_ref(),
+                is_queue_open,
                 self.seeking_preview,
                 self.expand_progress,
                 self.lyrics_overlay_active,
@@ -785,18 +875,28 @@ impl AppModel {
                     .height(Length::Fill),
             );
 
-            if self.library_scanning {
-                layout_col = layout_col.push(
-                    widget::container(
-                        widget::Row::new()
-                            .push(widget::text::caption(fl!("scanning-library")))
-                            .spacing(8)
-                            .align_y(Alignment::Center),
-                    )
-                    .padding(4)
-                    .width(Length::Fill),
-                );
-            }
+            // Always push a slot for the scanning indicator, varying only
+            // its content -- conditionally pushing/removing this sibling
+            // before `bar` (a stateful widget tree) would shift `bar`'s
+            // position in the column, resetting/flashing its state (see
+            // module-level notes on iced's tree-position-keyed widget
+            // state).
+            let scanning_indicator: Element<'_, Message> = if self.library_scanning {
+                widget::container(
+                    widget::Row::new()
+                        .push(widget::text::caption(fl!("scanning-library")))
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .padding(4)
+                .width(Length::Fill)
+                .into()
+            } else {
+                widget::container(widget::Space::new().width(Length::Fill).height(Length::Fixed(0.0)))
+                    .width(Length::Fill)
+                    .into()
+            };
+            layout_col = layout_col.push(scanning_indicator);
 
             layout_col = layout_col.push(bar);
 

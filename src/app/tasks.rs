@@ -96,8 +96,18 @@ pub(super) fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Mes
 }
 
 /// Resolve a station URL (following a `.pls`/`.m3u`/`.m3u8` playlist if
-/// needed) and dispatch `RadioStreamResolved` with the outcome.
-pub(super) fn resolve_and_play_radio(name: String, url: String) -> Task<cosmic::Action<Message>> {
+/// needed) and dispatch `RadioEvent::StreamResolved` with the outcome.
+/// `favicon` and `key` are threaded through unresolved: `favicon` so the
+/// now-playing strip can show it once playback actually starts, `key`
+/// (the pre-resolution stream/result URL) so the "currently playing" row
+/// indicator keeps matching even after resolution rewrites the actual
+/// stream URL (e.g. a `.pls` playlist resolving to a different host).
+pub(super) fn resolve_and_play_radio(
+    name: String,
+    favicon: String,
+    key: String,
+    url: String,
+) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
         let result = tokio::task::spawn_blocking(move || {
             let client = HTTP_CLIENT.clone();
@@ -105,7 +115,12 @@ pub(super) fn resolve_and_play_radio(name: String, url: String) -> Task<cosmic::
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::RadioStreamResolved { name, result })
+        cosmic::Action::App(Message::RadioEvent(super::radio_page::RadioEvent::StreamResolved {
+            name,
+            favicon,
+            key,
+            result,
+        }))
     })
 }
 

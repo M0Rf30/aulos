@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::tasks::{download_episode_task, refresh_podcast_task, resolve_and_play_radio};
+use super::tasks::{download_episode_task, refresh_podcast_task};
 use super::{
     AppModel, ContextPage, HTTP_CLIENT, Message, Page, SEARCH_INPUT_ID, now_epoch,
     open_online_store, parse_delimiters_input,
 };
 use crate::config::ReplayGainMode;
-use crate::convert::{ConvertJob, JobKind, JobState, OutputFormat, run_job};
 use crate::fl;
 use crate::library::{LibraryScanner, LyricsProvider, Track};
 use crate::online::podcast;
-use crate::online::radio;
 use crate::player::{ActiveBackend, PlaybackState};
-use crate::views::{convert, providers};
+use crate::views::providers;
 use cosmic::Application;
 use cosmic::prelude::*;
 use cosmic::widget::{self, nav_bar};
@@ -168,19 +166,56 @@ impl AppModel {
                 if self.is_stale_reload(generation, &provider_id) {
                     return Task::none();
                 }
-                // Append new albums and extract tracks
+
+                let refreshing_loaded_library = self
+                    .library_reload_staging
+                    .as_ref()
+                    .is_some_and(|s| s.generation == generation);
+
+                if refreshing_loaded_library {
+                    // Non-destructive refresh: accumulate into the staging
+                    // buffer while the previously loaded library stays
+                    // fully visible. Reuse the currently-displayed handle
+                    // for any album whose cover bytes are unchanged, so
+                    // iced's wgpu raster cache keeps the same handle id
+                    // and never re-uploads that cover.
+                    for (key, bytes) in cover_art_bytes {
+                        let reused = if self.cover_art_bytes.get(&key) == Some(&bytes) {
+                            self.cover_images.get(&key).cloned()
+                        } else {
+                            None
+                        };
+                        let handle = reused.or_else(|| cover_images.get(&key).cloned());
+                        if let Some(staging) = self.library_reload_staging.as_mut() {
+                            if let Some(handle) = handle {
+                                staging.cover_images.insert(key.clone(), handle);
+                            }
+                            staging.cover_art_bytes.insert(key, bytes);
+                        }
+                    }
+                    if let Some(staging) = self.library_reload_staging.as_mut() {
+                        for album in &albums {
+                            for track in &album.tracks {
+                                staging.tracks.push(track.clone());
+                            }
+                        }
+                        staging.albums.extend(albums);
+                    }
+                    return Task::none();
+                }
+
+                // Progressive first-load path: the library was empty when
+                // this reload started, so there is nothing to flash away
+                // from -- populate the visible fields directly as batches
+                // arrive.
                 for album in &albums {
                     for track in &album.tracks {
                         self.all_tracks.push(track.clone());
                     }
                     self.all_albums.push(album.clone());
                 }
-                // Merge cover images
                 self.cover_images.extend(cover_images);
-                // Merge cover art bytes for blur
                 self.cover_art_bytes.extend(cover_art_bytes);
-
-                // Incrementally merge only the new batch into artists
                 self.merge_artists_from_batch(&albums);
                 self.refresh_search_filter();
 
@@ -197,6 +232,20 @@ impl AppModel {
                     return Task::none();
                 }
                 self.library_scanning = false;
+
+                if let Some(staging) = self.library_reload_staging.take()
+                    && staging.generation == generation
+                {
+                    // Swap the staged refresh in atomically -- the
+                    // previously displayed library was never cleared, so
+                    // there is no empty-view flash between old and new data.
+                    self.all_tracks = staging.tracks;
+                    self.all_albums = staging.albums;
+                    self.cover_images = staging.cover_images;
+                    self.cover_art_bytes = staging.cover_art_bytes.into();
+                    self.rebuild_all_artists();
+                }
+
                 // Final sort
                 self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
                 self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
@@ -208,6 +257,10 @@ impl AppModel {
                     self.all_tracks.len(),
                     self.all_artists.len()
                 );
+                // Re-trigger blur in case the current track's cover
+                // changed as part of a staged refresh swap.
+                let blur_task = self.maybe_update_blurred_cover();
+                return blur_task;
             }
 
             // -- Filesystem watcher --
@@ -275,17 +328,28 @@ impl AppModel {
                 // exactly when the periodic publish stops running.
                 let mut task = Task::none();
                 if let Some(player) = &mut self.player {
-                    if player.state() == PlaybackState::Stopped && !self.all_tracks.is_empty() {
-                        // If stopped, start playing first track
-                        player.set_queue(self.all_tracks.clone());
-                        if player.play_index(0).is_ok() {
-                            self.current_track = self.all_tracks.first().cloned();
-                            self.playback_position = Duration::ZERO;
-                            #[cfg(feature = "visualizer")]
-                            {
-                                self.viz_metadata_opacity = 1.0;
+                    if player.state() == PlaybackState::Stopped {
+                        // Resume wherever the queue left off (e.g. after
+                        // `Stop` or after `RepeatMode::None` ran out).
+                        // Only fall back to the full library when the
+                        // queue itself is empty — starting from `Stopped`
+                        // must never silently replace a queue the user
+                        // still has loaded.
+                        let result = if !player.queue_is_empty() {
+                            player.resume_queue()
+                        } else if !self.all_tracks.is_empty() {
+                            player.set_queue(self.all_tracks.clone(), 0)
+                        } else {
+                            Ok(None)
+                        };
+                        match result {
+                            Ok(Some(track)) => {
+                                self.current_track = Some(track);
+                                self.playback_position = Duration::ZERO;
+                                task = self.on_track_changed();
                             }
-                            task = self.dispatch_mpd_after_play();
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("Resume from stopped failed: {e}"),
                         }
                     } else {
                         let was_playing = player.state() == PlaybackState::Playing;
@@ -307,43 +371,48 @@ impl AppModel {
             }
 
             Message::NextTrack => {
-                if let Some(ref mut player) = self.player {
+                if let Some(player) = &mut self.player {
                     match player.next() {
                         Ok(Some(track)) => {
-                            self.current_track = Some(track.clone());
+                            self.current_track = Some(track);
                             self.playback_position = Duration::ZERO;
-                            self.lyrics_text = None;
-                            #[cfg(feature = "visualizer")]
-                            {
-                                self.viz_metadata_opacity = 1.0;
-                            }
-                            let mpd_task = self.dispatch_mpd_after_play();
-                            let blur_task = self.maybe_update_blurred_cover();
-                            return Task::batch([mpd_task, blur_task]);
+                            return self.on_track_changed();
                         }
+                        Ok(None) => {}
                         Err(e) => tracing::error!("Next track failed: {e}"),
-                        _ => {}
                     }
                 }
             }
 
             Message::PreviousTrack => {
-                if let Some(ref mut player) = self.player {
-                    match player.previous() {
-                        Ok(Some(track)) => {
-                            self.current_track = Some(track.clone());
+                if let Some(player) = &mut self.player {
+                    match player.previous(self.playback_position) {
+                        Ok(Some(crate::player::PreviousResult::Restarted)) => {
                             self.playback_position = Duration::ZERO;
-                            self.lyrics_text = None;
-                            #[cfg(feature = "visualizer")]
-                            {
-                                self.viz_metadata_opacity = 1.0;
-                            }
-                            let mpd_task = self.dispatch_mpd_after_play();
-                            let blur_task = self.maybe_update_blurred_cover();
-                            return Task::batch([mpd_task, blur_task]);
+                            // The MPD backend's `seek` only updates its cached
+                            // position; the server needs the real command.
+                            let seek_task = match self.mpd_client() {
+                                Some(client) => self.dispatch_mpd(async move {
+                                    client
+                                        .command(mpd_client::commands::Seek(
+                                            mpd_client::commands::SeekMode::Absolute(
+                                                Duration::ZERO,
+                                            ),
+                                        ))
+                                        .await
+                                        .map_err(|e| format!("MPD seek: {e}"))
+                                }),
+                                None => Task::none(),
+                            };
+                            return Task::batch([seek_task, self.publish_mpris()]);
                         }
+                        Ok(Some(crate::player::PreviousResult::Track(track))) => {
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(None) => {}
                         Err(e) => tracing::error!("Previous track failed: {e}"),
-                        _ => {}
                     }
                 }
             }
@@ -431,39 +500,18 @@ impl AppModel {
                 }
             }
 
-            // Task 111: Wire shuffle toggle for MPD
             Message::ToggleShuffle => {
                 self.config.shuffle = !self.config.shuffle;
-                if let Some(mpd) = self.active_mpd_provider() {
-                    let enabled = self.config.shuffle;
-                    if let Err(e) = mpd.send_random(enabled) {
-                        tracing::error!("MPD send_random: {e}");
-                    }
+                if let Some(player) = &mut self.player {
+                    player.set_shuffle(self.config.shuffle);
                 }
                 return self.publish_mpris();
             }
 
-            // Task 112: Wire repeat mode for MPD
             Message::CycleRepeat => {
                 self.config.repeat_mode = self.config.repeat_mode.next();
-                if let Some(mpd) = self.active_mpd_provider() {
-                    let (repeat, single) = match self.config.repeat_mode {
-                        crate::config::RepeatMode::None => {
-                            (false, mpd_client::commands::SingleMode::Disabled)
-                        }
-                        crate::config::RepeatMode::All => {
-                            (true, mpd_client::commands::SingleMode::Disabled)
-                        }
-                        crate::config::RepeatMode::One => {
-                            (true, mpd_client::commands::SingleMode::Enabled)
-                        }
-                    };
-                    if let Err(e) = mpd.send_repeat(repeat) {
-                        tracing::error!("MPD send_repeat: {e}");
-                    }
-                    if let Err(e) = mpd.send_single(single) {
-                        tracing::error!("MPD send_single: {e}");
-                    }
+                if let Some(player) = &mut self.player {
+                    player.set_repeat_mode(self.config.repeat_mode);
                 }
                 return self.publish_mpris();
             }
@@ -475,7 +523,7 @@ impl AppModel {
                 volume,
                 song,
             } => {
-                // Feed polled status into the MPD backend cache.
+                let mut track_changed = false;
                 if let Some(player) = &mut self.player {
                     if let Some(mpd) = player.mpd_backend_mut() {
                         mpd.update_status(position, duration, state, volume);
@@ -520,13 +568,7 @@ impl AppModel {
                     {
                         player.adopt_mpd_track(track.clone(), duration);
                         self.current_track = Some(track);
-                        self.lyrics_text = None;
-                        self.scrobble_now_playing_sent = false;
-                        self.scrobble_sent = false;
-                        #[cfg(feature = "visualizer")]
-                        {
-                            self.viz_metadata_opacity = 1.0;
-                        }
+                        track_changed = true;
                     }
 
                     // Update UI position (unless user is dragging seek slider).
@@ -539,29 +581,37 @@ impl AppModel {
                         }
                     }
 
-                    // Check if track ended (MPD reports Stopped after playback).
-                    if player.is_finished().unwrap_or(false)
-                        && let Ok(Some(track)) = player.next()
-                    {
-                        self.current_track = Some(track.clone());
-                        self.playback_position = Duration::ZERO;
-                        self.lyrics_text = None;
-                        self.scrobble_now_playing_sent = false;
-                        self.scrobble_sent = false;
-                        #[cfg(feature = "visualizer")]
-                        {
-                            self.viz_metadata_opacity = 1.0;
+                    // Check if track ended (MPD reports Stopped after
+                    // playback) — this is a NATURAL end, so repeat-one
+                    // replays and repeat-none stops per `advance(auto =
+                    // true)`'s contract. This is the one authoritative
+                    // MPD end-of-track path (see the `PlaybackTick` guard
+                    // below, which deliberately skips it for MPD to avoid
+                    // double-advancing the queue).
+                    if player.is_finished().unwrap_or(false) {
+                        match player.advance_on_finish() {
+                            Ok(Some(track)) => {
+                                self.current_track = Some(track);
+                                self.playback_position = Duration::ZERO;
+                                track_changed = true;
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("MPD advance on finish failed: {e}"),
                         }
-                        // Dispatch the actual async MPD play command.
-                        return self.dispatch_mpd_after_play();
                     }
                 }
+
+                let extra_task = if track_changed {
+                    self.on_track_changed()
+                } else {
+                    Task::none()
+                };
 
                 // Scrobble handling for MPD tracks.
                 if let Some(track) = self.current_track.clone() {
                     self.handle_scrobble(track);
                 }
-                return self.publish_mpris();
+                return Task::batch([extra_task, self.publish_mpris()]);
             }
 
             Message::MpdCommandError(err) => {
@@ -571,29 +621,35 @@ impl AppModel {
 
             Message::PlaybackTick => {
                 // Local/Subsonic playback — read position from the active backend.
-                if let Some(ref mut player) = self.player {
+                let mut track_changed_task = Task::none();
+                if let Some(player) = &mut self.player {
                     if self.seeking_preview.is_none() {
                         self.playback_position = player.position();
 
-                        if let Some(ref track) = self.current_track
+                        if let Some(track) = &self.current_track
                             && self.playback_position > track.duration
                         {
                             self.playback_position = track.duration;
                         }
                     }
 
-                    // Check if track ended
-                    if player.is_finished().unwrap_or(false)
-                        && let Ok(Some(track)) = player.next()
+                    // MPD's own end-of-track advance is handled by
+                    // `MpdStatusUpdate` (which polls far more precisely
+                    // and is the only path that also dispatches the next
+                    // async MPD command) — this generic 500ms ticker fires
+                    // regardless of backend, so it would otherwise race
+                    // that poll and double-advance the queue.
+                    if player.active_backend_type() != ActiveBackend::Mpd
+                        && player.is_finished().unwrap_or(false)
                     {
-                        self.current_track = Some(track.clone());
-                        self.playback_position = Duration::ZERO;
-                        self.lyrics_text = None;
-                        self.scrobble_now_playing_sent = false;
-                        self.scrobble_sent = false;
-                        #[cfg(feature = "visualizer")]
-                        {
-                            self.viz_metadata_opacity = 1.0;
+                        match player.advance_on_finish() {
+                            Ok(Some(track)) => {
+                                self.current_track = Some(track);
+                                self.playback_position = Duration::ZERO;
+                                track_changed_task = self.on_track_changed();
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("Advance on finish failed: {e}"),
                         }
                     }
                 }
@@ -629,7 +685,119 @@ impl AppModel {
                     self.handle_scrobble(track);
                 }
                 let mpris_task = self.publish_mpris();
-                return Task::batch([position_save_task, mpris_task]);
+                return Task::batch([position_save_task, track_changed_task, mpris_task]);
+            }
+
+            Message::Stop => {
+                let mut mpd_task = Task::none();
+                if let Some(player) = &mut self.player {
+                    match player.stop() {
+                        Ok(()) => {
+                            self.playback_position = Duration::ZERO;
+                            if let Some(client) = self.mpd_client() {
+                                mpd_task = self.dispatch_mpd(async move {
+                                    client
+                                        .command(mpd_client::commands::Stop)
+                                        .await
+                                        .map_err(|e| format!("MPD stop: {e}"))
+                                });
+                            }
+                        }
+                        Err(e) => tracing::error!("Stop failed: {e}"),
+                    }
+                }
+                return Task::batch([mpd_task, self.publish_mpris()]);
+            }
+
+            Message::QueueJump(idx) => {
+                if let Some(player) = &mut self.player {
+                    match player.jump_to(idx) {
+                        Ok(Some(track)) => {
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::error!("Queue jump failed: {e}"),
+                    }
+                }
+            }
+
+            Message::QueueRemove(idx) => {
+                if let Some(player) = &mut self.player {
+                    match player.queue_remove(idx) {
+                        Ok(crate::player::QueueEditOutcome::NowPlaying(track)) => {
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(crate::player::QueueEditOutcome::Stopped) => {
+                            self.current_track = None;
+                            self.playback_position = Duration::ZERO;
+                            return self.publish_mpris();
+                        }
+                        Ok(crate::player::QueueEditOutcome::Unchanged) => {}
+                        Err(e) => tracing::error!("Queue remove failed: {e}"),
+                    }
+                }
+            }
+
+            Message::QueueMove { from, to } => {
+                if let Some(player) = &mut self.player {
+                    player.queue_move(from, to);
+                }
+            }
+
+            Message::QueueClear => {
+                if let Some(player) = &mut self.player {
+                    player.queue_clear_upcoming();
+                }
+            }
+
+            Message::PlayNext(tracks) => {
+                if tracks.is_empty() {
+                    return Task::none();
+                }
+                let added = tracks.len();
+                if let Some(player) = &mut self.player {
+                    match player.queue_insert_next(tracks) {
+                        Ok(Some(track)) => {
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(None) => {
+                            return self.push_toast(widget::toaster::Toast::new(fl!(
+                                "queued-tracks",
+                                count = added
+                            )));
+                        }
+                        Err(e) => tracing::error!("Play next failed: {e}"),
+                    }
+                }
+            }
+
+            Message::AddToQueue(tracks) => {
+                if tracks.is_empty() {
+                    return Task::none();
+                }
+                let added = tracks.len();
+                if let Some(player) = &mut self.player {
+                    match player.queue_append(tracks) {
+                        Ok(Some(track)) => {
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(None) => {
+                            return self.push_toast(widget::toaster::Toast::new(fl!(
+                                "queued-tracks",
+                                count = added
+                            )));
+                        }
+                        Err(e) => tracing::error!("Add to queue failed: {e}"),
+                    }
+                }
             }
 
             // -- Track selection --
@@ -657,21 +825,29 @@ impl AppModel {
                     if tracks.is_empty() {
                         return Task::none();
                     }
-                    // Appending only makes sense on top of an existing
-                    // queue; with nothing queued, "add to queue" has to
-                    // start playback or the tracks would sit unreachable.
-                    let can_append = self.player.as_ref().is_some_and(|p| !p.queue_is_empty());
-                    if !can_append {
-                        return self.play_track_list(tracks, 0);
-                    }
                     let added = tracks.len();
-                    if let Some(player) = self.player.as_mut() {
-                        player.extend_queue(tracks);
+                    let Some(player) = self.player.as_mut() else {
+                        return Task::none();
+                    };
+                    match player.queue_append(tracks) {
+                        Ok(Some(track)) => {
+                            // The queue was empty — appending started
+                            // playback immediately.
+                            self.current_track = Some(track);
+                            self.playback_position = Duration::ZERO;
+                            return self.on_track_changed();
+                        }
+                        Ok(None) => {
+                            return self.push_toast(widget::toaster::Toast::new(fl!(
+                                "queued-tracks",
+                                count = added
+                            )));
+                        }
+                        Err(e) => {
+                            tracing::error!("Queue folder failed: {e}");
+                            return Task::none();
+                        }
                     }
-                    return self.push_toast(widget::toaster::Toast::new(fl!(
-                        "queued-tracks",
-                        count = added
-                    )));
                 }
                 crate::views::folders::FolderMessage::ToggleFavorite(id) => {
                     return self.update(Message::ToggleFavorite(id));
@@ -1466,11 +1642,24 @@ impl AppModel {
                 }
             }
 
-            Message::MpdIdleEvent(provider_id) => {
-                tracing::debug!("MPD idle event from provider '{provider_id}'");
-                // If this is the active provider, reload the library to pick up changes
-                if self.registry.active_id() == provider_id {
-                    return self.reload_library();
+            Message::MpdIdleEvent(provider_id, subsystem) => {
+                if self.registry.active_id() != provider_id {
+                    return Task::none();
+                }
+                match crate::app::subscriptions::idle_action(subsystem) {
+                    crate::app::subscriptions::IdleAction::ReloadLibrary => {
+                        tracing::debug!(
+                            "MPD idle event from provider '{provider_id}': reloading library"
+                        );
+                        return self.reload_library();
+                    }
+                    crate::app::subscriptions::IdleAction::ReloadPlaylists => {
+                        tracing::debug!(
+                            "MPD idle event from provider '{provider_id}': reloading playlists"
+                        );
+                        return self.load_playlists();
+                    }
+                    crate::app::subscriptions::IdleAction::None => {}
                 }
             }
 
@@ -1701,7 +1890,14 @@ impl AppModel {
                 }
             }
 
-            Message::BlurReady(key, handle, accent) => {
+            Message::BlurReady(key, handle, accent, large_handle) => {
+                // The job that produced this result has finished either
+                // way (stale or not) -- clear the in-flight guard so a
+                // future call for the same key can spawn again if needed.
+                if self.blur_pending_key.as_deref() == Some(key.as_str()) {
+                    self.blur_pending_key = None;
+                }
+
                 // Guard against stale results: only apply if this blur is still
                 // for the current track's album. A slow computation may finish
                 // after the user has already moved to a different track.
@@ -1722,9 +1918,14 @@ impl AppModel {
                     // old value and retry" behaviour to preserve.
                     if let Some(handle) = handle {
                         self.blurred_cover = Some(handle);
-                        self.blurred_cover_key = Some(key);
+                        self.blurred_cover_key = Some(key.clone());
                     }
                     self.accent = accent;
+                    // Same "keep the old value on failure" behavior as
+                    // the blur handle above.
+                    if let Some(large) = large_handle {
+                        self.current_cover_large = Some((key, large));
+                    }
                 }
                 // If stale, discard silently — the correct blur is either already
                 // cached or will be requested by the next maybe_update_blurred_cover call.
@@ -2557,329 +2758,20 @@ impl AppModel {
                 }
             }
 
-            Message::OnlineIconLoaded(url, bytes) => {
-                if !bytes.is_empty() {
+            Message::OnlineIconLoaded(url, decoded) => {
+                if let Some((w, h, pixels)) = decoded {
                     self.online_icons
-                        .insert(url, widget::icon::from_raster_bytes(bytes));
+                        .insert(url, widget::icon::from_raster_pixels(w, h, pixels));
                 }
             }
 
             // -- Radio --
-            Message::RadioSearchChanged(query) => {
-                self.radio_search_query = query;
-            }
-
-            Message::RadioSearchSubmit => {
-                let query = self.radio_search_query.trim().to_string();
-                if query.is_empty() {
-                    return Task::none();
-                }
-                self.radio_search_loading = true;
-                return cosmic::task::future(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let client = HTTP_CLIENT.clone();
-                        radio::search_stations(&client, &query)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    cosmic::Action::App(Message::RadioSearchResults(result))
-                });
-            }
-
-            Message::RadioDiscover => {
-                self.radio_search_loading = true;
-                return cosmic::task::future(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let client = HTTP_CLIENT.clone();
-                        radio::popular_stations(&client, 50)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    cosmic::Action::App(Message::RadioSearchResults(result))
-                });
-            }
-
-            Message::RadioSearchResults(result) => {
-                self.radio_search_loading = false;
-                match result {
-                    Ok(results) => {
-                        let icon_urls: Vec<String> =
-                            results.iter().map(|r| r.favicon.clone()).collect();
-                        self.radio_search_results = results;
-                        return self.load_online_icons(icon_urls);
-                    }
-                    Err(e) => {
-                        return self.push_toast(widget::toaster::Toast::new(fl!(
-                            "toast-radio-search-failed",
-                            reason = e
-                        )));
-                    }
-                }
-            }
-
-            Message::RadioAddNameChanged(name) => {
-                self.radio_add_name = name;
-            }
-
-            Message::RadioAddUrlChanged(url) => {
-                self.radio_add_url = url;
-            }
-
-            Message::AddRadioStation {
-                name,
-                stream_url,
-                homepage,
-                favicon_url,
-                tags,
-            } => {
-                let result = open_online_store().and_then(|store| {
-                    store.add_radio_station(&name, &stream_url, &homepage, &favicon_url, &tags)
-                });
-                match result {
-                    Ok(_) => {
-                        self.radio_add_name.clear();
-                        self.radio_add_url.clear();
-                        return self.load_radio_stations();
-                    }
-                    Err(e) => tracing::error!("Failed to add radio station: {e}"),
-                }
-            }
-
-            Message::AddRadioFromSearch(idx) => {
-                if let Some(result) = self.radio_search_results.get(idx).cloned() {
-                    return cosmic::task::message(cosmic::Action::App(Message::AddRadioStation {
-                        name: result.name,
-                        stream_url: result.url,
-                        homepage: result.homepage,
-                        favicon_url: result.favicon,
-                        tags: result.tags,
-                    }));
-                }
-            }
-
-            Message::RadioStationsLoaded(stations) => {
-                let icon_urls: Vec<String> =
-                    stations.iter().map(|s| s.favicon_url.clone()).collect();
-                self.radio_stations = stations;
-                return self.load_online_icons(icon_urls);
-            }
-
-            Message::RemoveRadioStation(idx) => {
-                if let Some(station) = self.radio_stations.get(idx) {
-                    let id = station.id;
-                    match open_online_store().and_then(|store| store.remove_radio_station(id)) {
-                        Ok(()) => return self.load_radio_stations(),
-                        Err(e) => tracing::error!("Failed to remove radio station: {e}"),
-                    }
-                }
-            }
-
-            Message::PlayRadioStation(idx) => {
-                if let Some(station) = self.radio_stations.get(idx) {
-                    return resolve_and_play_radio(
-                        station.name.clone(),
-                        station.stream_url.clone(),
-                    );
-                }
-            }
-
-            Message::PlayRadioSearchResult(idx) => {
-                if let Some(result) = self.radio_search_results.get(idx) {
-                    return resolve_and_play_radio(result.name.clone(), result.url.clone());
-                }
-            }
-
-            Message::RadioStreamResolved { name, result } => match result {
-                Ok(resolved_url) => {
-                    let track = Track {
-                        id: -1,
-                        path: PathBuf::new(),
-                        title: name,
-                        artist: String::new(),
-                        album_artist: String::new(),
-                        album: String::new(),
-                        genre: String::new(),
-                        track_number: 0,
-                        disc_number: 0,
-                        year: 0,
-                        duration: Duration::ZERO,
-                        bitrate: 0,
-                        sample_rate: 0,
-                        provider_id: Arc::from("radio"),
-                        source_uri: resolved_url,
-                        is_favorite: false,
-                        rating: None,
-                        rg_track_gain: None,
-                        rg_album_gain: None,
-                    };
-                    return self.play_track_list(vec![track], 0);
-                }
-                Err(e) => {
-                    return self.push_toast(widget::toaster::Toast::new(fl!(
-                        "toast-radio-play-failed",
-                        reason = e
-                    )));
-                }
-            },
+            Message::Radio(msg) => return self.update_radio(msg),
+            Message::RadioEvent(event) => return self.handle_radio_event(event),
 
             // -- Convert / transcode / rip --
-            Message::ConvertAddFiles => {
-                return cosmic::task::future(async {
-                    let result = async {
-                        use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
-                        let mut filter = FileFilter::new("Audio, Video & CUE Files");
-                        for ext in crate::player::engine::decoder::SUPPORTED_EXTENSIONS
-                            .iter()
-                            .chain(["cue", "mkv", "mov", "avi"].iter())
-                        {
-                            filter = filter.glob(&format!("*.{ext}"));
-                        }
-
-                        let selected = SelectedFiles::open_file()
-                            .title("Select Audio/Video Files or a CUE Sheet")
-                            .multiple(true)
-                            .modal(true)
-                            .filter(filter)
-                            .send()
-                            .await
-                            .map_err(|e| format!("Portal request failed: {e}"))?
-                            .response()
-                            .map_err(|e| format!("Portal response failed: {e}"))?;
-
-                        let mut paths = Vec::new();
-                        for uri in selected.uris() {
-                            let uri_str = uri.as_str();
-                            let path = uri_str
-                                .strip_prefix("file://")
-                                .ok_or_else(|| format!("Not a local file URI: {uri_str}"))
-                                .and_then(|encoded| {
-                                    urlencoding::decode(encoded)
-                                        .map(|d| PathBuf::from(d.as_ref()))
-                                        .map_err(|e| format!("Could not decode URI path: {e}"))
-                                })?;
-                            paths.push(path);
-                        }
-                        if paths.is_empty() {
-                            Err("No files selected".to_string())
-                        } else {
-                            Ok(paths)
-                        }
-                    }
-                    .await;
-                    cosmic::Action::App(Message::ConvertFilesPicked(result))
-                });
-            }
-
-            Message::ConvertFilesPicked(result) => match result {
-                Ok(paths) => {
-                    let format = OutputFormat::ALL[self.convert_format_index];
-                    let target_rate = convert::SAMPLE_RATE_OPTIONS[self.convert_rate_index];
-                    for path in paths {
-                        let kind = if path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
-                        {
-                            JobKind::CueSplit
-                        } else {
-                            JobKind::Convert
-                        };
-                        let id = self.convert_next_id;
-                        self.convert_next_id += 1;
-                        self.convert_jobs.push(ConvertJob::new(
-                            id,
-                            path,
-                            kind,
-                            format,
-                            target_rate,
-                            self.convert_out_dir.clone(),
-                        ));
-                    }
-                }
-                Err(e) => tracing::warn!("convert: file picker failed: {e}"),
-            },
-
-            Message::ConvertPickOutputDir => {
-                return cosmic::task::future(async {
-                    let result = async {
-                        use ashpd::desktop::file_chooser::SelectedFiles;
-
-                        let selected = SelectedFiles::open_file()
-                            .title("Select Output Directory")
-                            .directory(true)
-                            .modal(true)
-                            .send()
-                            .await
-                            .map_err(|e| format!("Portal request failed: {e}"))?
-                            .response()
-                            .map_err(|e| format!("Portal response failed: {e}"))?;
-
-                        let uris = selected.uris();
-                        if let Some(uri) = uris.first() {
-                            let uri_str = uri.as_str();
-                            uri_str
-                                .strip_prefix("file://")
-                                .ok_or_else(|| format!("Not a local file URI: {uri_str}"))
-                                .and_then(|encoded| {
-                                    urlencoding::decode(encoded)
-                                        .map(|d| PathBuf::from(d.as_ref()))
-                                        .map_err(|e| format!("Could not decode URI path: {e}"))
-                                })
-                        } else {
-                            Err("No directory selected".to_string())
-                        }
-                    }
-                    .await;
-                    cosmic::Action::App(Message::ConvertOutputDirPicked(result))
-                });
-            }
-
-            Message::ConvertOutputDirPicked(result) => match result {
-                Ok(path) => self.convert_out_dir = path,
-                Err(e) => tracing::warn!("convert: output directory picker failed: {e}"),
-            },
-
-            Message::ConvertFormatSelected(index) => self.convert_format_index = index,
-
-            Message::ConvertRateSelected(index) => self.convert_rate_index = index,
-
-            Message::ConvertStart => {
-                let mut tasks = Vec::new();
-                for job in &mut self.convert_jobs {
-                    if job.state == JobState::Queued {
-                        job.state = JobState::Running;
-                        let job_clone = job.clone();
-                        let semaphore = Arc::clone(&self.convert_semaphore);
-                        tasks.push(cosmic::task::future(async move {
-                            let (id, state) = run_job(job_clone, semaphore).await;
-                            cosmic::Action::App(Message::ConvertJobFinished(id, state))
-                        }));
-                    }
-                }
-                if !tasks.is_empty() {
-                    return Task::batch(tasks);
-                }
-            }
-
-            Message::ConvertJobFinished(id, state) => {
-                if let Some(job) = self.convert_jobs.iter_mut().find(|j| j.id == id) {
-                    job.state = state;
-                }
-            }
-
-            Message::ConvertCancelJob(id) => {
-                if let Some(job) = self.convert_jobs.iter().find(|j| j.id == id) {
-                    job.request_cancel();
-                }
-            }
-
-            Message::ConvertClearFinished => {
-                self.convert_jobs
-                    .retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
-            }
-
-            Message::ConvertTick => {}
+            Message::Convert(msg) => return self.update_convert(msg),
+            Message::ConvertEvent(event) => return self.update_convert_event(event),
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -2914,15 +2806,14 @@ impl AppModel {
                                 self.update(Message::TogglePlayback)
                             }
                         }
-                        MprisCommand::Pause | MprisCommand::Stop => {
-                            // Lyra has no distinct "stop" state; degrade Stop
-                            // to Pause, which is the closest real behavior.
+                        MprisCommand::Pause => {
                             if playing {
                                 self.update(Message::TogglePlayback)
                             } else {
                                 Task::none()
                             }
                         }
+                        MprisCommand::Stop => self.update(Message::Stop),
                         MprisCommand::PlayPause => self.update(Message::TogglePlayback),
                         MprisCommand::Next => self.update(Message::NextTrack),
                         MprisCommand::Previous => self.update(Message::PreviousTrack),
@@ -3035,14 +2926,7 @@ impl AppModel {
 
                 match shortcut {
                     Shortcut::PlayPause => return self.update(Message::TogglePlayback),
-                    Shortcut::Stop => {
-                        if let Some(player) = &mut self.player {
-                            match player.stop() {
-                                Ok(()) => self.playback_position = Duration::ZERO,
-                                Err(e) => tracing::error!("Stop failed: {e}"),
-                            }
-                        }
-                    }
+                    Shortcut::Stop => return self.update(Message::Stop),
                     Shortcut::Next => return self.update(Message::NextTrack),
                     Shortcut::Previous => return self.update(Message::PreviousTrack),
                     Shortcut::SeekForward | Shortcut::SeekBackward => {
@@ -3105,6 +2989,9 @@ impl AppModel {
                         }
                     }
                     Shortcut::ToggleLyrics => return self.update(Message::ShowLyrics),
+                    Shortcut::ToggleQueue => {
+                        return self.update(Message::ToggleContextPage(ContextPage::Queue));
+                    }
                     Shortcut::ToggleExpanded => {
                         return if self.expand_progress > 0.0 || self.expand_target.is_some() {
                             self.update(Message::CollapseNowPlaying)

@@ -18,6 +18,10 @@ const HEART_WIDTH: f32 = 32.0;
 const RATING_WIDTH: f32 = 112.0;
 /// Fixed width of the add-to-playlist column.
 const ADD_WIDTH: f32 = 32.0;
+/// Fixed width of each per-row queue-action icon button (play next / add to
+/// queue) — shown alongside rating/quality at the 900px breakpoint, where
+/// there's ample remaining fill (see the column-width table above).
+const QUEUE_ACTION_WIDTH: f32 = 32.0;
 
 /// Minimum responsive width (px) at which the Artist column appears.
 const ARTIST_BREAKPOINT: f32 = 640.0;
@@ -153,6 +157,10 @@ fn secondary_cell_text<'a>(content: &'a str, is_playing: bool) -> common::Text<'
 #[derive(Debug, Clone)]
 pub enum SongMessage {
     PlayTrack(usize),
+    /// Insert this track right after the currently playing one.
+    PlayNext(usize),
+    /// Append this track to the end of the queue.
+    AddToQueue(usize),
     SortBy(SortField),
     ToggleFavorite(String),
     SetRating(String, u8),
@@ -395,6 +403,11 @@ fn build_header<'a>(
         row = row.push(widget::Space::new().width(common::QUALITY_BADGE_WIDTH));
     }
 
+    if show_rating {
+        row = row.push(widget::Space::new().width(QUEUE_ACTION_WIDTH));
+        row = row.push(widget::Space::new().width(QUEUE_ACTION_WIDTH));
+    }
+
     row = row.push(widget::Space::new().width(ADD_WIDTH));
 
     row = row.push(
@@ -518,6 +531,33 @@ fn build_row<'a>(
                 track.bitrate,
             )))
             .width(common::QUALITY_BADGE_WIDTH)
+            .align_x(Horizontal::Center),
+        );
+    }
+
+    if show_rating {
+        row = row.push(
+            widget::container(
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
+                        .on_press(SongMessage::PlayNext(original_index)),
+                    widget::text::caption(fl!("queue-play-next")),
+                    widget::tooltip::Position::Top,
+                ),
+            )
+            .width(QUEUE_ACTION_WIDTH)
+            .align_x(Horizontal::Center),
+        );
+        row = row.push(
+            widget::container(
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
+                        .on_press(SongMessage::AddToQueue(original_index)),
+                    widget::text::caption(fl!("queue-add")),
+                    widget::tooltip::Position::Top,
+                ),
+            )
+            .width(QUEUE_ACTION_WIDTH)
             .align_x(Horizontal::Center),
         );
     }

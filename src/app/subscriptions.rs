@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
+use super::convert_page::ConvertEvent;
 use super::{AppModel, Message};
 use crate::config::Config;
 use crate::convert::JobState;
@@ -363,7 +364,7 @@ fn convert_tick_stream() -> impl Stream<Item = Message> {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             loop {
                 interval.tick().await;
-                _ = emitter.send(Message::ConvertTick).await;
+                _ = emitter.send(Message::ConvertEvent(ConvertEvent::Tick)).await;
             }
         },
     )
@@ -426,9 +427,28 @@ fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
                 // Both connections established
                 _ = emitter.send(Message::MpdConnected(pid.clone())).await;
 
-                // Loop on idle events until the connection drops
-                while let Some(_event) = events.next().await {
-                    _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
+                // Loop on idle events until the connection drops or closes.
+                // Each event carries which MPD subsystem changed; only
+                // `Database`/`Update` (library content) and
+                // `StoredPlaylist` need a reload here — everything else
+                // (player/mixer/options/queue/output/...) is already
+                // covered by the status-poll subscription, so forwarding
+                // every idle wakeup as a blanket "reload the library"
+                // trigger (the previous behavior) reset/flashed the views
+                // on every pause, volume change, etc.
+                while let Some(event) = events.next().await {
+                    match event {
+                        mpd_client::client::ConnectionEvent::SubsystemChange(subsystem) => {
+                            let idle_subsystem = IdleSubsystem::from(&subsystem);
+                            _ = emitter
+                                .send(Message::MpdIdleEvent(pid.clone(), idle_subsystem))
+                                .await;
+                        }
+                        mpd_client::client::ConnectionEvent::ConnectionClosed(err) => {
+                            tracing::warn!("MPD provider '{pid}' idle connection closed: {err}");
+                            break;
+                        }
+                    }
                 }
 
                 // Idle stream ended — connection lost. Disconnect command too.
@@ -440,6 +460,64 @@ fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
             }
         },
     )
+}
+
+/// Mirrors the subset of `mpd_client::client::Subsystem` variants Lyra's
+/// idle handler distinguishes between. Kept separate from the upstream
+/// type (rather than embedding it directly in `Message`) because
+/// `Message` must be `Clone` and `Subsystem::Other` wraps a `Box<str>` —
+/// collapsing everything Lyra doesn't act on to a single `Other` unit
+/// variant is all `idle_action` needs and keeps the conversion trivial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleSubsystem {
+    /// The song database changed (files added/removed/rescanned).
+    Database,
+    /// A database `update`/`rescan` job finished.
+    Update,
+    /// A stored playlist was created, deleted, or modified.
+    StoredPlaylist,
+    /// Everything else (player/mixer/options/queue/output/partition/...):
+    /// already covered by the status-poll subscription, so the idle
+    /// handler takes no action for these.
+    Other,
+}
+
+impl From<&mpd_client::client::Subsystem> for IdleSubsystem {
+    fn from(subsystem: &mpd_client::client::Subsystem) -> Self {
+        match subsystem {
+            mpd_client::client::Subsystem::Database => IdleSubsystem::Database,
+            mpd_client::client::Subsystem::Update => IdleSubsystem::Update,
+            mpd_client::client::Subsystem::StoredPlaylist => IdleSubsystem::StoredPlaylist,
+            _ => IdleSubsystem::Other,
+        }
+    }
+}
+
+/// What an MPD idle event should trigger in `update()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleAction {
+    /// Reload the whole library (tracks/albums/artists/covers).
+    ReloadLibrary,
+    /// Reload only the stored-playlists list.
+    ReloadPlaylists,
+    /// Nothing to do.
+    None,
+}
+
+/// Pure mapping from an idle subsystem notification to the action
+/// `update()` should take. Kept free of `self`/`AppModel` so it is
+/// trivially unit-testable without constructing an `AppModel`.
+pub(super) fn idle_action(subsystem: IdleSubsystem) -> IdleAction {
+    match subsystem {
+        IdleSubsystem::Database => IdleAction::ReloadLibrary,
+        // `update` fires once a `update`/`rescan` command's background job
+        // completes; treat it the same as `database` since content may
+        // have changed without MPD necessarily also emitting a separate
+        // `database` event for it.
+        IdleSubsystem::Update => IdleAction::ReloadLibrary,
+        IdleSubsystem::StoredPlaylist => IdleAction::ReloadPlaylists,
+        IdleSubsystem::Other => IdleAction::None,
+    }
 }
 
 /// Filesystem watcher subscription — only when the Local provider is active.
@@ -774,4 +852,35 @@ fn mpd_capture_stream(key: &MpdCaptureKey) -> impl Stream<Item = Message> + use<
             futures_util::future::pending::<()>().await;
         },
     )
+}
+
+#[cfg(test)]
+mod idle_action_tests {
+    use super::{IdleAction, IdleSubsystem, idle_action};
+
+    #[test]
+    fn database_reloads_library() {
+        assert_eq!(
+            idle_action(IdleSubsystem::Database),
+            IdleAction::ReloadLibrary
+        );
+    }
+
+    #[test]
+    fn update_reloads_library() {
+        assert_eq!(idle_action(IdleSubsystem::Update), IdleAction::ReloadLibrary);
+    }
+
+    #[test]
+    fn stored_playlist_reloads_playlists_only() {
+        assert_eq!(
+            idle_action(IdleSubsystem::StoredPlaylist),
+            IdleAction::ReloadPlaylists
+        );
+    }
+
+    #[test]
+    fn other_subsystems_do_nothing() {
+        assert_eq!(idle_action(IdleSubsystem::Other), IdleAction::None);
+    }
 }

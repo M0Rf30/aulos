@@ -461,6 +461,14 @@ impl PlaybackEngine {
         self.status.track_finished.store(false, Ordering::Release);
     }
 
+    /// Clear the look-ahead slot without affecting current playback.
+    /// Call whenever the caller's prediction of "what comes next" changes
+    /// (queue edit, shuffle/repeat toggle, jump) so the playback thread
+    /// doesn't gapless/crossfade into a track that's no longer next.
+    pub fn clear_next(&self) {
+        *self.next_track.lock() = None;
+    }
+
     /// Current playback position within the current track. Zero while the
     /// playback thread is still opening/probing the source.
     pub fn position(&self) -> Duration {

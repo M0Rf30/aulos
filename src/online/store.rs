@@ -262,8 +262,11 @@ impl OnlineStore {
 
     // ---- Radio stations ----
 
-    /// Save a radio station, or update it if the stream URL is already saved.
-    /// Returns the station's row id.
+    /// Save a radio station, or update its metadata if the stream URL is
+    /// already saved (the upsert key). Returns the station's row id and
+    /// whether it already existed, so callers can tell a fresh save from
+    /// a duplicate save-of-an-already-saved station apart (e.g. to show
+    /// "Saved" vs "Already saved").
     pub fn add_radio_station(
         &self,
         name: &str,
@@ -271,7 +274,17 @@ impl OnlineStore {
         homepage: &str,
         favicon_url: &str,
         tags: &str,
-    ) -> Result<i64, String> {
+    ) -> Result<(i64, bool), String> {
+        use rusqlite::OptionalExtension;
+        let existing_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM radio_stations WHERE stream_url = ?1",
+                params![stream_url],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Add radio station lookup error: {e}"))?;
         self.conn
             .execute(
                 "INSERT INTO radio_stations (name, stream_url, homepage, favicon_url, tags)
@@ -282,13 +295,19 @@ impl OnlineStore {
                 params![name, stream_url, homepage, favicon_url, tags],
             )
             .map_err(|e| format!("Add radio station error: {e}"))?;
+        let id = match existing_id {
+            Some(id) => id,
+            None => self.conn.last_insert_rowid(),
+        };
+        Ok((id, existing_id.is_some()))
+    }
+
+    /// Rename a saved station in place, leaving every other field untouched.
+    pub fn rename_radio_station(&self, id: i64, name: &str) -> Result<(), String> {
         self.conn
-            .query_row(
-                "SELECT id FROM radio_stations WHERE stream_url = ?1",
-                params![stream_url],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Add radio station lookup error: {e}"))
+            .execute("UPDATE radio_stations SET name = ?1 WHERE id = ?2", params![name, id])
+            .map_err(|e| format!("Rename radio station error: {e}"))?;
+        Ok(())
     }
 
     pub fn remove_radio_station(&self, id: i64) -> Result<(), String> {
@@ -327,7 +346,6 @@ impl OnlineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn open_migrated_memory() -> OnlineStore {
         // Mirrors `LibraryDb::open_memory` schema creation for this module's
@@ -419,18 +437,53 @@ mod tests {
     #[test]
     fn radio_station_crud_roundtrip() {
         let store = open_migrated_memory();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let _ = now;
-
-        let id = store
+        let (id, existed) = store
             .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
             .unwrap();
+        assert!(!existed);
         assert_eq!(store.list_radio_stations().unwrap().len(), 1);
 
         store.remove_radio_station(id).unwrap();
         assert!(store.list_radio_stations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_radio_station_reports_already_existed_and_updates_metadata() {
+        let store = open_migrated_memory();
+        let (id1, existed1) = store
+            .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
+            .unwrap();
+        assert!(!existed1);
+
+        let (id2, existed2) = store
+            .add_radio_station(
+                "Test FM Renamed",
+                "https://stream.example/live",
+                "https://example.com",
+                "https://example.com/icon.png",
+                "jazz,chill",
+            )
+            .unwrap();
+        assert!(existed2);
+        assert_eq!(id1, id2);
+
+        let stations = store.list_radio_stations().unwrap();
+        assert_eq!(stations.len(), 1);
+        assert_eq!(stations[0].name, "Test FM Renamed");
+        assert_eq!(stations[0].tags, "jazz,chill");
+    }
+
+    #[test]
+    fn rename_radio_station_updates_only_the_name() {
+        let store = open_migrated_memory();
+        let (id, _) = store
+            .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
+            .unwrap();
+        store.rename_radio_station(id, "Renamed FM").unwrap();
+        let stations = store.list_radio_stations().unwrap();
+        assert_eq!(stations.len(), 1);
+        assert_eq!(stations[0].name, "Renamed FM");
+        assert_eq!(stations[0].tags, "jazz");
+        assert_eq!(stations[0].stream_url, "https://stream.example/live");
     }
 }

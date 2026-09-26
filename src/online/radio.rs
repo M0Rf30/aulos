@@ -9,6 +9,11 @@ use serde::Deserialize;
 /// A radio-browser.info directory search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StationSearchResult {
+    /// Radio-browser's own stable station id. Used as the row key for
+    /// Discover results instead of a list position, since a slow query
+    /// finishing late or a re-sort must never make an in-flight
+    /// Play/Save click land on the wrong row.
+    pub stationuuid: String,
     pub name: String,
     pub url: String,
     pub homepage: String,
@@ -16,10 +21,17 @@ pub struct StationSearchResult {
     pub tags: String,
     pub codec: String,
     pub bitrate: u32,
+    pub country: String,
+    pub countrycode: String,
+    pub language: String,
+    pub votes: i64,
+    pub clickcount: i64,
 }
 
 #[derive(Debug, Deserialize)]
 struct StationRaw {
+    #[serde(default)]
+    stationuuid: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -36,53 +48,64 @@ struct StationRaw {
     codec: String,
     #[serde(default)]
     bitrate: u32,
+    #[serde(default)]
+    country: String,
+    #[serde(default)]
+    countrycode: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default)]
+    votes: i64,
+    #[serde(default)]
+    clickcount: i64,
 }
 
-/// Search the radio-browser.info station directory by name.
-pub fn search_stations(
-    client: &reqwest::blocking::Client,
-    query: &str,
-) -> Result<Vec<StationSearchResult>, String> {
-    let url = format!(
-        "https://all.api.radio-browser.info/json/stations/search?name={}&limit=50&hidebroken=true",
-        urlencoding::encode(query)
-    );
-    let response = client
-        .get(&url)
-        .header("User-Agent", "lyra/0.1")
-        .send()
-        .map_err(|e| format!("Radio search failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("Radio search returned HTTP {}", response.status()));
-    }
-    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
-    let raw: Vec<StationRaw> =
-        serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
-    Ok(map_station_results(raw))
+/// Sort order for [`search_stations`], mirroring radio-browser.info's
+/// `order=` query parameter. Numeric orders are sent with `reverse=true`
+/// so they read "highest/most-popular first"; `Name` stays ascending
+/// (A→Z) — reversing it would list stations Z→A.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SortOrder {
+    #[default]
+    Clickcount,
+    Votes,
+    Name,
+    Bitrate,
 }
 
-/// Fetch the globally most-clicked stations from the radio-browser.info
-/// directory, letting users discover popular stations without already
-/// knowing a name to search for.
-pub fn popular_stations(
-    client: &reqwest::blocking::Client,
-    limit: u32,
-) -> Result<Vec<StationSearchResult>, String> {
-    let url = format!(
-        "https://all.api.radio-browser.info/json/stations/topclick/{limit}?hidebroken=true"
-    );
-    let response = client
-        .get(&url)
-        .header("User-Agent", "lyra/0.1")
-        .send()
-        .map_err(|e| format!("Radio search failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("Radio search returned HTTP {}", response.status()));
+impl SortOrder {
+    /// Every order the Discover sort dropdown offers, in display order.
+    pub const ALL: [SortOrder; 4] =
+        [SortOrder::Clickcount, SortOrder::Votes, SortOrder::Name, SortOrder::Bitrate];
+
+    fn as_param(self) -> &'static str {
+        match self {
+            SortOrder::Clickcount => "clickcount",
+            SortOrder::Votes => "votes",
+            SortOrder::Name => "name",
+            SortOrder::Bitrate => "bitrate",
+        }
     }
-    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
-    let raw: Vec<StationRaw> =
-        serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
-    Ok(map_station_results(raw))
+
+    /// Whether radio-browser should reverse its natural ascending order.
+    fn descending(self) -> bool {
+        !matches!(self, SortOrder::Name)
+    }
+}
+
+/// Parameters for a directory search against `/json/stations/search`.
+///
+/// `name`/`tag`/`countrycode` left empty are omitted from the request
+/// entirely rather than sent as `name=` -- an empty value narrows radio-
+/// browser's search to stations with a literally empty field, which is
+/// never what an empty UI field means.
+#[derive(Debug, Clone, Default)]
+pub struct StationQuery {
+    pub name: String,
+    pub tag: String,
+    pub countrycode: String,
+    pub order: SortOrder,
+    pub limit: u32,
 }
 
 /// Cap on the radio-browser.info JSON response body. The directory's own
@@ -91,11 +114,89 @@ pub fn popular_stations(
 /// large result set.
 const MAX_JSON_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Build the `/json/stations/search` request URL for `query`. Split out
+/// from [`search_stations`] so the query-string assembly (which params get
+/// included/omitted) is unit-testable without a network round trip.
+fn build_search_url(query: &StationQuery) -> String {
+    let mut url = format!(
+        "https://all.api.radio-browser.info/json/stations/search?hidebroken=true&reverse={}&limit={}&order={}",
+        query.order.descending(),
+        query.limit.max(1),
+        query.order.as_param()
+    );
+    if !query.name.trim().is_empty() {
+        url.push_str("&name=");
+        url.push_str(&urlencoding::encode(query.name.trim()));
+    }
+    if !query.tag.trim().is_empty() {
+        url.push_str("&tag=");
+        url.push_str(&urlencoding::encode(query.tag.trim()));
+    }
+    if !query.countrycode.trim().is_empty() {
+        url.push_str("&countrycode=");
+        url.push_str(&urlencoding::encode(query.countrycode.trim()));
+    }
+    url
+}
+
+/// Search the radio-browser.info station directory by name/tag/country,
+/// sorted by `query.order` (most-popular/matching first).
+pub fn search_stations(
+    client: &reqwest::blocking::Client,
+    query: &StationQuery,
+) -> Result<Vec<StationSearchResult>, String> {
+    fetch_stations(client, &build_search_url(query))
+}
+
+/// Fetch the globally most-clicked stations, for a Discover "Popular"
+/// preset that needs no search terms.
+pub fn top_click_stations(
+    client: &reqwest::blocking::Client,
+    limit: u32,
+) -> Result<Vec<StationSearchResult>, String> {
+    fetch_stations(client, &top_click_url(limit))
+}
+
+/// Fetch the globally top-voted stations, for a Discover "Top voted" preset.
+pub fn top_vote_stations(
+    client: &reqwest::blocking::Client,
+    limit: u32,
+) -> Result<Vec<StationSearchResult>, String> {
+    fetch_stations(client, &top_vote_url(limit))
+}
+
+fn top_click_url(limit: u32) -> String {
+    format!("https://all.api.radio-browser.info/json/stations/topclick/{}?hidebroken=true", limit.max(1))
+}
+
+fn top_vote_url(limit: u32) -> String {
+    format!("https://all.api.radio-browser.info/json/stations/topvote/{}?hidebroken=true", limit.max(1))
+}
+
+fn fetch_stations(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<Vec<StationSearchResult>, String> {
+    let response = client
+        .get(url)
+        .header("User-Agent", "lyra/0.1")
+        .send()
+        .map_err(|e| format!("Radio search failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Radio search returned HTTP {}", response.status()));
+    }
+    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
+    let raw: Vec<StationRaw> =
+        serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
+    Ok(map_station_results(raw))
+}
+
 fn map_station_results(raw: Vec<StationRaw>) -> Vec<StationSearchResult> {
     raw.into_iter()
         .map(|s| {
             let url = if s.url_resolved.is_empty() { s.url } else { s.url_resolved };
             StationSearchResult {
+                stationuuid: s.stationuuid,
                 name: s.name,
                 url,
                 homepage: s.homepage,
@@ -103,6 +204,11 @@ fn map_station_results(raw: Vec<StationRaw>) -> Vec<StationSearchResult> {
                 tags: s.tags,
                 codec: s.codec,
                 bitrate: s.bitrate,
+                country: s.country,
+                countrycode: s.countrycode,
+                language: s.language,
+                votes: s.votes,
+                clickcount: s.clickcount,
             }
         })
         .filter(|s| !s.url.is_empty())
@@ -327,5 +433,90 @@ mod tests {
         assert_eq!(results[0].bitrate, 128);
         assert_eq!(results[1].url, "http://y.example/live");
         assert_eq!(results[1].codec, "AAC");
+    }
+
+    #[test]
+    fn radio_browser_json_maps_full_extended_field_set() {
+        const BODY: &str = r#"[
+            {"stationuuid": "abc-123", "name": "Full Station", "url": "http://x.example/orig",
+             "url_resolved": "http://x.example/resolved", "homepage": "http://x.example",
+             "favicon": "http://x.example/favicon.ico", "tags": "jazz,chill", "codec": "MP3",
+             "bitrate": 128, "country": "Italy", "countrycode": "IT", "language": "italian",
+             "votes": 42, "clickcount": 999}
+        ]"#;
+        let raw: Vec<StationRaw> = serde_json::from_str(BODY).unwrap();
+        let results = map_station_results(raw);
+        assert_eq!(results.len(), 1);
+        let s = &results[0];
+        assert_eq!(s.stationuuid, "abc-123");
+        assert_eq!(s.country, "Italy");
+        assert_eq!(s.countrycode, "IT");
+        assert_eq!(s.language, "italian");
+        assert_eq!(s.votes, 42);
+        assert_eq!(s.clickcount, 999);
+    }
+
+    #[test]
+    fn radio_browser_json_defaults_missing_extended_fields() {
+        // Older/partial responses that omit the newer fields entirely
+        // must still parse, defaulting to empty/zero rather than failing.
+        const BODY: &str = r#"[{"name": "Bare Station", "url": "http://x.example/live"}]"#;
+        let raw: Vec<StationRaw> = serde_json::from_str(BODY).unwrap();
+        let results = map_station_results(raw);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stationuuid, "");
+        assert_eq!(results[0].votes, 0);
+        assert_eq!(results[0].clickcount, 0);
+    }
+
+    #[test]
+    fn build_search_url_omits_empty_params_but_always_has_order_and_limit() {
+        let query = StationQuery { limit: 25, order: SortOrder::Votes, ..Default::default() };
+        let url = build_search_url(&query);
+        assert!(url.contains("hidebroken=true"));
+        assert!(url.contains("reverse=true"));
+        assert!(url.contains("limit=25"));
+        assert!(url.contains("order=votes"));
+        assert!(!url.contains("name="));
+        assert!(!url.contains("tag="));
+        assert!(!url.contains("countrycode="));
+    }
+
+    #[test]
+    fn build_search_url_includes_name_tag_and_countrycode_when_set() {
+        let query = StationQuery {
+            name: "Radio Paradise".to_string(),
+            tag: "chill out".to_string(),
+            countrycode: "US".to_string(),
+            order: SortOrder::Name,
+            limit: 10,
+        };
+        let url = build_search_url(&query);
+        assert!(url.contains("name=Radio%20Paradise"));
+        assert!(url.contains("tag=chill%20out"));
+        assert!(url.contains("countrycode=US"));
+        assert!(url.contains("order=name"));
+        // Name sorts A→Z; only numeric orders are reversed.
+        assert!(url.contains("reverse=false"));
+    }
+
+    #[test]
+    fn build_search_url_clamps_zero_limit_to_one() {
+        let query = StationQuery { limit: 0, ..Default::default() };
+        assert!(build_search_url(&query).contains("limit=1"));
+    }
+
+    #[test]
+    fn top_click_and_top_vote_urls_hit_the_expected_global_endpoints() {
+        assert_eq!(
+            top_click_url(50),
+            "https://all.api.radio-browser.info/json/stations/topclick/50?hidebroken=true"
+        );
+        assert_eq!(
+            top_vote_url(50),
+            "https://all.api.radio-browser.info/json/stations/topvote/50?hidebroken=true"
+        );
+        // Never request a zero-sized list.
+        assert!(top_click_url(0).contains("/topclick/1?"));
     }
 }

@@ -10,6 +10,7 @@ use crate::player::Player;
 use crate::provider::ProviderRegistry;
 use crate::provider::mpd::MpdProvider;
 use crate::provider::subsonic::SubsonicProvider;
+use crate::views::radio as radio_view;
 use crate::views::{providers, songs};
 use cosmic::cosmic_config;
 use cosmic::widget::{self, about::About, menu, nav_bar};
@@ -21,9 +22,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod application;
+mod convert_page;
 mod helpers;
 mod init;
 mod message;
+mod radio_page;
 mod subscriptions;
 mod tasks;
 mod update;
@@ -92,6 +95,11 @@ pub struct AppModel {
     /// async results tagged with an older generation (or a different
     /// provider id) can be detected and ignored as stale.
     reload_generation: u64,
+    /// Staged data for a non-destructive library refresh in flight; see
+    /// `helpers::LibraryReloadStaging`. `None` when no reload is running,
+    /// or the running reload is a first/empty-library load that instead
+    /// populates `all_tracks`/`all_albums`/etc. progressively.
+    library_reload_staging: Option<helpers::LibraryReloadStaging>,
 
     // Library search (header search bar)
     /// Current search query (case-insensitive substring match against the
@@ -136,11 +144,49 @@ pub struct AppModel {
 
     // Radio
     radio_stations: Vec<RadioStation>,
-    radio_search_query: String,
-    radio_search_results: Vec<StationSearchResult>,
-    radio_search_loading: bool,
+    /// Which of the two Radio tabs is shown; kept for the session (not
+    /// persisted to disk).
+    radio_tab: radio_view::RadioTab,
+    /// Live filter text over `radio_stations` in the "My stations" tab.
+    radio_filter: String,
+    /// Whether the inline add-by-URL card is open.
+    radio_add_open: bool,
     radio_add_name: String,
     radio_add_url: String,
+    /// Inline validation error for the add-by-URL form.
+    radio_add_error: Option<String>,
+    /// Station id currently being renamed, and its live-edited name.
+    radio_renaming_id: Option<i64>,
+    radio_rename_input: String,
+
+    // Radio discovery (Discover tab)
+    radio_search_query: String,
+    /// Selected quick-tag chip, if any.
+    radio_search_tag: Option<&'static str>,
+    /// Country-code filter; empty means "any country". Toggled between
+    /// `""` and `radio_locale_country`.
+    radio_search_country: String,
+    /// Country code derived once from the process locale at startup (see
+    /// `radio_page::locale_country_code`); empty when it can't be
+    /// determined, in which case the country chip is simply not shown.
+    radio_locale_country: String,
+    radio_search_sort: crate::online::radio::SortOrder,
+    radio_search_results: Vec<StationSearchResult>,
+    radio_search_loading: bool,
+    /// Inline error from the last search/preset fetch, shown in the
+    /// results slot with a Retry action instead of only logging/toasting.
+    radio_search_error: Option<String>,
+    /// Bumped on every new search/preset dispatch so a slow, since-
+    /// superseded request's result can be recognized and dropped.
+    radio_search_generation: u64,
+    /// Favicon URL and pre-resolution stream/result URL ("key") of the
+    /// station currently loaded into the player, captured when playback
+    /// started. `current_track.source_uri` alone can't serve as the
+    /// "currently playing" identity: stream-URL resolution (following a
+    /// `.pls`/`.m3u` playlist) can rewrite it to a different URL than the
+    /// one the saved/search row was keyed by.
+    radio_now_playing_favicon: String,
+    radio_now_playing_key: String,
 
     /// Podcast artwork / radio favicon bytes, keyed by their source URL.
     /// Shared between both views since the icons are the same kind of
@@ -261,6 +307,24 @@ pub struct AppModel {
     blurred_cover: Option<widget::icon::Handle>,
     /// Album key for the cached blurred cover.
     blurred_cover_key: Option<String>,
+    /// Album key of a blur+accent computation currently in flight (task
+    /// spawned, `BlurReady` not yet received). Guards
+    /// `maybe_update_blurred_cover` against spawning a second identical
+    /// job every time it's called again before the first one finishes
+    /// (e.g. once per cover-art batch arrival) — each spawn would
+    /// otherwise build a brand-new handle even though the result is
+    /// identical.
+    blur_pending_key: Option<String>,
+    /// Larger, separately decoded cover handle for the current track's
+    /// album, used by the expanded now-playing view so it doesn't have
+    /// to reuse the smaller grid-thumbnail handle from `cover_images`.
+    /// Computed off-thread alongside the blur (see
+    /// `maybe_update_blurred_cover`) and keyed by album key: `view()`
+    /// only uses it while that key still matches the current track, so a
+    /// track without cover bytes (radio, untagged files) never inherits
+    /// the previous album's art. Otherwise callers fall back to the
+    /// regular `cover_images` handle.
+    current_cover_large: Option<(String, widget::icon::Handle)>,
     /// Accent colour extracted from the current track's cover art via
     /// `library::palette::extract`, computed alongside the blur (same
     /// bytes, same trigger — see `maybe_update_blurred_cover`). `None`
@@ -339,17 +403,14 @@ pub struct AppModel {
     // Local file conversion / transcoding / CUE-ripping
     /// Queued/running/finished conversion jobs, oldest first.
     convert_jobs: Vec<ConvertJob>,
-    /// Output directory for new conversion jobs.
-    convert_out_dir: PathBuf,
-    /// Selected index into `OutputFormat::ALL`.
-    convert_format_index: usize,
-    /// Selected index into `views::convert::SAMPLE_RATE_OPTIONS`.
-    convert_rate_index: usize,
     /// Monotonic id source for new jobs.
     convert_next_id: u64,
-    /// Caps concurrently-running conversion jobs at 2, shared across every
-    /// in-flight job future.
+    /// Caps concurrently-running conversion jobs, shared across every
+    /// in-flight job future — see `crate::convert::concurrency`.
     convert_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Inline error from the last failed output-directory validation
+    /// (shown in the Output settings card); cleared on every new `Start`.
+    convert_dir_error: Option<String>,
     /// Whether the preset browser overlay is currently open.
     #[cfg(feature = "visualizer")]
     viz_browser_open: bool,
@@ -400,6 +461,8 @@ pub enum ContextPage {
     Equalizer,
     Lyrics,
     Providers,
+    /// The play queue ("Up Next").
+    Queue,
     Settings,
 }
 
@@ -410,6 +473,7 @@ pub enum MenuAction {
     Equalizer,
     Providers,
     Settings,
+    Queue,
     ScanLibrary,
     AddMusicDir,
     Search,
@@ -425,6 +489,7 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
             MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
             MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
+            MenuAction::Queue => Message::ToggleContextPage(ContextPage::Queue),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Search => Message::ToggleLibrarySearch,

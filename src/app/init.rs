@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds};
+use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds, radio_page};
 use crate::config::Config;
 use crate::fl;
 use crate::library::LibraryDb;
@@ -9,6 +9,7 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
+use crate::views::radio as radio_view;
 use crate::views::{providers, songs};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::Application;
@@ -349,6 +350,7 @@ impl AppModel {
             all_artists: Vec::new(),
             library_scanning: false,
             reload_generation: 0,
+            library_reload_staging: None,
 
             library_search: String::new(),
             search_active: false,
@@ -373,11 +375,25 @@ impl AppModel {
             last_saved_podcast_position_secs: 0,
             downloading_episodes: std::collections::HashSet::new(),
             radio_stations: Vec::new(),
-            radio_search_query: String::new(),
-            radio_search_results: Vec::new(),
-            radio_search_loading: false,
+            radio_tab: radio_view::RadioTab::default(),
+            radio_filter: String::new(),
+            radio_add_open: false,
             radio_add_name: String::new(),
             radio_add_url: String::new(),
+            radio_add_error: None,
+            radio_renaming_id: None,
+            radio_rename_input: String::new(),
+            radio_search_query: String::new(),
+            radio_search_tag: None,
+            radio_search_country: String::new(),
+            radio_locale_country: radio_page::locale_country_code(),
+            radio_search_sort: crate::online::radio::SortOrder::default(),
+            radio_search_results: Vec::new(),
+            radio_search_loading: false,
+            radio_search_error: None,
+            radio_search_generation: 0,
+            radio_now_playing_favicon: String::new(),
+            radio_now_playing_key: String::new(),
             online_icons: HashMap::new(),
             player,
             playback_position: Duration::ZERO,
@@ -436,6 +452,8 @@ impl AppModel {
             cover_art_bytes: crate::library::palette::CoverByteCache::new(),
             blurred_cover: None,
             blurred_cover_key: None,
+            blur_pending_key: None,
+            current_cover_large: None,
             accent: None,
             expand_progress: 0.0,
             expand_target: None,
@@ -471,13 +489,9 @@ impl AppModel {
             #[cfg(feature = "visualizer")]
             viz_hud_pointer_over: false,
             convert_jobs: Vec::new(),
-            convert_out_dir: dirs::audio_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-                .join("Converted"),
-            convert_format_index: 0,
-            convert_rate_index: 0,
             convert_next_id: 0,
-            convert_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            convert_semaphore: Arc::new(tokio::sync::Semaphore::new(crate::convert::concurrency())),
+            convert_dir_error: None,
             #[cfg(feature = "visualizer")]
             viz_browser_open: false,
             #[cfg(feature = "visualizer")]

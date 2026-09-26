@@ -85,6 +85,14 @@ impl LocalBackend {
         self.engine.set_crossfade(secs.max(0.0));
     }
 
+    /// Clear the engine's gapless/crossfade look-ahead slot without
+    /// touching current playback. Call whenever the upcoming track might
+    /// have changed (queue edit, shuffle/repeat toggle, jump) so a stale
+    /// pre-queued source doesn't play next instead of the new prediction.
+    pub fn clear_pre_queued(&mut self) {
+        self.engine.clear_next();
+    }
+
     /// Set the replay gain to apply to the next track.
     ///
     /// Call this before `play()` with the appropriate gain value from the

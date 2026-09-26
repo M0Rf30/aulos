@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0
 
 //! Local file converter/transcoder/ripper view — pick files (audio, video
-//! containers, or `.cue` sheets), an output format/rate, and run the queue.
+//! containers, or `.cue` sheets), an output format/rate/folder, and run the
+//! queue.
+//!
+//! The tree shape is the same regardless of queue/job state (a fixed
+//! header, an output settings card, a queue-summary card, then either the
+//! empty state or the job list) — only the *content* of each slot changes,
+//! so switching pages or jobs finishing never resets scroll position or
+//! flashes a differently-shaped view (see the crate's iced/libcosmic UI
+//! rules).
 
 use std::path::Path;
 
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::convert::{ConvertJob, JobKind, JobState, OutputFormat};
+use crate::convert::{ConvertJob, JobId, JobKind, JobState, OutputFormat};
 use crate::fl;
 use crate::views::common;
 
@@ -21,17 +29,70 @@ pub enum ConvertMessage {
     /// Open the (multi-select) file picker to add jobs.
     AddFiles,
     /// Open the directory picker to change the output directory.
-    PickOutputDir,
+    ChangeOutputDir,
+    /// Open the current output directory in the file manager.
+    OpenOutputDir,
     /// User picked an entry in the format dropdown.
     FormatSelected(usize),
     /// User picked an entry in the sample-rate dropdown.
     RateSelected(usize),
     /// Run every queued job.
     StartQueue,
-    /// Cancel a specific job by id.
-    CancelJob(u64),
+    /// Cancel every queued/running job.
+    CancelAll,
     /// Drop every finished (done/failed/cancelled) job from the list.
     ClearFinished,
+    /// Cancel a specific job by id.
+    CancelJob(JobId),
+    /// Requeue a failed/cancelled job by id.
+    RetryJob(JobId),
+    /// Remove a single non-running job by id.
+    RemoveJob(JobId),
+    /// Open a finished job's output folder in the file manager.
+    OpenJobFolder(JobId),
+}
+
+/// Counts of jobs in each lifecycle state, for the queue summary card.
+#[derive(Default, Clone, Copy)]
+struct JobCounts {
+    queued: usize,
+    running: usize,
+    done: usize,
+    failed: usize,
+}
+
+impl JobCounts {
+    fn compute(jobs: &[ConvertJob]) -> Self {
+        let mut counts = Self::default();
+        for job in jobs {
+            match job.state {
+                JobState::Queued => counts.queued += 1,
+                JobState::Running => counts.running += 1,
+                JobState::Done => counts.done += 1,
+                JobState::Failed(_) | JobState::Cancelled => counts.failed += 1,
+            }
+        }
+        counts
+    }
+}
+
+/// Overall queue progress (0.0-1.0): each queued job counts as 0, each
+/// finished (done/failed/cancelled) job as 1, and a running job as its own
+/// live fraction — so the bar climbs smoothly instead of jumping in
+/// per-job steps.
+fn overall_progress(jobs: &[ConvertJob]) -> f32 {
+    if jobs.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = jobs
+        .iter()
+        .map(|job| match job.state {
+            JobState::Queued => 0.0,
+            JobState::Running => job.progress_permille() as f32 / 1000.0,
+            JobState::Done | JobState::Failed(_) | JobState::Cancelled => 1.0,
+        })
+        .sum();
+    sum / jobs.len() as f32
 }
 
 /// Localized label for a format dropdown entry.
@@ -48,62 +109,289 @@ fn format_label(format: OutputFormat) -> String {
 fn rate_label(rate: Option<u32>) -> String {
     match rate {
         None => fl!("convert-rate-source"),
-        Some(hz) => format!("{hz} Hz"),
+        Some(hz) => fl!("convert-rate-hz", hz = hz),
     }
+}
+
+/// Localized label for a job's kind.
+fn kind_label(kind: JobKind) -> String {
+    match kind {
+        JobKind::Convert => fl!("convert-kind-convert"),
+        JobKind::CueSplit => fl!("convert-kind-cuesplit"),
+    }
+}
+
+/// Localized label for a job's lifecycle state.
+fn state_label(state: &JobState) -> String {
+    match state {
+        JobState::Queued => fl!("convert-state-queued"),
+        JobState::Running => fl!("convert-state-running"),
+        JobState::Done => fl!("convert-state-done"),
+        JobState::Failed(_) => fl!("convert-state-failed-chip"),
+        JobState::Cancelled => fl!("convert-state-cancelled"),
+    }
+}
+
+/// Bare icon button with a caption tooltip. Takes an owned `String` label
+/// (rather than `common::icon_button`'s borrowed `&'a str`) so it can be
+/// built from `fl!()` — see `now_playing::preset_browser::panel_icon_button`
+/// for the same pattern and why the borrowed signature can't take it.
+fn job_icon_button<'a>(
+    icon_name: &'static str,
+    label: String,
+    on_press: ConvertMessage,
+    destructive: bool,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let mut button = widget::button::icon(widget::icon::from_name(icon_name).size(16)).on_press(on_press);
+    if destructive {
+        button = button.class(cosmic::theme::Button::Destructive);
+    }
+    widget::tooltip(button, widget::text::caption(label), widget::tooltip::Position::Top).into()
+}
+
+/// Output settings card: destination folder, format, and sample rate
+/// applied to jobs the moment `Start` runs them.
+fn output_section<'a>(
+    out_dir: &Path,
+    format: OutputFormat,
+    sample_rate: Option<u32>,
+    dir_error: Option<&'a str>,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let format_index = OutputFormat::ALL.iter().position(|f| *f == format).unwrap_or(0);
+    let rate_index = SAMPLE_RATE_OPTIONS.iter().position(|r| *r == sample_rate).unwrap_or(0);
+
+    let dir_row = widget::Row::new()
+        .push(common::clipped_cell(
+            common::cell_text(out_dir.display().to_string()).into(),
+        ))
+        .push(widget::button::standard(fl!("convert-dir-change")).on_press(ConvertMessage::ChangeOutputDir))
+        .push(widget::button::standard(fl!("convert-dir-open")).on_press(ConvertMessage::OpenOutputDir))
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut section = widget::settings::section()
+        .title(fl!("convert-output-section"))
+        .add(widget::settings::item(fl!("convert-output-dir"), dir_row))
+        .add(widget::settings::item(
+            fl!("convert-format"),
+            widget::dropdown(
+                OutputFormat::ALL.iter().map(|&f| format_label(f)).collect::<Vec<_>>(),
+                Some(format_index),
+                ConvertMessage::FormatSelected,
+            ),
+        ))
+        .add(widget::settings::item(
+            fl!("convert-sample-rate"),
+            widget::dropdown(
+                SAMPLE_RATE_OPTIONS.iter().map(|&r| rate_label(r)).collect::<Vec<_>>(),
+                Some(rate_index),
+                ConvertMessage::RateSelected,
+            ),
+        ));
+
+    if let Some(reason) = dir_error {
+        section = section.add(widget::text::body(fl!("convert-dir-error", reason = reason.to_owned())));
+    }
+    section = section.add(widget::text::caption(fl!("convert-settings-hint")));
+
+    section.into()
+}
+
+/// Queue summary card: per-state counts, an always-present overall
+/// progress bar, and Start/Cancel-all/Clear-finished actions that disable
+/// (rather than disappear) when not applicable.
+fn summary_section<'a>(jobs: &'a [ConvertJob]) -> cosmic::Element<'a, ConvertMessage> {
+    let counts = JobCounts::compute(jobs);
+
+    let counts_row = widget::Row::new()
+        .push(common::cell_caption(fl!("convert-summary-queued", count = counts.queued)))
+        .push(common::cell_caption(fl!("convert-summary-running", count = counts.running)))
+        .push(common::cell_caption(fl!("convert-summary-done", count = counts.done)))
+        .push(common::cell_caption(fl!("convert-summary-failed", count = counts.failed)))
+        .spacing(16);
+
+    let progress =
+        widget::progress_bar::determinate_linear(overall_progress(jobs)).width(Length::Fill);
+
+    let buttons = widget::Row::new()
+        .push(
+            widget::button::suggested(fl!("convert-start"))
+                .on_press_maybe((counts.queued > 0).then_some(ConvertMessage::StartQueue)),
+        )
+        .push(
+            widget::button::destructive(fl!("convert-cancel-all")).on_press_maybe(
+                (counts.queued + counts.running > 0).then_some(ConvertMessage::CancelAll),
+            ),
+        )
+        .push(
+            widget::button::standard(fl!("convert-clear-finished"))
+                .on_press_maybe((counts.done + counts.failed > 0).then_some(ConvertMessage::ClearFinished)),
+        )
+        .spacing(8);
+
+    widget::container(
+        widget::Column::new()
+            .push(counts_row)
+            .push(progress)
+            .push(buttons)
+            .spacing(8)
+            .padding(12),
+    )
+    .width(Length::Fill)
+    .class(cosmic::theme::Container::Card)
+    .into()
+}
+
+/// One job row: kind icon, filename, target-format/destination caption
+/// (plus the failure reason when applicable), a status chip, a
+/// constant-height progress slot, and state-appropriate actions.
+///
+/// `pending_*` are the *current* output settings, used to preview a job
+/// that hasn't started yet — its own `settings` are `None` until `Start`
+/// actually runs it (see `ConvertJob::start`).
+fn job_row<'a>(
+    job: &'a ConvertJob,
+    pending_format: OutputFormat,
+    pending_rate: Option<u32>,
+    pending_out_dir: &Path,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let (format, rate, out_dir): (OutputFormat, Option<u32>, &Path) = match &job.settings {
+        Some(settings) => (settings.format, settings.target_rate, settings.out_dir.as_path()),
+        None => (pending_format, pending_rate, pending_out_dir),
+    };
+    let destination = job.destination_preview(format, out_dir);
+    let filename = job.source.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+    let caption = fl!(
+        "convert-job-caption",
+        kind = kind_label(job.kind),
+        format = format_label(format),
+        rate = rate_label(rate),
+        dest = destination.display().to_string()
+    );
+
+    let mut info = widget::Column::new()
+        .push(common::cell_text(filename))
+        .push(common::cell_caption(caption))
+        .spacing(2);
+
+    if let JobState::Failed(reason) = &job.state {
+        info = info.push(widget::tooltip(
+            common::cell_caption(fl!("convert-state-failed", error = reason.clone())),
+            widget::text::caption(reason.clone()),
+            widget::tooltip::Position::Top,
+        ));
+    }
+
+    // Constant-height progress slot regardless of state, so a row's height
+    // never jumps as the job moves through the queue.
+    let fraction = match &job.state {
+        JobState::Running => job.progress_permille() as f32 / 1000.0,
+        JobState::Done => 1.0,
+        JobState::Queued | JobState::Failed(_) | JobState::Cancelled => 0.0,
+    };
+    info = info.push(widget::progress_bar::determinate_linear(fraction).width(Length::Fill));
+
+    let kind_icon = match job.kind {
+        JobKind::Convert => "audio-x-generic-symbolic",
+        JobKind::CueSplit => "playlist-symbolic",
+    };
+
+    let status_chip = widget::container(common::cell_caption(state_label(&job.state)))
+        .padding(6)
+        .class(cosmic::theme::Container::Card);
+
+    let mut actions = widget::Row::new().spacing(4).align_y(Alignment::Center);
+    match job.state {
+        JobState::Queued => {
+            actions = actions
+                .push(job_icon_button(
+                    "process-stop-symbolic",
+                    fl!("convert-cancel-tooltip"),
+                    ConvertMessage::CancelJob(job.id),
+                    true,
+                ))
+                .push(job_icon_button(
+                    "user-trash-symbolic",
+                    fl!("convert-remove-tooltip"),
+                    ConvertMessage::RemoveJob(job.id),
+                    false,
+                ));
+        }
+        JobState::Running => {
+            actions = actions.push(job_icon_button(
+                "process-stop-symbolic",
+                fl!("convert-cancel-tooltip"),
+                ConvertMessage::CancelJob(job.id),
+                true,
+            ));
+        }
+        JobState::Failed(_) | JobState::Cancelled => {
+            actions = actions
+                .push(job_icon_button(
+                    "view-refresh-symbolic",
+                    fl!("convert-retry-tooltip"),
+                    ConvertMessage::RetryJob(job.id),
+                    false,
+                ))
+                .push(job_icon_button(
+                    "user-trash-symbolic",
+                    fl!("convert-remove-tooltip"),
+                    ConvertMessage::RemoveJob(job.id),
+                    false,
+                ));
+        }
+        JobState::Done => {
+            actions = actions
+                .push(job_icon_button(
+                    "folder-open-symbolic",
+                    fl!("convert-open-folder-tooltip"),
+                    ConvertMessage::OpenJobFolder(job.id),
+                    false,
+                ))
+                .push(job_icon_button(
+                    "user-trash-symbolic",
+                    fl!("convert-remove-tooltip"),
+                    ConvertMessage::RemoveJob(job.id),
+                    false,
+                ));
+        }
+    }
+
+    widget::container(
+        widget::Row::new()
+            .push(widget::icon::from_name(kind_icon).size(32))
+            .push(common::clipped_cell(info.into()))
+            .push(status_chip)
+            .push(actions)
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .padding(8),
+    )
+    .width(Length::Fill)
+    .class(cosmic::theme::Container::Card)
+    .into()
 }
 
 pub fn convert_view<'a>(
     jobs: &'a [ConvertJob],
-    out_dir: &'a Path,
-    format_index: usize,
-    rate_index: usize,
+    out_dir: &Path,
+    format: OutputFormat,
+    sample_rate: Option<u32>,
+    dir_error: Option<&'a str>,
 ) -> cosmic::Element<'a, ConvertMessage> {
-    let mut col = widget::Column::new().spacing(12).padding(16);
+    let header = widget::Row::new()
+        .push(widget::text::title3(fl!("convert")))
+        .push(widget::Space::new().width(Length::Fill))
+        .push(widget::button::suggested(fl!("convert-add-files")).on_press(ConvertMessage::AddFiles))
+        .align_y(Alignment::Center);
 
-    let dir_text = out_dir.display().to_string();
-    let controls = widget::Column::new()
-        .spacing(8)
-        .push(
-            widget::Row::new()
-                .push(widget::button::suggested(fl!("convert-add-files")).on_press(ConvertMessage::AddFiles))
-                .push(common::cell_text(fl!("convert-output-dir")))
-                .push(common::clipped_cell(common::cell_text(dir_text).into()))
-                .push(widget::button::standard(fl!("convert-choose-dir")).on_press(ConvertMessage::PickOutputDir))
-                .spacing(8)
-                .align_y(Alignment::Center),
-        )
-        .push(
-            widget::Row::new()
-                .push(common::cell_text(fl!("convert-format")))
-                .push(widget::dropdown(
-                    OutputFormat::ALL.iter().map(|&f| format_label(f)).collect::<Vec<_>>(),
-                    Some(format_index),
-                    ConvertMessage::FormatSelected,
-                ))
-                .push(common::cell_text(fl!("convert-sample-rate")))
-                .push(widget::dropdown(
-                    SAMPLE_RATE_OPTIONS.iter().map(|&r| rate_label(r)).collect::<Vec<_>>(),
-                    Some(rate_index),
-                    ConvertMessage::RateSelected,
-                ))
-                .spacing(8)
-                .align_y(Alignment::Center),
-        )
-        .push(
-            widget::Row::new()
-                .push(
-                    widget::button::suggested(fl!("convert-start"))
-                        .on_press_maybe(has_queued(jobs).then_some(ConvertMessage::StartQueue)),
-                )
-                .push(
-                    widget::button::standard(fl!("convert-clear-finished"))
-                        .on_press_maybe(has_finished(jobs).then_some(ConvertMessage::ClearFinished)),
-                )
-                .spacing(8),
-        );
-
-    col = col.push(controls);
-    col = col.push(widget::divider::horizontal::default());
+    let mut col = widget::Column::new()
+        .spacing(16)
+        .padding(16)
+        .push(header)
+        .push(output_section(out_dir, format, sample_rate, dir_error))
+        .push(summary_section(jobs));
 
     if jobs.is_empty() {
         col = col.push(common::empty_state(
@@ -114,74 +402,11 @@ pub fn convert_view<'a>(
         return col.into();
     }
 
-    let mut list = widget::Column::new().spacing(2);
+    let mut list = widget::Column::new().spacing(4);
     for job in jobs {
-        list = list.push(job_row(job));
+        list = list.push(job_row(job, format, sample_rate, out_dir));
     }
 
     col = col.push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
     col.into()
-}
-
-fn has_queued(jobs: &[ConvertJob]) -> bool {
-    jobs.iter().any(|j| j.state == JobState::Queued)
-}
-
-fn has_finished(jobs: &[ConvertJob]) -> bool {
-    jobs.iter()
-        .any(|j| matches!(j.state, JobState::Done | JobState::Failed(_) | JobState::Cancelled))
-}
-
-fn kind_label(kind: JobKind) -> String {
-    match kind {
-        JobKind::Convert => fl!("convert-kind-convert"),
-        JobKind::CueSplit => fl!("convert-kind-cuesplit"),
-    }
-}
-
-fn state_label(state: &JobState) -> String {
-    match state {
-        JobState::Queued => fl!("convert-state-queued"),
-        JobState::Running => fl!("convert-state-running"),
-        JobState::Done => fl!("convert-state-done"),
-        JobState::Failed(error) => fl!("convert-state-failed", error = error.clone()),
-        JobState::Cancelled => fl!("convert-state-cancelled"),
-    }
-}
-
-fn job_row(job: &ConvertJob) -> cosmic::Element<'_, ConvertMessage> {
-    let filename = job.source.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-
-    let mut info = widget::Column::new()
-        .push(common::cell_text(filename))
-        .push(common::cell_caption(format!("{} — {}", kind_label(job.kind), state_label(&job.state))))
-        .spacing(2);
-
-    if job.state == JobState::Running {
-        info = info.push(
-            widget::progress_bar::determinate_linear(job.progress_permille() as f32 / 1000.0)
-                .width(Length::Fill),
-        );
-    }
-
-    let cancellable = matches!(job.state, JobState::Queued | JobState::Running);
-    let cancel_btn = widget::tooltip(
-        widget::button::icon(widget::icon::from_name("process-stop-symbolic").size(16))
-            .class(cosmic::theme::Button::Destructive)
-            .on_press_maybe(cancellable.then_some(ConvertMessage::CancelJob(job.id))),
-        widget::text::caption(fl!("convert-cancel-tooltip")),
-        widget::tooltip::Position::Top,
-    );
-
-    widget::container(
-        widget::Row::new()
-            .push(widget::icon::from_name("audio-x-generic-symbolic").size(32))
-            .push(common::clipped_cell(info.into()))
-            .push(cancel_btn)
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .padding(8),
-    )
-    .width(Length::Fill)
-    .into()
 }

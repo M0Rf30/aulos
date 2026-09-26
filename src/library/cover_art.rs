@@ -62,9 +62,80 @@ impl CoverArt {
         format!("{artist}||{album}")
     }
 
+    /// Max side length (px) for a grid/list cover-art thumbnail. Sized so
+    /// a 160px (logical) grid card stays crisp on 2x HiDPI displays with
+    /// headroom to spare, while remaining far smaller than typical
+    /// full-resolution embedded cover art (which can be several thousand
+    /// pixels per side) — see `decode_thumbnail`.
+    pub const GRID_THUMBNAIL_MAX_DIM: u32 = 320;
+
+    /// Max side length (px) for the larger cover shown in the expanded
+    /// now-playing view, which can render at up to roughly half the
+    /// window width.
+    pub const EXPANDED_COVER_MAX_DIM: u32 = 960;
+
+    /// Max side length (px) for podcast/radio favicons, which are
+    /// rendered small (list rows / avatar-sized) and rarely larger than
+    /// this to begin with.
+    pub const ONLINE_ICON_MAX_DIM: u32 = 160;
+
+    /// Decode encoded cover-art bytes and return a downscaled RGBA8
+    /// thumbnail as `(width, height, pixels)`, sized to fit within
+    /// `max_dim` on its longer side while preserving aspect ratio. Never
+    /// upscales: an image already smaller than `max_dim` is returned at
+    /// its original size.
+    ///
+    /// Building `widget::icon::Handle`s from this pre-decoded pixel
+    /// buffer (via `widget::icon::from_raster_pixels`) instead of the
+    /// original encoded bytes (`from_raster_bytes`) means the full-size
+    /// JPEG/PNG is decoded here, once, off the UI thread, rather than
+    /// re-decoded on the UI thread every time iced's wgpu raster cache
+    /// evicts and re-uploads the handle (e.g. on every page/drawer
+    /// switch that stops drawing it for one frame).
+    pub fn decode_thumbnail(bytes: &[u8], max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let img = image::load_from_memory(bytes).ok()?;
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 {
+            return None;
+        }
+        // Single scale factor applied to both dimensions preserves aspect
+        // ratio exactly (modulo integer rounding); capping at 1.0 means an
+        // already-small image is returned as-is instead of upscaled.
+        let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+        let resized = if scale < 1.0 {
+            let target_w = ((w as f32 * scale).round() as u32).max(1);
+            let target_h = ((h as f32 * scale).round() as u32).max(1);
+            img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            img
+        };
+        let rgba = resized.into_rgba8();
+        let (rw, rh) = rgba.dimensions();
+        Some((rw, rh, rgba.into_raw()))
+    }
+
     /// Generate a colored circle avatar with initials for an artist name.
-    /// Returns PNG bytes.
+    /// Returns PNG bytes. Prefer `generate_artist_avatar_pixels` for new
+    /// call sites building a `widget::icon::Handle` directly — this
+    /// wraps it purely for callers that need an encoded, shareable byte
+    /// blob.
     pub fn generate_artist_avatar(name: &str, size: u32) -> Vec<u8> {
+        let (w, h, pixels) = Self::generate_artist_avatar_pixels(name, size);
+        let img: RgbaImage =
+            ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap_or_default();
+        buf
+    }
+
+    /// Generate a colored circle avatar with initials for an artist name,
+    /// as raw RGBA8 pixels (`(width, height, pixels)`) rather than
+    /// encoded PNG bytes — this small procedural image never needs an
+    /// encode/decode round trip, so callers building a
+    /// `widget::icon::Handle` should use `widget::icon::from_raster_pixels`
+    /// directly on this output.
+    pub fn generate_artist_avatar_pixels(name: &str, size: u32) -> (u32, u32, Vec<u8>) {
         let initials = artist_initials(name);
         let color = deterministic_color(name);
 
@@ -113,10 +184,7 @@ impl CoverArt {
             }
         }
 
-        let mut buf = Vec::new();
-        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
-            .unwrap_or_default();
-        buf
+        (size, size, img.into_raw())
     }
 }
 
@@ -156,4 +224,50 @@ pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::CoverArt;
+
+    fn encode_test_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 0, 0, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn downscales_large_image_preserving_aspect() {
+        let bytes = encode_test_png(1000, 500);
+        let (w, h, pixels) = CoverArt::decode_thumbnail(&bytes, 320).expect("decodes");
+        assert!(w <= 320 && h <= 320, "got {w}x{h}");
+        // 2:1 source aspect ratio preserved within integer-rounding error.
+        assert!(
+            (w as f32 / h as f32 - 2.0).abs() < 0.05,
+            "aspect ratio drifted: {w}x{h}"
+        );
+        assert_eq!(pixels.len(), (w * h * 4) as usize);
+    }
+
+    #[test]
+    fn does_not_upscale_small_image() {
+        let bytes = encode_test_png(64, 48);
+        let (w, h, _) = CoverArt::decode_thumbnail(&bytes, 320).expect("decodes");
+        assert_eq!((w, h), (64, 48));
+    }
+
+    #[test]
+    fn rejects_undecodable_bytes() {
+        assert!(CoverArt::decode_thumbnail(b"not an image", 320).is_none());
+    }
+
+    #[test]
+    fn avatar_pixels_match_declared_size() {
+        let (w, h, pixels) = CoverArt::generate_artist_avatar_pixels("Jane Doe", 64);
+        assert_eq!((w, h), (64, 64));
+        assert_eq!(pixels.len(), (64 * 64 * 4) as usize);
+    }
 }

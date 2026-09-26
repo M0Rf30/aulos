@@ -2,11 +2,9 @@
 
 use super::ContextPage;
 use crate::config::{Config, ReplayGainMode};
-use crate::convert::JobState;
 use crate::library::{Album, Artist, Lyrics, Track};
 use crate::online::podcast::PodcastSearchResult;
-use crate::online::radio::StationSearchResult;
-use crate::online::store::{Episode, Podcast, RadioStation};
+use crate::online::store::{Episode, Podcast};
 use crate::player::PlaybackState;
 use crate::views::radio as radio_view;
 use crate::views::{albums, artists, convert, podcasts, songs};
@@ -103,6 +101,25 @@ pub enum Message {
     ToggleShuffle,
     CycleRepeat,
     PlaybackTick,
+    /// Stop playback entirely (transport button, `Stop` shortcut, MPRIS
+    /// `Stop`). Keeps the queue so a later play resumes it.
+    Stop,
+
+    // Play queue ("Up Next") editing. Every index is a position in *play
+    // order* — the order `Player::queue()` returns, which already reflects
+    // shuffle — so the queue view can hand its row index straight back.
+    /// Jump to and play the queue entry at this play-order index.
+    QueueJump(usize),
+    /// Remove the queue entry at this play-order index.
+    QueueRemove(usize),
+    /// Move a queue entry between two play-order indices.
+    QueueMove { from: usize, to: usize },
+    /// Drop every queue entry except the one currently playing.
+    QueueClear,
+    /// Insert tracks right after the currently playing one.
+    PlayNext(Vec<Track>),
+    /// Append tracks to the end of the queue.
+    AddToQueue(Vec<Track>),
 
     // Track selection
     PlayTrackIndex(usize),
@@ -250,7 +267,10 @@ pub enum Message {
     // MPD provider events
     MpdConnected(String),
     MpdConnectionFailed(String, String),
-    MpdIdleEvent(String),
+    /// `provider_id`, plus which MPD subsystem changed (only
+    /// `Database`/`Update`/`StoredPlaylist` trigger a reload in
+    /// `update()` — see `subscriptions::idle_action`).
+    MpdIdleEvent(String, super::subscriptions::IdleSubsystem),
     /// Polled status from the active MPD backend (position, duration,
     /// state, volume). `song` is `Some` only on the tick where MPD's
     /// current song identity changed (including the first tick after the
@@ -291,14 +311,16 @@ pub enum Message {
     ExpandNowPlaying,
     CollapseNowPlaying,
     ExpandAnimTick,
-    /// Blurred cover art and accent colour are ready for `album_key`.
-    /// The blur handle is `None` when blur computation failed (still
-    /// worth delivering the accent); the accent is `None` when
-    /// extraction found no legible dominant hue.
+    /// Blurred cover art, accent colour, and a separately-decoded larger
+    /// cover handle (for the expanded now-playing view) are ready for
+    /// `album_key`. The blur/large-cover handles are `None` when their
+    /// respective decode failed (still worth delivering the accent); the
+    /// accent is `None` when extraction found no legible dominant hue.
     BlurReady(
         String,
         Option<widget::icon::Handle>,
         Option<crate::library::palette::Accent>,
+        Option<widget::icon::Handle>,
     ),
 
     // Visualizer (behind feature flag)
@@ -371,50 +393,27 @@ pub enum Message {
     /// `podcast_episodes`.
     DeleteEpisodeDownload(usize),
     /// A podcast/radio icon (artwork or favicon) finished downloading.
-    OnlineIconLoaded(String, Vec<u8>),
+    /// `Some((width, height, rgba_pixels))` on success (already decoded
+    /// and downscaled off-thread by `load_online_icons`, so the handler
+    /// can build a `widget::icon::from_raster_pixels` handle directly);
+    /// `None` when the fetch or decode failed.
+    OnlineIconLoaded(String, Option<(u32, u32, Vec<u8>)>),
 
     // Radio
-    RadioSearchChanged(String),
-    RadioSearchSubmit,
-    /// Fetch globally popular stations (reuses `RadioSearchResults` to
-    /// complete, since finishing a discovery fetch behaves identically to
-    /// finishing a name search).
-    RadioDiscover,
-    RadioSearchResults(Result<Vec<StationSearchResult>, String>),
-    RadioAddNameChanged(String),
-    RadioAddUrlChanged(String),
-    AddRadioStation {
-        name: String,
-        stream_url: String,
-        homepage: String,
-        favicon_url: String,
-        tags: String,
-    },
-    AddRadioFromSearch(usize),
-    RadioStationsLoaded(Vec<RadioStation>),
-    RemoveRadioStation(usize),
-    PlayRadioStation(usize),
-    PlayRadioSearchResult(usize),
-    RadioStreamResolved {
-        name: String,
-        result: Result<String, String>,
-    },
+    /// UI events from the radio view (see `views::radio::RadioMessage`).
+    Radio(radio_view::RadioMessage),
+    /// Async results for the radio page (see `app::radio_page::RadioEvent`).
+    RadioEvent(super::radio_page::RadioEvent),
 
     /// A toast notification was dismissed (by timeout or user action).
     CloseToast(widget::toaster::ToastId),
 
     // Convert / transcode / rip local files
-    ConvertAddFiles,
-    ConvertFilesPicked(Result<Vec<PathBuf>, String>),
-    ConvertPickOutputDir,
-    ConvertOutputDirPicked(Result<PathBuf, String>),
-    ConvertFormatSelected(usize),
-    ConvertRateSelected(usize),
-    ConvertStart,
-    ConvertCancelJob(u64),
-    ConvertClearFinished,
-    ConvertJobFinished(u64, JobState),
-    ConvertTick,
+    /// UI actions from the convert view (see `views::convert::ConvertMessage`).
+    Convert(convert::ConvertMessage),
+    /// Async results and ticks for the convert page (see
+    /// `app::convert_page::ConvertEvent`).
+    ConvertEvent(super::convert_page::ConvertEvent),
 
     // Application lifecycle
     Quit,
@@ -446,6 +445,8 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::FilterByGenre(g) => Message::FilterByGenre(g),
             albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
             albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
+            albums::AlbumMessage::PlayNext(tracks) => Message::PlayNext(tracks),
+            albums::AlbumMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
         }
     }
 }
@@ -461,6 +462,8 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::SetRating(id, r) => Message::SetRating(id, r),
             artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
             artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
+            artists::ArtistMessage::PlayNext(tracks) => Message::PlayNext(tracks),
+            artists::ArtistMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
         }
     }
 }
@@ -482,43 +485,6 @@ impl From<podcasts::PodcastMessage> for Message {
             podcasts::PodcastMessage::TogglePlayed(i) => Message::TogglePodcastEpisodePlayed(i),
             podcasts::PodcastMessage::Download(i) => Message::DownloadEpisode(i),
             podcasts::PodcastMessage::DeleteDownload(i) => Message::DeleteEpisodeDownload(i),
-        }
-    }
-}
-
-impl From<radio_view::RadioMessage> for Message {
-    fn from(msg: radio_view::RadioMessage) -> Self {
-        match msg {
-            radio_view::RadioMessage::SearchChanged(s) => Message::RadioSearchChanged(s),
-            radio_view::RadioMessage::SearchSubmit => Message::RadioSearchSubmit,
-            radio_view::RadioMessage::AddNameChanged(s) => Message::RadioAddNameChanged(s),
-            radio_view::RadioMessage::AddUrlChanged(s) => Message::RadioAddUrlChanged(s),
-            radio_view::RadioMessage::AddByUrl(name, url) => Message::AddRadioStation {
-                name,
-                stream_url: url,
-                homepage: String::new(),
-                favicon_url: String::new(),
-                tags: String::new(),
-            },
-            radio_view::RadioMessage::AddFromSearch(i) => Message::AddRadioFromSearch(i),
-            radio_view::RadioMessage::RemoveStation(i) => Message::RemoveRadioStation(i),
-            radio_view::RadioMessage::PlayStation(i) => Message::PlayRadioStation(i),
-            radio_view::RadioMessage::PlaySearchResult(i) => Message::PlayRadioSearchResult(i),
-            radio_view::RadioMessage::Discover => Message::RadioDiscover,
-        }
-    }
-}
-
-impl From<convert::ConvertMessage> for Message {
-    fn from(msg: convert::ConvertMessage) -> Self {
-        match msg {
-            convert::ConvertMessage::AddFiles => Message::ConvertAddFiles,
-            convert::ConvertMessage::PickOutputDir => Message::ConvertPickOutputDir,
-            convert::ConvertMessage::FormatSelected(i) => Message::ConvertFormatSelected(i),
-            convert::ConvertMessage::RateSelected(i) => Message::ConvertRateSelected(i),
-            convert::ConvertMessage::StartQueue => Message::ConvertStart,
-            convert::ConvertMessage::CancelJob(id) => Message::ConvertCancelJob(id),
-            convert::ConvertMessage::ClearFinished => Message::ConvertClearFinished,
         }
     }
 }

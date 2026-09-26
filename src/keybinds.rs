@@ -30,6 +30,8 @@ pub enum Shortcut {
     ToggleFavorite,
     ToggleLyrics,
     ToggleExpanded,
+    /// Toggle the "Up Next" queue drawer.
+    ToggleQueue,
     FocusSearch,
     /// 1-based page number, matching the digit key pressed (`1`-`8`).
     NavPage(u8),
@@ -82,6 +84,7 @@ pub fn resolve(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
             "r" => Some(Shortcut::CycleRepeat),
             "f" => Some(Shortcut::ToggleFavorite),
             "l" => Some(Shortcut::ToggleLyrics),
+            "u" => Some(Shortcut::ToggleQueue),
             "/" => Some(Shortcut::FocusSearch),
             "1" => Some(Shortcut::NavPage(1)),
             "2" => Some(Shortcut::NavPage(2)),
@@ -135,6 +138,14 @@ mod tests {
         assert_eq!(
             resolve(&Key::Character("8".into()), Modifiers::empty()),
             Some(Shortcut::NavPage(8))
+        );
+    }
+
+    #[test]
+    fn u_toggles_the_queue_drawer() {
+        assert_eq!(
+            resolve(&Key::Character("u".into()), Modifiers::empty()),
+            Some(Shortcut::ToggleQueue)
         );
     }
 
