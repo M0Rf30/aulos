@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::tasks::{download_episode_task, refresh_podcast_task};
-use super::{
-    AppModel, ContextPage, HTTP_CLIENT, Message, Page, SEARCH_INPUT_ID, now_epoch,
-    open_online_store, parse_delimiters_input,
-};
+use super::helpers::clamp_display_position;
+use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID, parse_delimiters_input};
 use crate::config::ReplayGainMode;
 use crate::fl;
-use crate::library::{LibraryScanner, LyricsProvider, Track};
-use crate::online::podcast;
+use crate::library::{LibraryScanner, LyricsProvider};
 use crate::player::{ActiveBackend, PlaybackState};
 use crate::views::providers;
 use cosmic::Application;
 use cosmic::prelude::*;
 use cosmic::widget::{self, nav_bar};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 impl AppModel {
@@ -129,7 +124,6 @@ impl AppModel {
                 albums,
                 artists: _artists,
                 cover_images,
-                artist_avatars,
                 cover_art_bytes,
             } => {
                 if self.is_stale_reload(generation, &provider_id) {
@@ -139,7 +133,6 @@ impl AppModel {
                 self.all_tracks = tracks;
                 self.all_albums = albums;
                 self.cover_images = cover_images;
-                self.artist_avatars = artist_avatars;
                 self.rebuild_all_artists();
                 self.cover_art_bytes = cover_art_bytes.into();
                 // Rebuild the folder tree only if it's already in use —
@@ -574,10 +567,9 @@ impl AppModel {
                     // Update UI position (unless user is dragging seek slider).
                     if self.seeking_preview.is_none() {
                         self.playback_position = position;
-                        if let Some(track) = &self.current_track
-                            && self.playback_position > track.duration
-                        {
-                            self.playback_position = track.duration;
+                        if let Some(track) = &self.current_track {
+                            self.playback_position =
+                                clamp_display_position(self.playback_position, track.duration);
                         }
                     }
 
@@ -626,10 +618,9 @@ impl AppModel {
                     if self.seeking_preview.is_none() {
                         self.playback_position = player.position();
 
-                        if let Some(track) = &self.current_track
-                            && self.playback_position > track.duration
-                        {
-                            self.playback_position = track.duration;
+                        if let Some(track) = &self.current_track {
+                            self.playback_position =
+                                clamp_display_position(self.playback_position, track.duration);
                         }
                     }
 
@@ -896,10 +887,36 @@ impl AppModel {
 
             Message::SelectArtist(idx) => {
                 self.selected_artist = Some(idx);
+                self.artist_bio_expanded = false;
+                if let Some(name) = self.all_artists.get(idx).map(|a| a.name.clone()) {
+                    return self.load_artist_info_for_selected(&name);
+                }
             }
 
             Message::BackToArtistList => {
                 self.selected_artist = None;
+                self.artist_bio_expanded = false;
+            }
+
+            Message::ToggleArtistBioExpanded => {
+                self.artist_bio_expanded = !self.artist_bio_expanded;
+            }
+
+            Message::ArtistInfoLoaded(outcome) => {
+                self.artist_info_pending.remove(&outcome.name);
+                let mut resolved = false;
+                if let Some(bio) = outcome.bio {
+                    self.artist_bios.insert(outcome.name.clone(), bio);
+                    resolved = true;
+                }
+                if let Some((w, h, pixels)) = outcome.image {
+                    let handle = widget::image::Handle::from_rgba(w, h, pixels);
+                    self.artist_photos.insert(outcome.name.clone(), handle);
+                    resolved = true;
+                }
+                if !resolved && !outcome.name.is_empty() {
+                    self.artist_info_negative.insert(outcome.name);
+                }
             }
 
             Message::SortSongs(field) => {
@@ -1408,6 +1425,20 @@ impl AppModel {
                 self.refresh_search_filter();
             }
 
+            Message::SetExperimentalConverter(enabled) => {
+                self.config.experimental_converter = enabled;
+                self.save_config();
+                self.set_convert_nav_entry(enabled);
+            }
+
+            Message::SetFetchArtistInfo(enabled) => {
+                self.config.fetch_artist_info = enabled;
+                self.save_config();
+                if enabled && self.nav.active_data::<Page>() == Some(&Page::Artists) {
+                    return self.load_artist_info_for_visible();
+                }
+            }
+
             Message::ArtistTagDelimitersInputChanged(text) => {
                 self.artist_tag_delimiters_input = text;
             }
@@ -1436,8 +1467,12 @@ impl AppModel {
                 if let Some((id, _name)) = self.provider_list.get(index)
                     && self.registry.set_active(id)
                 {
+                    let provider_id = id.clone();
                     self.active_provider_index = Some(index);
-                    tracing::info!("Switched to provider: {id}");
+                    self.provider_manually_switched = true;
+                    self.config.active_provider = Some(provider_id.clone());
+                    self.save_config();
+                    tracing::info!("Switched to provider: {provider_id}");
 
                     // Recreate player with the correct backend for the new provider.
                     self.recreate_player();
@@ -1447,7 +1482,10 @@ impl AppModel {
                     self.all_albums.clear();
                     self.all_artists.clear();
                     self.cover_images.clear();
-                    self.artist_avatars.clear();
+                    self.artist_photos.clear();
+                    self.artist_bios.clear();
+                    self.artist_info_pending.clear();
+                    self.artist_info_negative.clear();
                     return self.reload_library();
                 }
             }
@@ -1583,6 +1621,18 @@ impl AppModel {
                     && let Some(s) = self.mpd_connection_status.get_mut(idx)
                 {
                     *s = Some(fl!("connected"));
+                }
+
+                // Restore the persisted active provider once it actually
+                // connects, unless the user has since switched providers
+                // manually — a manual choice always wins over the saved
+                // one, even across a later reconnect of this server.
+                if !self.provider_manually_switched
+                    && self.config.active_provider.as_deref() == Some(provider_id.as_str())
+                    && self.registry.active_id() != provider_id
+                    && self.registry.set_active(&provider_id)
+                {
+                    self.rebuild_provider_list();
                 }
 
                 // If this is the active provider, attach an MpdBackend and
@@ -1862,7 +1912,7 @@ impl AppModel {
                 // Leaving the expanded view must also leave fullscreen, else the
                 // header bar / nav sidebar would stay hidden with no visualizer.
                 #[cfg(feature = "visualizer")]
-                self.exit_viz_fullscreen();
+                return self.exit_viz_fullscreen();
             }
 
             Message::ExpandAnimTick => {
@@ -1939,13 +1989,13 @@ impl AppModel {
                 // takes over. If it was never computed (e.g. track changed while
                 // viz was active and bytes weren't cached yet), trigger it now.
                 if !self.visualizer_active {
-                    self.exit_viz_fullscreen();
+                    let fs_task = self.exit_viz_fullscreen();
                     self.viz_browser_open = false;
                     // Force retry even if key matches — blurred_cover may be None.
                     if self.blurred_cover.is_none() {
                         self.blurred_cover_key = None;
                     }
-                    return self.maybe_update_blurred_cover();
+                    return Task::batch([fs_task, self.maybe_update_blurred_cover()]);
                 }
             }
 
@@ -2009,19 +2059,26 @@ impl AppModel {
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizerFullscreen => {
                 // COSMIC uses client-side decorations, so the header bar *is* the
-                // titlebar. "Fullscreen" here means hiding the header bar and the
-                // nav sidebar so the visualizer fills the whole window. (The old
+                // titlebar; hiding it (plus the nav sidebar) is necessary but not
+                // sufficient for a real fullscreen — the compositor's panels/dock
+                // stay visible unless the window itself enters fullscreen mode, so
+                // this also drives the iced window `set_mode` command. (The old
                 // `toggle_decorations` call targeted server-side decorations,
                 // which COSMIC never draws, so it was a silent no-op.)
                 self.viz_fullscreen = !self.viz_fullscreen;
-                if self.viz_fullscreen {
+                let mode = if self.viz_fullscreen {
                     self.viz_hud_idle_frames = 0;
                     self.viz_prev_nav_active = self.core.nav_bar_active();
                     self.core.window.show_headerbar = false;
                     self.core.nav_bar_set_toggled(false);
+                    cosmic::iced::window::Mode::Fullscreen
                 } else {
                     self.core.window.show_headerbar = true;
                     self.core.nav_bar_set_toggled(self.viz_prev_nav_active);
+                    cosmic::iced::window::Mode::Windowed
+                };
+                if let Some(id) = self.core.main_window_id() {
+                    return cosmic::iced::window::set_mode(id, mode);
                 }
             }
 
@@ -2474,289 +2531,8 @@ impl AppModel {
             }
 
             // -- Podcasts --
-            Message::PodcastSearchChanged(query) => {
-                self.podcast_search_query = query;
-            }
-
-            Message::PodcastSearchSubmit => {
-                let query = self.podcast_search_query.trim().to_string();
-                if query.is_empty() {
-                    return Task::none();
-                }
-                self.podcast_search_loading = true;
-                return cosmic::task::future(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let client = HTTP_CLIENT.clone();
-                        podcast::search_itunes(&client, &query)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    cosmic::Action::App(Message::PodcastSearchResults(result))
-                });
-            }
-
-            Message::PodcastSearchResults(result) => {
-                self.podcast_search_loading = false;
-                match result {
-                    Ok(results) => {
-                        let icon_urls: Vec<String> =
-                            results.iter().map(|r| r.image.clone()).collect();
-                        self.podcast_search_results = results;
-                        return self.load_online_icons(icon_urls);
-                    }
-                    Err(e) => {
-                        return self.push_toast(widget::toaster::Toast::new(fl!(
-                            "toast-podcast-search-failed",
-                            reason = e
-                        )));
-                    }
-                }
-            }
-
-            Message::PodcastAddUrlChanged(url) => {
-                self.podcast_add_url = url;
-            }
-
-            Message::SubscribePodcast(feed_url) => {
-                let feed_url = feed_url.trim().to_string();
-                if feed_url.is_empty() {
-                    return Task::none();
-                }
-                self.podcast_add_url.clear();
-                return cosmic::task::future(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let client = HTTP_CLIENT.clone();
-                        let (meta, episodes) = podcast::fetch_feed(&client, &feed_url)?;
-                        let store = open_online_store()?;
-                        let id = store.add_podcast(&feed_url, &meta)?;
-                        store.upsert_episodes(id, &episodes)?;
-                        store.touch_podcast_refresh(id, &meta, now_epoch())?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    cosmic::Action::App(Message::PodcastSubscribed(result))
-                });
-            }
-
-            Message::PodcastSubscribed(result) => match result {
-                Ok(()) => {
-                    self.podcast_search_results.clear();
-                    self.podcast_search_query.clear();
-                    return self.load_podcasts();
-                }
-                Err(e) => {
-                    return self.push_toast(widget::toaster::Toast::new(fl!(
-                        "toast-podcast-subscribe-failed",
-                        reason = e
-                    )));
-                }
-            },
-
-            Message::PodcastsLoaded(podcasts) => {
-                let icon_urls: Vec<String> = podcasts.iter().map(|p| p.image_url.clone()).collect();
-                self.podcasts = podcasts;
-                return self.load_online_icons(icon_urls);
-            }
-
-            Message::SelectPodcast(idx) => {
-                self.selected_podcast = Some(idx);
-                if let Some(podcast) = self.podcasts.get(idx) {
-                    return self.load_podcast_episodes(podcast.id);
-                }
-            }
-
-            Message::BackToPodcastList => {
-                self.selected_podcast = None;
-                self.podcast_episodes.clear();
-            }
-
-            Message::RemovePodcast(idx) => {
-                if let Some(podcast) = self.podcasts.get(idx) {
-                    let id = podcast.id;
-                    if let Ok(store) = open_online_store()
-                        && let Ok(episodes) = store.list_episodes(id)
-                    {
-                        for episode in episodes {
-                            if !episode.downloaded_path.is_empty() {
-                                let _ = std::fs::remove_file(&episode.downloaded_path);
-                            }
-                        }
-                    }
-                    match open_online_store().and_then(|store| store.remove_podcast(id)) {
-                        Ok(()) => {
-                            if self.selected_podcast == Some(idx) {
-                                self.selected_podcast = None;
-                                self.podcast_episodes.clear();
-                            }
-                            return self.load_podcasts();
-                        }
-                        Err(e) => tracing::error!("Failed to remove podcast: {e}"),
-                    }
-                }
-            }
-
-            Message::RefreshPodcast(idx) => {
-                if let Some(podcast) = self.podcasts.get(idx) {
-                    return refresh_podcast_task(podcast.id, podcast.feed_url.clone());
-                }
-            }
-
-            Message::RefreshAllPodcasts => {
-                let tasks: Vec<_> = self
-                    .podcasts
-                    .iter()
-                    .map(|p| refresh_podcast_task(p.id, p.feed_url.clone()))
-                    .collect();
-                return Task::batch(tasks);
-            }
-
-            Message::PodcastRefreshed(id, result) => match result {
-                Ok(()) => {
-                    let reload_task = self.load_podcasts();
-                    let is_selected = self
-                        .selected_podcast
-                        .and_then(|i| self.podcasts.get(i))
-                        .is_some_and(|p| p.id == id);
-                    let episodes_task = if is_selected {
-                        self.load_podcast_episodes(id)
-                    } else {
-                        Task::none()
-                    };
-                    return Task::batch([reload_task, episodes_task]);
-                }
-                Err(e) => {
-                    return self.push_toast(widget::toaster::Toast::new(fl!(
-                        "toast-podcast-refresh-failed",
-                        reason = e
-                    )));
-                }
-            },
-
-            Message::PodcastEpisodesLoaded(podcast_id, episodes) => {
-                let is_selected = self
-                    .selected_podcast
-                    .and_then(|i| self.podcasts.get(i))
-                    .is_some_and(|p| p.id == podcast_id);
-                if is_selected {
-                    self.podcast_episodes = episodes;
-                }
-            }
-
-            Message::PlayPodcastEpisode(idx) => {
-                let Some(podcast_idx) = self.selected_podcast else {
-                    return Task::none();
-                };
-                let Some(episode) = self.podcast_episodes.get(idx).cloned() else {
-                    return Task::none();
-                };
-                let Some(podcast) = self.podcasts.get(podcast_idx) else {
-                    return Task::none();
-                };
-                let track = Track {
-                    id: -1,
-                    path: if episode.downloaded_path.is_empty() {
-                        PathBuf::new()
-                    } else {
-                        PathBuf::from(&episode.downloaded_path)
-                    },
-                    title: episode.title.clone(),
-                    artist: podcast.title.clone(),
-                    album_artist: podcast.title.clone(),
-                    album: podcast.title.clone(),
-                    genre: String::new(),
-                    track_number: 0,
-                    disc_number: 0,
-                    year: 0,
-                    duration: Duration::from_secs(episode.duration_secs.max(0) as u64),
-                    bitrate: 0,
-                    sample_rate: 0,
-                    provider_id: Arc::from("podcast"),
-                    source_uri: episode.enclosure_url.clone(),
-                    is_favorite: false,
-                    rating: None,
-                    rg_track_gain: None,
-                    rg_album_gain: None,
-                };
-                let play_task = self.play_track_list(vec![track], 0);
-                self.current_podcast_episode_id = Some(episode.id);
-                self.last_saved_podcast_position_secs = 0;
-                if episode.position_ms > 0 {
-                    let resume_at = Duration::from_millis(episode.position_ms as u64);
-                    if let Some(player) = &mut self.player {
-                        let _ = player.seek(resume_at);
-                    }
-                    self.playback_position = resume_at;
-                }
-                return play_task;
-            }
-
-            Message::TogglePodcastEpisodePlayed(idx) => {
-                if let Some(episode) = self.podcast_episodes.get(idx).cloned() {
-                    let new_played = !episode.played;
-                    let result = open_online_store().and_then(|store| {
-                        store.save_episode_position(episode.id, episode.position_ms, new_played)
-                    });
-                    match result {
-                        Ok(()) => {
-                            if let Some(ep) = self.podcast_episodes.get_mut(idx) {
-                                ep.played = new_played;
-                            }
-                        }
-                        Err(e) => tracing::error!("Failed to toggle played: {e}"),
-                    }
-                }
-            }
-
-            Message::DownloadEpisode(idx) => {
-                let Some(episode) = self.podcast_episodes.get(idx).cloned() else {
-                    return Task::none();
-                };
-                if !self.downloading_episodes.insert(episode.id) {
-                    // Already downloading — ignore the duplicate request.
-                    return Task::none();
-                }
-                return download_episode_task(episode);
-            }
-
-            Message::EpisodeDownloaded(episode_id, result) => {
-                self.downloading_episodes.remove(&episode_id);
-                match result {
-                    Ok(path) => {
-                        if let Some(ep) = self
-                            .podcast_episodes
-                            .iter_mut()
-                            .find(|e| e.id == episode_id)
-                        {
-                            ep.downloaded_path = path;
-                        }
-                    }
-                    Err(e) => {
-                        return self.push_toast(widget::toaster::Toast::new(fl!(
-                            "toast-episode-download-failed",
-                            reason = e
-                        )));
-                    }
-                }
-            }
-
-            Message::DeleteEpisodeDownload(idx) => {
-                if let Some(episode) = self.podcast_episodes.get(idx).cloned() {
-                    if !episode.downloaded_path.is_empty() {
-                        let _ = std::fs::remove_file(&episode.downloaded_path);
-                    }
-                    match open_online_store()
-                        .and_then(|store| store.set_episode_downloaded_path(episode.id, ""))
-                    {
-                        Ok(()) => {
-                            if let Some(ep) = self.podcast_episodes.get_mut(idx) {
-                                ep.downloaded_path = String::new();
-                            }
-                        }
-                        Err(e) => tracing::error!("Failed to clear episode download: {e}"),
-                    }
-                }
-            }
+            Message::Podcast(msg) => return self.update_podcast(msg),
+            Message::PodcastEvent(event) => return self.handle_podcast_event(event),
 
             Message::OnlineIconLoaded(url, decoded) => {
                 if let Some((w, h, pixels)) = decoded {
@@ -3033,13 +2809,20 @@ impl AppModel {
         self.selected_genre = None;
         self.selected_smart_playlist = None;
         self.smart_playlist_editor = None;
+        self.selected_podcast = None;
 
         // Collapse expanded now-playing view when navigating
+        #[cfg(feature = "visualizer")]
+        let mut fs_task = Task::none();
         if self.expand_progress > 0.0 || self.expand_target.is_some() {
             self.lyrics_overlay_active = false;
             self.expand_target = Some(0.0);
             self.expand_anim_start = Some(std::time::Instant::now());
             self.expand_anim_from = self.expand_progress;
+            #[cfg(feature = "visualizer")]
+            {
+                fs_task = self.exit_viz_fullscreen();
+            }
         }
 
         // Lazy-load data for Playlists and Genres pages
@@ -3068,6 +2851,7 @@ impl AppModel {
                 })
             }
             Some(Page::Genres) => self.load_genres(),
+            Some(Page::Artists) => self.load_artist_info_for_visible(),
             Some(Page::Folders) => {
                 self.folder_state
                     .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
@@ -3075,10 +2859,14 @@ impl AppModel {
             }
             Some(Page::Podcasts) => self.load_podcasts(),
             Some(Page::Radio) => self.load_radio_stations(),
+            Some(Page::Convert) => self.detect_ffmpeg_once(),
             _ => Task::none(),
         };
 
         let title_task = self.update_title();
+        #[cfg(feature = "visualizer")]
+        return Task::batch([title_task, page_task, fs_task]);
+        #[cfg(not(feature = "visualizer"))]
         Task::batch([title_task, page_task])
     }
 }

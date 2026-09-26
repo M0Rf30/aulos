@@ -2,6 +2,7 @@
 
 //! Music library: scanning, database, metadata, and cover art.
 
+pub mod artist_info;
 pub mod artist_tags;
 mod cover_art;
 mod db;
@@ -176,6 +177,18 @@ impl Artist {
     pub fn track_count(&self) -> usize {
         self.albums.iter().map(|a| a.tracks.len()).sum()
     }
+}
+
+/// Provider-native artist metadata (currently only meaningfully produced
+/// by `SubsonicProvider::get_artist_info` — Local/MPD use
+/// `crate::library::artist_info`'s own Deezer/Wikipedia lookup instead).
+/// `image_bytes` is the raw encoded (JPEG/PNG) download, decoded and
+/// cached by the caller, matching how album cover art bytes flow through
+/// `MusicProvider::get_cover_art`.
+#[derive(Debug, Clone)]
+pub struct ArtistInfoResult {
+    pub bio: Option<String>,
+    pub image_bytes: Option<Vec<u8>>,
 }
 
 /// A user-created playlist.

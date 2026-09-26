@@ -1,27 +1,59 @@
 // SPDX-License-Identifier: GPL-3.0
 
 //! Local file converter/transcoder/ripper view — pick files (audio, video
-//! containers, or `.cue` sheets), an output format/rate/folder, and run the
-//! queue.
+//! containers, or `.cue` sheets), an output format/rate/folder plus
+//! format-specific quality options, and run the queue.
 //!
 //! The tree shape is the same regardless of queue/job state (a fixed
 //! header, an output settings card, a queue-summary card, then either the
 //! empty state or the job list) — only the *content* of each slot changes,
 //! so switching pages or jobs finishing never resets scroll position or
 //! flashes a differently-shaped view (see the crate's iced/libcosmic UI
-//! rules).
+//! rules). The Output card's format-specific quality row (FLAC
+//! compression/bit-depth, MP3 mode, AAC/Opus bitrate, Vorbis quality) is
+//! the one part of that card whose *control type* varies by the currently
+//! selected format — its position in the card is fixed either way.
 
 use std::path::Path;
 
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
+use crate::convert::encoder::{FlacBitDepth, FlacOptions, LossyOptions, Mp3Mode};
 use crate::convert::{ConvertJob, JobId, JobKind, JobState, OutputFormat};
 use crate::fl;
 use crate::views::common;
 
 /// Sample-rate dropdown options: `None` keeps the source rate.
-pub const SAMPLE_RATE_OPTIONS: &[Option<u32>] = &[None, Some(44_100), Some(48_000), Some(96_000)];
+pub const SAMPLE_RATE_OPTIONS: &[Option<u32>] =
+    &[None, Some(22_050), Some(32_000), Some(44_100), Some(48_000), Some(88_200), Some(96_000), Some(176_400), Some(192_000)];
+
+/// FLAC compression-level dropdown options (0 fastest/largest .. 8
+/// slowest/smallest — see `encoder::apply_compression_level`).
+pub const FLAC_COMPRESSION_OPTIONS: [u8; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+/// FLAC bit-depth dropdown options.
+pub const FLAC_BIT_DEPTH_OPTIONS: [FlacBitDepth; 3] =
+    [FlacBitDepth::Auto, FlacBitDepth::Bits16, FlacBitDepth::Bits24];
+
+/// MP3 mode/quality dropdown options: a handful of common VBR presets plus
+/// common CBR bitrates, rather than exposing the raw 0-9/kbps numbers.
+pub const MP3_MODE_OPTIONS: [Mp3Mode; 8] = [
+    Mp3Mode::Vbr(0),
+    Mp3Mode::Vbr(2),
+    Mp3Mode::Vbr(4),
+    Mp3Mode::Vbr(6),
+    Mp3Mode::Cbr(128),
+    Mp3Mode::Cbr(192),
+    Mp3Mode::Cbr(256),
+    Mp3Mode::Cbr(320),
+];
+
+/// Bitrate dropdown options shared by AAC and Opus.
+pub const BITRATE_KBPS_OPTIONS: [u32; 6] = [96, 128, 160, 192, 256, 320];
+
+/// Ogg Vorbis `-q:a` quality dropdown options (-1.0 lowest .. 10.0 highest).
+pub const VORBIS_QUALITY_OPTIONS: [f32; 7] = [-1.0, 0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
 
 /// Messages from the convert view.
 #[derive(Debug, Clone)]
@@ -36,6 +68,18 @@ pub enum ConvertMessage {
     FormatSelected(usize),
     /// User picked an entry in the sample-rate dropdown.
     RateSelected(usize),
+    /// User picked an entry in the FLAC compression-level dropdown.
+    FlacCompressionSelected(usize),
+    /// User picked an entry in the FLAC bit-depth dropdown.
+    FlacBitDepthSelected(usize),
+    /// User picked an entry in the MP3 mode/quality dropdown.
+    Mp3ModeSelected(usize),
+    /// User picked an entry in the AAC bitrate dropdown.
+    AacBitrateSelected(usize),
+    /// User picked an entry in the Opus bitrate dropdown.
+    OpusBitrateSelected(usize),
+    /// User picked an entry in the Ogg Vorbis quality dropdown.
+    VorbisQualitySelected(usize),
     /// Run every queued job.
     StartQueue,
     /// Cancel every queued/running job.
@@ -50,6 +94,23 @@ pub enum ConvertMessage {
     RemoveJob(JobId),
     /// Open a finished job's output folder in the file manager.
     OpenJobFolder(JobId),
+}
+
+/// Everything [`convert_view`] needs, bundled to keep its signature
+/// manageable now that the Output card has per-format quality controls
+/// (same pattern as `views::radio::RadioViewProps`).
+pub struct ConvertViewProps<'a, 'b> {
+    pub jobs: &'a [ConvertJob],
+    pub out_dir: &'b Path,
+    pub format: OutputFormat,
+    pub sample_rate: Option<u32>,
+    pub dir_error: Option<&'a str>,
+    pub flac_options: FlacOptions,
+    pub lossy_options: LossyOptions,
+    /// `None` while `ffmpeg`'s availability hasn't been probed yet (see
+    /// `crate::app::convert_page::AppModel::detect_ffmpeg_once`) — treated
+    /// the same as `Some(false)` for gating purposes until it resolves.
+    pub ffmpeg_available: Option<bool>,
 }
 
 /// Counts of jobs in each lifecycle state, for the queue summary card.
@@ -95,14 +156,25 @@ fn overall_progress(jobs: &[ConvertJob]) -> f32 {
     sum / jobs.len() as f32
 }
 
-/// Localized label for a format dropdown entry.
+/// Localized label for a format dropdown entry. The five `ffmpeg`-backed
+/// formats always get a "(needs ffmpeg)" suffix, regardless of whether
+/// `ffmpeg` is currently available — see [`output_section`]'s separate
+/// warning caption for the unavailable case.
 fn format_label(format: OutputFormat) -> String {
-    match format {
+    let base = match format {
         OutputFormat::Flac => fl!("convert-format-flac"),
         OutputFormat::Wav16 => fl!("convert-format-wav16"),
         OutputFormat::Wav24 => fl!("convert-format-wav24"),
         OutputFormat::Wav32Float => fl!("convert-format-wav32float"),
-    }
+        OutputFormat::Aiff16 => fl!("convert-format-aiff16"),
+        OutputFormat::Aiff24 => fl!("convert-format-aiff24"),
+        OutputFormat::Mp3 => fl!("convert-format-mp3"),
+        OutputFormat::Aac => fl!("convert-format-aac"),
+        OutputFormat::Opus => fl!("convert-format-opus"),
+        OutputFormat::OggVorbis => fl!("convert-format-vorbis"),
+        OutputFormat::Alac => fl!("convert-format-alac"),
+    };
+    if format.requires_ffmpeg() { fl!("convert-format-needs-ffmpeg", format = base) } else { base }
 }
 
 /// Localized label for a sample-rate dropdown entry.
@@ -111,6 +183,32 @@ fn rate_label(rate: Option<u32>) -> String {
         None => fl!("convert-rate-source"),
         Some(hz) => fl!("convert-rate-hz", hz = hz),
     }
+}
+
+/// Localized label for a FLAC bit-depth dropdown entry.
+fn flac_bit_depth_label(depth: FlacBitDepth) -> String {
+    match depth {
+        FlacBitDepth::Auto => fl!("convert-flac-bitdepth-auto"),
+        FlacBitDepth::Bits16 => fl!("convert-flac-bitdepth-16"),
+        FlacBitDepth::Bits24 => fl!("convert-flac-bitdepth-24"),
+    }
+}
+
+/// Localized label for an MP3 mode/quality dropdown entry.
+fn mp3_mode_label(mode: Mp3Mode) -> String {
+    match mode {
+        Mp3Mode::Vbr(q) => fl!("convert-mp3-vbr", q = q),
+        Mp3Mode::Cbr(kbps) => fl!("convert-mp3-cbr", kbps = kbps),
+    }
+}
+
+/// Localized label for a kbps bitrate dropdown entry (AAC/Opus). A named
+/// function rather than an inline `fl!()` call inside `.map()`: nested
+/// directly in a `.map(...).collect::<Vec<_>>()` closure, `fl!`'s
+/// internal `FluentValue` conversion can't infer `*hz`'s type even though
+/// it's already the concrete `u32` `BITRATE_KBPS_OPTIONS` always yields.
+fn bitrate_kbps_label(kbps: u32) -> String {
+    fl!("convert-rate-hz-kbps", kbps = kbps)
 }
 
 /// Localized label for a job's kind.
@@ -149,13 +247,133 @@ fn job_icon_button<'a>(
     widget::tooltip(button, widget::text::caption(label), widget::tooltip::Position::Top).into()
 }
 
-/// Output settings card: destination folder, format, and sample rate
-/// applied to jobs the moment `Start` runs them.
+/// The Output card's format-specific quality row: FLAC gets a compression
+/// level + bit depth dropdown, each `ffmpeg`-backed format gets its own
+/// quality/bitrate dropdown, and lossless formats with no extra knob
+/// (WAV/AIFF/ALAC, whose bit depth is already picked via the format
+/// dropdown itself) get none. Always built at the same position in
+/// `output_section`'s settings section regardless of which arm runs, so
+/// only the *content* of that slot varies with the selected format.
+fn quality_items(
+    format: OutputFormat,
+    flac_options: FlacOptions,
+    lossy_options: LossyOptions,
+) -> Vec<cosmic::Element<'static, ConvertMessage>> {
+    match format {
+        OutputFormat::Flac => {
+            let compression_index = FLAC_COMPRESSION_OPTIONS
+                .iter()
+                .position(|&l| l == flac_options.compression_level)
+                .unwrap_or(5);
+            let bit_depth_index =
+                FLAC_BIT_DEPTH_OPTIONS.iter().position(|&d| d == flac_options.bit_depth).unwrap_or(0);
+            vec![
+                widget::settings::item(
+                    fl!("convert-flac-compression"),
+                    widget::dropdown(
+                        FLAC_COMPRESSION_OPTIONS.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        Some(compression_index),
+                        ConvertMessage::FlacCompressionSelected,
+                    ),
+                )
+                .into(),
+                widget::settings::item(
+                    fl!("convert-flac-bitdepth"),
+                    widget::dropdown(
+                        FLAC_BIT_DEPTH_OPTIONS.iter().map(|&d| flac_bit_depth_label(d)).collect::<Vec<_>>(),
+                        Some(bit_depth_index),
+                        ConvertMessage::FlacBitDepthSelected,
+                    ),
+                )
+                .into(),
+            ]
+        }
+        OutputFormat::Mp3 => {
+            let index =
+                MP3_MODE_OPTIONS.iter().position(|&m| m == lossy_options.mp3_mode).unwrap_or(1);
+            vec![
+                widget::settings::item(
+                    fl!("convert-mp3-mode"),
+                    widget::dropdown(
+                        MP3_MODE_OPTIONS.iter().map(|&m| mp3_mode_label(m)).collect::<Vec<_>>(),
+                        Some(index),
+                        ConvertMessage::Mp3ModeSelected,
+                    ),
+                )
+                .into(),
+            ]
+        }
+        OutputFormat::Aac => {
+            let index = BITRATE_KBPS_OPTIONS
+                .iter()
+                .position(|&b| b == lossy_options.aac_bitrate_kbps)
+                .unwrap_or(3);
+            vec![
+                widget::settings::item(
+                    fl!("convert-bitrate"),
+                    widget::dropdown(
+                        BITRATE_KBPS_OPTIONS.iter().map(|&hz| bitrate_kbps_label(hz)).collect::<Vec<_>>(),
+                        Some(index),
+                        ConvertMessage::AacBitrateSelected,
+                    ),
+                )
+                .into(),
+            ]
+        }
+        OutputFormat::Opus => {
+            let index = BITRATE_KBPS_OPTIONS
+                .iter()
+                .position(|&b| b == lossy_options.opus_bitrate_kbps)
+                .unwrap_or(2);
+            vec![
+                widget::settings::item(
+                    fl!("convert-bitrate"),
+                    widget::dropdown(
+                        BITRATE_KBPS_OPTIONS.iter().map(|&hz| bitrate_kbps_label(hz)).collect::<Vec<_>>(),
+                        Some(index),
+                        ConvertMessage::OpusBitrateSelected,
+                    ),
+                )
+                .into(),
+            ]
+        }
+        OutputFormat::OggVorbis => {
+            let index = VORBIS_QUALITY_OPTIONS
+                .iter()
+                .position(|&q| (q - lossy_options.vorbis_quality).abs() < 0.01)
+                .unwrap_or(4);
+            vec![
+                widget::settings::item(
+                    fl!("convert-vorbis-quality"),
+                    widget::dropdown(
+                        VORBIS_QUALITY_OPTIONS.iter().map(|q| format!("{q:.0}")).collect::<Vec<_>>(),
+                        Some(index),
+                        ConvertMessage::VorbisQualitySelected,
+                    ),
+                )
+                .into(),
+            ]
+        }
+        OutputFormat::Wav16
+        | OutputFormat::Wav24
+        | OutputFormat::Wav32Float
+        | OutputFormat::Aiff16
+        | OutputFormat::Aiff24
+        | OutputFormat::Alac => Vec::new(),
+    }
+}
+
+/// Output settings card: destination folder, format, sample rate, and
+/// format-specific quality options applied to jobs the moment `Start` runs
+/// them.
 fn output_section<'a>(
     out_dir: &Path,
     format: OutputFormat,
     sample_rate: Option<u32>,
     dir_error: Option<&'a str>,
+    flac_options: FlacOptions,
+    lossy_options: LossyOptions,
+    ffmpeg_available: Option<bool>,
 ) -> cosmic::Element<'a, ConvertMessage> {
     let format_index = OutputFormat::ALL.iter().position(|f| *f == format).unwrap_or(0);
     let rate_index = SAMPLE_RATE_OPTIONS.iter().position(|r| *r == sample_rate).unwrap_or(0);
@@ -189,6 +407,14 @@ fn output_section<'a>(
             ),
         ));
 
+    for item in quality_items(format, flac_options, lossy_options) {
+        section = section.add(item);
+    }
+
+    if format.requires_ffmpeg() && ffmpeg_available != Some(true) {
+        section = section.add(widget::text::body(fl!("convert-requires-ffmpeg")));
+    }
+
     if let Some(reason) = dir_error {
         section = section.add(widget::text::body(fl!("convert-dir-error", reason = reason.to_owned())));
     }
@@ -199,9 +425,16 @@ fn output_section<'a>(
 
 /// Queue summary card: per-state counts, an always-present overall
 /// progress bar, and Start/Cancel-all/Clear-finished actions that disable
-/// (rather than disappear) when not applicable.
-fn summary_section<'a>(jobs: &'a [ConvertJob]) -> cosmic::Element<'a, ConvertMessage> {
+/// (rather than disappear) when not applicable. `Start` also stays
+/// disabled while the configured format needs `ffmpeg` and it isn't
+/// available, since every job would just fail immediately otherwise.
+fn summary_section<'a>(
+    jobs: &'a [ConvertJob],
+    format: OutputFormat,
+    ffmpeg_available: Option<bool>,
+) -> cosmic::Element<'a, ConvertMessage> {
     let counts = JobCounts::compute(jobs);
+    let format_blocked = format.requires_ffmpeg() && ffmpeg_available != Some(true);
 
     let counts_row = widget::Row::new()
         .push(common::cell_caption(fl!("convert-summary-queued", count = counts.queued)))
@@ -216,7 +449,7 @@ fn summary_section<'a>(jobs: &'a [ConvertJob]) -> cosmic::Element<'a, ConvertMes
     let buttons = widget::Row::new()
         .push(
             widget::button::suggested(fl!("convert-start"))
-                .on_press_maybe((counts.queued > 0).then_some(ConvertMessage::StartQueue)),
+                .on_press_maybe((counts.queued > 0 && !format_blocked).then_some(ConvertMessage::StartQueue)),
         )
         .push(
             widget::button::destructive(fl!("convert-cancel-all")).on_press_maybe(
@@ -373,13 +606,18 @@ fn job_row<'a>(
     .into()
 }
 
-pub fn convert_view<'a>(
-    jobs: &'a [ConvertJob],
-    out_dir: &Path,
-    format: OutputFormat,
-    sample_rate: Option<u32>,
-    dir_error: Option<&'a str>,
-) -> cosmic::Element<'a, ConvertMessage> {
+pub fn convert_view<'a, 'b>(props: ConvertViewProps<'a, 'b>) -> cosmic::Element<'a, ConvertMessage> {
+    let ConvertViewProps {
+        jobs,
+        out_dir,
+        format,
+        sample_rate,
+        dir_error,
+        flac_options,
+        lossy_options,
+        ffmpeg_available,
+    } = props;
+
     let header = widget::Row::new()
         .push(widget::text::title3(fl!("convert")))
         .push(widget::Space::new().width(Length::Fill))
@@ -390,12 +628,20 @@ pub fn convert_view<'a>(
         .spacing(16)
         .padding(16)
         .push(header)
-        .push(output_section(out_dir, format, sample_rate, dir_error))
-        .push(summary_section(jobs));
+        .push(output_section(
+            out_dir,
+            format,
+            sample_rate,
+            dir_error,
+            flac_options,
+            lossy_options,
+            ffmpeg_available,
+        ))
+        .push(summary_section(jobs, format, ffmpeg_available));
 
     if jobs.is_empty() {
         col = col.push(common::empty_state(
-            "media-import-audio-symbolic",
+            "document-import-symbolic",
             fl!("no-convert-jobs"),
             fl!("convert-empty-hint"),
         ));

@@ -39,6 +39,11 @@ pub enum ConvertEvent {
     ReadyToStart(Result<JobSettings, String>),
     /// A running job reached a terminal state.
     JobFinished(JobId, JobState),
+    /// The off-thread `ffmpeg -version` availability probe finished (see
+    /// `AppModel::detect_ffmpeg_once`). The result is already cached
+    /// globally by `crate::convert::ffmpeg::detect` itself — this only
+    /// exists to trigger a re-render once it's known.
+    FfmpegDetected(bool),
     /// Progress ticker while any job is running (see
     /// `subscriptions::convert_tick_stream`) — just triggers a redraw so
     /// the view picks up the latest atomic progress values.
@@ -167,6 +172,84 @@ impl AppModel {
                     && let Err(e) = self.config.set_convert_sample_rate(ctx, rate)
                 {
                     tracing::error!("Failed to persist convert sample rate: {e}");
+                }
+                Task::none()
+            }
+
+            ConvertMessage::FlacCompressionSelected(index) => {
+                if let Some(&level) = crate::views::convert::FLAC_COMPRESSION_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.flac_options;
+                    opts.compression_level = level;
+                    if let Err(e) = self.config.set_flac_options(ctx, opts) {
+                        tracing::error!("Failed to persist FLAC compression level: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            ConvertMessage::FlacBitDepthSelected(index) => {
+                if let Some(&depth) = crate::views::convert::FLAC_BIT_DEPTH_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.flac_options;
+                    opts.bit_depth = depth;
+                    if let Err(e) = self.config.set_flac_options(ctx, opts) {
+                        tracing::error!("Failed to persist FLAC bit depth: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            ConvertMessage::Mp3ModeSelected(index) => {
+                if let Some(&mode) = crate::views::convert::MP3_MODE_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.lossy_options;
+                    opts.mp3_mode = mode;
+                    if let Err(e) = self.config.set_lossy_options(ctx, opts) {
+                        tracing::error!("Failed to persist MP3 mode: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            ConvertMessage::AacBitrateSelected(index) => {
+                if let Some(&kbps) = crate::views::convert::BITRATE_KBPS_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.lossy_options;
+                    opts.aac_bitrate_kbps = kbps;
+                    if let Err(e) = self.config.set_lossy_options(ctx, opts) {
+                        tracing::error!("Failed to persist AAC bitrate: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            ConvertMessage::OpusBitrateSelected(index) => {
+                if let Some(&kbps) = crate::views::convert::BITRATE_KBPS_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.lossy_options;
+                    opts.opus_bitrate_kbps = kbps;
+                    if let Err(e) = self.config.set_lossy_options(ctx, opts) {
+                        tracing::error!("Failed to persist Opus bitrate: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            ConvertMessage::VorbisQualitySelected(index) => {
+                if let Some(&quality) = crate::views::convert::VORBIS_QUALITY_OPTIONS.get(index)
+                    && let Some(ctx) = &self.config_context
+                {
+                    let mut opts = self.config.lossy_options;
+                    opts.vorbis_quality = quality;
+                    if let Err(e) = self.config.set_lossy_options(ctx, opts) {
+                        tracing::error!("Failed to persist Vorbis quality: {e}");
+                    }
                 }
                 Task::none()
             }
@@ -301,8 +384,26 @@ impl AppModel {
                 }))
             }
 
+            ConvertEvent::FfmpegDetected(_) => Task::none(),
+
             ConvertEvent::Tick => Task::none(),
         }
+    }
+
+    /// Fires the off-thread `ffmpeg` availability probe if it hasn't run
+    /// yet this session (see `crate::convert::ffmpeg`) — safe to call
+    /// every time the Convert page is opened, since it's a no-op once the
+    /// result is cached.
+    pub(super) fn detect_ffmpeg_once(&self) -> Task<cosmic::Action<Message>> {
+        if crate::convert::ffmpeg::cached().is_some() {
+            return Task::none();
+        }
+        cosmic::task::future(async {
+            let available = tokio::task::spawn_blocking(crate::convert::ffmpeg::detect)
+                .await
+                .unwrap_or(false);
+            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::FfmpegDetected(available)))
+        })
     }
 
     /// Validates (creating if needed) the current output directory off the
@@ -319,6 +420,8 @@ impl AppModel {
             format: self.config.convert_format,
             target_rate: self.config.convert_sample_rate,
             out_dir: self.convert_out_dir(),
+            flac_options: self.config.flac_options,
+            lossy_options: self.config.lossy_options,
         };
 
         cosmic::task::future(async move {

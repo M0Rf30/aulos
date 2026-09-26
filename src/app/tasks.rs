@@ -8,7 +8,7 @@ use cosmic::prelude::*;
 use std::path::PathBuf;
 
 /// Re-fetch a podcast's feed and update its metadata/episodes in the
-/// online store, dispatching `PodcastRefreshed` with the outcome.
+/// online store, dispatching `PodcastEvent::Refreshed` with the outcome.
 pub(super) fn refresh_podcast_task(id: i64, feed_url: String) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
         let result = tokio::task::spawn_blocking(move || {
@@ -21,7 +21,10 @@ pub(super) fn refresh_podcast_task(id: i64, feed_url: String) -> Task<cosmic::Ac
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::PodcastRefreshed(id, result))
+        cosmic::Action::App(Message::PodcastEvent(super::podcast_page::PodcastEvent::Refreshed {
+            id,
+            result,
+        }))
     })
 }
 
@@ -51,7 +54,7 @@ fn episode_file_extension(mime: &str, enclosure_url: &str) -> String {
 /// Download an episode's enclosure to `dirs::data_dir()/lyra/podcast_downloads`
 /// for offline playback, persisting the resulting path via
 /// `OnlineStore::set_episode_downloaded_path` and dispatching
-/// `EpisodeDownloaded` with the outcome. Mirrors `refresh_podcast_task`'s
+/// `PodcastEvent::Downloaded` with the outcome. Mirrors `refresh_podcast_task`'s
 /// blocking-task idiom.
 pub(super) fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
@@ -91,7 +94,10 @@ pub(super) fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Mes
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::EpisodeDownloaded(episode_id, result))
+        cosmic::Action::App(Message::PodcastEvent(super::podcast_page::PodcastEvent::Downloaded {
+            episode_id,
+            result,
+        }))
     })
 }
 

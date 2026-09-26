@@ -45,7 +45,7 @@ pub struct WriteTags<'a> {
 }
 
 impl WriteTags<'_> {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.artist.is_none()
             && self.album.is_none()
@@ -401,6 +401,8 @@ mod tests {
             1,
             44_100,
             Some(16),
+            crate::convert::encoder::FlacOptions::default(),
+            crate::convert::encoder::LossyOptions::default(),
         )
         .unwrap();
         let samples: Vec<f32> = (0..4410)

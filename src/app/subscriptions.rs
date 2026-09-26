@@ -88,11 +88,11 @@ impl AppModel {
             ));
         }
 
-        // Convert queue progress ticker (every 500ms while jobs are running)
-        if self
-            .convert_jobs
-            .iter()
-            .any(|j| j.state == JobState::Running)
+        // Convert queue progress ticker (every 500ms while jobs are running);
+        // gated on the experimental-converter flag so it never runs while
+        // the feature (and its nav entry) is disabled.
+        if self.config.experimental_converter
+            && self.convert_jobs.iter().any(|j| j.state == JobState::Running)
         {
             subs.push(Subscription::run(convert_tick_stream));
         }

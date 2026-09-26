@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::core::text::Wrapping;
-use cosmic::iced::{Alignment, Length};
+use cosmic::iced::{Alignment, Color, ContentFit, Length};
 use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 use cosmic::widget::tooltip::Position as TooltipPosition;
@@ -360,6 +360,61 @@ pub fn list_art_icon<'a, M: 'static>(
         Some(handle) => widget::icon::icon(handle.clone()).size(size).into(),
         None => widget::icon::from_name(placeholder_icon).size(size).into(),
     }
+}
+
+/// Round artist avatar: a real photo (clipped to a circle via
+/// `widget::image`'s native `border_radius` support) when `photo` is
+/// available, otherwise the deterministic-color initials placeholder —
+/// see `initials_avatar`. Built entirely from widgets, so it stays crisp
+/// at any `size`/HiDPI scale factor, unlike a rasterized bitmap scaled up
+/// to fit. Shared by every place an artist avatar is shown (grid, list,
+/// detail view).
+pub fn artist_avatar<'a, M: 'static>(
+    name: &str,
+    photo: Option<&widget::image::Handle>,
+    size: f32,
+) -> cosmic::Element<'a, M> {
+    match photo {
+        Some(handle) => widget::image(handle.clone())
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .content_fit(ContentFit::Cover)
+            .border_radius(size / 2.0)
+            .into(),
+        None => initials_avatar(name, size),
+    }
+}
+
+/// Deterministic-color circle with centered initials — no raster image
+/// involved, so it never blurs/pixelates at large sizes or on HiDPI
+/// displays the way the old rasterized-at-64px avatar did. See
+/// `artist_avatar`.
+pub fn initials_avatar<'a, M: 'static>(name: &str, size: f32) -> cosmic::Element<'a, M> {
+    let initials = crate::library::CoverArt::artist_initials(name);
+    let (r, g, b) = crate::library::CoverArt::artist_avatar_color(name);
+    let background = Color::from_rgb8(r, g, b);
+    let font_size = (size * 0.36).max(11.0);
+
+    widget::container(
+        widget::text(initials)
+            .size(font_size)
+            .class(cosmic::theme::Text::Color(Color::WHITE)),
+    )
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .align_x(Horizontal::Center)
+    .align_y(Vertical::Center)
+    .class(cosmic::theme::Container::custom(move |_theme| {
+        cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(background)),
+            border: cosmic::iced::Border {
+                radius: (size / 2.0).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }))
+    .into()
 }
 
 /// Fixed-height two-line label block under a grid card: a title element

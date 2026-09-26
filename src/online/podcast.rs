@@ -12,6 +12,7 @@ pub struct PodcastMeta {
     pub title: String,
     pub description: String,
     pub image_url: String,
+    pub author: String,
 }
 
 /// A single episode extracted from a feed entry.
@@ -77,6 +78,7 @@ pub fn feed_to_podcast_meta(feed: &Feed) -> PodcastMeta {
             .map(|i| i.uri.clone())
             .or_else(|| feed.icon.as_ref().map(|i| i.uri.clone()))
             .unwrap_or_default(),
+        author: feed.authors.first().map(|p| p.name.clone()).unwrap_or_default(),
     }
 }
 
@@ -235,6 +237,7 @@ mod tests {
     <title>Test Podcast</title>
     <description>A show about tests</description>
     <image><url>https://example.com/art.png</url></image>
+    <itunes:author>Test Author</itunes:author>
     <item>
       <title>Episode One</title>
       <guid>ep-1-guid</guid>
@@ -252,12 +255,13 @@ mod tests {
 </rss>"#;
 
     #[test]
-    fn feed_metadata_maps_title_description_and_image() {
+    fn feed_metadata_maps_title_description_image_and_author() {
         let feed = feed_rs::parser::parse(FEED_XML.as_bytes()).unwrap();
         let meta = feed_to_podcast_meta(&feed);
         assert_eq!(meta.title, "Test Podcast");
         assert_eq!(meta.description, "A show about tests");
         assert_eq!(meta.image_url, "https://example.com/art.png");
+        assert_eq!(meta.author, "Test Author");
     }
 
     #[test]

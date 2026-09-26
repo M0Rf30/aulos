@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 use super::tasks::resolve_mpris_art_task;
-use super::{AppModel, HTTP_CLIENT, Message, open_online_store, reload_result_is_stale};
+use super::{AppModel, HTTP_CLIENT, Message, reload_result_is_stale};
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Track};
 use crate::player::mpd_backend::MpdBackend;
@@ -47,6 +47,23 @@ fn cover_thumbnail_handle(bytes: &[u8]) -> widget::icon::Handle {
     {
         Some((w, h, pixels)) => widget::icon::from_raster_pixels(w, h, pixels),
         None => widget::icon::from_raster_bytes(bytes.to_vec()),
+    }
+}
+
+/// Clamp a live-updating playback position display value to a track's
+/// known duration. `Duration::ZERO` duration means "unknown/unbounded" —
+/// a live radio track (whose `Track::duration` is always `Duration::ZERO`,
+/// see `radio_page.rs`), or any track whose duration genuinely hasn't been
+/// probed yet — never "the track is zero seconds long", so it must not
+/// clamp in that case: doing so would pin the seek-bar/position display at
+/// zero forever even while a live stream keeps playing indefinitely. Used
+/// by `PlaybackTick`/`MpdStatusUpdate` in `update.rs`, the only two
+/// call sites that update the UI-displayed playback position.
+pub(super) fn clamp_display_position(position: Duration, duration: Duration) -> Duration {
+    if duration > Duration::ZERO && position > duration {
+        duration
+    } else {
+        position
     }
 }
 
@@ -237,7 +254,6 @@ impl AppModel {
                     self.library_reload_staging = None;
                     self.all_artists.clear();
                     self.cover_images.clear();
-                    self.artist_avatars.clear();
                 } else {
                     // A library is already showing: keep it fully visible
                     // and accumulate the refreshed data off to the side.
@@ -315,15 +331,6 @@ impl AppModel {
                 }
             }
 
-            // Generate artist avatars (fast, keep sequential)
-            let mut artist_avatars = HashMap::new();
-            for artist in &artists {
-                let (w, h, pixels) =
-                    crate::library::CoverArt::generate_artist_avatar_pixels(&artist.name, 64);
-                let handle = widget::icon::from_raster_pixels(w, h, pixels);
-                artist_avatars.insert(artist.name.clone(), handle);
-            }
-
             cosmic::Action::App(Message::LibraryLoaded {
                 generation,
                 provider_id,
@@ -331,7 +338,6 @@ impl AppModel {
                 albums,
                 artists,
                 cover_images,
-                artist_avatars,
                 cover_art_bytes,
             })
         })
@@ -809,9 +815,12 @@ impl AppModel {
     /// Albums keep a single primary attribution (`album.artist`, set by
     /// the provider) for the Albums view; only the artist index widens.
     /// Only processes the `new_albums` slice (the batch that just arrived),
-    /// appending to existing artists or creating new ones. Avatars are only
-    /// generated for newly-seen artist names — existing entries in
-    /// `artist_avatars` are reused.
+    /// appending to existing artists or creating new ones. Avatars aren't
+    /// generated here at all — the grid/list/detail views build the
+    /// initials placeholder on the fly (see
+    /// `crate::views::common::artist_avatar`), and real photos are fetched
+    /// lazily by `load_artist_info_for_visible` when the Artists page is
+    /// opened or an artist is selected.
     pub(super) fn merge_artists_from_batch(&mut self, new_albums: &[Album]) {
         // Build an index over the current artists list for O(1) lookup.
         let mut index: HashMap<String, usize> = self
@@ -844,16 +853,6 @@ impl AppModel {
                         name: name.clone(),
                         albums: vec![album.clone()],
                     });
-
-                    // Generate an avatar only for artists we've never seen,
-                    // in a single hash lookup.
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        self.artist_avatars.entry(name)
-                    {
-                        let (w, h, pixels) =
-                            crate::library::CoverArt::generate_artist_avatar_pixels(slot.key(), 64);
-                        slot.insert(widget::icon::from_raster_pixels(w, h, pixels));
-                    }
                 }
             }
         }
@@ -1090,16 +1089,22 @@ impl AppModel {
         self.toasts.push(toast).map(cosmic::Action::App)
     }
 
-    /// Exit visualizer fullscreen if active: restore the COSMIC header bar and
-    /// nav sidebar. No-op when not in fullscreen. Called whenever the expanded
-    /// now-playing view is left or the visualizer is turned off.
+    /// Exit visualizer fullscreen if active: restore the COSMIC header bar,
+    /// nav sidebar, and the real OS-level window mode (back to `Windowed`).
+    /// No-op (returns `Task::none()`) when not in fullscreen. Called
+    /// whenever the expanded now-playing view is left or the visualizer is
+    /// turned off.
     #[cfg(feature = "visualizer")]
-    pub(super) fn exit_viz_fullscreen(&mut self) {
+    pub(super) fn exit_viz_fullscreen(&mut self) -> Task<cosmic::Action<Message>> {
         if self.viz_fullscreen {
             self.viz_fullscreen = false;
             self.core.window.show_headerbar = true;
             self.core.nav_bar_set_toggled(self.viz_prev_nav_active);
+            if let Some(id) = self.core.main_window_id() {
+                return cosmic::iced::window::set_mode(id, cosmic::iced::window::Mode::Windowed);
+            }
         }
+        Task::none()
     }
 
     /// Trigger blur + accent-colour computation for the current track if
@@ -1216,40 +1221,6 @@ impl AppModel {
         }
     }
 
-    /// Load subscribed podcasts from the online store.
-    pub(super) fn load_podcasts(&self) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
-            let podcasts = tokio::task::spawn_blocking(|| {
-                open_online_store()
-                    .and_then(|store| store.list_podcasts())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_podcasts failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
-            cosmic::Action::App(Message::PodcastsLoaded(podcasts))
-        })
-    }
-
-    /// Load a podcast's episodes from the online store.
-    pub(super) fn load_podcast_episodes(&self, podcast_id: i64) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
-            let episodes = tokio::task::spawn_blocking(move || {
-                open_online_store()
-                    .and_then(|store| store.list_episodes(podcast_id))
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_episodes failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
-            cosmic::Action::App(Message::PodcastEpisodesLoaded(podcast_id, episodes))
-        })
-    }
-
     /// Fetch each not-yet-cached icon URL and dispatch `OnlineIconLoaded` for
     /// it, used for podcast artwork and radio station favicons alike.
     pub(super) fn load_online_icons(&self, urls: Vec<String>) -> Task<cosmic::Action<Message>> {
@@ -1288,30 +1259,6 @@ impl AppModel {
         Task::batch(tasks)
     }
 
-    /// Persist podcast episode playback progress. Fire-and-forget: a
-    /// transient DB error is logged, not surfaced as a toast, since it
-    /// shouldn't interrupt playback.
-    pub(super) fn save_podcast_position(
-        &self,
-        episode_id: i64,
-        position_ms: i64,
-        played: bool,
-    ) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                open_online_store()
-                    .and_then(|store| store.save_episode_position(episode_id, position_ms, played))
-            })
-            .await;
-            if let Ok(Err(e)) = result {
-                tracing::warn!("Failed to save podcast position: {e}");
-            }
-            // No-op message — this write is fire-and-forget, matching
-            // `dispatch_mpd`'s convention for tasks nothing depends on.
-            cosmic::Action::App(Message::PlaybackTick)
-        })
-    }
-
     /// Reads tags for a set of ad-hoc files -- double-clicked in a file
     /// manager via `Exec=lyra %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri` -- and
@@ -1337,5 +1284,156 @@ impl AppModel {
             .unwrap_or_default();
             cosmic::Action::App(Message::OpenFilesScanned(tracks))
         })
+    }
+
+    /// Lazily fetches artist bio/image for the Artists page — called
+    /// from `select_nav` when the page becomes active. Only artists not
+    /// already resolved in memory, not already in flight, and not
+    /// confirmed-negative this session are considered, capped per visit
+    /// so opening the page never fires a burst of requests for a huge
+    /// library; the remainder are picked up on a later visit, or
+    /// immediately if individually selected (see
+    /// `load_artist_info_for_selected`). A no-op in Local/MPD mode when
+    /// `Config::fetch_artist_info` is off; always runs in Subsonic mode,
+    /// whose data comes from the server, not the network toggle.
+    pub(super) fn load_artist_info_for_visible(&mut self) -> Task<cosmic::Action<Message>> {
+        /// Cap on artists newly dispatched per page visit — a courtesy
+        /// bound independent of `ARTIST_INFO_CONCURRENCY` (which bounds
+        /// how many run *at once*, not how many get queued).
+        const MAX_PER_VISIT: usize = 40;
+
+        let Some(provider) = self.registry.active_shared() else {
+            return Task::none();
+        };
+        let is_subsonic = provider.provider_type() == crate::provider::ProviderType::Subsonic;
+        if !is_subsonic && !self.config.fetch_artist_info {
+            return Task::none();
+        }
+
+        let names: Vec<String> = self
+            .all_artists
+            .iter()
+            .map(|a| a.name.clone())
+            .filter(|name| self.artist_info_wanted(name))
+            .take(MAX_PER_VISIT)
+            .collect();
+
+        self.dispatch_artist_info_fetch(provider, is_subsonic, names)
+    }
+
+    /// Fetches artist info for a single artist immediately (e.g. when
+    /// selected from the detail view), bypassing the per-visit cap so a
+    /// deep-linked or scrolled-past artist still gets its info without
+    /// waiting for a later page visit.
+    pub(super) fn load_artist_info_for_selected(
+        &mut self,
+        name: &str,
+    ) -> Task<cosmic::Action<Message>> {
+        let Some(provider) = self.registry.active_shared() else {
+            return Task::none();
+        };
+        let is_subsonic = provider.provider_type() == crate::provider::ProviderType::Subsonic;
+        if !is_subsonic && !self.config.fetch_artist_info {
+            return Task::none();
+        }
+        if !self.artist_info_wanted(name) {
+            return Task::none();
+        }
+        self.dispatch_artist_info_fetch(provider, is_subsonic, vec![name.to_string()])
+    }
+
+    /// True when `name` has neither a cached photo/bio nor an in-flight
+    /// or confirmed-negative lookup — i.e. still worth dispatching.
+    fn artist_info_wanted(&self, name: &str) -> bool {
+        !self.artist_photos.contains_key(name)
+            && !self.artist_bios.contains_key(name)
+            && !self.artist_info_negative.contains(name)
+            && !self.artist_info_pending.contains(name)
+    }
+
+    /// Marks `names` pending and dispatches one `cosmic::task::future`
+    /// per artist, each acquiring `artist_info_semaphore` before its
+    /// blocking resolve (cache hit or network fetch) — mirroring
+    /// `crate::convert::run_job`'s acquire-then-`spawn_blocking` pattern
+    /// — so the actual concurrency bound lives in one shared semaphore
+    /// rather than in how many tasks happen to be dispatched at once.
+    fn dispatch_artist_info_fetch(
+        &mut self,
+        provider: Arc<dyn MusicProvider>,
+        is_subsonic: bool,
+        names: Vec<String>,
+    ) -> Task<cosmic::Action<Message>> {
+        if names.is_empty() {
+            return Task::none();
+        }
+        for name in &names {
+            self.artist_info_pending.insert(name.clone());
+        }
+
+        let provider_id = provider.id().to_string();
+        let tasks: Vec<Task<cosmic::Action<Message>>> = names
+            .into_iter()
+            .map(|name| {
+                let provider = Arc::clone(&provider);
+                let store = Arc::clone(&self.artist_info_store);
+                let semaphore = Arc::clone(&self.artist_info_semaphore);
+                let provider_id = provider_id.clone();
+                cosmic::task::future(async move {
+                    let permit = semaphore.acquire_owned().await.ok();
+                    let now = super::now_epoch();
+                    let name_for_panic = name.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        if is_subsonic {
+                            crate::library::artist_info::resolve_via_provider(
+                                &store,
+                                provider.as_ref(),
+                                &provider_id,
+                                &name,
+                                now,
+                            )
+                        } else {
+                            crate::library::artist_info::resolve_via_agents(&store, &name, now)
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::library::artist_info::ArtistInfoOutcome::empty(name_for_panic)
+                    });
+                    cosmic::Action::App(Message::ArtistInfoLoaded(outcome))
+                })
+            })
+            .collect();
+
+        Task::batch(tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_duration_live_track_position_is_never_clamped() {
+        // A live radio track always reports `duration: Duration::ZERO`
+        // (see `radio_page.rs`) — its ever-increasing playback position
+        // must never get clamped back down to zero, or the UI would show
+        // 0:00 forever despite the stream actually playing.
+        let position = Duration::from_secs(3600);
+        assert_eq!(clamp_display_position(position, Duration::ZERO), position);
+    }
+
+    #[test]
+    fn known_duration_clamps_overshoot() {
+        let duration = Duration::from_secs(180);
+        let position = Duration::from_secs(181);
+        assert_eq!(clamp_display_position(position, duration), duration);
+    }
+
+    #[test]
+    fn known_duration_leaves_in_range_position_untouched() {
+        let duration = Duration::from_secs(180);
+        let position = Duration::from_secs(90);
+        assert_eq!(clamp_display_position(position, duration), position);
     }
 }

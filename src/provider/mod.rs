@@ -202,6 +202,22 @@ pub trait MusicProvider: Send + Sync {
         let _ = genre;
         Ok(Vec::new())
     }
+
+    // --- Artist metadata (optional, default: not supported) ---
+
+    /// Fetch provider-native artist metadata (bio + image), if this
+    /// provider serves its own (currently only `SubsonicProvider`, from
+    /// the server's `getArtistInfo2`/cover art). The default
+    /// `NotSupported` tells `crate::library::artist_info` callers to fall
+    /// back to Lyra's own Deezer/Wikipedia lookup instead, gated by
+    /// `Config::fetch_artist_info`.
+    fn get_artist_info(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::library::ArtistInfoResult>, ProviderError> {
+        let _ = name;
+        Err(ProviderError::NotSupported("artist_info".into()))
+    }
 }
 
 /// Manages all registered music providers.

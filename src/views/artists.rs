@@ -30,6 +30,8 @@ pub enum ArtistMessage {
     PlayNext(Vec<Track>),
     /// Append this album's tracks to the end of the queue.
     AddToQueue(Vec<Track>),
+    /// Expand/collapse the clipped biography preview in the detail view.
+    ToggleBioExpanded,
 }
 
 /// Card artwork/label width for the grid layout — the avatar frame and
@@ -43,7 +45,7 @@ const CARD_LABEL_HEIGHT: f32 = 40.0;
 /// Render the artists view: card grid or list, depending on `mode`.
 pub fn artists_view<'a>(
     artists: &'a [Artist],
-    artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    artist_photos: &'a std::collections::HashMap<String, widget::image::Handle>,
     mode: crate::config::ViewMode,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
@@ -63,10 +65,10 @@ pub fn artists_view<'a>(
             let mut list = widget::Column::new().spacing(2);
 
             for (index, artist) in artists.iter().enumerate() {
-                let avatar = common::list_art_icon(
-                    artist_avatars.get(&artist.name),
-                    48,
-                    "avatar-default-symbolic",
+                let avatar = common::artist_avatar(
+                    &artist.name,
+                    artist_photos.get(&artist.name),
+                    48.0,
                 );
 
                 let info = widget::Column::new()
@@ -98,11 +100,8 @@ pub fn artists_view<'a>(
                 .iter()
                 .enumerate()
                 .map(|(index, artist)| {
-                    let art_widget = common::grid_art_tile(
-                        artist_avatars.get(&artist.name),
-                        160,
-                        "avatar-default-symbolic",
-                    );
+                    let art_widget =
+                        common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 128.0);
 
                     let label_block = common::grid_card_label(
                         CARD_WIDTH,
@@ -144,18 +143,13 @@ pub fn artists_view<'a>(
 pub fn artist_detail_view<'a>(
     artist: &'a Artist,
     artist_index: usize,
-    artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    artist_photos: &'a std::collections::HashMap<String, widget::image::Handle>,
+    artist_bio: Option<&'a str>,
+    bio_expanded: bool,
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
     current_track_id: Option<i64>,
 ) -> cosmic::Element<'a, ArtistMessage> {
-    let avatar: cosmic::Element<'_, ArtistMessage> =
-        if let Some(handle) = artist_avatars.get(&artist.name) {
-            widget::icon::icon(handle.clone()).size(80).into()
-        } else {
-            widget::icon::from_name("avatar-default-symbolic")
-                .size(80)
-                .into()
-        };
+    let avatar = common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 120.0);
 
     let header_info = widget::Column::new()
         .push(widget::text::title1(artist.name.as_str()).wrapping(Wrapping::None))
@@ -176,6 +170,9 @@ pub fn artist_detail_view<'a>(
 
     let mut content = widget::Column::new().push(header).spacing(16);
 
+    if let Some(bio) = artist_bio.filter(|b| !b.trim().is_empty()) {
+        content = content.push(bio_block(bio, bio_expanded));
+    }
     for (album_idx, album) in artist.albums.iter().enumerate() {
         let key = CoverArt::album_key(&artist.name, &album.name);
         let album_art: cosmic::Element<'_, ArtistMessage> =
@@ -341,4 +338,49 @@ fn album_track_summary(album: &Album) -> String {
     } else {
         track_str
     }
+}
+
+/// Max characters shown before the biography is clipped with a
+/// "show more" link — long enough for a couple of sentences, short
+/// enough that the detail view's header stays above the fold.
+const BIO_PREVIEW_CHARS: usize = 320;
+
+/// Clipped-biography card: the full text once `expanded`, otherwise a
+/// character-capped preview with a trailing ellipsis, plus a
+/// show-more/show-less link when the text is actually long enough to
+/// need clipping.
+fn bio_block<'a>(bio: &'a str, expanded: bool) -> cosmic::Element<'a, ArtistMessage> {
+    let char_count = bio.chars().count();
+    let is_long = char_count > BIO_PREVIEW_CHARS;
+
+    let shown = if expanded || !is_long {
+        bio.to_string()
+    } else {
+        let mut preview: String = bio.chars().take(BIO_PREVIEW_CHARS).collect();
+        preview.push('…');
+        preview
+    };
+
+    let mut col = widget::Column::new()
+        .push(widget::text::body(shown))
+        .spacing(8);
+
+    if is_long {
+        let label = if expanded {
+            fl!("artist-bio-less")
+        } else {
+            fl!("artist-bio-more")
+        };
+        col = col.push(
+            widget::button::text(label)
+                .class(cosmic::theme::Button::Link)
+                .on_press(ArtistMessage::ToggleBioExpanded),
+        );
+    }
+
+    widget::container(col)
+        .padding(12)
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::Card)
+        .into()
 }

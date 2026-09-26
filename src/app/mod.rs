@@ -11,7 +11,7 @@ use crate::provider::ProviderRegistry;
 use crate::provider::mpd::MpdProvider;
 use crate::provider::subsonic::SubsonicProvider;
 use crate::views::radio as radio_view;
-use crate::views::{providers, songs};
+use crate::views::{podcasts, providers, songs};
 use cosmic::cosmic_config;
 use cosmic::widget::{self, about::About, menu, nav_bar};
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ mod convert_page;
 mod helpers;
 mod init;
 mod message;
+mod podcast_page;
 mod radio_page;
 mod subscriptions;
 mod tasks;
@@ -41,6 +42,11 @@ const APP_ICON: &[u8] =
 /// Widget id for the header library-search input, used to programmatically
 /// focus it when the search bar is activated.
 const SEARCH_INPUT_ID: &str = "lyra-library-search";
+
+/// Max concurrent artist-info fetches (Deezer/Wikipedia/Subsonic
+/// requests) — see `artist_info_semaphore`. Small and fixed: this is a
+/// courtesy to keyless public APIs, not a throughput knob.
+const ARTIST_INFO_CONCURRENCY: usize = 2;
 
 /// Frames of no mouse movement (at the visualizer's ~30fps render cadence)
 /// before the fullscreen HUD control card auto-hides. ~3 seconds.
@@ -84,6 +90,11 @@ pub struct AppModel {
     provider_list: Vec<(String, String)>,
     /// Index of the active provider in `provider_list`.
     active_provider_index: Option<usize>,
+    /// Set once the user explicitly picks a provider via `SwitchProvider`.
+    /// Guards the startup-restoration logic in the `MpdConnected` handler
+    /// so a later reconnect of a previously-active MPD server never
+    /// overrides a manual switch away from it.
+    provider_manually_switched: bool,
 
     // Library data
     all_tracks: Vec<Track>,
@@ -127,12 +138,41 @@ pub struct AppModel {
 
     // Podcasts
     podcasts: Vec<Podcast>,
-    selected_podcast: Option<usize>,
-    podcast_episodes: Vec<Episode>,
+    /// Which of the two Podcasts tabs is shown; kept for the session (not
+    /// persisted to disk).
+    podcast_tab: podcasts::PodcastTab,
+    /// Whether the inline add-by-URL card is open.
+    podcast_add_open: bool,
+    podcast_add_url: String,
+    /// Inline validation error for the add-by-URL form.
+    podcast_add_error: Option<String>,
+    /// Podcast ids currently being refreshed (per-show spinner in the
+    /// Subscriptions list and in the show detail header).
+    refreshing_podcasts: std::collections::HashSet<i64>,
+    /// Podcast id awaiting an inline unsubscribe confirmation, if any.
+    pending_unsubscribe_podcast: Option<i64>,
+
+    // Podcast discovery (Discover tab)
     podcast_search_query: String,
     podcast_search_results: Vec<PodcastSearchResult>,
     podcast_search_loading: bool,
-    podcast_add_url: String,
+    /// Inline error from the last search, shown in the results slot with a
+    /// Retry action instead of only logging/toasting.
+    podcast_search_error: Option<String>,
+    /// Bumped on every new search dispatch so a slow, since-superseded
+    /// request's result can be recognized and dropped.
+    podcast_search_generation: u64,
+
+    // Podcast show detail
+    /// The subscribed podcast's db id currently shown in detail, or `None`
+    /// for the Subscriptions/Discover list.
+    selected_podcast: Option<i64>,
+    podcast_episodes: Vec<Episode>,
+    podcast_episode_filter: podcasts::EpisodeFilter,
+    podcast_episode_text_filter: String,
+    /// Whether the show detail's description is expanded past its clipped
+    /// preview.
+    podcast_description_expanded: bool,
     /// The episode id currently playing, if the current track came from a
     /// podcast subscription — used to persist playback position.
     current_podcast_episode_id: Option<i64>,
@@ -255,7 +295,35 @@ pub struct AppModel {
     /// library reloads (see `FolderTree::build`).
     folder_state: crate::views::folders::FolderState,
     cover_images: HashMap<String, widget::icon::Handle>,
-    artist_avatars: HashMap<String, widget::icon::Handle>,
+    /// Cached real artist photos (from Subsonic's own artist data or, in
+    /// Local/MPD mode, Deezer via `crate::library::artist_info` when
+    /// `Config::fetch_artist_info` is on), keyed by artist name. Missing
+    /// entries fall back to the deterministic-color initials avatar
+    /// built entirely from widgets — see `crate::views::common::artist_avatar`.
+    artist_photos: HashMap<String, widget::image::Handle>,
+    /// Cached artist biography text, populated the same way as
+    /// `artist_photos`.
+    artist_bios: HashMap<String, String>,
+    /// Artist names with an info fetch currently in flight, so opening
+    /// the Artists page again (or re-selecting an artist) never
+    /// double-dispatches a fetch that's already running.
+    artist_info_pending: std::collections::HashSet<String>,
+    /// Artist names confirmed (this session) to have neither a bio nor
+    /// an image, so a page re-visit doesn't retry them in-memory until
+    /// the on-disk negative-cache TTL expires and the app restarts.
+    artist_info_negative: std::collections::HashSet<String>,
+    /// Whether the selected artist's biography preview is expanded past
+    /// its clipped preview; reset on selection/back navigation.
+    artist_bio_expanded: bool,
+    /// On-disk cache for `artist_photos`/`artist_bios` — see
+    /// `crate::library::artist_info::ArtistInfoStore`.
+    artist_info_store: Arc<crate::library::artist_info::ArtistInfoStore>,
+    /// Bounds how many artist-info fetches (Deezer/Wikipedia/Subsonic
+    /// requests) run concurrently, mirroring `convert_semaphore`'s
+    /// acquire-before-`spawn_blocking` pattern — a small, fixed number of
+    /// permits so opening the Artists page never fires an unbounded
+    /// burst of network requests.
+    artist_info_semaphore: Arc<tokio::sync::Semaphore>,
 
     // Keyboard input state
     /// Tracks whether any text input field currently has keyboard focus.
@@ -559,6 +627,16 @@ fn online_db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("lyra")
         .join("library.db")
+}
+
+/// Data directory the artist-info disk cache lives under (see
+/// `crate::library::artist_info::ArtistInfoStore::open`), sibling to the
+/// library database rather than inside it — it's a bag of JSON + image
+/// files, not SQL rows.
+fn artist_info_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lyra")
 }
 
 /// Open the online store at the shared library database path.

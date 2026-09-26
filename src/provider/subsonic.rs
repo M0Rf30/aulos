@@ -845,4 +845,80 @@ impl MusicProvider for SubsonicProvider {
             Ok(tracks)
         })
     }
+
+    // --- Artist metadata ---
+
+    /// Serves the server's own artist bio/image (`getArtistInfo2` and the
+    /// artist's cover art / `artistImageUrl`) regardless of Lyra's
+    /// "fetch artist images and info online" setting — that toggle only
+    /// gates Lyra's own Deezer/Wikipedia lookup for Local/MPD, which
+    /// would be redundant (and pointlessly slower) next to data the
+    /// Subsonic/Navidrome server already curates.
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_artist_info(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::library::ArtistInfoResult>, ProviderError> {
+        self.block_on(async {
+            let indexes = self
+                .client
+                .get_artists(None)
+                .await
+                .map_err(subsonic_err("getArtists"))?;
+
+            let Some(artist_ref) = indexes
+                .index
+                .iter()
+                .flat_map(|idx| idx.artist.iter())
+                .find(|a| a.name.eq_ignore_ascii_case(name))
+            else {
+                return Ok(None);
+            };
+            let artist_id = artist_ref.id.clone();
+
+            let detail = self
+                .client
+                .get_artist(&artist_id)
+                .await
+                .map_err(subsonic_err("getArtist"))?;
+
+            let bio = self
+                .client
+                .get_artist_info2(&artist_id, None, None)
+                .await
+                .ok()
+                .and_then(|info| info.biography)
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty());
+
+            // Prefer the server's own cover art (an authenticated URL,
+            // already signed by the client, matching `get_cover_art`'s
+            // `CoverSource::Url` handling above) over the external
+            // `artistImageUrl`, which may be stale or absent on servers
+            // that don't scrape one.
+            let image_url = self
+                .cover_source_from_id(&detail.cover_art)
+                .and_then(|src| match src {
+                    CoverSource::Url(u) => Some(u),
+                    CoverSource::LocalFile(_) | CoverSource::MpdAlbumArt(_) => None,
+                })
+                .or_else(|| detail.artist_image_url.clone());
+
+            let image_bytes = match image_url {
+                Some(url) => match self.http_client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        resp.bytes().await.ok().map(|b| b.to_vec())
+                    }
+                    _ => None,
+                },
+                None => None,
+            };
+
+            if bio.is_none() && image_bytes.is_none() {
+                return Ok(None);
+            }
+
+            Ok(Some(crate::library::ArtistInfoResult { bio, image_bytes }))
+        })
+    }
 }

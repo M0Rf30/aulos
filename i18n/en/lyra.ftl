@@ -375,3 +375,67 @@ toast-radio-save-failed = Failed to save station: { $reason }
 toast-radio-play-failed = Failed to play station: { $reason }
 toast-radio-removed = Removed "{ $name }"
 radio-undo = Undo
+
+## Converter
+settings-experimental = Experimental
+experimental-converter = Audio Converter
+experimental-converter-description = Convert, transcode, or rip local audio/video files and CUE sheets. Experimental: enable to add a "Convert" page to the navigation.
+convert-format-aiff16 = AIFF (16-bit)
+convert-format-aiff24 = AIFF (24-bit)
+convert-format-mp3 = MP3
+convert-format-aac = AAC (M4A)
+convert-format-opus = Opus
+convert-format-vorbis = Ogg Vorbis
+convert-format-alac = ALAC (M4A)
+convert-format-needs-ffmpeg = { $format } (needs ffmpeg)
+convert-flac-compression = Compression Level
+convert-flac-bitdepth = Bit Depth
+convert-flac-bitdepth-auto = Auto
+convert-flac-bitdepth-16 = 16-bit
+convert-flac-bitdepth-24 = 24-bit
+convert-mp3-mode = Quality
+convert-mp3-vbr = VBR V{ $q }
+convert-mp3-cbr = CBR { $kbps } kbps
+convert-bitrate = Bitrate
+convert-rate-hz-kbps = { $kbps } kbps
+convert-vorbis-quality = Quality
+convert-requires-ffmpeg = This format needs the ffmpeg command-line tool, which wasn't found on your system.
+
+## Podcasts
+podcast-tab-discover = Discover
+podcast-add-by-url = Add by URL
+podcast-cancel = Cancel
+podcast-add-url-required = Enter a feed URL
+podcast-add-url-invalid = URL must start with http:// or https://
+podcast-unplayed-badge = { $count } unplayed
+podcast-updated-at = Updated { $when }
+podcast-never-updated = Never updated
+podcast-confirm-unsubscribe = Unsubscribe from "{ $name }"? This deletes its downloaded episodes.
+podcast-confirm-unsubscribe-yes = Unsubscribe
+toast-podcast-unsubscribe-failed = Failed to unsubscribe: { $reason }
+toast-podcast-subscribed = Subscribed to "{ $name }"
+podcast-searching-hint = Looking for shows…
+podcast-retry = Retry
+podcast-no-results = No shows found
+podcast-no-results-hint = Try a different search term
+podcast-subscribed-badge = Subscribed
+podcast-description-more = Show more
+podcast-description-less = Show less
+podcast-refresh = Refresh
+podcast-unsubscribe = Unsubscribe
+podcast-filter-all = All
+podcast-filter-unplayed = Unplayed
+podcast-filter-downloaded = Downloaded
+podcast-episode-filter-placeholder = Filter episodes...
+podcast-no-filter-matches = No matching episodes
+podcast-no-filter-matches-hint = Try a different search term, or clear the filter
+podcast-play-tooltip = Play episode
+podcast-resume-tooltip = Resume episode
+podcast-now-playing-badge = Now playing
+
+## Artists
+settings-artist-info = Artist Info
+fetch-artist-info = Fetch artist images and info online
+fetch-artist-info-description = Look up artist photos (via Deezer) and biography text (via Wikipedia) when browsing in Local or MPD mode. Off by default. Ignored in Subsonic/Navidrome mode, which always shows the server's own artist info instead.
+artist-bio-more = Show more
+artist-bio-less = Show less

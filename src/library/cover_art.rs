@@ -186,6 +186,21 @@ impl CoverArt {
 
         (size, size, img.into_raw())
     }
+
+    /// Public accessor for the deterministic initials used by the
+    /// generated avatar — shared by `crate::views::common::initials_avatar`,
+    /// which renders them as widget text instead of rasterizing them, so
+    /// the placeholder avatar stays crisp at any size/HiDPI scale factor.
+    pub fn artist_initials(name: &str) -> String {
+        artist_initials(name)
+    }
+
+    /// Public accessor for the deterministic background color used by the
+    /// generated avatar, as plain RGB — see `artist_initials`.
+    pub fn artist_avatar_color(name: &str) -> (u8, u8, u8) {
+        let [r, g, b, _a] = deterministic_color(name);
+        (r, g, b)
+    }
 }
 
 fn artist_initials(name: &str) -> String {
@@ -269,5 +284,21 @@ mod thumbnail_tests {
         let (w, h, pixels) = CoverArt::generate_artist_avatar_pixels("Jane Doe", 64);
         assert_eq!((w, h), (64, 64));
         assert_eq!(pixels.len(), (64 * 64 * 4) as usize);
+    }
+
+    #[test]
+    fn artist_initials_takes_first_two_word_leaders_uppercased() {
+        assert_eq!(CoverArt::artist_initials("daft punk"), "DP");
+        assert_eq!(CoverArt::artist_initials("Beyoncé"), "B");
+        assert_eq!(CoverArt::artist_initials("  "), "");
+    }
+
+    #[test]
+    fn artist_avatar_color_is_deterministic_and_name_sensitive() {
+        let a1 = CoverArt::artist_avatar_color("Daft Punk");
+        let a2 = CoverArt::artist_avatar_color("Daft Punk");
+        let b = CoverArt::artist_avatar_color("Air");
+        assert_eq!(a1, a2, "same name must always produce the same color");
+        assert_ne!(a1, b, "different names should (almost always) differ");
     }
 }

@@ -41,6 +41,11 @@ pub enum SettingsMessage {
     SubmitArtistTagDelimiters(String),
     /// Reset the delimiter list to the built-in defaults.
     ResetArtistTagDelimiters,
+    /// Toggle the experimental local file converter feature on/off.
+    SetExperimentalConverter(bool),
+    /// Toggle fetching artist images/biography from online sources
+    /// (Local/MPD mode only — ignored in Subsonic mode).
+    SetFetchArtistInfo(bool),
 }
 
 /// All replay gain modes, in the order shown in the dropdown.
@@ -52,12 +57,15 @@ const REPLAY_GAIN_MODES: [ReplayGainMode; 4] = [
 ];
 
 /// Render the Settings page.
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     music_dirs: &'a [PathBuf],
     crossfade_secs: f32,
     replay_gain_mode: ReplayGainMode,
     volume: f32,
     split_artist_tags: bool,
+    experimental_converter: bool,
+    fetch_artist_info: bool,
     artist_tag_delimiters_input: &'a str,
 ) -> cosmic::Element<'a, SettingsMessage> {
     let col = widget::Column::new()
@@ -68,6 +76,8 @@ pub fn view<'a>(
             artist_tag_delimiters_input,
         ))
         .push(playback_section(crossfade_secs, replay_gain_mode, volume))
+        .push(artist_info_section(fetch_artist_info))
+        .push(experimental_section(experimental_converter))
         .push(shortcuts_section())
         .push(about_section());
 
@@ -174,6 +184,42 @@ fn playback_section<'a>(
         .add(crossfade_item)
         .add(replay_gain_item)
         .add(volume_item)
+        .into()
+}
+
+/// Experimental section: opt-in toggle for the local file
+/// converter/transcoder/ripper page, disabled by default (see
+/// `crate::config::Config::experimental_converter`). Toggling it
+/// live-adds/removes the Convert nav entry — see
+/// `crate::app::AppModel::set_convert_nav_entry`.
+fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a, SettingsMessage> {
+    let item = widget::settings::item::builder(fl!("experimental-converter"))
+        .description(fl!("experimental-converter-description"))
+        .control(
+            widget::toggler(experimental_converter)
+                .on_toggle(SettingsMessage::SetExperimentalConverter),
+        );
+
+    widget::settings::section()
+        .title(fl!("settings-experimental"))
+        .add(item)
+        .into()
+}
+
+/// Artist info section: opt-in toggle for fetching artist images and
+/// biography text from online sources when browsing in Local or MPD mode
+/// (see `crate::config::Config::fetch_artist_info`). Ignored in Subsonic
+/// mode, which always shows the server's own artist info instead.
+fn artist_info_section<'a>(fetch_artist_info: bool) -> cosmic::Element<'a, SettingsMessage> {
+    let item = widget::settings::item::builder(fl!("fetch-artist-info"))
+        .description(fl!("fetch-artist-info-description"))
+        .control(
+            widget::toggler(fetch_artist_info).on_toggle(SettingsMessage::SetFetchArtistInfo),
+        );
+
+    widget::settings::section()
+        .title(fl!("settings-artist-info"))
+        .add(item)
         .into()
 }
 

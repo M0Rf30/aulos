@@ -7,6 +7,7 @@ pub mod engine;
 pub mod eq_presets;
 pub mod eq_source;
 pub mod equalizer;
+mod icy_reader;
 mod http_range_reader;
 pub mod local_backend;
 pub mod mpd_backend;

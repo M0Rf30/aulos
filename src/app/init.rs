@@ -10,7 +10,7 @@ use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::radio as radio_view;
-use crate::views::{providers, songs};
+use crate::views::{podcasts, providers, songs};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::Application;
 use cosmic::prelude::*;
@@ -75,11 +75,6 @@ impl AppModel {
             .data::<Page>(Page::Radio)
             .icon(icon::from_name("network-wireless-symbolic"));
 
-        nav.insert()
-            .text(fl!("convert"))
-            .data::<Page>(Page::Convert)
-            .icon(icon::from_name("media-import-audio-symbolic"));
-
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -96,6 +91,10 @@ impl AppModel {
                 Err((_errors, config)) => config,
             })
             .unwrap_or_default();
+
+        if config.experimental_converter {
+            insert_convert_nav_entry(&mut nav);
+        }
 
         // Tasks 83-84: Migrate plaintext passwords to system keyring.
         // For each provider config entry that has a password but hasn't been
@@ -257,6 +256,19 @@ impl AppModel {
             }
         }
 
+        // Restore the provider that was active when the app last exited,
+        // falling back to local if it's no longer registered (server
+        // removed from config, etc). All providers above are registered
+        // synchronously regardless of connection state, so this already
+        // reflects the final registered set even though MPD/Subsonic
+        // connections themselves complete asynchronously later.
+        let registered_ids: Vec<String> = registry.list().into_iter().map(|(id, _, _)| id).collect();
+        if let Some(target) =
+            crate::config::resolve_active_provider(config.active_provider.as_deref(), &registered_ids)
+        {
+            registry.set_active(&target);
+        }
+
         // Build editing state for MPD servers
         let mpd_edit_states: Vec<providers::MpdEditState> = config
             .mpd_servers
@@ -345,6 +357,7 @@ impl AppModel {
             mpd_providers,
             provider_list: Vec::new(),
             active_provider_index: None,
+            provider_manually_switched: false,
             all_tracks: Vec::new(),
             all_albums: Vec::new(),
             all_artists: Vec::new(),
@@ -365,12 +378,22 @@ impl AppModel {
             filtered_genres: Vec::new(),
             filtered_genre_map: Vec::new(),
             podcasts: Vec::new(),
-            selected_podcast: None,
-            podcast_episodes: Vec::new(),
+            podcast_tab: podcasts::PodcastTab::default(),
+            podcast_add_open: false,
+            podcast_add_url: String::new(),
+            podcast_add_error: None,
+            refreshing_podcasts: std::collections::HashSet::new(),
+            pending_unsubscribe_podcast: None,
             podcast_search_query: String::new(),
             podcast_search_results: Vec::new(),
             podcast_search_loading: false,
-            podcast_add_url: String::new(),
+            podcast_search_error: None,
+            podcast_search_generation: 0,
+            selected_podcast: None,
+            podcast_episodes: Vec::new(),
+            podcast_episode_filter: podcasts::EpisodeFilter::default(),
+            podcast_episode_text_filter: String::new(),
+            podcast_description_expanded: false,
             current_podcast_episode_id: None,
             last_saved_podcast_position_secs: 0,
             downloading_episodes: std::collections::HashSet::new(),
@@ -422,7 +445,17 @@ impl AppModel {
             genre_tracks: Vec::new(),
             folder_state: crate::views::folders::FolderState::default(),
             cover_images: HashMap::new(),
-            artist_avatars: HashMap::new(),
+            artist_photos: HashMap::new(),
+            artist_bios: HashMap::new(),
+            artist_info_pending: std::collections::HashSet::new(),
+            artist_info_negative: std::collections::HashSet::new(),
+            artist_bio_expanded: false,
+            artist_info_store: Arc::new(crate::library::artist_info::ArtistInfoStore::open(
+                &super::artist_info_data_dir(),
+            )),
+            artist_info_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                super::ARTIST_INFO_CONCURRENCY,
+            )),
             text_input_focused: false,
             lyrics_text: None,
             lyrics_loading: false,
@@ -537,4 +570,43 @@ impl AppModel {
 
         (app, Task::batch(init_tasks))
     }
+
+    /// Inserts or removes the Convert nav entry live when the
+    /// experimental-converter setting is toggled. Order stays stable:
+    /// re-enabling always appends it at the end (same as at startup, since
+    /// `nav.insert()` always pushes onto the tail of the display order and
+    /// nothing is ever inserted after Convert). If Convert was the active
+    /// page when disabled, Albums is activated instead so the view never
+    /// falls back to it (also guarded defensively at render time, see
+    /// `view::view_page`).
+    pub(super) fn set_convert_nav_entry(&mut self, enabled: bool) {
+        let entities: Vec<_> = self.nav.iter().collect();
+        let convert_entity =
+            entities.iter().copied().find(|&id| self.nav.data::<Page>(id) == Some(&Page::Convert));
+
+        if enabled {
+            if convert_entity.is_none() {
+                insert_convert_nav_entry(&mut self.nav);
+            }
+        } else if let Some(id) = convert_entity {
+            let was_active = self.nav.active() == id;
+            self.nav.remove(id);
+            if was_active
+                && let Some(albums_id) =
+                    entities.iter().copied().find(|&aid| self.nav.data::<Page>(aid) == Some(&Page::Albums))
+            {
+                self.nav.activate(albums_id);
+            }
+        }
+    }
+}
+
+/// Appends the Convert nav entry at the end of `nav`'s display order —
+/// shared between the initial (config-gated) build in `init_model` and
+/// `AppModel::set_convert_nav_entry`'s live re-enable path.
+fn insert_convert_nav_entry(nav: &mut nav_bar::Model) {
+    nav.insert()
+        .text(fl!("convert"))
+        .data::<Page>(Page::Convert)
+        .icon(icon::from_name("document-import-symbolic"));
 }

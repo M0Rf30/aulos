@@ -110,8 +110,16 @@ md5 = "0.8"
 thiserror = "2"
 regex = "1"
 
-# Local file conversion / transcoding / CUE ripping (pure Rust — no C
-# bindings, so no lossy encoder or CD-drive ripping support)
+# Local file conversion / transcoding / CUE ripping. Pure Rust — no C
+# bindings/-sys crates here. Lossless formats this converter can't
+# encode without a C dependency (WAV is via `hound` below; AIFF is
+# hand-written, no crate needed). Lossy formats (MP3/AAC/Opus/Ogg
+# Vorbis/ALAC) have no usable pure-Rust encoder as of this writing (see
+# src/convert/encoder.rs's module docs for the crates.io candidates
+# rejected and why) and fall back to shelling out to the system
+# `ffmpeg` binary at runtime instead — no crate/build dependency added
+# for that, so CD-drive ripping (which does need C bindings) is still
+# the one thing out of scope here.
 flacenc = "0.5"
 hound = "3.5"
 

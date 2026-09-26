@@ -2,17 +2,22 @@
 
 //! Local file conversion / transcoding / CUE-sheet ripping.
 //!
-//! Pure-Rust by design: decoding goes through symphonia (already a
-//! dependency), encoding through `flacenc` (FLAC) and `hound` (WAV) — no
-//! lossy encoders exist in pure Rust, and CD-drive ripping needs C bindings,
-//! so neither is in scope here. `pipeline` decodes any symphonia-supported
-//! input (audio files *and* video containers such as mp4/mkv, since
-//! symphonia's probe is content-based and picks the default audio track
-//! regardless of container), `encoder` writes the chosen output format, and
-//! `cue` splits a single ripped file into per-track outputs from a CUE sheet.
+//! Decoding goes through symphonia (already a dependency); encoding is
+//! pure Rust for every lossless format (`flacenc` for FLAC, `hound` for
+//! WAV, a hand-written writer for AIFF — see `encoder`'s module docs) and
+//! falls back to shelling out to the system `ffmpeg` binary for the five
+//! formats with no usable pure-Rust encoder (MP3, AAC, Opus, Ogg Vorbis,
+//! ALAC — see `ffmpeg`'s module docs for why). CD-drive ripping needs C
+//! bindings and stays out of scope either way. `pipeline` decodes any
+//! symphonia-supported input (audio files *and* video containers such as
+//! mp4/mkv, since symphonia's probe is content-based and picks the
+//! default audio track regardless of container), `encoder`/`ffmpeg`
+//! together write the chosen output format, and `cue` splits a single
+//! ripped file into per-track outputs from a CUE sheet.
 
 pub mod cue;
 pub mod encoder;
+pub mod ffmpeg;
 pub mod pipeline;
 pub mod tag_writer;
 
@@ -77,6 +82,8 @@ pub struct JobSettings {
     pub format: OutputFormat,
     pub target_rate: Option<u32>,
     pub out_dir: PathBuf,
+    pub flac_options: encoder::FlacOptions,
+    pub lossy_options: encoder::LossyOptions,
 }
 
 /// A single conversion/rip job tracked by the UI and run by [`run_job`].
@@ -214,7 +221,13 @@ mod tests {
     use super::*;
 
     fn settings(out_dir: &str) -> JobSettings {
-        JobSettings { format: OutputFormat::Flac, target_rate: None, out_dir: PathBuf::from(out_dir) }
+        JobSettings {
+            format: OutputFormat::Flac,
+            target_rate: None,
+            out_dir: PathBuf::from(out_dir),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
+        }
     }
 
     #[test]

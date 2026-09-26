@@ -3,8 +3,6 @@
 use super::ContextPage;
 use crate::config::{Config, ReplayGainMode};
 use crate::library::{Album, Artist, Lyrics, Track};
-use crate::online::podcast::PodcastSearchResult;
-use crate::online::store::{Episode, Podcast};
 use crate::player::PlaybackState;
 use crate::views::radio as radio_view;
 use crate::views::{albums, artists, convert, podcasts, songs};
@@ -60,7 +58,6 @@ pub enum Message {
         albums: Vec<Album>,
         artists: Vec<Artist>,
         cover_images: HashMap<String, widget::icon::Handle>,
-        artist_avatars: HashMap<String, widget::icon::Handle>,
         /// Raw cover art bytes for blur processing.
         cover_art_bytes: HashMap<String, Vec<u8>>,
     },
@@ -135,6 +132,11 @@ pub enum Message {
     // Artists view
     SelectArtist(usize),
     BackToArtistList,
+    /// Expand/collapse the selected artist's clipped biography preview.
+    ToggleArtistBioExpanded,
+    /// One lazily-fetched artist's bio/image result landed (see
+    /// `AppModel::load_artist_info_for_visible`).
+    ArtistInfoLoaded(crate::library::artist_info::ArtistInfoOutcome),
 
     // Songs view
     SortSongs(songs::SortField),
@@ -249,6 +251,13 @@ pub enum Message {
     SubmitArtistTagDelimiters(String),
     /// Reset the delimiter list to `artist_tags::DEFAULT_DELIMITERS`.
     ResetArtistTagDelimiters,
+    /// Toggle the experimental local file converter feature on/off (also
+    /// live-adds/removes the Convert nav entry — see
+    /// `crate::app::init::AppModel::set_convert_nav_entry`).
+    SetExperimentalConverter(bool),
+    /// Toggle fetching artist images/biography from online sources
+    /// (Local/MPD mode only — ignored in Subsonic mode).
+    SetFetchArtistInfo(bool),
 
     // Provider switching
     SwitchProvider(usize),
@@ -367,31 +376,10 @@ pub enum Message {
 
     // Notifications
     // Podcasts
-    PodcastSearchChanged(String),
-    PodcastSearchSubmit,
-    PodcastSearchResults(Result<Vec<PodcastSearchResult>, String>),
-    PodcastAddUrlChanged(String),
-    SubscribePodcast(String),
-    PodcastSubscribed(Result<(), String>),
-    PodcastsLoaded(Vec<Podcast>),
-    SelectPodcast(usize),
-    BackToPodcastList,
-    RemovePodcast(usize),
-    RefreshPodcast(usize),
-    RefreshAllPodcasts,
-    PodcastRefreshed(i64, Result<(), String>),
-    PodcastEpisodesLoaded(i64, Vec<Episode>),
-    PlayPodcastEpisode(usize),
-    TogglePodcastEpisodePlayed(usize),
-    /// Download an episode's enclosure for offline playback, by its index
-    /// in `podcast_episodes`.
-    DownloadEpisode(usize),
-    /// An episode download finished: episode id plus the resulting local
-    /// file path, or a failure reason.
-    EpisodeDownloaded(i64, Result<String, String>),
-    /// Delete a downloaded episode's local file, by its index in
-    /// `podcast_episodes`.
-    DeleteEpisodeDownload(usize),
+    /// UI events from the podcasts view (see `views::podcasts::PodcastMessage`).
+    Podcast(podcasts::PodcastMessage),
+    /// Async results for the podcasts page (see `app::podcast_page::PodcastEvent`).
+    PodcastEvent(super::podcast_page::PodcastEvent),
     /// A podcast/radio icon (artwork or favicon) finished downloading.
     /// `Some((width, height, rgba_pixels))` on success (already decoded
     /// and downscaled off-thread by `load_online_icons`, so the handler
@@ -464,27 +452,7 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
             artists::ArtistMessage::PlayNext(tracks) => Message::PlayNext(tracks),
             artists::ArtistMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
-        }
-    }
-}
-
-impl From<podcasts::PodcastMessage> for Message {
-    fn from(msg: podcasts::PodcastMessage) -> Self {
-        match msg {
-            podcasts::PodcastMessage::SearchChanged(s) => Message::PodcastSearchChanged(s),
-            podcasts::PodcastMessage::SearchSubmit => Message::PodcastSearchSubmit,
-            podcasts::PodcastMessage::AddUrlChanged(s) => Message::PodcastAddUrlChanged(s),
-            podcasts::PodcastMessage::AddByUrl(url) => Message::SubscribePodcast(url),
-            podcasts::PodcastMessage::SubscribeFromSearch(url) => Message::SubscribePodcast(url),
-            podcasts::PodcastMessage::SelectPodcast(i) => Message::SelectPodcast(i),
-            podcasts::PodcastMessage::BackToList => Message::BackToPodcastList,
-            podcasts::PodcastMessage::RemovePodcast(i) => Message::RemovePodcast(i),
-            podcasts::PodcastMessage::RefreshPodcast(i) => Message::RefreshPodcast(i),
-            podcasts::PodcastMessage::RefreshAll => Message::RefreshAllPodcasts,
-            podcasts::PodcastMessage::PlayEpisode(i) => Message::PlayPodcastEpisode(i),
-            podcasts::PodcastMessage::TogglePlayed(i) => Message::TogglePodcastEpisodePlayed(i),
-            podcasts::PodcastMessage::Download(i) => Message::DownloadEpisode(i),
-            podcasts::PodcastMessage::DeleteDownload(i) => Message::DeleteEpisodeDownload(i),
+            artists::ArtistMessage::ToggleBioExpanded => Message::ToggleArtistBioExpanded,
         }
     }
 }

@@ -231,6 +231,8 @@ impl AppModel {
                     self.config.replay_gain_mode,
                     volume,
                     self.config.split_artist_tags,
+                    self.config.experimental_converter,
+                    self.config.fetch_artist_info,
                     &self.artist_tag_delimiters_input,
                 )
                 .map(|msg| match msg {
@@ -253,6 +255,9 @@ impl AppModel {
                     settings::SettingsMessage::SetSplitArtistTags(v) => {
                         Message::SetSplitArtistTags(v)
                     }
+                    settings::SettingsMessage::SetFetchArtistInfo(v) => {
+                        Message::SetFetchArtistInfo(v)
+                    }
                     settings::SettingsMessage::EditArtistTagDelimiters(v) => {
                         Message::ArtistTagDelimitersInputChanged(v)
                     }
@@ -261,6 +266,9 @@ impl AppModel {
                     }
                     settings::SettingsMessage::ResetArtistTagDelimiters => {
                         Message::ResetArtistTagDelimiters
+                    }
+                    settings::SettingsMessage::SetExperimentalConverter(v) => {
+                        Message::SetExperimentalConverter(v)
                     }
                 });
 
@@ -330,6 +338,15 @@ impl AppModel {
             .active_data::<Page>()
             .cloned()
             .unwrap_or(Page::Albums);
+        // Defensive fallback: the Convert nav entry only exists while
+        // `experimental_converter` is on (see `AppModel::set_convert_nav_entry`),
+        // but guard here too in case `last_view` restoration ever lands on
+        // it while the flag is off.
+        let page = if page == Page::Convert && !self.config.experimental_converter {
+            Page::Albums
+        } else {
+            page
+        };
 
         let search_query_active = self.search_active && !self.library_search.trim().is_empty();
 
@@ -383,7 +400,9 @@ impl AppModel {
                         artists::artist_detail_view(
                             artist,
                             artist_idx,
-                            &self.artist_avatars,
+                            &self.artist_photos,
+                            self.artist_bios.get(&artist.name).map(String::as_str),
+                            self.artist_bio_expanded,
                             &self.cover_images,
                             self.current_track.as_ref().map(|t| t.id),
                         )
@@ -403,7 +422,7 @@ impl AppModel {
                         };
                     artists::artists_view(
                         artists_data,
-                        &self.artist_avatars,
+                        &self.artist_photos,
                         self.config.artists_view_mode,
                     )
                     .map(move |msg| {
@@ -637,28 +656,40 @@ impl AppModel {
             )
             .map(Message::Folders),
 
-            Page::Podcasts => match self
-                .selected_podcast
-                .and_then(|idx| self.podcasts.get(idx).map(|podcast| (idx, podcast)))
-            {
-                Some((_, podcast)) => podcasts::podcast_detail_view(
-                    podcast,
-                    &self.podcast_episodes,
-                    self.current_podcast_episode_id,
-                    &self.online_icons,
-                    &self.downloading_episodes,
-                )
-                .map(Message::from),
-                None => podcasts::podcast_list_view(
-                    &self.podcasts,
-                    &self.podcast_search_query,
-                    &self.podcast_search_results,
-                    self.podcast_search_loading,
-                    &self.podcast_add_url,
-                    &self.online_icons,
-                )
-                .map(Message::from),
-            },
+            Page::Podcasts => {
+                let is_podcast_track =
+                    self.current_track.as_ref().is_some_and(|t| &*t.provider_id == "podcast");
+                let playback_state = self.player.as_ref().map(|p| p.state());
+                let is_episode_playing = is_podcast_track
+                    && matches!(playback_state, Some(PlaybackState::Playing) | Some(PlaybackState::Paused));
+                let is_paused = matches!(playback_state, Some(PlaybackState::Paused));
+                let selected =
+                    self.selected_podcast.and_then(|id| self.podcasts.iter().find(|p| p.id == id));
+                let props = podcasts::PodcastViewProps {
+                    podcasts: &self.podcasts,
+                    tab: self.podcast_tab,
+                    add_open: self.podcast_add_open,
+                    add_url: &self.podcast_add_url,
+                    add_error: self.podcast_add_error.as_deref(),
+                    refreshing: &self.refreshing_podcasts,
+                    pending_unsubscribe: self.pending_unsubscribe_podcast,
+                    search_query: &self.podcast_search_query,
+                    search_results: &self.podcast_search_results,
+                    search_loading: self.podcast_search_loading,
+                    search_error: self.podcast_search_error.as_deref(),
+                    selected,
+                    episodes: &self.podcast_episodes,
+                    episode_filter: self.podcast_episode_filter,
+                    episode_text_filter: &self.podcast_episode_text_filter,
+                    description_expanded: self.podcast_description_expanded,
+                    downloading: &self.downloading_episodes,
+                    current_episode_id: self.current_podcast_episode_id,
+                    is_episode_playing,
+                    is_paused,
+                    icons: &self.online_icons,
+                };
+                podcasts::podcast_view(props).map(Message::Podcast)
+            }
 
             Page::Radio => {
                 let props = radio_view::RadioViewProps {
@@ -693,13 +724,16 @@ impl AppModel {
 
             Page::Convert => {
                 let out_dir = self.convert_out_dir();
-                convert::convert_view(
-                    &self.convert_jobs,
-                    &out_dir,
-                    self.config.convert_format,
-                    self.config.convert_sample_rate,
-                    self.convert_dir_error.as_deref(),
-                )
+                convert::convert_view(convert::ConvertViewProps {
+                    jobs: &self.convert_jobs,
+                    out_dir: &out_dir,
+                    format: self.config.convert_format,
+                    sample_rate: self.config.convert_sample_rate,
+                    dir_error: self.convert_dir_error.as_deref(),
+                    flac_options: self.config.flac_options,
+                    lossy_options: self.config.lossy_options,
+                    ffmpeg_available: crate::convert::ffmpeg::cached(),
+                })
                 .map(Message::Convert)
             }
         };

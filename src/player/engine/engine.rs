@@ -52,6 +52,7 @@ use super::resampler::ResamplerQuality;
 use crate::player::backend::PlayerError;
 use crate::player::eq_source::{EqFilter, SharedCoeffs};
 use crate::player::http_range_reader::HttpRangeReader;
+use crate::player::icy_reader::IcyStrippingReader;
 #[cfg(feature = "visualizer")]
 use crate::views::now_playing::visualizer::PcmBuffer;
 
@@ -191,13 +192,20 @@ impl PlaySource {
                         .metadata_interval();
                 match metadata_interval {
                     Some(interval) => {
-                        let reader = icy_metadata::IcyMetadataReader::new(
+                        // `icy_metadata::IcyMetadataReader` (crate 0.6.0) panics
+                        // whenever `icy-metaint` exceeds the caller's read-buffer
+                        // size — which Symphonia's `MediaSourceStream` (~32 KiB
+                        // internal buffer) triggers for any station whose
+                        // metaint is bigger than that (e.g. SomaFM's 45000),
+                        // a few seconds into playback. See `icy_reader`'s module
+                        // docs for the full explanation; this is the direct fix
+                        // for "radio streams play for a few seconds and stop".
+                        let reader = IcyStrippingReader::new(
                             response,
-                            Some(interval),
+                            interval.get(),
                             move |metadata| {
-                                let title = metadata
-                                    .ok()
-                                    .and_then(|m| m.stream_title().map(str::to_string));
+                                let title =
+                                    metadata.and_then(|m| m.stream_title().map(str::to_string));
                                 *icy_title.lock() = title;
                             },
                         );
@@ -207,6 +215,129 @@ impl PlaySource {
                 }
             }
         }
+    }
+}
+
+/// Maximum consecutive reconnect attempts for a live radio stream hiccup
+/// (transient network drop, server-side reset) before giving up and
+/// letting the track be treated as genuinely finished — see `LiveRetry`
+/// and `reconnect_live`.
+const MAX_LIVE_RECONNECT_ATTEMPTS: u32 = 5;
+
+/// Reconnect ingredients captured from a `PlaySource::LiveStream` before it
+/// is consumed opening the initial connection. Internet radio has no
+/// concept of "the track ended" — a bare EOS or IO error almost always
+/// means the TCP connection dropped, not that playback should stop, so
+/// `run_pcm` uses this to transparently re-`GET` the same URL instead of
+/// surfacing the drop as "finished" (see `try_reconnect`). Cheap to clone:
+/// `client` is a `reqwest::blocking::Client`, itself just a handle to a
+/// shared connection pool.
+#[derive(Clone)]
+struct LiveRetry {
+    url: String,
+    client: reqwest::blocking::Client,
+    hint_extension: Option<String>,
+    icy_title: Arc<Mutex<Option<String>>>,
+}
+
+fn live_retry_from_source(source: &PlaySource) -> Option<LiveRetry> {
+    match source {
+        PlaySource::LiveStream { url, client, hint_extension, icy_title } => Some(LiveRetry {
+            url: url.clone(),
+            client: client.clone(),
+            hint_extension: hint_extension.clone(),
+            icy_title: Arc::clone(icy_title),
+        }),
+        PlaySource::LocalFile(_) | PlaySource::Reader { .. } => None,
+    }
+}
+
+/// Mirrors `live_retry_from_source`, but for the value the playback thread
+/// is actually started with (a `ThreadStart::Ready` local file never needs
+/// reconnect ingredients — it can't be a live stream).
+fn live_retry_from_start(start: &ThreadStart) -> Option<LiveRetry> {
+    match start {
+        ThreadStart::Pending(source) => live_retry_from_source(source),
+        ThreadStart::Ready(_) => None,
+    }
+}
+
+/// Re-establish a live stream's HTTP connection after a hiccup, retrying
+/// with a short, capped backoff up to `MAX_LIVE_RECONNECT_ATTEMPTS` times.
+/// Bails out immediately (returning `None`) if `stop()` is requested
+/// mid-retry — including mid-backoff-sleep — so the user's Stop is never
+/// delayed by a reconnect loop. Also returns `None` once every attempt is
+/// exhausted, at which point the caller falls back to treating the stream
+/// as genuinely finished.
+fn reconnect_live(retry: &LiveRetry, ctx: &ThreadContext) -> Option<SymphoniaDecoder> {
+    for attempt in 1..=MAX_LIVE_RECONNECT_ATTEMPTS {
+        if ctx.stop_flag.load(Ordering::Acquire) {
+            return None;
+        }
+        let source = PlaySource::LiveStream {
+            url: retry.url.clone(),
+            client: retry.client.clone(),
+            hint_extension: retry.hint_extension.clone(),
+            icy_title: Arc::clone(&retry.icy_title),
+        };
+        match source.open_decoder() {
+            Ok(decoder) => {
+                tracing::info!("live stream reconnected after a hiccup (attempt {attempt})");
+                return Some(decoder);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "live stream reconnect attempt {attempt}/{MAX_LIVE_RECONNECT_ATTEMPTS} failed: {e}"
+                );
+                if attempt == MAX_LIVE_RECONNECT_ATTEMPTS {
+                    break;
+                }
+                // Capped linear backoff, polled in small steps so a
+                // `stop()` fired mid-wait still takes effect promptly.
+                let backoff = Duration::from_millis(300 * u64::from(attempt)).min(Duration::from_secs(3));
+                let deadline = std::time::Instant::now() + backoff;
+                while std::time::Instant::now() < deadline {
+                    if ctx.stop_flag.load(Ordering::Acquire) {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+    tracing::error!(
+        "live stream reconnect exhausted {MAX_LIVE_RECONNECT_ATTEMPTS} attempts, giving up"
+    );
+    None
+}
+
+/// What `try_reconnect` found on success — mirrors the two shapes
+/// `run_pcm`'s existing gapless-advance handling already knows how to deal
+/// with: continue in place when the reconnected stream's format matches
+/// the currently-open output, or hand back a decoder for the caller to
+/// rebuild the output around when it doesn't.
+enum ReconnectOutcome {
+    SameFormat(SymphoniaDecoder),
+    FormatChanged(SymphoniaDecoder, f32),
+}
+
+/// Attempts a live-stream reconnect via `reconnect_live`, if `live_retry`
+/// carries any (i.e. the current source actually is a live stream).
+/// Returns `None` when there's nothing to reconnect (not a live stream) or
+/// every attempt failed — either way, the caller should fall back to its
+/// original "really done" behavior.
+fn try_reconnect(
+    live_retry: Option<&LiveRetry>,
+    format: DecoderFormat,
+    gain: f32,
+    ctx: &ThreadContext,
+) -> Option<ReconnectOutcome> {
+    let retry = live_retry?;
+    let decoder = reconnect_live(retry, ctx)?;
+    if !decoder.is_dsd() && decoder.format() == format {
+        Some(ReconnectOutcome::SameFormat(decoder))
+    } else {
+        Some(ReconnectOutcome::FormatChanged(decoder, gain))
     }
 }
 
@@ -524,6 +655,14 @@ fn playback_thread_main(
     command_rx: Receiver<EngineCommand>,
     ctx: ThreadContext,
 ) {
+    // Captured before `resolve_start` consumes `start`: lets a network
+    // hiccup on a live radio stream reconnect instead of the track being
+    // treated as finished. Cleared the moment playback moves to a
+    // genuinely different decoder (`Advance`, from either path below) —
+    // see `run_pcm`'s own (finer-grained, in-place) handling for hiccups
+    // that don't require leaving this function at all.
+    let mut live_retry = live_retry_from_start(&start);
+
     let mut decoder = match resolve_start(start) {
         Ok(d) => d,
         Err(e) => {
@@ -553,6 +692,7 @@ fn playback_thread_main(
                     DsdOutcome::Advance(next_decoder, next_gain) => {
                         decoder = next_decoder;
                         gain = next_gain;
+                        live_retry = None;
                         continue 'song;
                     }
                     DsdOutcome::Done => break 'song,
@@ -572,10 +712,11 @@ fn playback_thread_main(
             }
         }
 
-        match run_pcm(decoder, gain, dsd_target_rate, &command_rx, &ctx) {
+        match run_pcm(decoder, gain, dsd_target_rate, live_retry.as_ref(), &command_rx, &ctx) {
             PcmOutcome::Advance(next_decoder, next_gain) => {
                 decoder = next_decoder;
                 gain = next_gain;
+                live_retry = None;
                 continue 'song;
             }
             PcmOutcome::Done => break 'song,
@@ -862,6 +1003,7 @@ fn run_pcm(
     mut decoder: SymphoniaDecoder,
     mut gain: f32,
     dsd_target_rate: Option<u32>,
+    live_retry: Option<&LiveRetry>,
     command_rx: &Receiver<EngineCommand>,
     ctx: &ThreadContext,
 ) -> PcmOutcome {
@@ -882,7 +1024,11 @@ fn run_pcm(
     let mut buffer = vec![0f32; BUFFER_SIZE];
     let mut total_samples: u64 = 0;
     let samples_per_second = format.sample_rate as u64 * format.channels.max(1) as u64;
-
+    // Owned, reassignable copy of the caller's reconnect ingredients:
+    // cleared the moment playback moves on to a different (pre-queued)
+    // track within this same call, so a later hiccup on THAT track never
+    // mistakenly retries the original live stream's URL instead.
+    let mut live_retry: Option<LiveRetry> = live_retry.cloned();
     'buf: loop {
         if ctx.stop_flag.load(Ordering::Acquire) {
             sink.stop();
@@ -942,6 +1088,7 @@ fn run_pcm(
                                 samples_played,
                             } => {
                                 ctx.status.track_finished.store(true, Ordering::Release);
+                                live_retry = None;
                                 decoder = nd;
                                 gain = ng;
                                 total_samples = samples_played;
@@ -981,6 +1128,28 @@ fn run_pcm(
             Ok(n) => n,
             Err(e) => {
                 tracing::error!("decode error: {e}");
+                // A read error on an ordinary source is fatal. On a live
+                // radio stream it's almost always a transient network
+                // hiccup — reconnect (same URL, fresh connection) instead
+                // of treating the whole track as finished.
+                if let Some(outcome) = try_reconnect(live_retry.as_ref(), format, gain, ctx) {
+                    match outcome {
+                        ReconnectOutcome::SameFormat(nd) => {
+                            decoder = nd;
+                            total_samples = 0;
+                            sink.eq.reset_states();
+                            ctx.status.position_nanos.store(0, Ordering::Release);
+                            ctx.status
+                                .duration_nanos
+                                .store(secs_to_nanos(decoder.duration()), Ordering::Release);
+                            continue 'buf;
+                        }
+                        ReconnectOutcome::FormatChanged(nd, ng) => {
+                            sink.stop();
+                            return PcmOutcome::Advance(nd, ng);
+                        }
+                    }
+                }
                 sink.stop();
                 return PcmOutcome::Done;
             }
@@ -991,12 +1160,13 @@ fn run_pcm(
             // -ness — unlike rmpd, lyra rebuilds the output on a format
             // change instead of refusing the gapless advance outright.
             let gapless_next = ctx.next_track.lock().take().and_then(open_pending);
-            ctx.status.track_finished.store(true, Ordering::Release);
 
             match gapless_next {
                 Some((next_decoder, next_gain))
                     if !next_decoder.is_dsd() && next_decoder.format() == format =>
                 {
+                    ctx.status.track_finished.store(true, Ordering::Release);
+                    live_retry = None;
                     decoder = next_decoder;
                     gain = next_gain;
                     total_samples = 0;
@@ -1008,10 +1178,45 @@ fn run_pcm(
                     continue 'buf;
                 }
                 Some((next_decoder, next_gain)) => {
+                    ctx.status.track_finished.store(true, Ordering::Release);
                     sink.stop();
                     return PcmOutcome::Advance(next_decoder, next_gain);
                 }
                 None => {
+                    // No explicit next track queued. For an ordinary
+                    // finite source this really is the end. For live
+                    // radio, though, a bare EOS almost always means the
+                    // connection dropped rather than the "track" having
+                    // a natural end — internet radio has no such thing.
+                    // Try to reconnect BEFORE ever setting
+                    // `track_finished`: it's read by the UI thread's
+                    // ~500ms poll (`Player::is_finished`), and a
+                    // reconnect attempt (with backoff) can take longer
+                    // than that poll interval, so setting the flag first
+                    // — then clearing it again on success — would leave
+                    // a window where the UI could see a spurious
+                    // "finished" and advance/stop the queue anyway.
+                    if let Some(outcome) = try_reconnect(live_retry.as_ref(), format, gain, ctx) {
+                        match outcome {
+                            ReconnectOutcome::SameFormat(nd) => {
+                                decoder = nd;
+                                total_samples = 0;
+                                sink.eq.reset_states();
+                                ctx.status.position_nanos.store(0, Ordering::Release);
+                                ctx.status.duration_nanos.store(
+                                    secs_to_nanos(decoder.duration()),
+                                    Ordering::Release,
+                                );
+                                continue 'buf;
+                            }
+                            ReconnectOutcome::FormatChanged(nd, ng) => {
+                                ctx.status.track_finished.store(true, Ordering::Release);
+                                sink.stop();
+                                return PcmOutcome::Advance(nd, ng);
+                            }
+                        }
+                    }
+                    ctx.status.track_finished.store(true, Ordering::Release);
                     sink.stop();
                     return PcmOutcome::Done;
                 }

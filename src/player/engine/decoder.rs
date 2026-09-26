@@ -661,4 +661,127 @@ mod tests {
 
         assert_eq!(error.0, "Too many consecutive DSD decoder resets");
     }
+
+
+    /// Manual repro harness (network-dependent, not run in CI): opens a
+    /// real public Icecast/Shoutcast live stream exactly the way
+    /// `PlaySource::LiveStream::open_decoder` does (blocking GET +
+    /// `Icy-MetaData: 1` header, wrapped in `icy_metadata::IcyMetadataReader`
+    /// when the server advertises a metadata interval, then
+    /// `SymphoniaDecoder::open_stream`), then calls `read()` in a loop for
+    /// ~25 real seconds, logging every `Read::read` call the underlying
+    /// socket sees (via a counting wrapper) alongside every `decoder.read()`
+    /// result. Run with:
+    /// `cargo test --package lyra --lib player::engine::decoder::tests::repro_live_stream_stops_after_a_few_seconds -- --ignored --nocapture`
+    #[test]
+    #[ignore = "network-dependent manual repro harness"]
+    fn repro_live_stream_stops_after_a_few_seconds() {
+        use std::time::{Duration, Instant};
+
+        struct CountingReader<R> {
+            inner: R,
+            start: Instant,
+            total: u64,
+        }
+        impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let t0 = Instant::now();
+                let result = self.inner.read(buf);
+                let elapsed = t0.elapsed();
+                match &result {
+                    Ok(n) => {
+                        self.total += *n as u64;
+                        eprintln!(
+                            "[{:>7.3}s] socket.read() -> Ok({n}) after {:>6.1}ms (total={} bytes)",
+                            self.start.elapsed().as_secs_f64(),
+                            elapsed.as_secs_f64() * 1000.0,
+                            self.total
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[{:>7.3}s] socket.read() -> Err({e:?}) [kind={:?}] after {:>6.1}ms",
+                            self.start.elapsed().as_secs_f64(),
+                            e.kind(),
+                            elapsed.as_secs_f64() * 1000.0
+                        );
+                    }
+                }
+                result
+            }
+        }
+
+        let url = std::env::var("LYRA_TEST_RADIO_URL")
+            .unwrap_or_else(|_| "http://ice1.somafm.com/groovesalad-128-mp3".to_string());
+        eprintln!("connecting to {url}");
+
+        // Mirrors `PlaySource::LiveStream::open_decoder` exactly, including
+        // the client (no explicit timeout — same as `LocalBackend`'s
+        // `reqwest::blocking::Client::new()`).
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .get(&url)
+            .header("Icy-MetaData", "1")
+            .send()
+            .expect("connect");
+        eprintln!("status={} headers={:#?}", response.status(), response.headers());
+        let metadata_interval =
+            icy_metadata::IcyHeaders::parse_from_headers(response.headers()).metadata_interval();
+        eprintln!("icy metadata_interval={metadata_interval:?}");
+
+        let counting = CountingReader {
+            inner: response,
+            start: Instant::now(),
+            total: 0,
+        };
+
+        let mut decoder = match metadata_interval {
+            Some(interval) => {
+                let reader = icy_metadata::IcyMetadataReader::new(
+                    counting,
+                    Some(interval),
+                    |metadata| {
+                        if let Ok(m) = metadata {
+                            eprintln!("ICY title: {:?}", m.stream_title());
+                        }
+                    },
+                );
+                SymphoniaDecoder::open_stream(reader, None).expect("open_stream")
+            }
+            None => SymphoniaDecoder::open_stream(counting, None).expect("open_stream"),
+        };
+
+        eprintln!("opened decoder: duration={:?}", decoder.duration());
+
+        let start = Instant::now();
+        let mut buffer = vec![0f32; 4096];
+        let mut total_samples: u64 = 0;
+        let mut iterations: u64 = 0;
+        while start.elapsed() < Duration::from_secs(25) {
+            iterations += 1;
+            match decoder.read(&mut buffer) {
+                Ok(0) => {
+                    eprintln!(
+                        "[{:>7.3}s] decoder.read() -> Ok(0) — EOS after {iterations} calls, {total_samples} samples",
+                        start.elapsed().as_secs_f64()
+                    );
+                    panic!(
+                        "live stream reported end-of-stream after only {:.1}s — this is the bug",
+                        start.elapsed().as_secs_f64()
+                    );
+                }
+                Ok(n) => {
+                    total_samples += n as u64;
+                }
+                Err(e) => {
+                    eprintln!("[{:>7.3}s] decoder.read() -> Err({e})", start.elapsed().as_secs_f64());
+                    panic!("live stream decode error after {:.1}s: {e}", start.elapsed().as_secs_f64());
+                }
+            }
+        }
+        eprintln!(
+            "OK: still streaming after {:.1}s ({iterations} read() calls, {total_samples} samples)",
+            start.elapsed().as_secs_f64()
+        );
+    }
 }

@@ -279,6 +279,21 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v6 commit error: {e}"))?;
         }
 
+        if version < 7 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v7 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "ALTER TABLE podcasts ADD COLUMN author TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version=7;",
+            )
+            .map_err(|e| format!("Migration v7 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v7 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1254,9 +1269,9 @@ mod tests {
         db.run_migration().unwrap();
         db.run_migration().unwrap();
         assert!(db.column_exists("tracks", "rg_album_gain").unwrap());
-        // v5 added the smart_playlists table, v6 added the genre index;
-        // assert all three so this test keeps pinning the migration
-        // ladder's head.
+        // v5 added the smart_playlists table, v6 added the genre index, v7
+        // added podcasts.author; assert all so this test keeps pinning the
+        // migration ladder's head.
         assert!(
             db.conn
                 .query_row(
@@ -1275,11 +1290,12 @@ mod tests {
                 )
                 .is_ok()
         );
+        assert!(db.column_exists("podcasts", "author").unwrap());
         assert_eq!(
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            6
+            7
         );
     }
 

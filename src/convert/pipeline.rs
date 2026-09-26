@@ -164,6 +164,8 @@ fn transcode(
         channels,
         dst_rate,
         source.bits_per_sample,
+        settings(job).flac_options,
+        settings(job).lossy_options,
     )?;
 
     // Frame budget for the `[start, end)` window, in source-domain frames.
@@ -303,15 +305,28 @@ fn front_cover(pictures: &[Picture]) -> Option<&Picture> {
     pictures.iter().find(|p| p.is_front_cover).or_else(|| pictures.first())
 }
 
-/// Dispatches to the FLAC or WAV tag writer for `format`'s output
-/// container. Best-effort per the callers' contract — see
-/// `super::tag_writer`.
+/// Dispatches to the right tag writer for `format`'s output container:
+/// `super::tag_writer` (FLAC/WAV, this crate's own writers), a no-op for
+/// AIFF (no tag chunk writer exists yet), or `super::ffmpeg` (the five
+/// `ffmpeg`-backed formats, tagged via a `-metadata` remux pass since none
+/// of them are containers this crate writes natively).
 fn write_output_tags(path: &Path, format: encoder::OutputFormat, tags: &WriteTags<'_>) {
     match format {
         encoder::OutputFormat::Flac => tag_writer::write_flac_tags(path, tags),
         encoder::OutputFormat::Wav16 | encoder::OutputFormat::Wav24 | encoder::OutputFormat::Wav32Float => {
             tag_writer::write_wav_tags(path, tags)
         }
+        // No native AIFF tag chunk is written (yet): AIFF has a standard
+        // `ID3 `/`NAME`/`AUTH`/`(c) ` chunk convention, but round-tripping
+        // it isn't implemented — matches the "best-effort, never a hard
+        // error" contract by simply skipping rather than half-implementing
+        // a reader-incompatible tag.
+        encoder::OutputFormat::Aiff16 | encoder::OutputFormat::Aiff24 => {}
+        encoder::OutputFormat::Mp3
+        | encoder::OutputFormat::Aac
+        | encoder::OutputFormat::Opus
+        | encoder::OutputFormat::OggVorbis
+        | encoder::OutputFormat::Alac => super::ffmpeg::write_tags(path, tags),
     }
 }
 
@@ -582,8 +597,16 @@ mod tests {
     /// for reading, since FLAC — unlike this fork's WAV reader, see
     /// `tag_writer`'s module docs — round-trips tags end to end).
     fn write_test_flac_frames(path: &Path, num_frames: u32) {
-        let mut sink =
-            encoder::create_sink(encoder::OutputFormat::Flac, path, 1, 44_100, Some(16)).unwrap();
+        let mut sink = encoder::create_sink(
+            encoder::OutputFormat::Flac,
+            path,
+            1,
+            44_100,
+            Some(16),
+            encoder::FlacOptions::default(),
+            encoder::LossyOptions::default(),
+        )
+        .unwrap();
         let samples: Vec<f32> =
             (0..num_frames).map(|i| (TAU * 440.0 * i as f32 / 44_100.0).sin()).collect();
         sink.write(&samples).unwrap();
@@ -612,6 +635,8 @@ mod tests {
             format: encoder::OutputFormat::Flac,
             target_rate: None,
             out_dir: out_dir.clone(),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
         });
 
         run(&job).expect("conversion job should succeed");
@@ -656,6 +681,8 @@ mod tests {
             format: encoder::OutputFormat::Flac,
             target_rate: None,
             out_dir: out_dir.clone(),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
         });
         run(&job).expect("conversion job should succeed");
 
@@ -706,6 +733,8 @@ mod tests {
             format: encoder::OutputFormat::Wav16,
             target_rate: None,
             out_dir: out_dir.clone(),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
         });
         job.cancel();
         let result = run(&job);
@@ -735,6 +764,8 @@ mod tests {
             format: encoder::OutputFormat::Flac,
             target_rate: Some(48_000),
             out_dir: out_dir.clone(),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
         });
         run(&job).expect("resampled conversion job should succeed");
 
@@ -744,6 +775,53 @@ mod tests {
             probed.properties.duration.as_secs_f64() > 0.0,
             "resampled short clip should not be flushed away entirely, got {:?}",
             probed.properties.duration
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End-to-end smoke test of the `ffmpeg` fallback path through the
+    /// real `pipeline::run`, not just `ffmpeg::spawn_encoder`'s argument
+    /// building — skips (rather than fails) when `ffmpeg` isn't on
+    /// `$PATH`, since CI/dev environments aren't guaranteed to have it.
+    #[test]
+    fn run_encodes_mp3_via_ffmpeg_when_available() {
+        if !crate::convert::ffmpeg::detect() {
+            eprintln!("skipping: ffmpeg not found on $PATH");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("lyra-pipeline-mp3-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+        tag_writer::write_wav_tags(&source, &WriteTags { title: Some("MP3 Smoke Test"), ..Default::default() });
+
+        let out_dir = dir.join("out");
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings {
+            format: encoder::OutputFormat::Mp3,
+            target_rate: None,
+            out_dir: out_dir.clone(),
+            flac_options: encoder::FlacOptions::default(),
+            lossy_options: encoder::LossyOptions::default(),
+        });
+
+        run(&job).expect("mp3 conversion job should succeed");
+
+        let out_path = out_dir.join("source.mp3");
+        assert!(out_path.exists(), "expected {out_path:?} to exist");
+
+        let probed = track_tags::probe(&out_path, false).expect("probe should succeed decoding the mp3");
+        assert!(
+            probed.properties.duration.as_secs_f64() > 0.5,
+            "expected ~1s of decoded mp3 audio, got {:?}",
+            probed.properties.duration
+        );
+        assert_eq!(
+            probed.tags.title.as_deref(),
+            Some("MP3 Smoke Test"),
+            "title tag should have survived the ffmpeg -metadata remux"
         );
 
         std::fs::remove_dir_all(&dir).ok();

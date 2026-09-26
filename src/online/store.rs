@@ -23,7 +23,12 @@ pub struct Podcast {
     pub title: String,
     pub description: String,
     pub image_url: String,
+    pub author: String,
     pub last_refreshed: i64,
+    /// Count of episodes with `played = 0`, computed by `list_podcasts`'s
+    /// query rather than stored — always in sync, never a separate write
+    /// path to keep consistent with `podcast_episodes.played`.
+    pub unplayed_count: i64,
 }
 
 /// A single episode of a subscribed podcast.
@@ -77,16 +82,15 @@ impl OnlineStore {
     // ---- Podcasts ----
 
     /// Subscribe to a podcast feed, or refresh its metadata if already
-    /// subscribed. Returns the podcast's row id.
     pub fn add_podcast(&self, feed_url: &str, meta: &PodcastMeta) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO podcasts (feed_url, title, description, image_url)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO podcasts (feed_url, title, description, image_url, author)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(feed_url) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
-                    image_url=excluded.image_url",
-                params![feed_url, meta.title, meta.description, meta.image_url],
+                    image_url=excluded.image_url, author=excluded.author",
+                params![feed_url, meta.title, meta.description, meta.image_url, meta.author],
             )
             .map_err(|e| format!("Add podcast error: {e}"))?;
         self.conn
@@ -109,8 +113,11 @@ impl OnlineStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, feed_url, title, description, image_url, last_refreshed
-                 FROM podcasts ORDER BY title",
+                "SELECT p.id, p.feed_url, p.title, p.description, p.image_url, p.author,
+                        p.last_refreshed,
+                        (SELECT COUNT(*) FROM podcast_episodes e
+                         WHERE e.podcast_id = p.id AND e.played = 0) AS unplayed_count
+                 FROM podcasts p ORDER BY p.title",
             )
             .map_err(|e| format!("List podcasts error: {e}"))?;
         let podcasts = stmt
@@ -121,7 +128,9 @@ impl OnlineStore {
                     title: row.get(2)?,
                     description: row.get(3)?,
                     image_url: row.get(4)?,
-                    last_refreshed: row.get(5)?,
+                    author: row.get(5)?,
+                    last_refreshed: row.get(6)?,
+                    unplayed_count: row.get(7)?,
                 })
             })
             .map_err(|e| format!("List podcasts error: {e}"))?
@@ -140,9 +149,9 @@ impl OnlineStore {
     ) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE podcasts SET title=?2, description=?3, image_url=?4, last_refreshed=?5
+                "UPDATE podcasts SET title=?2, description=?3, image_url=?4, author=?5, last_refreshed=?6
                  WHERE id=?1",
-                params![id, meta.title, meta.description, meta.image_url, refreshed_at],
+                params![id, meta.title, meta.description, meta.image_url, meta.author, refreshed_at],
             )
             .map_err(|e| format!("Update podcast error: {e}"))?;
         Ok(())
@@ -356,7 +365,8 @@ mod tests {
              CREATE TABLE podcasts (
                  id INTEGER PRIMARY KEY AUTOINCREMENT, feed_url TEXT NOT NULL UNIQUE,
                  title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
-                 image_url TEXT NOT NULL DEFAULT '', last_refreshed INTEGER NOT NULL DEFAULT 0
+                 image_url TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+                 last_refreshed INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE podcast_episodes (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,6 +393,7 @@ mod tests {
             title: title.to_string(),
             description: "desc".to_string(),
             image_url: "https://example.com/art.png".to_string(),
+            author: "Example Author".to_string(),
         }
     }
 
@@ -409,6 +420,34 @@ mod tests {
         let podcasts = store.list_podcasts().unwrap();
         assert_eq!(podcasts.len(), 1);
         assert_eq!(podcasts[0].title, "Show Renamed");
+    }
+
+    #[test]
+    fn add_podcast_persists_author() {
+        let store = open_migrated_memory();
+        store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
+        let podcasts = store.list_podcasts().unwrap();
+        assert_eq!(podcasts[0].author, "Example Author");
+    }
+
+    #[test]
+    fn list_podcasts_computes_unplayed_count() {
+        let store = open_migrated_memory();
+        let id = store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
+        store
+            .upsert_episodes(id, &[episode("guid-1", "Ep 1"), episode("guid-2", "Ep 2")])
+            .unwrap();
+
+        let podcasts = store.list_podcasts().unwrap();
+        assert_eq!(podcasts[0].unplayed_count, 2);
+
+        let episodes = store.list_episodes(id).unwrap();
+        store
+            .save_episode_position(episodes[0].id, 1_000, true)
+            .unwrap();
+
+        let podcasts = store.list_podcasts().unwrap();
+        assert_eq!(podcasts[0].unplayed_count, 1);
     }
 
     #[test]

@@ -194,6 +194,30 @@ pub struct Config {
     /// Output sample rate for local file conversion jobs; `None` keeps
     /// each source's original rate.
     pub convert_sample_rate: Option<u32>,
+    /// Whether the (experimental) local file converter/transcoder/ripper
+    /// is enabled. Off by default: shows/hides the Convert nav entry and
+    /// gates its progress-ticker subscription (see
+    /// `crate::app::init::insert_convert_nav_entry` and
+    /// `crate::app::subscriptions`).
+    pub experimental_converter: bool,
+    /// FLAC compression level / bit-depth choice for local file
+    /// conversion jobs.
+    pub flac_options: crate::convert::encoder::FlacOptions,
+    /// Bitrate/quality knobs for the `ffmpeg`-backed lossy formats (MP3,
+    /// AAC, Opus, Ogg Vorbis) in local file conversion jobs.
+    pub lossy_options: crate::convert::encoder::LossyOptions,
+    /// Id of the provider that was active when the app last exited
+    /// (`"local"`, an MPD server id, or a Subsonic server id). Restored on
+    /// the next startup via `resolve_active_provider`; falls back to the
+    /// local provider if the saved id is no longer registered.
+    pub active_provider: Option<String>,
+    /// Whether Lyra fetches artist images/biography from online sources
+    /// (Deezer for images, Wikipedia for bios — both keyless) when
+    /// browsing in Local or MPD mode. Off by default: purely opt-in
+    /// network access. Ignored in Subsonic mode, which always shows the
+    /// server's own artist info instead — see
+    /// `crate::provider::subsonic::SubsonicProvider::get_artist_info`.
+    pub fetch_artist_info: bool,
 }
 
 impl Default for Config {
@@ -231,6 +255,82 @@ impl Default for Config {
             convert_out_dir: None,
             convert_format: crate::convert::OutputFormat::Flac,
             convert_sample_rate: None,
+            experimental_converter: false,
+            flac_options: crate::convert::encoder::FlacOptions::default(),
+            lossy_options: crate::convert::encoder::LossyOptions::default(),
+            active_provider: None,
+            fetch_artist_info: false,
         }
+    }
+}
+
+/// Choose which provider id should become active, given the persisted
+/// choice and the ids currently registered. Pure so it can be unit tested
+/// without spinning up a real `ProviderRegistry`.
+///
+/// - If `saved` is `Some` and still present in `registered_ids`, it wins.
+/// - Otherwise falls back to `"local"` if registered.
+/// - Otherwise falls back to the first registered id.
+/// - Returns `None` only if nothing is registered at all.
+pub fn resolve_active_provider(saved: Option<&str>, registered_ids: &[String]) -> Option<String> {
+    if let Some(saved) = saved
+        && let Some(found) = registered_ids.iter().find(|id| id.as_str() == saved)
+    {
+        return Some(found.clone());
+    }
+    if let Some(local) = registered_ids.iter().find(|id| id.as_str() == "local") {
+        return Some(local.clone());
+    }
+    registered_ids.first().cloned()
+}
+
+#[cfg(test)]
+mod resolve_active_provider_tests {
+    use super::resolve_active_provider;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn saved_id_wins_when_still_registered() {
+        let registered = ids(&["local", "mpd-home", "subsonic-navidrome"]);
+        assert_eq!(
+            resolve_active_provider(Some("mpd-home"), &registered),
+            Some("mpd-home".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_local_when_saved_id_missing() {
+        let registered = ids(&["local", "subsonic-navidrome"]);
+        assert_eq!(
+            resolve_active_provider(Some("mpd-gone"), &registered),
+            Some("local".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_local_when_nothing_saved() {
+        let registered = ids(&["local", "mpd-home"]);
+        assert_eq!(
+            resolve_active_provider(None, &registered),
+            Some("local".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_first_registered_when_no_local() {
+        let registered = ids(&["mpd-home", "subsonic-navidrome"]);
+        assert_eq!(
+            resolve_active_provider(Some("gone"), &registered),
+            Some("mpd-home".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_nothing_registered() {
+        let registered: Vec<String> = Vec::new();
+        assert_eq!(resolve_active_provider(Some("local"), &registered), None);
     }
 }
