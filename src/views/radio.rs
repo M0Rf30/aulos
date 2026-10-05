@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Radio view — saved internet radio stations ("My stations") and a
 //! radio-browser.info directory search ("Discover"), behind a stable

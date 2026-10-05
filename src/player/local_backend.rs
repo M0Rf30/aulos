@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Local audio playback backend: direct symphonia (DSD-capable fork) + cpal,
 //! driven through [`super::engine::PlaybackEngine`].

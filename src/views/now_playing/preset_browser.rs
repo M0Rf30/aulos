@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Preset browser overlay for the ProjectM visualizer (behind the
 //! `visualizer` feature flag). Lists every discovered `.milk` preset,

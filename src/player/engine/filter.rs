@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! In-place DSP filter stage trait and the software volume filter.
 //!
 //! [`AudioFilter`] is the seam every in-place audio-thread DSP stage

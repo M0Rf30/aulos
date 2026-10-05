@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! cpal device resolution: a layered "configured → exact/substring match →
 //! default → re-resolve-on-busy" fallback chain, plus DoP's stricter

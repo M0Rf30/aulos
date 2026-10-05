@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Captures MPD's own PipeWire playback stream so the projectM visualizer
 //! reacts to audio when MPD is the active backend.

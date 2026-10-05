@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Podcasts view — subscribed shows ("Subscriptions") and an iTunes
 //! directory search ("Discover"), behind a stable two-tab layout, plus a

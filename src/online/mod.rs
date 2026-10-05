@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Online audio hub: podcast subscriptions (via `feed-rs`) and internet
 //! radio directory search/playback (Shoutcast/Icecast).

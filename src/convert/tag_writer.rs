@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Minimal, best-effort tag writers for the two output containers the file
 //! converter can produce (FLAC via `flacenc`, WAV via `hound`) — both of

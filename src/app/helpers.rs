@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 use super::tasks::resolve_mpris_art_task;
 use super::{AppModel, HTTP_CLIENT, Message, reload_result_is_stale};

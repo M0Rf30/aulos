@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Benchmarks for `LibraryDb::all_albums()` and `LibraryDb::all_artists()`
 //! grouping performance at various dataset sizes.

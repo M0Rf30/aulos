@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Local file converter/transcoder/ripper view — pick files (audio, video
 //! containers, or `.cue` sheets), an output format/rate/folder plus

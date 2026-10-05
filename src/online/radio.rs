@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Internet radio directory search (radio-browser.info) and PLS/M3U
 //! playlist resolution for Shoutcast/Icecast stations that publish a

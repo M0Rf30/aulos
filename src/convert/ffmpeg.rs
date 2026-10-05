@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Fallback encoder for the formats with no usable pure-Rust encoder (see
 //! `super::encoder`'s module docs for why): shells out to the system

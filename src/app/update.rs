@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 use super::helpers::clamp_display_position;
 use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID, parse_delimiters_input};

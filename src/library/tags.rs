@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Shared Symphonia-based tag/audio-property reading, used by the library
 //! scanner, cover art extractor, lyrics provider, and the file converter's

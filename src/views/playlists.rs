@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-License-Identifier: GPL-3.0-only
 
 //! Playlists view - list of playlists with create/delete/rename actions,
 //! and a detail view showing tracks in a selected playlist.
