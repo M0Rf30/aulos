@@ -4,8 +4,8 @@
 //! Benchmarks for `LibraryDb::all_albums()` and `LibraryDb::all_artists()`
 //! grouping performance at various dataset sizes.
 
+use aulos::library::{LibraryDb, Track};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use lyra::library::{LibraryDb, Track};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

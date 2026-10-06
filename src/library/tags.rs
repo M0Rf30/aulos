@@ -7,7 +7,7 @@
 //!
 //! Ports the probe/tag-mapping approach from the sibling `rmpd` project's
 //! `rmpd-library::metadata` (same M0Rf30 Symphonia fork this crate already
-//! depends on for playback, rev `2c160a8`), trimmed to the fields lyra
+//! depends on for playback, rev `2c160a8`), trimmed to the fields aulos
 //! actually surfaces (`crate::library::Track` has no bit-depth/channel
 //! fields — those are read independently by
 //! [`crate::convert::pipeline::AudioSource`] for the converter's own
@@ -38,7 +38,7 @@ pub struct Picture {
     pub data: Vec<u8>,
 }
 
-/// Tag fields lyra's library/converter care about. Every field is `None`
+/// Tag fields aulos's library/converter care about. Every field is `None`
 /// (or empty) when the container/tag doesn't carry it — callers apply
 /// their own fallbacks (e.g. filename-as-title in the scanner).
 #[derive(Debug, Clone, Default)]
@@ -91,7 +91,7 @@ pub struct ProbedFile {
     pub properties: AudioProperties,
 }
 
-/// Probes `path` and reads everything lyra needs from its tags and default
+/// Probes `path` and reads everything aulos needs from its tags and default
 /// audio track. `want_pictures` gates collecting embedded picture bytes —
 /// pass `false` when only text tags are needed (the scanner, lyrics
 /// provider), since cloning artwork bytes is wasted work otherwise.

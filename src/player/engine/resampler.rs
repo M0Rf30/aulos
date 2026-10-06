@@ -16,7 +16,7 @@
 //! with no anti-aliasing.
 //!
 //! Config-driven quality tiers are represented locally by
-//! [`ResamplerQuality`] since lyra has no config-file story for this yet.
+//! [`ResamplerQuality`] since aulos has no config-file story for this yet.
 
 use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{

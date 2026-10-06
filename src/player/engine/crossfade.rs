@@ -10,7 +10,7 @@
 //!
 //! Wiring these into a decode look-ahead loop (opening the next decoder
 //! before EOS so two streams overlap, then blending with
-//! [`equal_power_gains`]/[`mix_into`]) is a later phase of lyra's engine
+//! [`equal_power_gains`]/[`mix_into`]) is a later phase of aulos's engine
 //! work, not part of this module.
 
 use std::f32::consts::FRAC_PI_2;

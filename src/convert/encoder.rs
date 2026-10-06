@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn wav16_roundtrip_preserves_frame_count() {
-        let dir = std::env::temp_dir().join(format!("lyra-convert-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("aulos-convert-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("wav16.wav");
 
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn flac_roundtrip_preserves_frame_count() {
-        let dir = std::env::temp_dir().join(format!("lyra-convert-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("aulos-convert-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine.flac");
 
@@ -701,7 +701,7 @@ mod tests {
         // the only thing exercising `apply_compression_level` at all.
         for level in 0..=8u8 {
             let dir = std::env::temp_dir().join(format!(
-                "lyra-convert-flaclevel-test-{}-{level}",
+                "aulos-convert-flaclevel-test-{}-{level}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&dir).unwrap();
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn flac_bit_depth_forced_24_ignores_16_bit_source_hint() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-convert-flac24-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-convert-flac24-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine24.flac");
 
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn aiff16_roundtrip_preserves_frame_count_and_header() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-convert-aiff16-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-convert-aiff16-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine.aiff");
 
@@ -823,7 +823,7 @@ mod tests {
         // Mono 24-bit => 3 bytes/frame, so an odd frame count makes the
         // SSND payload odd-length and exercises the pad-byte path.
         let dir =
-            std::env::temp_dir().join(format!("lyra-convert-aiff24-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-convert-aiff24-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine24.aiff");
 

@@ -3,7 +3,7 @@
 
 //! Audio quality classification (lossy / CD-lossless / hi-res / DSD).
 //!
-//! Lyra never demuxes a container to inspect its actual codec — that would
+//! Aulos never demuxes a container to inspect its actual codec — that would
 //! mean pulling in a probing dependency just to paint a badge. Instead this
 //! module infers a quality tier from data already sitting on [`Track`]: the
 //! file extension (a reasonable proxy for container/codec) plus the sample

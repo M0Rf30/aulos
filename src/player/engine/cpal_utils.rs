@@ -6,7 +6,7 @@
 //! `hw:`-only device search.
 //!
 //! `configured_device` is currently a stub that always returns `None` since
-//! lyra has no output-device-selection setting today. The resolution
+//! aulos has no output-device-selection setting today. The resolution
 //! functions still accept the configured device as a plain `Option<&str>`
 //! parameter so wiring a real "preferred output device" setting later is a
 //! one-line change at the call sites, not a rewrite of the algorithm.
@@ -17,8 +17,8 @@ use cpal::{Device, SampleFormat, SampleRate, StreamConfig};
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 
-/// The output device configured via lyra's settings, if any. Currently
-/// always `None` — lyra has no output-device-selection setting today. Kept
+/// The output device configured via aulos's settings, if any. Currently
+/// always `None` — aulos has no output-device-selection setting today. Kept
 /// as its own function (rather than inlining `None` at each call site) so
 /// wiring a real setting later only needs to change this one function.
 pub fn configured_device() -> Option<String> {

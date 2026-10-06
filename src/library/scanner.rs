@@ -233,7 +233,7 @@ mod tests {
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "lyra-scanner-{label}-{}-{}",
+            "aulos-scanner-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

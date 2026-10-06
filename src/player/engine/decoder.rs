@@ -6,11 +6,11 @@
 //! One decoder implementation only — no MPD-style `DecoderPlugin` registry,
 //! since a compile-time registry only earns its keep with multiple
 //! interchangeable implementations. There's also no ICY "now playing" title
-//! support for internet radio streams, since lyra doesn't need it.
+//! support for internet radio streams, since aulos doesn't need it.
 //!
 //! [`SymphoniaDecoder::open`] (local files) and
 //! [`SymphoniaDecoder::open_reader`] (arbitrary readers — used for HTTP
-//! streaming from lyra's Subsonic/Navidrome remote libraries via
+//! streaming from aulos's Subsonic/Navidrome remote libraries via
 //! [`crate::player::http_range_reader::HttpRangeReader`]) both funnel into
 //! [`SymphoniaDecoder::from_media_source`] so the probe/track-selection logic
 //! is written once regardless of where the bytes come from.
@@ -46,7 +46,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "ape", "wv", "mpc", "dsf", "dff", "webm", "mka", "caf",
 ];
 
-/// Minimal audio format descriptor. Dependency-free by design — lyra has no
+/// Minimal audio format descriptor. Dependency-free by design — aulos has no
 /// shared "song"/media domain crate to pull a richer type from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioFormat {
@@ -207,7 +207,7 @@ impl SymphoniaDecoder {
     }
 
     /// Open an arbitrary seekable byte source for decoding — e.g. a remote
-    /// track streamed through lyra's [`HttpRangeReader`]. `byte_len` should
+    /// track streamed through aulos's [`HttpRangeReader`]. `byte_len` should
     /// be the total content length in bytes if known (enables trailing-tag
     /// probing and lets Symphonia seek accurately near the end of the
     /// stream); `hint_extension` should be the file extension of the
@@ -234,7 +234,7 @@ impl SymphoniaDecoder {
         Self::from_media_source(mss, hint)
     }
 
-    /// Convenience wrapper over [`Self::open_reader`] for lyra's own
+    /// Convenience wrapper over [`Self::open_reader`] for aulos's own
     /// Subsonic/Navidrome remote-library use case: opens a decoder directly
     /// against an [`HttpRangeReader`], translating its `content_length()`
     /// convention (`0` = unknown) into the `Option<u64>` `open_reader` wants.
@@ -672,7 +672,7 @@ mod tests {
     /// ~25 real seconds, logging every `Read::read` call the underlying
     /// socket sees (via a counting wrapper) alongside every `decoder.read()`
     /// result. Run with:
-    /// `cargo test --package lyra --lib player::engine::decoder::tests::repro_live_stream_stops_after_a_few_seconds -- --ignored --nocapture`
+    /// `cargo test --package aulos --lib player::engine::decoder::tests::repro_live_stream_stops_after_a_few_seconds -- --ignored --nocapture`
     #[test]
     #[ignore = "network-dependent manual repro harness"]
     fn repro_live_stream_stops_after_a_few_seconds() {
@@ -711,7 +711,7 @@ mod tests {
             }
         }
 
-        let url = std::env::var("LYRA_TEST_RADIO_URL")
+        let url = std::env::var("AULOS_TEST_RADIO_URL")
             .unwrap_or_else(|_| "http://ice1.somafm.com/groovesalad-128-mp3".to_string());
         eprintln!("connecting to {url}");
 

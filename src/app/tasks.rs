@@ -51,7 +51,7 @@ fn episode_file_extension(mime: &str, enclosure_url: &str) -> String {
         .unwrap_or_else(|| "mp3".to_string())
 }
 
-/// Download an episode's enclosure to `dirs::data_dir()/lyra/podcast_downloads`
+/// Download an episode's enclosure to `dirs::data_dir()/aulos/podcast_downloads`
 /// for offline playback, persisting the resulting path via
 /// `OnlineStore::set_episode_downloaded_path` and dispatching
 /// `PodcastEvent::Downloaded` with the outcome. Mirrors `refresh_podcast_task`'s
@@ -62,7 +62,7 @@ pub(super) fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Mes
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let dir = dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("lyra")
+                .join("aulos")
                 .join("podcast_downloads");
             std::fs::create_dir_all(&dir).map_err(|e| format!("Create download dir error: {e}"))?;
             let ext = episode_file_extension(&episode.mime, &episode.enclosure_url);

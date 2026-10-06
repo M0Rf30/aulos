@@ -414,7 +414,7 @@ impl PlayQueue {
 }
 
 /// Tiny xorshift64* PRNG — avoids pulling in the `rand` crate for the one
-/// place lyra needs randomness (queue shuffling).
+/// place aulos needs randomness (queue shuffling).
 #[derive(Debug, Clone)]
 struct XorShift64(u64);
 

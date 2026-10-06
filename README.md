@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="resources/icons/hicolor/scalable/apps/io.github.m0rf30.Lyra.svg" width="120" height="120" alt="Lyra">
+<img src="resources/icons/hicolor/scalable/apps/io.github.m0rf30.Aulos.svg" width="120" height="120" alt="Aulos">
 
-# Lyra
+# Aulos
 
 **A modern music player for the COSMIC desktop**
 
@@ -15,7 +15,7 @@
 
 ---
 
-Lyra is a sleek, native music player designed specifically for the [COSMIC desktop environment](https://github.com/pop-os/cosmic). Named after the constellation and the ancient lyre, it brings together elegant design with powerful music management capabilities.
+Aulos is a sleek, native music player designed specifically for the [COSMIC desktop environment](https://github.com/pop-os/cosmic). Named after the constellation and the ancient lyre, it brings together elegant design with powerful music management capabilities.
 
 ## Features
 
@@ -31,21 +31,21 @@ Lyra is a sleek, native music player designed specifically for the [COSMIC deskt
 
 ### Prebuilt Binaries
 
-Download the archive for your architecture from the [GitHub Releases](https://github.com/M0Rf30/lyra/releases) page:
+Download the archive for your architecture from the [GitHub Releases](https://github.com/M0Rf30/aulos/releases) page:
 
-- `lyra-<version>-x86_64-unknown-linux-gnu.tar.gz` — x86_64 Linux
-- `lyra-<version>-aarch64-unknown-linux-gnu.tar.gz` — aarch64 Linux
+- `aulos-<version>-x86_64-unknown-linux-gnu.tar.gz` — x86_64 Linux
+- `aulos-<version>-aarch64-unknown-linux-gnu.tar.gz` — aarch64 Linux
 
 Verify the checksum, extract, and install:
 
 ```bash
-sha256sum -c lyra-<version>-<target>.tar.gz.sha256
-tar xzf lyra-<version>-<target>.tar.gz
-cd lyra-<version>-<target>
+sha256sum -c aulos-<version>-<target>.tar.gz.sha256
+tar xzf aulos-<version>-<target>.tar.gz
+cd aulos-<version>-<target>
 sudo just install
 ```
 
-The extracted directory contains the `lyra` binary, `LICENSE`, `README.md`, the `justfile` and `resources/` (desktop entry, AppStream metainfo, icons). If you don't have [just](https://github.com/casey/just), copy those files into place by hand.
+The extracted directory contains the `aulos` binary, `LICENSE`, `README.md`, the `justfile` and `resources/` (desktop entry, AppStream metainfo, icons). If you don't have [just](https://github.com/casey/just), copy those files into place by hand.
 
 ### Runtime Requirements
 
@@ -58,8 +58,8 @@ The extracted directory contains the `lyra` binary, `LICENSE`, `README.md`, the 
 Requires the Rust toolchain (2024 edition) and [just](https://github.com/casey/just):
 
 ```bash
-git clone https://github.com/M0Rf30/lyra
-cd lyra
+git clone https://github.com/M0Rf30/aulos
+cd aulos
 just build-release
 sudo just install
 ```
@@ -82,7 +82,7 @@ cargo build --release --features tokio-console
 
 ## Usage
 
-Launch Lyra from your application menu or run:
+Launch Aulos from your application menu or run:
 
 ```bash
 cargo run --release
@@ -96,7 +96,7 @@ cargo run --release
 
 ## Architecture
 
-Lyra is built with a modern Rust stack:
+Aulos is built with a modern Rust stack:
 
 - **UI Framework**: [libcosmic](https://github.com/pop-os/libcosmic) — Native COSMIC toolkit
 - **Audio Playback**: [rodio](https://github.com/RustAudio/rodio) with symphonia for broad format support
@@ -106,13 +106,13 @@ Lyra is built with a modern Rust stack:
 
 ## Support
 
-If you enjoy Lyra and want to support its development, consider buying me a coffee:
+If you enjoy Aulos and want to support its development, consider buying me a coffee:
 
 <a href='https://ko-fi.com/W7W61U8IUL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
 ## License
 
-Lyra is free software released under the GNU General Public License v3.0. See [LICENSE](LICENSE) for details.
+Aulos is free software released under the GNU General Public License v3.0. See [LICENSE](LICENSE) for details.
 
 ---
 

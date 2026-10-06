@@ -413,7 +413,7 @@ pub enum Message {
     /// or a command relayed from a media-key/shell-applet D-Bus call.
     Mpris(crate::mpris::MprisEvent),
     /// Open ad-hoc audio files outside the library (double-clicked in a
-    /// file manager via `Exec=lyra %U`, passed on the command line, or
+    /// file manager via `Exec=aulos %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri`).
     OpenFiles(Vec<PathBuf>),
     /// The background tag-read kicked off by `OpenFiles` has finished;

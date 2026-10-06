@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=Lyra
+Name=Aulos
 Comment=A modern music player for the COSMIC desktop
-Exec=lyra %U
-Icon=io.github.m0rf30.Lyra
+Exec=aulos %U
+Icon=io.github.m0rf30.Aulos
 Terminal=false
 Type=Application
 Categories=Audio;Music;Player;
-Keywords=music;audio;player;mp3;flac;lyra;
+Keywords=music;audio;player;mp3;flac;aulos;
 MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-wav;audio/x-aiff;audio/mp4;audio/aac;audio/x-ape;audio/x-wavpack;audio/x-musepack;audio/x-dsf;audio/x-dff;audio/webm;audio/x-matroska;

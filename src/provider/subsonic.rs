@@ -120,7 +120,7 @@ impl SubsonicProvider {
         let auth = Auth::token(&config.username, &config.password);
         let mut client = Client::new(&config.url, auth)
             .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
-            .with_client_name("lyra");
+            .with_client_name("aulos");
 
         if config.accept_invalid_certs {
             client = client
@@ -859,9 +859,9 @@ impl MusicProvider for SubsonicProvider {
     // --- Artist metadata ---
 
     /// Serves the server's own artist bio/image (`getArtistInfo2` and the
-    /// artist's cover art / `artistImageUrl`) regardless of Lyra's
+    /// artist's cover art / `artistImageUrl`) regardless of Aulos's
     /// "fetch artist images and info online" setting — that toggle only
-    /// gates Lyra's own Deezer/Wikipedia lookup for Local/MPD, which
+    /// gates Aulos's own Deezer/Wikipedia lookup for Local/MPD, which
     /// would be redundant (and pointlessly slower) next to data the
     /// Subsonic/Navidrome server already curates.
     #[tracing::instrument(skip(self), level = "debug")]

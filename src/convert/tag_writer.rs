@@ -89,7 +89,7 @@ fn metadata_block_header(block_type: u8, is_last: bool, len: usize) -> [u8; 4] {
 /// `KEY=value` comments, little-endian length prefixes throughout — the
 /// native FLAC embedding, unlike Ogg's framed variant).
 fn build_vorbis_comment_block(tags: &WriteTags<'_>, is_last: bool) -> Vec<u8> {
-    let vendor = concat!("lyra ", env!("CARGO_PKG_VERSION"));
+    let vendor = concat!("aulos ", env!("CARGO_PKG_VERSION"));
     let mut comments: Vec<String> = Vec::new();
     if let Some(v) = tags.title {
         comments.push(format!("TITLE={v}"));
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn flac_splice_clears_last_flag_and_preserves_audio_tail() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-tagwriter-flac-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-tagwriter-flac-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.flac");
         std::fs::write(&path, minimal_flac_bytes()).unwrap();
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn flac_tags_round_trip_through_symphonia_reader() {
         let dir = std::env::temp_dir().join(format!(
-            "lyra-tagwriter-flac-roundtrip-{}",
+            "aulos-tagwriter-flac-roundtrip-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn empty_tags_leave_file_untouched() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-tagwriter-empty-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-tagwriter-empty-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.flac");
         let original = minimal_flac_bytes();
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn wav_id3_chunk_round_trips_through_tags_probe() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-tagwriter-wav-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-tagwriter-wav-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.wav");
 

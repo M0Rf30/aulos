@@ -323,7 +323,7 @@ mod tests {
 
     fn temp_cache_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "lyra-autoeq-test-{label}-{}-{}",
+            "aulos-autoeq-test-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

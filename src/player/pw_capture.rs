@@ -4,7 +4,7 @@
 //! Captures MPD's own PipeWire playback stream so the projectM visualizer
 //! reacts to audio when MPD is the active backend.
 //!
-//! Lyra only remote-controls MPD (see `mpd_backend`/`provider::mpd`): no PCM
+//! Aulos only remote-controls MPD (see `mpd_backend`/`provider::mpd`): no PCM
 //! passes through the in-process decode/output engine that feeds the
 //! visualizer tap for local playback (`engine::engine::tap_visualizer`).
 //! Instead, when MPD is playing, this module opens its own PipeWire client,
@@ -108,7 +108,7 @@ impl PwCapture {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
         let thread = std::thread::Builder::new()
-            .name("lyra-pw-capture".into())
+            .name("aulos-pw-capture".into())
             .spawn(move || {
                 if let Err(e) = run_capture_loop(pcm, mpd_playing, cmd_rx, ready_tx.clone()) {
                     tracing::warn!("MPD PipeWire capture stopped: {e}");
@@ -369,7 +369,7 @@ fn build_stream(
         "media.type" => "Audio",
         "media.category" => "Capture",
         "media.role" => "Music",
-        "node.name" => "lyra-visualizer",
+        "node.name" => "aulos-visualizer",
     };
     let require_mpd_playing = if let Some(target) = target {
         props.insert("target.object", target);
@@ -382,7 +382,7 @@ fn build_stream(
         true
     };
 
-    let stream = pw::stream::StreamRc::new(core.clone(), "lyra-visualizer", props)
+    let stream = pw::stream::StreamRc::new(core.clone(), "aulos-visualizer", props)
         .map_err(|e| format!("stream create: {e}"))?;
 
     let user_data = StreamUserData {
@@ -557,7 +557,7 @@ pub(crate) fn is_local_host(host: &str, machine_hostname: Option<&str>) -> bool 
 
 /// Reads this machine's hostname from `/proc/sys/kernel/hostname`.
 ///
-/// Lyra is Linux/COSMIC-specific, so reading this virtual file avoids
+/// Aulos is Linux/COSMIC-specific, so reading this virtual file avoids
 /// pulling in a whole crate (`hostname`/`gethostname`) for a single
 /// `libc::gethostname()` call.
 fn local_hostname() -> Option<String> {

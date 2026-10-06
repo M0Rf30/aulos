@@ -38,11 +38,11 @@ pub use message::Message;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] =
-    include_bytes!("../../resources/icons/hicolor/scalable/apps/io.github.m0rf30.Lyra.svg");
+    include_bytes!("../../resources/icons/hicolor/scalable/apps/io.github.m0rf30.Aulos.svg");
 
 /// Widget id for the header library-search input, used to programmatically
 /// focus it when the search bar is activated.
-const SEARCH_INPUT_ID: &str = "lyra-library-search";
+const SEARCH_INPUT_ID: &str = "aulos-library-search";
 
 /// Max concurrent artist-info fetches (Deezer/Wikipedia/Subsonic
 /// requests) — see `artist_info_semaphore`. Small and fixed: this is a
@@ -626,7 +626,7 @@ fn reload_result_is_stale(
 fn online_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("lyra")
+        .join("aulos")
         .join("library.db")
 }
 
@@ -637,7 +637,7 @@ fn online_db_path() -> PathBuf {
 fn artist_info_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("lyra")
+        .join("aulos")
 }
 
 /// Open the online store at the shared library database path.
@@ -655,7 +655,7 @@ fn now_epoch() -> i64 {
 
 /// Flags passed into `AppModel::init` at startup -- currently just the
 /// audio files (if any) the process was launched or handed off to open,
-/// via `Exec=lyra %U`, a bare CLI argument, or another running
+/// via `Exec=aulos %U`, a bare CLI argument, or another running
 /// instance's MPRIS `OpenUri` forwarded through `main`.
 #[derive(Debug, Clone, Default)]
 pub struct AppFlags {

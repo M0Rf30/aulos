@@ -9,7 +9,12 @@
 
 use std::sync::Once;
 
-const SERVICE: &str = "io.github.m0rf30.Lyra";
+const SERVICE: &str = "io.github.m0rf30.Aulos";
+
+/// Keyring service used before the Lyra → Aulos rename. Read as a fallback by
+/// [`retrieve_password`], which re-stores hits under [`SERVICE`] and deletes
+/// the legacy entry, so saved MPD/Subsonic passwords survive the rename.
+const LEGACY_SERVICE: &str = "io.github.m0rf30.Lyra";
 
 static INIT: Once = Once::new();
 
@@ -60,11 +65,23 @@ pub fn retrieve_password(provider_id: &str) -> Result<Option<String>, String> {
         .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
-        Err(keyring_core::Error::NoEntry) => Ok(None),
+        Err(keyring_core::Error::NoEntry) => Ok(migrate_legacy_password(provider_id)),
         Err(e) => Err(format!(
             "Failed to retrieve password for '{provider_id}': {e}"
         )),
     }
+}
+
+/// Look the password up under [`LEGACY_SERVICE`]; on a hit, move it to
+/// [`SERVICE`]. Failures are swallowed: a missing legacy entry is the normal
+/// case, and a failed move just means the lookup repeats next time.
+fn migrate_legacy_password(provider_id: &str) -> Option<String> {
+    let legacy = keyring_core::Entry::new(LEGACY_SERVICE, provider_id).ok()?;
+    let password = legacy.get_password().ok()?;
+    if store_password(provider_id, &password).is_ok() {
+        let _ = legacy.delete_credential();
+    }
+    Some(password)
 }
 
 /// Delete a password from the system keyring for the given provider ID.
@@ -89,7 +106,7 @@ pub fn delete_password(provider_id: &str) -> Result<(), String> {
 /// keyring is usable, `false` otherwise.
 pub fn is_keyring_available() -> bool {
     init();
-    const PROBE_USER: &str = "__lyra_keyring_probe__";
+    const PROBE_USER: &str = "__aulos_keyring_probe__";
     const PROBE_PASSWORD: &str = "probe";
 
     let entry = match keyring_core::Entry::new(SERVICE, PROBE_USER) {

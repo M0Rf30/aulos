@@ -11,7 +11,7 @@ impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
     type Flags = AppFlags;
     type Message = Message;
-    const APP_ID: &'static str = "io.github.m0rf30.Lyra";
+    const APP_ID: &'static str = "io.github.m0rf30.Aulos";
 
     fn core(&self) -> &cosmic::Core {
         &self.core

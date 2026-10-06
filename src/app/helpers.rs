@@ -146,11 +146,11 @@ impl AppModel {
     /// Dispatch an async MPD play command for a URI (ClearQueue + Add +
     /// Play).
     ///
-    /// Lyra drives MPD one track at a time from its own [`crate::player`]
+    /// Aulos drives MPD one track at a time from its own [`crate::player`]
     /// queue — shuffle/repeat live entirely in that queue, never in MPD
     /// itself. Forcing `random`/`repeat`/`single` off on every dispatch
     /// guards against a stale `repeat 1` (set by an external MPD client,
-    /// or left over from before Lyra started driving this server): with a
+    /// or left over from before Aulos started driving this server): with a
     /// single-song MPD queue, `repeat 1` would otherwise loop that one
     /// song forever and `is_finished()` would never fire, silently
     /// freezing playback on the current track.
@@ -705,7 +705,7 @@ impl AppModel {
 
         let db_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("lyra")
+            .join("aulos")
             .join("library.db");
 
         if let Ok(db) = LibraryDb::open(&db_path) {
@@ -1264,7 +1264,7 @@ impl AppModel {
     }
 
     /// Reads tags for a set of ad-hoc files -- double-clicked in a file
-    /// manager via `Exec=lyra %U`, passed on the command line, or
+    /// manager via `Exec=aulos %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri` -- and
     /// queues the readable ones for playback. Deliberately bypasses the
     /// library database: these files need not live in any configured

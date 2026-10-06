@@ -190,7 +190,7 @@ fn fetch_stations(
 ) -> Result<Vec<StationSearchResult>, String> {
     let response = client
         .get(url)
-        .header("User-Agent", "lyra/0.1")
+        .header("User-Agent", "aulos/0.1")
         .send()
         .map_err(|e| format!("Radio search failed: {e}"))?;
     if !response.status().is_success() {

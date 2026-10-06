@@ -76,8 +76,8 @@ impl MpdBackend {
     }
 
     /// Mark the backend as having been actively playing, without going
-    /// through `play()`. Used by `Player::adopt_mpd_track` when Lyra
-    /// adopts a track MPD was already playing before Lyra's `Player`
+    /// through `play()`. Used by `Player::adopt_mpd_track` when Aulos
+    /// adopts a track MPD was already playing before Aulos's `Player`
     /// existed, so `is_finished()` doesn't treat it as already ended.
     pub fn mark_playing(&mut self) {
         self.was_playing = true;

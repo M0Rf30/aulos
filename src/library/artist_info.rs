@@ -8,7 +8,7 @@
 //! Deezer, MusicBrainz) behind a common `ArtistImageRetriever` /
 //! `ArtistBiographyRetriever` interface and cache results in its
 //! database with a TTL (`consts.ArtistInfoTimeToLive`, 24h server-side).
-//! Lyra is a desktop client hitting keyless public endpoints rather than
+//! Aulos is a desktop client hitting keyless public endpoints rather than
 //! a server with its own API key vault, so this module is deliberately
 //! smaller:
 //!
@@ -62,9 +62,9 @@ const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_BIO_CHARS: usize = 2000;
 
 const USER_AGENT: &str = concat!(
-    "Lyra/",
+    "Aulos/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/M0Rf30/lyra)"
+    " (+https://github.com/M0Rf30/aulos)"
 );
 
 const DEEZER_SEARCH_URL: &str = "https://api.deezer.com/search/artist";
@@ -380,7 +380,7 @@ fn download_image(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u
     crate::online::read_capped_body(resp, MAX_IMAGE_BYTES).ok()
 }
 
-/// Resolves one artist's info via Lyra's own keyless online agents
+/// Resolves one artist's info via Aulos's own keyless online agents
 /// (Deezer for the image, Wikipedia for the bio), consulting/populating
 /// `store` first. Blocking — call from `tokio::task::spawn_blocking`,
 /// never on the UI thread or an async task's own worker thread.

@@ -646,7 +646,7 @@ mod tests {
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "lyra-viz-{label}-{}-{}",
+            "aulos-viz-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -631,7 +631,7 @@ impl Player {
         self.mpd_backend.as_mut()
     }
 
-    /// Adopt a track MPD is already playing without Lyra having started it
+    /// Adopt a track MPD is already playing without Aulos having started it
     /// itself — e.g. right after switching to an MPD backend whose server
     /// was already mid-playback. Makes the MPD backend the active one and
     /// marks it as having been playing, so `is_finished()` doesn't

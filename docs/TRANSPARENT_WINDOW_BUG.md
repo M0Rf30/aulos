@@ -1,11 +1,11 @@
 # Transparent/Empty Second Window Appears Alongside Main Application Window
 
 **Status**: Reported to upstream (https://github.com/pop-os/libcosmic/issues/1125)  
-**Affects**: Lyra music player on COSMIC Desktop Environment  
+**Affects**: Aulos music player on COSMIC Desktop Environment  
 **Suspected Component**: libcosmic/iced-wgpu or cosmic-comp  
 
 ## Description
-When running Lyra (a libcosmic-based music player application), a second transparent/empty window appears alongside the main application window. This window appears to be a winit/wgpu surface but has no visible content and appears transparent.
+When running Aulos (a libcosmic-based music player application), a second transparent/empty window appears alongside the main application window. This window appears to be a winit/wgpu surface but has no visible content and appears transparent.
 
 ## Environment
 - **OS**: Linux 6.18.9-zen1-2-zen (Arch-based)
@@ -18,13 +18,13 @@ When running Lyra (a libcosmic-based music player application), a second transpa
 - **Graphics Backend**: wgpu with EGL backend
 
 ## Steps to Reproduce
-1. Build and run Lyra: `cargo build --release && ./target/release/lyra`
+1. Build and run Aulos: `cargo build --release && ./target/release/aulos`
 2. Observe two windows appear:
-   - Main window with Lyra UI (normal, functional)
+   - Main window with Aulos UI (normal, functional)
    - Second window that is transparent/empty (unexpected)
 
 ## Expected Behavior
-Only one window should appear - the main application window with Lyra's UI.
+Only one window should appear - the main application window with Aulos's UI.
 
 ## Actual Behavior
 Two windows appear. The second window:
@@ -63,8 +63,8 @@ Key observations:
 
 ### Process Information
 ```bash
-$ pgrep -fa lyra
-542373 /usr/bin/lyra
+$ pgrep -fa aulos
+542373 /usr/bin/aulos
 
 $ ls -la /proc/542373/fd/ | grep socket | wc -l
 14
@@ -81,7 +81,7 @@ fn main() -> cosmic::iced::Result {
         .init();
 
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
-    lyra::i18n::init(&requested_languages);
+    aulos::i18n::init(&requested_languages);
 
     let settings = cosmic::app::Settings::default()
         .size_limits(
@@ -90,14 +90,14 @@ fn main() -> cosmic::iced::Result {
                 .min_height(600.0),
         );
 
-    cosmic::app::run::<lyra::app::AppModel>(settings, ())
+    cosmic::app::run::<aulos::app::AppModel>(settings, ())
 }
 ```
 
 **app.rs** - Application trait implementation (simplified):
 ```rust
 impl cosmic::Application for AppModel {
-    const APP_ID: &'static str = "io.github.m0rf30.Lyra";
+    const APP_ID: &'static str = "io.github.m0rf30.Aulos";
     
     fn init(core: cosmic::Core, _flags: Self::Flags) -> (Self, Task<cosmic::Action<Self::Message>>) {
         // Standard initialization
@@ -160,12 +160,12 @@ This issue was discovered while implementing keyboard shortcuts for the applicat
 - **libcosmic repository**: https://github.com/pop-os/libcosmic
 - **COSMIC compositor**: https://github.com/pop-os/cosmic-comp
 - **winit (pop-os fork)**: https://github.com/pop-os/winit
-- **Lyra repository**: https://github.com/M0Rf30/rust-music-player
+- **Aulos repository**: https://github.com/M0Rf30/rust-music-player
 
 ## Dependency Tree (Relevant Parts)
 
 ```
-lyra v0.1.0
+aulos v0.1.0
 ├── libcosmic v1.0.0 (git: a3cf875)
 │   ├── iced v0.14.0-dev
 │   │   ├── iced_renderer v0.14.0-dev
@@ -179,7 +179,7 @@ lyra v0.1.0
 
 ## Next Steps
 
-1. Test with other libcosmic applications to determine if this is Lyra-specific or framework-wide
+1. Test with other libcosmic applications to determine if this is Aulos-specific or framework-wide
 2. Test on X11 (if available) to see if this is Wayland-specific
 3. Try different wgpu backend configurations
 4. Report to libcosmic issue tracker if confirmed as framework issue
@@ -187,5 +187,5 @@ lyra v0.1.0
 ---
 
 **Report Date**: 2026-02-16  
-**Reporter**: Lyra development team  
+**Reporter**: Aulos development team  
 **File Location**: `docs/TRANSPARENT_WINDOW_BUG.md`

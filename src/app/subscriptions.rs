@@ -41,8 +41,8 @@ impl AppModel {
         // backend, not on `is_playing` or `active_backend_type()`: right
         // after switching to an MPD provider, the freshly-created `Player`
         // always reports `Stopped` (no status has been polled yet) and
-        // `active_backend_type()` only flips to `Mpd` once Lyra itself has
-        // issued a `play` through it — gating on either would mean Lyra
+        // `active_backend_type()` only flips to `Mpd` once Aulos itself has
+        // issued a `play` through it — gating on either would mean Aulos
         // never polls a server that was already playing before the switch.
         if let Some(player) = &self.player
             && let Some(mpd) = player.mpd_backend_ref()
@@ -142,7 +142,7 @@ impl AppModel {
 
         // MPD PipeWire capture subscription — feeds the same PCM buffer as
         // the render subscription above, but from MPD's own PipeWire
-        // playback stream instead of the local engine's tap, since lyra
+        // playback stream instead of the local engine's tap, since aulos
         // only remote-controls MPD (no PCM otherwise reaches this
         // process). Gated on the same active+expanded condition as the
         // render subscription, further restricted to when MPD is actually
@@ -468,11 +468,11 @@ fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
     )
 }
 
-/// Mirrors the subset of `mpd_client::client::Subsystem` variants Lyra's
+/// Mirrors the subset of `mpd_client::client::Subsystem` variants Aulos's
 /// idle handler distinguishes between. Kept separate from the upstream
 /// type (rather than embedding it directly in `Message`) because
 /// `Message` must be `Clone` and `Subsystem::Other` wraps a `Box<str>` —
-/// collapsing everything Lyra doesn't act on to a single `Other` unit
+/// collapsing everything Aulos doesn't act on to a single `Other` unit
 /// variant is all `idle_action` needs and keeps the conversion trivial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleSubsystem {

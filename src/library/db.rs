@@ -1193,7 +1193,7 @@ mod tests {
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "lyra-db-{label}-{}-{}",
+            "aulos-db-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1225,7 +1225,7 @@ mod tests {
             1
         );
 
-        let track_id = insert_local(&db, Path::new("/tmp/lyra-cascade.mp3"));
+        let track_id = insert_local(&db, Path::new("/tmp/aulos-cascade.mp3"));
         let playlist = db.create_playlist("test").unwrap();
         db.add_to_playlist(&playlist.id, &[track_id.to_string()])
             .unwrap();

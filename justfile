@@ -1,7 +1,7 @@
 # Name of the application's binary.
-name := 'lyra'
+name := 'aulos'
 # The unique ID of the application.
-appid := 'io.github.m0rf30.Lyra'
+appid := 'io.github.m0rf30.Aulos'
 
 # Path to root file system, which defaults to `/`.
 rootdir := ''
@@ -9,9 +9,9 @@ rootdir := ''
 prefix := '/usr'
 # The location of the cargo target directory.
 cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
-# Binary to install. Defaults to a `lyra` binary next to the justfile (as shipped
+# Binary to install. Defaults to a `aulos` binary next to the justfile (as shipped
 # in release tarballs), falling back to the cargo release build. Override with
-# `just bin-src=/path/to/lyra install`.
+# `just bin-src=/path/to/aulos install`.
 bin-src := if path_exists(justfile_directory() / name) == 'true' { justfile_directory() / name } else { cargo-target-dir / 'release' / name }
 
 # Application's appstream metadata

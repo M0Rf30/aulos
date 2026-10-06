@@ -288,7 +288,7 @@ impl AppModel {
                             // we open the DB directly for scan_paths.
                             let db_path = dirs::data_dir()
                                 .unwrap_or_else(|| PathBuf::from("."))
-                                .join("lyra")
+                                .join("aulos")
                                 .join("library.db");
 
                             match crate::library::LibraryDb::open(&db_path) {
@@ -524,7 +524,7 @@ impl AppModel {
                     }
 
                     // Real MPD-server playback state (not gated on which
-                    // backend Lyra currently considers "active" — see the
+                    // backend Aulos currently considers "active" — see the
                     // early-return below and `AppModel::mpd_playing`'s doc
                     // comment): the PipeWire capture thread's monitor
                     // fallback must only feed the visualizer while MPD
@@ -538,7 +538,7 @@ impl AppModel {
                     }
 
                     // The poll runs whenever an MPD backend exists, which
-                    // includes while Lyra plays a local file, radio stream
+                    // includes while Aulos plays a local file, radio stream
                     // or podcast through the local backend (opening a file
                     // from a file manager does exactly that). Only let MPD
                     // drive the shared UI state when it is the backend
@@ -553,10 +553,10 @@ impl AppModel {
                         return Task::none();
                     }
 
-                    // Adopt a track MPD is already playing that Lyra didn't
+                    // Adopt a track MPD is already playing that Aulos didn't
                     // start itself — e.g. right after switching to this MPD
                     // backend while its server was already mid-playback, or
-                    // MPD's song changed out from under Lyra (another
+                    // MPD's song changed out from under Aulos (another
                     // client skipped tracks). `song` is only `Some` on the
                     // tick where MPD's song identity changed.
                     if let Some(track) = song
@@ -1240,7 +1240,7 @@ impl AppModel {
 
                 let cache_dir = dirs::cache_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("lyra")
+                    .join("aulos")
                     .join("autoeq");
                 let timeout = std::time::Duration::from_secs(30);
 
@@ -1279,7 +1279,7 @@ impl AppModel {
 
                 let cache_dir = dirs::cache_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("lyra")
+                    .join("aulos")
                     .join("autoeq");
                 let timeout = std::time::Duration::from_secs(30);
 
@@ -2272,7 +2272,7 @@ impl AppModel {
                             self.smart_playlist_editor = None;
                             let db_path = dirs::data_dir()
                                 .unwrap_or_else(|| PathBuf::from("."))
-                                .join("lyra")
+                                .join("aulos")
                                 .join("library.db");
                             return cosmic::task::future(async move {
                                 let playlists = tokio::task::spawn_blocking(move || {
@@ -2309,7 +2309,7 @@ impl AppModel {
                             }
                             let db_path = dirs::data_dir()
                                 .unwrap_or_else(|| PathBuf::from("."))
-                                .join("lyra")
+                                .join("aulos")
                                 .join("library.db");
                             return cosmic::task::future(async move {
                                 let playlists = tokio::task::spawn_blocking(move || {
@@ -2345,7 +2345,7 @@ impl AppModel {
                         if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
                             let db_path = dirs::data_dir()
                                 .unwrap_or_else(|| PathBuf::from("."))
-                                .join("lyra")
+                                .join("aulos")
                                 .join("library.db");
                             return cosmic::task::future(async move {
                                 let tracks = tokio::task::spawn_blocking(move || {
@@ -2375,7 +2375,7 @@ impl AppModel {
                         if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
                             let db_path = dirs::data_dir()
                                 .unwrap_or_else(|| PathBuf::from("."))
-                                .join("lyra")
+                                .join("aulos")
                                 .join("library.db");
                             return cosmic::task::future(async move {
                                 let tracks = tokio::task::spawn_blocking(move || {
@@ -2648,7 +2648,7 @@ impl AppModel {
                         }
                         MprisCommand::Raise => {
                             tracing::debug!(
-                                "MPRIS: Raise requested (no-op, Lyra has no window-raise hook)"
+                                "MPRIS: Raise requested (no-op, Aulos has no window-raise hook)"
                             );
                             Task::none()
                         }
@@ -2835,7 +2835,7 @@ impl AppModel {
             Some(Page::SmartPlaylists) => {
                 let db_path = dirs::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
-                    .join("lyra")
+                    .join("aulos")
                     .join("library.db");
                 cosmic::task::future(async move {
                     let playlists = tokio::task::spawn_blocking(move || {

@@ -80,7 +80,7 @@ jobs:
         id: version
         run: |
           ver=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "lyra") | .version')
+            | jq -r '.packages[] | select(.name == "aulos") | .version')
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
       # Refuse to release a version the tag does not name (e.g. tagging 0.2.0
@@ -142,7 +142,7 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
-      # The tarball unpacks to lyra-<version>-<target>/ with the binary next to
+      # The tarball unpacks to aulos-<version>-<target>/ with the binary next to
       # the justfile, so `sudo just install` works from inside the extracted
       # directory.
       - name: Package
@@ -150,9 +150,9 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          name="lyra-${VERSION}-${TARGET}"
+          name="aulos-${VERSION}-${TARGET}"
           mkdir -p "dist/${name}"
-          cp target/release/lyra LICENSE README.md justfile "dist/${name}/"
+          cp target/release/aulos LICENSE README.md justfile "dist/${name}/"
           cp -r resources "dist/${name}/resources"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
@@ -162,7 +162,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: lyra-${{ matrix.target }}
+          name: aulos-${{ matrix.target }}
           path: |
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
@@ -200,7 +200,7 @@ jobs:
           else
             range="$tag"
           fi
-          base="lyra-${VERSION}"
+          base="aulos-${VERSION}"
           x86="${base}-x86_64-unknown-linux-gnu"
           arm="${base}-aarch64-unknown-linux-gnu"
           {
@@ -226,7 +226,7 @@ jobs:
             echo "sudo just install"
             echo '```'
             echo
-            echo "Without \`just\`, copy \`lyra\` into your \`PATH\` and the"
+            echo "Without \`just\`, copy \`aulos\` into your \`PATH\` and the"
             echo "files under \`resources/\` to the matching \`/usr/share\`."
           } > release-notes.md
           cat release-notes.md
@@ -234,7 +234,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: lyra ${{ github.ref_name }}
+          name: aulos ${{ github.ref_name }}
           body_path: release-notes.md
           files: |
             artifacts/*.tar.gz

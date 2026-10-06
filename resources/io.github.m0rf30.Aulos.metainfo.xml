@@ -1,23 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.m0rf30.Lyra</id>
-  <name>Lyra</name>
+  <id>io.github.m0rf30.Aulos</id>
+  <name>Aulos</name>
   <summary>A modern music player for the COSMIC desktop</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0</project_license>
   <description>
     <p>
-      Lyra is a modern, feature-rich music player built with the COSMIC
+      Aulos is a modern, feature-rich music player built with the COSMIC
       desktop SDK. It features a clean album-focused interface with support
       for multiple audio formats, MPD and Subsonic/OpenSubsonic backends,
       embedded cover art, lyrics display, and CSD playback controls in the
       title bar.
     </p>
   </description>
-  <url type="homepage">https://github.com/M0Rf30/lyra</url>
-  <url type="bugtracker">https://github.com/M0Rf30/lyra/issues</url>
+  <url type="homepage">https://github.com/M0Rf30/aulos</url>
+  <url type="bugtracker">https://github.com/M0Rf30/aulos/issues</url>
   <provides>
-    <binary>lyra</binary>
+    <binary>aulos</binary>
   </provides>
   <content_rating type="oars-1.1" />
 </component>

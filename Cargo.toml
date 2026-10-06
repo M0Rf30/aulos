@@ -1,10 +1,10 @@
 [package]
-name = "lyra"
+name = "aulos"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A modern music player for the COSMIC desktop"
-repository = "https://github.com/M0Rf30/lyra"
+repository = "https://github.com/M0Rf30/aulos"
 
 [dependencies]
 # COSMIC / UI framework
@@ -130,7 +130,7 @@ console-subscriber = { version = "0.5", optional = true }
 projectm = { version = "3.1", optional = true, default-features = false, features = ["static"] }
 glutin = { version = "0.32", optional = true }
 gl = { version = "0.14", optional = true }
-# MPD visualizer audio: capture MPD's own PipeWire playback stream (lyra only
+# MPD visualizer audio: capture MPD's own PipeWire playback stream (aulos only
 # remote-controls MPD, so no PCM passes through the in-app engine tap).
 pipewire = { version = "0.10", optional = true }
 

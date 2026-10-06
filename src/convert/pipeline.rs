@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn run_converts_and_copies_tags_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("lyra-pipeline-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("aulos-pipeline-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.flac");
         write_test_flac(&source);
@@ -720,7 +720,7 @@ mod tests {
     #[test]
     fn run_copies_date_and_cover_art_end_to_end() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-pipeline-art-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-pipeline-art-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.flac");
         write_test_flac(&source);
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn cancelled_conversion_leaves_no_output_file() {
         let dir =
-            std::env::temp_dir().join(format!("lyra-pipeline-cancel-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-pipeline-cancel-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         write_test_wav(&source);
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn run_with_resample_does_not_drop_a_short_clip() {
         let dir = std::env::temp_dir().join(format!(
-            "lyra-pipeline-resample-test-{}",
+            "aulos-pipeline-resample-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -893,7 +893,7 @@ mod tests {
         }
 
         let dir =
-            std::env::temp_dir().join(format!("lyra-pipeline-mp3-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("aulos-pipeline-mp3-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         write_test_wav(&source);

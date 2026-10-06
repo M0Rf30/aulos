@@ -4,7 +4,7 @@
 //! EQ preset manager for saving, loading, and deleting custom presets.
 //!
 //! Custom presets are stored as individual JSON files in a presets directory
-//! (typically `~/.config/lyra/eq_presets/`). Built-in presets are hardcoded
+//! (typically `~/.config/aulos/eq_presets/`). Built-in presets are hardcoded
 //! and cannot be saved or deleted.
 
 use super::equalizer::{EqPreset, EqPresetData, PresetSource};
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_is_builtin_name() {
-        let dir = std::env::temp_dir().join("lyra_test_presets");
+        let dir = std::env::temp_dir().join("aulos_test_presets");
         let _ = std::fs::create_dir_all(&dir);
         let manager = EqPresetManager::new(dir).unwrap();
 

@@ -10,7 +10,7 @@
 //!
 //! This module intentionally omits a hardware-mixer seam (`Mixer`/`SoftwareMixer`)
 //! and an ordered `FilterChain` runner: neither is wired into any live
-//! pipeline here, since lyra's engine loop applies its filters directly.
+//! pipeline here, since aulos's engine loop applies its filters directly.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};

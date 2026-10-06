@@ -1,4 +1,4 @@
-app-title = Lyra
+app-title = Aulos
 about = About
 repository = Repository
 file = File

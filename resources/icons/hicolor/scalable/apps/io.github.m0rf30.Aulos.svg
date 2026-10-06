@@ -87,7 +87,7 @@
     <line x1="75" y1="26" x2="72" y2="104"/>
   </g>
 
-  <!-- Lyra constellation stars — positioned to overlay the lyre shape -->
+  <!-- Aulos constellation stars — positioned to overlay the lyre shape -->
   <!-- The constellation maps onto the instrument: Vega at the yoke, -->
   <!-- the parallelogram (β, γ, δ, ζ) across the arms and body -->
   <g filter="url(#glow)">

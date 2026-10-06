@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod i18n;
 pub mod keybinds;
 pub mod library;
+pub mod migrate;
 pub mod mpris;
 pub mod online;
 pub mod player;
@@ -18,7 +19,7 @@ pub mod provider;
 pub mod views;
 
 /// Decodes a `file://` URI into a filesystem path. Shared by `main`'s
-/// CLI-argument parsing (`Exec=lyra %U`) and MPRIS's `OpenUri`, which
+/// CLI-argument parsing (`Exec=aulos %U`) and MPRIS's `OpenUri`, which
 /// always receives a URI rather than a bare path. Returns `None` for any
 /// other scheme, which callers should treat as unsupported.
 pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {

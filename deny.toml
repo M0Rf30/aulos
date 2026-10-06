@@ -2,7 +2,7 @@
 # See: https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# Lyra is Linux-only (wayland, zbus, ashpd, keyutils).
+# Aulos is Linux-only (wayland, zbus, ashpd, keyutils).
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },

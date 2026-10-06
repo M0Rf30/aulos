@@ -3,7 +3,7 @@
 
 //! Accent colour extraction from cover art.
 //!
-//! Lyra already keeps the raw encoded cover-art bytes for the current album
+//! Aulos already keeps the raw encoded cover-art bytes for the current album
 //! around for blur processing (`AppModel.cover_art_bytes`); this module
 //! reuses that same byte source to pick a small, legible accent colour so
 //! the now-playing surfaces can visually match the artwork instead of

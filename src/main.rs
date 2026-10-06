@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-/// Bus name Lyra's MPRIS server claims once running (see
-/// `lyra::mpris::mpris_stream`). Used both to detect an already-running
+/// Bus name Aulos's MPRIS server claims once running (see
+/// `aulos::mpris::mpris_stream`). Used both to detect an already-running
 /// instance and to address it directly over D-Bus.
-const MPRIS_BUS_NAME: &str = "org.mpris.MediaPlayer2.Lyra";
+const MPRIS_BUS_NAME: &str = "org.mpris.MediaPlayer2.Aulos";
 
 fn main() -> cosmic::iced::Result {
     #[cfg(feature = "tokio-console")]
@@ -18,12 +18,12 @@ fn main() -> cosmic::iced::Result {
         .init();
 
     // Files passed on the command line -- via a file manager's "Open
-    // With" (`Exec=lyra %U` in the desktop entry) or directly by the
+    // With" (`Exec=aulos %U` in the desktop entry) or directly by the
     // user. Nonexistent paths are dropped here rather than failing later
     // inside the scanner.
     let open_paths = parse_args();
 
-    // If another Lyra instance already owns the MPRIS bus name, hand the
+    // If another Aulos instance already owns the MPRIS bus name, hand the
     // files to it and exit instead of starting a second player -- every
     // playback route lives on a single `AppModel`/`Player`, so two
     // processes would each think they own the audio device.
@@ -31,11 +31,15 @@ fn main() -> cosmic::iced::Result {
         return Ok(());
     }
 
+    // Carry over data/config/cache from the pre-rename "Lyra" install
+    // before anything opens the library database or reads the config.
+    aulos::migrate::migrate_legacy_dirs();
+
     // Get the system's preferred languages.
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
 
     // Enable localizations to be applied.
-    lyra::i18n::init(&requested_languages);
+    aulos::i18n::init(&requested_languages);
 
     // Settings for configuring the application window and iced runtime.
     let settings = cosmic::app::Settings::default().size_limits(
@@ -44,21 +48,21 @@ fn main() -> cosmic::iced::Result {
             .min_height(600.0),
     );
 
-    let flags = lyra::app::AppFlags { open_paths };
+    let flags = aulos::app::AppFlags { open_paths };
 
     // Starts the application's event loop.
-    cosmic::app::run::<lyra::app::AppModel>(settings, flags)
+    cosmic::app::run::<aulos::app::AppModel>(settings, flags)
 }
 
 /// Parses `argv[1..]` into existing filesystem paths, accepting both
-/// plain paths and `file://` URIs (as passed by `Exec=lyra %U` per the
+/// plain paths and `file://` URIs (as passed by `Exec=aulos %U` per the
 /// Desktop Entry Specification, or by some file managers' "Open With").
 fn parse_args() -> Vec<PathBuf> {
     std::env::args_os()
         .skip(1)
         .filter_map(|arg| {
             let arg = arg.to_string_lossy().into_owned();
-            let path = lyra::file_uri_to_path(&arg).unwrap_or_else(|| PathBuf::from(&arg));
+            let path = aulos::file_uri_to_path(&arg).unwrap_or_else(|| PathBuf::from(&arg));
             if path.exists() {
                 Some(path)
             } else {
@@ -69,7 +73,7 @@ fn parse_args() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Hands `paths` to an already-running Lyra instance over D-Bus
+/// Hands `paths` to an already-running Aulos instance over D-Bus
 /// (`org.mpris.MediaPlayer2.Player.OpenUri`) and raises its window,
 /// instead of starting a second process. Returns `true` only when every
 /// step succeeded; any failure (no running instance, no session bus, a
@@ -91,7 +95,7 @@ fn hand_off_to_running_instance(paths: &[PathBuf]) -> bool {
     match runtime.block_on(try_hand_off(paths)) {
         Ok(handed_off) => handed_off,
         Err(e) => {
-            tracing::warn!("Could not hand off files to a running Lyra instance: {e}");
+            tracing::warn!("Could not hand off files to a running Aulos instance: {e}");
             false
         }
     }

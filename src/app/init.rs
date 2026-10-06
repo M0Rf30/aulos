@@ -213,7 +213,7 @@ impl AppModel {
         // Open library database and initialize provider registry
         let db_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("lyra")
+            .join("aulos")
             .join("library.db");
 
         if let Some(parent) = db_path.parent() {
@@ -469,7 +469,7 @@ impl AppModel {
             preset_manager: {
                 let presets_dir = dirs::config_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("lyra")
+                    .join("aulos")
                     .join("eq_presets");
                 crate::player::eq_presets::EqPresetManager::new(presets_dir)
                     .expect("Failed to create EQ presets directory")
@@ -568,7 +568,7 @@ impl AppModel {
         }
         if !flags.open_paths.is_empty() {
             // Files passed on the command line or handed off via
-            // `Exec=lyra %U` -- queue them for ad-hoc playback once tags
+            // `Exec=aulos %U` -- queue them for ad-hoc playback once tags
             // are read, bypassing the library scan/DB entirely.
             init_tasks.push(app.open_files(flags.open_paths));
         }

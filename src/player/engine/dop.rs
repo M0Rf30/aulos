@@ -19,7 +19,7 @@
 //! Reference: <https://dsd-guide.com/sites/default/files/white-papers/DoP_openStandard_1v1.pdf>
 //!
 //! This module has no production dependencies beyond the Symphonia fork's
-//! `BitOrder`/`ChannelDataLayout` types and lyra's [`PlayerError`] for its
+//! `BitOrder`/`ChannelDataLayout` types and aulos's [`PlayerError`] for its
 //! error return. There's deliberately no DoP-to-`f32` conversion helper —
 //! DoP output only ever reaches cpal as 24-bit-in-32-bit samples, so that
 //! conversion has no production caller.

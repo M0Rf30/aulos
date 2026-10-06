@@ -212,7 +212,7 @@ pub struct Config {
     /// the next startup via `resolve_active_provider`; falls back to the
     /// local provider if the saved id is no longer registered.
     pub active_provider: Option<String>,
-    /// Whether Lyra fetches artist images/biography from online sources
+    /// Whether Aulos fetches artist images/biography from online sources
     /// (Deezer for images, Wikipedia for bios — both keyless) when
     /// browsing in Local or MPD mode. Off by default: purely opt-in
     /// network access. Ignored in Subsonic mode, which always shows the

@@ -16,7 +16,7 @@
 //! (sections 2, 5, 6, 7) for the full architecture this is based on — with
 //! one deliberate simplification per that report's §9: rmpd's decode
 //! thread → `MultiOutput` worker → `CpalOutput`-internal-channel double hop
-//! collapses to a single hop here, since lyra only ever has one output.
+//! collapses to a single hop here, since aulos only ever has one output.
 //! The decode thread applies ReplayGain, [`EqFilter`], and [`VolumeFilter`]
 //! directly, then hands samples straight to [`CpalOutput::write`] /
 //! [`DopOutput::write`] — no `MultiOutput`-equivalent fan-out type exists.
@@ -346,7 +346,7 @@ fn try_reconnect(
 }
 
 /// Out-of-band commands sent to the playback thread (mirrors rmpd's
-/// `PlaybackCommand`, minus everything but seek — lyra has no CUE ranges).
+/// `PlaybackCommand`, minus everything but seek — aulos has no CUE ranges).
 enum EngineCommand {
     Seek(Duration),
 }
@@ -1168,7 +1168,7 @@ fn run_pcm(
 
         if samples_read == 0 {
             // EOS: claim a pre-fetched next track regardless of format/DSD
-            // -ness — unlike rmpd, lyra rebuilds the output on a format
+            // -ness — unlike rmpd, aulos rebuilds the output on a format
             // change instead of refusing the gapless advance outright.
             let gapless_next = ctx.next_track.lock().take().and_then(open_pending);
 

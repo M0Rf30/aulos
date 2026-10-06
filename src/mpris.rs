@@ -4,7 +4,7 @@
 //! MPRIS2 D-Bus media player interface.
 //!
 //! Exposes `org.mpris.MediaPlayer2` and `org.mpris.MediaPlayer2.Player` on the
-//! session bus (via the `mpris-server` crate) so Lyra responds to desktop
+//! session bus (via the `mpris-server` crate) so Aulos responds to desktop
 //! media keys and shows up in the COSMIC/GNOME Shell media applet.
 //!
 //! This module owns nothing about playback itself: [`mpris_stream`] spawns
@@ -24,7 +24,7 @@
 //! (`impl<T> Server<T> where T: PlayerInterface + 'static`, around line 399)
 //! and only requires `T: PlayerInterface` (which itself requires
 //! `RootInterface`); it does not require `TrackListInterface` or
-//! `PlaylistsInterface`, both of which Lyra does not implement.
+//! `PlaylistsInterface`, both of which Aulos does not implement.
 //! `Server::properties_changed`/`Server::emit(Signal::Seeked { .. })` are
 //! defined in the same file around lines 438-504.
 
@@ -129,7 +129,7 @@ struct Update {
 struct SharedState {
     snapshot: Mutex<MprisSnapshot>,
     updates: cosmic::iced::futures::channel::mpsc::UnboundedSender<Update>,
-    /// Per-track `file://` cover art URL cache. Lyra keeps cover art as
+    /// Per-track `file://` cover art URL cache. Aulos keeps cover art as
     /// BLOBs in its library database rather than as loose files on disk, but
     /// MPRIS clients need an actual file to read pixels from — see
     /// [`MprisHandle::cached_art_url`]/[`MprisHandle::cache_art_url`].
@@ -235,7 +235,7 @@ impl MprisHandle {
 
 /// Extracts embedded cover art for `path` and writes it to a small on-disk
 /// cache under the user's cache directory, returning a `file://` URL to it.
-/// This is the only disk-writing cover art cache in Lyra (the library's own
+/// This is the only disk-writing cover art cache in Aulos (the library's own
 /// cache stores album art as database BLOBs, which D-Bus clients can't read
 /// directly) and is scoped entirely to MPRIS's needs.
 pub(crate) fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
@@ -245,7 +245,7 @@ pub(crate) fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     } else {
         "jpg"
     };
-    let dir = dirs::cache_dir()?.join("lyra").join("mpris");
+    let dir = dirs::cache_dir()?.join("aulos").join("mpris");
     std::fs::create_dir_all(&dir).ok()?;
     let file_path = dir.join(format!("{track_id}.{ext}"));
     if !file_path.exists() {
@@ -316,7 +316,7 @@ fn track_id_for(id: i64) -> TrackId {
     if id <= 0 {
         return TrackId::NO_TRACK;
     }
-    TrackId::try_from(format!("/io/github/m0rf30/Lyra/Track/{id}")).unwrap_or(TrackId::NO_TRACK)
+    TrackId::try_from(format!("/io/github/m0rf30/Aulos/Track/{id}")).unwrap_or(TrackId::NO_TRACK)
 }
 
 fn build_metadata(snapshot: &MprisSnapshot) -> Metadata {
@@ -347,7 +347,7 @@ fn build_metadata(snapshot: &MprisSnapshot) -> Metadata {
 /// `MprisEvent::Ready` first, then an `MprisEvent::Command` per D-Bus call.
 ///
 /// If no session bus is available, logs a `warn` and ends the stream
-/// quietly — Lyra keeps running without media-key/applet integration.
+/// quietly — Aulos keeps running without media-key/applet integration.
 pub fn mpris_stream() -> impl Stream<Item = MprisEvent> {
     cosmic::iced::stream::channel(
         16,
@@ -364,7 +364,7 @@ pub fn mpris_stream() -> impl Stream<Item = MprisEvent> {
                 commands: emitter.clone(),
             };
 
-            let server = match Server::new("Lyra", imp).await {
+            let server = match Server::new("Aulos", imp).await {
                 Ok(server) => server,
                 Err(err) => {
                     tracing::warn!("MPRIS: could not start D-Bus server (no session bus?): {err}");
@@ -437,7 +437,7 @@ impl RootInterface for DbusPlayer {
     }
 
     async fn set_fullscreen(&self, _fullscreen: bool) -> ZbusResult<()> {
-        // CanSetFullscreen is false; Lyra has no fullscreen video surface.
+        // CanSetFullscreen is false; Aulos has no fullscreen video surface.
         Ok(())
     }
 
@@ -454,23 +454,23 @@ impl RootInterface for DbusPlayer {
     }
 
     async fn identity(&self) -> fdo::Result<String> {
-        Ok("Lyra".to_owned())
+        Ok("Aulos".to_owned())
     }
 
     async fn desktop_entry(&self) -> fdo::Result<String> {
-        Ok("io.github.m0rf30.Lyra".to_owned())
+        Ok("io.github.m0rf30.Aulos".to_owned())
     }
 
     async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
         // Only `file://` is wired up end-to-end (`OpenUri` ->
         // `Message::OpenFiles` -> ad-hoc tag read off disk); advertising
-        // http(s) here would be a lie, since Lyra has no ad-hoc
+        // http(s) here would be a lie, since Aulos has no ad-hoc
         // network-stream playback path outside its library/queue model.
         Ok(vec!["file".to_owned()])
     }
 
     async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
-        // Mirrors resources/io.github.m0rf30.Lyra.desktop's `MimeType=`
+        // Mirrors resources/io.github.m0rf30.Aulos.desktop's `MimeType=`
         // list, itself verified against
         // `player::engine::decoder::SUPPORTED_EXTENSIONS`.
         Ok(vec![
@@ -564,7 +564,7 @@ impl PlayerInterface for DbusPlayer {
     }
 
     async fn set_rate(&self, _rate: PlaybackRate) -> ZbusResult<()> {
-        // Lyra always plays at normal speed; MinimumRate/MaximumRate are
+        // Aulos always plays at normal speed; MinimumRate/MaximumRate are
         // both pinned to 1.0 below, so clients shouldn't attempt this.
         Ok(())
     }

@@ -210,7 +210,7 @@ pub trait MusicProvider: Send + Sync {
     /// provider serves its own (currently only `SubsonicProvider`, from
     /// the server's `getArtistInfo2`/cover art). The default
     /// `NotSupported` tells `crate::library::artist_info` callers to fall
-    /// back to Lyra's own Deezer/Wikipedia lookup instead, gated by
+    /// back to Aulos's own Deezer/Wikipedia lookup instead, gated by
     /// `Config::fetch_artist_info`.
     fn get_artist_info(
         &self,
