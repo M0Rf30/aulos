@@ -1,3 +1,4 @@
 [build]
-rustc-wrapper = "sccache"
+# sccache is a per-machine choice: set `rustc-wrapper` in ~/.cargo/config.toml
+# or `RUSTC_WRAPPER=sccache` locally. Hard-coding it here breaks CI runners.
 rustflags = ["--cfg", "tokio_unstable"]
