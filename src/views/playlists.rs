@@ -209,14 +209,12 @@ pub fn playlist_detail_view<'a>(
                 .push(
                     widget::Row::new()
                         .push(
-                            widget::button::standard(fl!("queue-play-next")).on_press(
-                                PlaylistMessage::PlayNext(playlist.tracks.clone()),
-                            ),
+                            widget::button::standard(fl!("queue-play-next"))
+                                .on_press(PlaylistMessage::PlayNext(playlist.tracks.clone())),
                         )
                         .push(
-                            widget::button::standard(fl!("queue-add")).on_press(
-                                PlaylistMessage::AddToQueue(playlist.tracks.clone()),
-                            ),
+                            widget::button::standard(fl!("queue-add"))
+                                .on_press(PlaylistMessage::AddToQueue(playlist.tracks.clone())),
                         )
                         .spacing(8),
                 )

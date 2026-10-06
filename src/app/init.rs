@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds, radio_page};
+use super::{
+    APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds, radio_page,
+};
 use crate::config::Config;
 use crate::fl;
 use crate::library::LibraryDb;
@@ -12,8 +14,8 @@ use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::radio as radio_view;
 use crate::views::{podcasts, providers, songs};
-use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::Application;
+use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, icon, nav_bar};
 use std::collections::HashMap;
@@ -263,10 +265,12 @@ impl AppModel {
         // synchronously regardless of connection state, so this already
         // reflects the final registered set even though MPD/Subsonic
         // connections themselves complete asynchronously later.
-        let registered_ids: Vec<String> = registry.list().into_iter().map(|(id, _, _)| id).collect();
-        if let Some(target) =
-            crate::config::resolve_active_provider(config.active_provider.as_deref(), &registered_ids)
-        {
+        let registered_ids: Vec<String> =
+            registry.list().into_iter().map(|(id, _, _)| id).collect();
+        if let Some(target) = crate::config::resolve_active_provider(
+            config.active_provider.as_deref(),
+            &registered_ids,
+        ) {
             registry.set_active(&target);
         }
 
@@ -582,8 +586,10 @@ impl AppModel {
     /// `view::view_page`).
     pub(super) fn set_convert_nav_entry(&mut self, enabled: bool) {
         let entities: Vec<_> = self.nav.iter().collect();
-        let convert_entity =
-            entities.iter().copied().find(|&id| self.nav.data::<Page>(id) == Some(&Page::Convert));
+        let convert_entity = entities
+            .iter()
+            .copied()
+            .find(|&id| self.nav.data::<Page>(id) == Some(&Page::Convert));
 
         if enabled {
             if convert_entity.is_none() {
@@ -593,8 +599,10 @@ impl AppModel {
             let was_active = self.nav.active() == id;
             self.nav.remove(id);
             if was_active
-                && let Some(albums_id) =
-                    entities.iter().copied().find(|&aid| self.nav.data::<Page>(aid) == Some(&Page::Albums))
+                && let Some(albums_id) = entities
+                    .iter()
+                    .copied()
+                    .find(|&aid| self.nav.data::<Page>(aid) == Some(&Page::Albums))
             {
                 self.nav.activate(albums_id);
             }

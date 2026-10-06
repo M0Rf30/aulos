@@ -103,13 +103,22 @@ pub fn spawn_encoder(
             }
         }
         OutputFormat::Aac => {
-            cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", lossy.aac_bitrate_kbps));
+            cmd.arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg(format!("{}k", lossy.aac_bitrate_kbps));
         }
         OutputFormat::Opus => {
-            cmd.arg("-c:a").arg("libopus").arg("-b:a").arg(format!("{}k", lossy.opus_bitrate_kbps));
+            cmd.arg("-c:a")
+                .arg("libopus")
+                .arg("-b:a")
+                .arg(format!("{}k", lossy.opus_bitrate_kbps));
         }
         OutputFormat::OggVorbis => {
-            cmd.arg("-c:a").arg("libvorbis").arg("-q:a").arg(format!("{}", lossy.vorbis_quality));
+            cmd.arg("-c:a")
+                .arg("libvorbis")
+                .arg("-q:a")
+                .arg(format!("{}", lossy.vorbis_quality));
         }
         OutputFormat::Alac => {
             cmd.arg("-c:a").arg("alac");
@@ -133,10 +142,13 @@ pub fn spawn_encoder(
     };
     cmd.arg("-f").arg(muxer);
     cmd.arg(out_path);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
-    let mut child =
-        cmd.spawn().map_err(|e| ConvertError::Encode(format!("failed to spawn ffmpeg: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| ConvertError::Encode(format!("failed to spawn ffmpeg: {e}")))?;
     let stdin = child.stdin.take();
     let mut stderr = child.stderr.take();
 
@@ -155,7 +167,12 @@ pub fn spawn_encoder(
         buf
     });
 
-    Ok(FfmpegSink { child, stdin, stderr_thread: Some(stderr_thread), finished: false })
+    Ok(FfmpegSink {
+        child,
+        stdin,
+        stderr_thread: Some(stderr_thread),
+        finished: false,
+    })
 }
 
 /// [`SampleSink`] that pipes interleaved `f32le` PCM to an `ffmpeg` child
@@ -174,10 +191,9 @@ pub struct FfmpegSink {
 
 impl SampleSink for FfmpegSink {
     fn write(&mut self, interleaved: &[f32]) -> Result<(), ConvertError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| ConvertError::Encode("ffmpeg stdin is unexpectedly closed".to_owned()))?;
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            ConvertError::Encode("ffmpeg stdin is unexpectedly closed".to_owned())
+        })?;
 
         let mut buf = Vec::with_capacity(interleaved.len() * 4);
         for &sample in interleaved {
@@ -199,8 +215,11 @@ impl SampleSink for FfmpegSink {
             .map_err(|e| ConvertError::Encode(format!("waiting for ffmpeg failed: {e}")))?;
         self.finished = true;
 
-        let stderr_output =
-            self.stderr_thread.take().and_then(|handle| handle.join().ok()).unwrap_or_default();
+        let stderr_output = self
+            .stderr_thread
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
 
         if !status.success() {
             let detail = stderr_output.trim();
@@ -246,7 +265,14 @@ pub fn write_tags(path: &Path, tags: &WriteTags<'_>) {
     let tmp_path = path.with_extension(format!("tagtmp.{ext}"));
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-y").arg("-i").arg(path).arg("-c").arg("copy");
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(path)
+        .arg("-c")
+        .arg("copy");
 
     if let Some(v) = tags.title {
         cmd.arg("-metadata").arg(format!("title={v}"));
@@ -275,12 +301,16 @@ pub fn write_tags(path: &Path, tags: &WriteTags<'_>) {
     }
 
     cmd.arg(&tmp_path);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     match cmd.status() {
         Ok(status) if status.success() => {
             if let Err(e) = std::fs::rename(&tmp_path, path) {
-                tracing::warn!("ffmpeg tag remux: failed to install tagged output for {path:?}: {e}");
+                tracing::warn!(
+                    "ffmpeg tag remux: failed to install tagged output for {path:?}: {e}"
+                );
                 let _ = std::fs::remove_file(&tmp_path);
             }
         }
@@ -333,25 +363,39 @@ mod tests {
                 }
             }
             OutputFormat::Aac => {
-                cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", lossy.aac_bitrate_kbps));
+                cmd.arg("-c:a")
+                    .arg("aac")
+                    .arg("-b:a")
+                    .arg(format!("{}k", lossy.aac_bitrate_kbps));
             }
             OutputFormat::Opus => {
-                cmd.arg("-c:a").arg("libopus").arg("-b:a").arg(format!("{}k", lossy.opus_bitrate_kbps));
+                cmd.arg("-c:a")
+                    .arg("libopus")
+                    .arg("-b:a")
+                    .arg(format!("{}k", lossy.opus_bitrate_kbps));
             }
             OutputFormat::OggVorbis => {
-                cmd.arg("-c:a").arg("libvorbis").arg("-q:a").arg(format!("{}", lossy.vorbis_quality));
+                cmd.arg("-c:a")
+                    .arg("libvorbis")
+                    .arg("-q:a")
+                    .arg(format!("{}", lossy.vorbis_quality));
             }
             OutputFormat::Alac => {
                 cmd.arg("-c:a").arg("alac");
             }
             _ => unreachable!(),
         }
-        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
     fn mp3_vbr_uses_q_a_flag() {
-        let lossy = LossyOptions { mp3_mode: Mp3Mode::Vbr(0), ..LossyOptions::default() };
+        let lossy = LossyOptions {
+            mp3_mode: Mp3Mode::Vbr(0),
+            ..LossyOptions::default()
+        };
         let args = args_of(OutputFormat::Mp3, &lossy);
         assert!(args.windows(2).any(|w| w == ["-c:a", "libmp3lame"]));
         assert!(args.windows(2).any(|w| w == ["-q:a", "0"]));
@@ -360,7 +404,10 @@ mod tests {
 
     #[test]
     fn mp3_cbr_uses_b_a_flag_in_kbps() {
-        let lossy = LossyOptions { mp3_mode: Mp3Mode::Cbr(320), ..LossyOptions::default() };
+        let lossy = LossyOptions {
+            mp3_mode: Mp3Mode::Cbr(320),
+            ..LossyOptions::default()
+        };
         let args = args_of(OutputFormat::Mp3, &lossy);
         assert!(args.windows(2).any(|w| w == ["-b:a", "320k"]));
         assert!(!args.iter().any(|a| a == "-q:a"));
@@ -368,7 +415,10 @@ mod tests {
 
     #[test]
     fn aac_uses_native_aac_codec_and_bitrate() {
-        let lossy = LossyOptions { aac_bitrate_kbps: 256, ..LossyOptions::default() };
+        let lossy = LossyOptions {
+            aac_bitrate_kbps: 256,
+            ..LossyOptions::default()
+        };
         let args = args_of(OutputFormat::Aac, &lossy);
         assert!(args.windows(2).any(|w| w == ["-c:a", "aac"]));
         assert!(args.windows(2).any(|w| w == ["-b:a", "256k"]));
@@ -376,7 +426,10 @@ mod tests {
 
     #[test]
     fn opus_uses_libopus_and_bitrate() {
-        let lossy = LossyOptions { opus_bitrate_kbps: 128, ..LossyOptions::default() };
+        let lossy = LossyOptions {
+            opus_bitrate_kbps: 128,
+            ..LossyOptions::default()
+        };
         let args = args_of(OutputFormat::Opus, &lossy);
         assert!(args.windows(2).any(|w| w == ["-c:a", "libopus"]));
         assert!(args.windows(2).any(|w| w == ["-b:a", "128k"]));
@@ -384,7 +437,10 @@ mod tests {
 
     #[test]
     fn vorbis_uses_libvorbis_and_q_a_quality() {
-        let lossy = LossyOptions { vorbis_quality: 8.0, ..LossyOptions::default() };
+        let lossy = LossyOptions {
+            vorbis_quality: 8.0,
+            ..LossyOptions::default()
+        };
         let args = args_of(OutputFormat::OggVorbis, &lossy);
         assert!(args.windows(2).any(|w| w == ["-c:a", "libvorbis"]));
         assert!(args.windows(2).any(|w| w == ["-q:a", "8"]));
@@ -399,11 +455,18 @@ mod tests {
 
     #[test]
     fn every_pcm_invocation_specifies_f32le_input_format() {
-        for format in
-            [OutputFormat::Mp3, OutputFormat::Aac, OutputFormat::Opus, OutputFormat::OggVorbis, OutputFormat::Alac]
-        {
+        for format in [
+            OutputFormat::Mp3,
+            OutputFormat::Aac,
+            OutputFormat::Opus,
+            OutputFormat::OggVorbis,
+            OutputFormat::Alac,
+        ] {
             let args = args_of(format, &LossyOptions::default());
-            assert!(args.windows(2).any(|w| w == ["-f", "f32le"]), "format {format:?} missing -f f32le");
+            assert!(
+                args.windows(2).any(|w| w == ["-f", "f32le"]),
+                "format {format:?} missing -f f32le"
+            );
         }
     }
 }

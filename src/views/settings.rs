@@ -214,9 +214,7 @@ fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a,
 fn artist_info_section<'a>(fetch_artist_info: bool) -> cosmic::Element<'a, SettingsMessage> {
     let item = widget::settings::item::builder(fl!("fetch-artist-info"))
         .description(fl!("fetch-artist-info-description"))
-        .control(
-            widget::toggler(fetch_artist_info).on_toggle(SettingsMessage::SetFetchArtistInfo),
-        );
+        .control(widget::toggler(fetch_artist_info).on_toggle(SettingsMessage::SetFetchArtistInfo));
 
     widget::settings::section()
         .title(fl!("settings-artist-info"))

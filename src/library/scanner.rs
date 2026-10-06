@@ -186,13 +186,19 @@ impl LibraryScanner {
 
         // Use filename as title if tag is missing.
         let title = t.title.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string()
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string()
         });
 
         let artist = t.artist.unwrap_or_default();
 
         // Fall back album_artist -> artist.
-        let album_artist = t.album_artist.filter(|s| !s.is_empty()).unwrap_or_else(|| artist.clone());
+        let album_artist = t
+            .album_artist
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| artist.clone());
 
         let source_uri = path.to_string_lossy().to_string();
         Ok(Track {

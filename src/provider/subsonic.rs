@@ -797,7 +797,9 @@ impl MusicProvider for SubsonicProvider {
                 .get_song(&id)
                 .await
                 .map_err(subsonic_err("getSong"))?;
-            Ok(song.user_rating.and_then(|r| if r > 0 { Some(r as u8) } else { None }))
+            Ok(song
+                .user_rating
+                .and_then(|r| if r > 0 { Some(r as u8) } else { None }))
         })
     }
 

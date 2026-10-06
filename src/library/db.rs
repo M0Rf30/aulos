@@ -1344,7 +1344,10 @@ mod tests {
             )
             .unwrap();
 
-        assert!(db.remove_missing_tracks(std::slice::from_ref(&root)).is_err());
+        assert!(
+            db.remove_missing_tracks(std::slice::from_ref(&root))
+                .is_err()
+        );
         assert_eq!(
             db.conn
                 .query_row("SELECT COUNT(*) FROM tracks", [], |row| row

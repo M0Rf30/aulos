@@ -381,7 +381,7 @@ impl ProjectMRenderer {
         // Force alpha to fully opaque. projectM often renders with alpha < 255
         // which causes washed-out/transparent-looking colors when the image is
         // composited onto the UI background.
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
 
@@ -403,7 +403,8 @@ impl ProjectMRenderer {
     /// Load a specific preset file directly, bypassing the playlist, with
     /// a smooth transition.
     pub fn load_preset(&mut self, path: &Path) {
-        self.projectm.load_preset_file(&path.to_string_lossy(), true);
+        self.projectm
+            .load_preset_file(&path.to_string_lossy(), true);
     }
 
     /// Lock/unlock automatic preset transitions. Manual switches (this

@@ -213,10 +213,7 @@ impl CpalOutput {
     /// `Option` on visualizer activate/deactivate, which the callback
     /// observes on its very next invocation.
     #[cfg(feature = "visualizer")]
-    pub fn set_viz_tap(
-        &mut self,
-        tap: VizTapSlot,
-    ) {
+    pub fn set_viz_tap(&mut self, tap: VizTapSlot) {
         self.viz_tap = Some(tap);
     }
 
@@ -243,11 +240,7 @@ impl CpalOutput {
     /// allocation happens here.
     #[cfg(feature = "visualizer")]
     #[inline]
-    fn tap_viz(
-        tap: &Option<VizTapSlot>,
-        samples: &[f32],
-        channels: usize,
-    ) {
+    fn tap_viz(tap: &Option<VizTapSlot>, samples: &[f32], channels: usize) {
         if let Some(slot) = tap
             && let Some(inner) = slot.try_lock()
             && let Some(buf) = inner.as_ref()

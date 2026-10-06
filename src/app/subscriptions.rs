@@ -93,7 +93,10 @@ impl AppModel {
         // gated on the experimental-converter flag so it never runs while
         // the feature (and its nav entry) is disabled.
         if self.config.experimental_converter
-            && self.convert_jobs.iter().any(|j| j.state == JobState::Running)
+            && self
+                .convert_jobs
+                .iter()
+                .any(|j| j.state == JobState::Running)
         {
             subs.push(Subscription::run(convert_tick_stream));
         }
@@ -365,7 +368,9 @@ fn convert_tick_stream() -> impl Stream<Item = Message> {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             loop {
                 interval.tick().await;
-                _ = emitter.send(Message::ConvertEvent(ConvertEvent::Tick)).await;
+                _ = emitter
+                    .send(Message::ConvertEvent(ConvertEvent::Tick))
+                    .await;
             }
         },
     )
@@ -869,7 +874,10 @@ mod idle_action_tests {
 
     #[test]
     fn update_reloads_library() {
-        assert_eq!(idle_action(IdleSubsystem::Update), IdleAction::ReloadLibrary);
+        assert_eq!(
+            idle_action(IdleSubsystem::Update),
+            IdleAction::ReloadLibrary
+        );
     }
 
     #[test]

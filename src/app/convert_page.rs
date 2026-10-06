@@ -60,14 +60,19 @@ fn default_convert_out_dir() -> PathBuf {
 
 /// True when `path`'s extension is `.cue` (case-insensitive).
 fn is_cue_path(path: &std::path::Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
 }
 
 impl AppModel {
     /// Resolved output directory: `config.convert_out_dir`, or the default
     /// under the user's music/home directory when unset.
     pub(super) fn convert_out_dir(&self) -> PathBuf {
-        self.config.convert_out_dir.clone().unwrap_or_else(default_convert_out_dir)
+        self.config
+            .convert_out_dir
+            .clone()
+            .unwrap_or_else(default_convert_out_dir)
     }
 
     /// Handles direct UI actions from the convert view.
@@ -265,7 +270,8 @@ impl AppModel {
             }
 
             ConvertMessage::ClearFinished => {
-                self.convert_jobs.retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
+                self.convert_jobs
+                    .retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
                 Task::none()
             }
 
@@ -285,7 +291,8 @@ impl AppModel {
 
             ConvertMessage::RemoveJob(id) => {
                 // Keep running jobs even if their id matches — cancel first.
-                self.convert_jobs.retain(|j| j.id != id || j.state == JobState::Running);
+                self.convert_jobs
+                    .retain(|j| j.id != id || j.state == JobState::Running);
                 Task::none()
             }
 
@@ -301,13 +308,20 @@ impl AppModel {
     }
 
     /// Handles async results and ticks for the convert page.
-    pub(super) fn update_convert_event(&mut self, event: ConvertEvent) -> Task<cosmic::Action<Message>> {
+    pub(super) fn update_convert_event(
+        &mut self,
+        event: ConvertEvent,
+    ) -> Task<cosmic::Action<Message>> {
         match event {
             ConvertEvent::FilesPicked(result) => {
                 match result {
                     Ok(paths) => {
                         for path in paths {
-                            let kind = if is_cue_path(&path) { JobKind::CueSplit } else { JobKind::Convert };
+                            let kind = if is_cue_path(&path) {
+                                JobKind::CueSplit
+                            } else {
+                                JobKind::Convert
+                            };
                             let id = self.convert_next_id;
                             self.convert_next_id += 1;
                             self.convert_jobs.push(ConvertJob::new(id, path, kind));
@@ -345,7 +359,9 @@ impl AppModel {
                         let semaphore = Arc::clone(&self.convert_semaphore);
                         tasks.push(cosmic::task::future(async move {
                             let (id, state) = run_job(job_clone, semaphore).await;
-                            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::JobFinished(id, state)))
+                            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::JobFinished(
+                                id, state,
+                            )))
                         }));
                     }
                     Task::batch(tasks)
@@ -364,12 +380,18 @@ impl AppModel {
                 // Queue just drained (no more queued/running jobs): summarize
                 // the batch in a toast. Guarded on "was something finished at
                 // all" so clearing an already-empty queue stays silent.
-                let still_active =
-                    self.convert_jobs.iter().any(|j| matches!(j.state, JobState::Queued | JobState::Running));
+                let still_active = self
+                    .convert_jobs
+                    .iter()
+                    .any(|j| matches!(j.state, JobState::Queued | JobState::Running));
                 if still_active {
                     return Task::none();
                 }
-                let done = self.convert_jobs.iter().filter(|j| j.state == JobState::Done).count();
+                let done = self
+                    .convert_jobs
+                    .iter()
+                    .filter(|j| j.state == JobState::Done)
+                    .count();
                 let failed = self
                     .convert_jobs
                     .iter()
@@ -379,7 +401,11 @@ impl AppModel {
                     return Task::none();
                 }
                 self.push_toast(widget::toaster::Toast::new(if failed > 0 {
-                    fl!("toast-convert-queue-done-with-failures", done = done, failed = failed)
+                    fl!(
+                        "toast-convert-queue-done-with-failures",
+                        done = done,
+                        failed = failed
+                    )
                 } else {
                     fl!("toast-convert-queue-done", done = done)
                 }))
@@ -403,7 +429,9 @@ impl AppModel {
             let available = tokio::task::spawn_blocking(crate::convert::ffmpeg::detect)
                 .await
                 .unwrap_or(false);
-            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::FfmpegDetected(available)))
+            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::FfmpegDetected(
+                available,
+            )))
         })
     }
 
@@ -413,7 +441,11 @@ impl AppModel {
     /// via [`ConvertEvent::ReadyToStart`].
     fn start_convert_queue(&mut self) -> Task<cosmic::Action<Message>> {
         self.convert_dir_error = None;
-        if !self.convert_jobs.iter().any(|j| j.state == JobState::Queued) {
+        if !self
+            .convert_jobs
+            .iter()
+            .any(|j| j.state == JobState::Queued)
+        {
             return Task::none();
         }
 

@@ -44,8 +44,10 @@ pub(super) struct LibraryReloadStaging {
 /// switch). Falls back to the encoded bytes if decoding fails, so a
 /// corrupt/unusual cover blob is not silently dropped.
 fn cover_thumbnail_handle(bytes: &[u8]) -> widget::icon::Handle {
-    match crate::library::CoverArt::decode_thumbnail(bytes, crate::library::CoverArt::GRID_THUMBNAIL_MAX_DIM)
-    {
+    match crate::library::CoverArt::decode_thumbnail(
+        bytes,
+        crate::library::CoverArt::GRID_THUMBNAIL_MAX_DIM,
+    ) {
         Some((w, h, pixels)) => widget::icon::from_raster_pixels(w, h, pixels),
         None => widget::icon::from_raster_bytes(bytes.to_vec()),
     }
@@ -1196,7 +1198,8 @@ impl AppModel {
             .await
             .unwrap_or((None, None, None));
 
-            let handle = blurred.map(|(w, h, pixels)| widget::icon::from_raster_pixels(w, h, pixels));
+            let handle =
+                blurred.map(|(w, h, pixels)| widget::icon::from_raster_pixels(w, h, pixels));
             let large_handle =
                 cover_large.map(|(w, h, pixels)| widget::icon::from_raster_pixels(w, h, pixels));
             cosmic::Action::App(Message::BlurReady(key_clone, handle, accent, large_handle))

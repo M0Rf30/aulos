@@ -207,7 +207,8 @@ pub fn lyrics_overlay_view<'a, M: 'static>(
         }
     } else {
         widget::container(
-            widget::text(fl!("lyrics-unavailable")).class(cosmic::theme::Text::Color(subtext_color)),
+            widget::text(fl!("lyrics-unavailable"))
+                .class(cosmic::theme::Text::Color(subtext_color)),
         )
         .width(Length::Fill)
         .height(Length::Fill)

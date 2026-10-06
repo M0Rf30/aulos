@@ -26,16 +26,28 @@ use crate::fl;
 use crate::views::common;
 
 /// Sample-rate dropdown options: `None` keeps the source rate.
-pub const SAMPLE_RATE_OPTIONS: &[Option<u32>] =
-    &[None, Some(22_050), Some(32_000), Some(44_100), Some(48_000), Some(88_200), Some(96_000), Some(176_400), Some(192_000)];
+pub const SAMPLE_RATE_OPTIONS: &[Option<u32>] = &[
+    None,
+    Some(22_050),
+    Some(32_000),
+    Some(44_100),
+    Some(48_000),
+    Some(88_200),
+    Some(96_000),
+    Some(176_400),
+    Some(192_000),
+];
 
 /// FLAC compression-level dropdown options (0 fastest/largest .. 8
 /// slowest/smallest — see `encoder::apply_compression_level`).
 pub const FLAC_COMPRESSION_OPTIONS: [u8; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
 /// FLAC bit-depth dropdown options.
-pub const FLAC_BIT_DEPTH_OPTIONS: [FlacBitDepth; 3] =
-    [FlacBitDepth::Auto, FlacBitDepth::Bits16, FlacBitDepth::Bits24];
+pub const FLAC_BIT_DEPTH_OPTIONS: [FlacBitDepth; 3] = [
+    FlacBitDepth::Auto,
+    FlacBitDepth::Bits16,
+    FlacBitDepth::Bits24,
+];
 
 /// MP3 mode/quality dropdown options: a handful of common VBR presets plus
 /// common CBR bitrates, rather than exposing the raw 0-9/kbps numbers.
@@ -175,7 +187,11 @@ fn format_label(format: OutputFormat) -> String {
         OutputFormat::OggVorbis => fl!("convert-format-vorbis"),
         OutputFormat::Alac => fl!("convert-format-alac"),
     };
-    if format.requires_ffmpeg() { fl!("convert-format-needs-ffmpeg", format = base) } else { base }
+    if format.requires_ffmpeg() {
+        fl!("convert-format-needs-ffmpeg", format = base)
+    } else {
+        base
+    }
 }
 
 /// Localized label for a sample-rate dropdown entry.
@@ -241,11 +257,17 @@ fn job_icon_button<'a>(
     on_press: ConvertMessage,
     destructive: bool,
 ) -> cosmic::Element<'a, ConvertMessage> {
-    let mut button = widget::button::icon(widget::icon::from_name(icon_name).size(16)).on_press(on_press);
+    let mut button =
+        widget::button::icon(widget::icon::from_name(icon_name).size(16)).on_press(on_press);
     if destructive {
         button = button.class(cosmic::theme::Button::Destructive);
     }
-    widget::tooltip(button, widget::text::caption(label), widget::tooltip::Position::Top).into()
+    widget::tooltip(
+        button,
+        widget::text::caption(label),
+        widget::tooltip::Position::Top,
+    )
+    .into()
 }
 
 /// The Output card's format-specific quality row: FLAC gets a compression
@@ -266,13 +288,18 @@ fn quality_items(
                 .iter()
                 .position(|&l| l == flac_options.compression_level)
                 .unwrap_or(5);
-            let bit_depth_index =
-                FLAC_BIT_DEPTH_OPTIONS.iter().position(|&d| d == flac_options.bit_depth).unwrap_or(0);
+            let bit_depth_index = FLAC_BIT_DEPTH_OPTIONS
+                .iter()
+                .position(|&d| d == flac_options.bit_depth)
+                .unwrap_or(0);
             vec![
                 widget::settings::item(
                     fl!("convert-flac-compression"),
                     widget::dropdown(
-                        FLAC_COMPRESSION_OPTIONS.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        FLAC_COMPRESSION_OPTIONS
+                            .iter()
+                            .map(|l| l.to_string())
+                            .collect::<Vec<_>>(),
                         Some(compression_index),
                         ConvertMessage::FlacCompressionSelected,
                     ),
@@ -281,7 +308,10 @@ fn quality_items(
                 widget::settings::item(
                     fl!("convert-flac-bitdepth"),
                     widget::dropdown(
-                        FLAC_BIT_DEPTH_OPTIONS.iter().map(|&d| flac_bit_depth_label(d)).collect::<Vec<_>>(),
+                        FLAC_BIT_DEPTH_OPTIONS
+                            .iter()
+                            .map(|&d| flac_bit_depth_label(d))
+                            .collect::<Vec<_>>(),
                         Some(bit_depth_index),
                         ConvertMessage::FlacBitDepthSelected,
                     ),
@@ -290,13 +320,18 @@ fn quality_items(
             ]
         }
         OutputFormat::Mp3 => {
-            let index =
-                MP3_MODE_OPTIONS.iter().position(|&m| m == lossy_options.mp3_mode).unwrap_or(1);
+            let index = MP3_MODE_OPTIONS
+                .iter()
+                .position(|&m| m == lossy_options.mp3_mode)
+                .unwrap_or(1);
             vec![
                 widget::settings::item(
                     fl!("convert-mp3-mode"),
                     widget::dropdown(
-                        MP3_MODE_OPTIONS.iter().map(|&m| mp3_mode_label(m)).collect::<Vec<_>>(),
+                        MP3_MODE_OPTIONS
+                            .iter()
+                            .map(|&m| mp3_mode_label(m))
+                            .collect::<Vec<_>>(),
                         Some(index),
                         ConvertMessage::Mp3ModeSelected,
                     ),
@@ -313,7 +348,10 @@ fn quality_items(
                 widget::settings::item(
                     fl!("convert-bitrate"),
                     widget::dropdown(
-                        BITRATE_KBPS_OPTIONS.iter().map(|&hz| bitrate_kbps_label(hz)).collect::<Vec<_>>(),
+                        BITRATE_KBPS_OPTIONS
+                            .iter()
+                            .map(|&hz| bitrate_kbps_label(hz))
+                            .collect::<Vec<_>>(),
                         Some(index),
                         ConvertMessage::AacBitrateSelected,
                     ),
@@ -330,7 +368,10 @@ fn quality_items(
                 widget::settings::item(
                     fl!("convert-bitrate"),
                     widget::dropdown(
-                        BITRATE_KBPS_OPTIONS.iter().map(|&hz| bitrate_kbps_label(hz)).collect::<Vec<_>>(),
+                        BITRATE_KBPS_OPTIONS
+                            .iter()
+                            .map(|&hz| bitrate_kbps_label(hz))
+                            .collect::<Vec<_>>(),
                         Some(index),
                         ConvertMessage::OpusBitrateSelected,
                     ),
@@ -347,7 +388,10 @@ fn quality_items(
                 widget::settings::item(
                     fl!("convert-vorbis-quality"),
                     widget::dropdown(
-                        VORBIS_QUALITY_OPTIONS.iter().map(|q| format!("{q:.0}")).collect::<Vec<_>>(),
+                        VORBIS_QUALITY_OPTIONS
+                            .iter()
+                            .map(|q| format!("{q:.0}"))
+                            .collect::<Vec<_>>(),
                         Some(index),
                         ConvertMessage::VorbisQualitySelected,
                     ),
@@ -376,15 +420,27 @@ fn output_section<'a>(
     lossy_options: LossyOptions,
     ffmpeg_available: Option<bool>,
 ) -> cosmic::Element<'a, ConvertMessage> {
-    let format_index = OutputFormat::ALL.iter().position(|f| *f == format).unwrap_or(0);
-    let rate_index = SAMPLE_RATE_OPTIONS.iter().position(|r| *r == sample_rate).unwrap_or(0);
+    let format_index = OutputFormat::ALL
+        .iter()
+        .position(|f| *f == format)
+        .unwrap_or(0);
+    let rate_index = SAMPLE_RATE_OPTIONS
+        .iter()
+        .position(|r| *r == sample_rate)
+        .unwrap_or(0);
 
     let dir_row = widget::Row::new()
         .push(common::clipped_cell(
             common::cell_text(out_dir.display().to_string()).into(),
         ))
-        .push(widget::button::standard(fl!("convert-dir-change")).on_press(ConvertMessage::ChangeOutputDir))
-        .push(widget::button::standard(fl!("convert-dir-open")).on_press(ConvertMessage::OpenOutputDir))
+        .push(
+            widget::button::standard(fl!("convert-dir-change"))
+                .on_press(ConvertMessage::ChangeOutputDir),
+        )
+        .push(
+            widget::button::standard(fl!("convert-dir-open"))
+                .on_press(ConvertMessage::OpenOutputDir),
+        )
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -394,7 +450,10 @@ fn output_section<'a>(
         .add(widget::settings::item(
             fl!("convert-format"),
             widget::dropdown(
-                OutputFormat::ALL.iter().map(|&f| format_label(f)).collect::<Vec<_>>(),
+                OutputFormat::ALL
+                    .iter()
+                    .map(|&f| format_label(f))
+                    .collect::<Vec<_>>(),
                 Some(format_index),
                 ConvertMessage::FormatSelected,
             ),
@@ -402,7 +461,10 @@ fn output_section<'a>(
         .add(widget::settings::item(
             fl!("convert-sample-rate"),
             widget::dropdown(
-                SAMPLE_RATE_OPTIONS.iter().map(|&r| rate_label(r)).collect::<Vec<_>>(),
+                SAMPLE_RATE_OPTIONS
+                    .iter()
+                    .map(|&r| rate_label(r))
+                    .collect::<Vec<_>>(),
                 Some(rate_index),
                 ConvertMessage::RateSelected,
             ),
@@ -417,7 +479,10 @@ fn output_section<'a>(
     }
 
     if let Some(reason) = dir_error {
-        section = section.add(widget::text::body(fl!("convert-dir-error", reason = reason.to_owned())));
+        section = section.add(widget::text::body(fl!(
+            "convert-dir-error",
+            reason = reason.to_owned()
+        )));
     }
     section = section.add(widget::text::caption(fl!("convert-settings-hint")));
 
@@ -438,10 +503,22 @@ fn summary_section<'a>(
     let format_blocked = format.requires_ffmpeg() && ffmpeg_available != Some(true);
 
     let counts_row = widget::Row::new()
-        .push(common::cell_caption(fl!("convert-summary-queued", count = counts.queued)))
-        .push(common::cell_caption(fl!("convert-summary-running", count = counts.running)))
-        .push(common::cell_caption(fl!("convert-summary-done", count = counts.done)))
-        .push(common::cell_caption(fl!("convert-summary-failed", count = counts.failed)))
+        .push(common::cell_caption(fl!(
+            "convert-summary-queued",
+            count = counts.queued
+        )))
+        .push(common::cell_caption(fl!(
+            "convert-summary-running",
+            count = counts.running
+        )))
+        .push(common::cell_caption(fl!(
+            "convert-summary-done",
+            count = counts.done
+        )))
+        .push(common::cell_caption(fl!(
+            "convert-summary-failed",
+            count = counts.failed
+        )))
         .spacing(16);
 
     let progress =
@@ -449,8 +526,9 @@ fn summary_section<'a>(
 
     let buttons = widget::Row::new()
         .push(
-            widget::button::suggested(fl!("convert-start"))
-                .on_press_maybe((counts.queued > 0 && !format_blocked).then_some(ConvertMessage::StartQueue)),
+            widget::button::suggested(fl!("convert-start")).on_press_maybe(
+                (counts.queued > 0 && !format_blocked).then_some(ConvertMessage::StartQueue),
+            ),
         )
         .push(
             widget::button::destructive(fl!("convert-cancel-all")).on_press_maybe(
@@ -458,8 +536,9 @@ fn summary_section<'a>(
             ),
         )
         .push(
-            widget::button::standard(fl!("convert-clear-finished"))
-                .on_press_maybe((counts.done + counts.failed > 0).then_some(ConvertMessage::ClearFinished)),
+            widget::button::standard(fl!("convert-clear-finished")).on_press_maybe(
+                (counts.done + counts.failed > 0).then_some(ConvertMessage::ClearFinished),
+            ),
         )
         .spacing(8);
 
@@ -490,11 +569,19 @@ fn job_row<'a>(
     pending_out_dir: &Path,
 ) -> cosmic::Element<'a, ConvertMessage> {
     let (format, rate, out_dir): (OutputFormat, Option<u32>, &Path) = match &job.settings {
-        Some(settings) => (settings.format, settings.target_rate, settings.out_dir.as_path()),
+        Some(settings) => (
+            settings.format,
+            settings.target_rate,
+            settings.out_dir.as_path(),
+        ),
         None => (pending_format, pending_rate, pending_out_dir),
     };
     let destination = job.destination_preview(format, out_dir);
-    let filename = job.source.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    let filename = job
+        .source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
 
     let caption = fl!(
         "convert-job-caption",
@@ -607,7 +694,9 @@ fn job_row<'a>(
     .into()
 }
 
-pub fn convert_view<'a, 'b>(props: ConvertViewProps<'a, 'b>) -> cosmic::Element<'a, ConvertMessage> {
+pub fn convert_view<'a, 'b>(
+    props: ConvertViewProps<'a, 'b>,
+) -> cosmic::Element<'a, ConvertMessage> {
     let ConvertViewProps {
         jobs,
         out_dir,
@@ -622,7 +711,9 @@ pub fn convert_view<'a, 'b>(props: ConvertViewProps<'a, 'b>) -> cosmic::Element<
     let header = widget::Row::new()
         .push(widget::text::title3(fl!("convert")))
         .push(widget::Space::new().width(Length::Fill))
-        .push(widget::button::suggested(fl!("convert-add-files")).on_press(ConvertMessage::AddFiles))
+        .push(
+            widget::button::suggested(fl!("convert-add-files")).on_press(ConvertMessage::AddFiles),
+        )
         .align_y(Alignment::Center);
 
     let mut col = widget::Column::new()
@@ -654,6 +745,7 @@ pub fn convert_view<'a, 'b>(props: ConvertViewProps<'a, 'b>) -> cosmic::Element<
         list = list.push(job_row(job, format, sample_rate, out_dir));
     }
 
-    col = col.push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
+    col = col
+        .push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
     col.into()
 }

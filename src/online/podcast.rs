@@ -52,7 +52,8 @@ pub fn fetch_feed(
         return Err(format!("Failed to fetch feed: HTTP {}", response.status()));
     }
     let bytes = super::read_capped_body(response, MAX_FEED_RESPONSE_BYTES)?;
-    let feed = feed_rs::parser::parse(&bytes[..]).map_err(|e| format!("Failed to parse feed: {e}"))?;
+    let feed =
+        feed_rs::parser::parse(&bytes[..]).map_err(|e| format!("Failed to parse feed: {e}"))?;
 
     let meta = feed_to_podcast_meta(&feed);
     let episodes = feed
@@ -67,7 +68,11 @@ pub fn fetch_feed(
 /// Map a parsed [`Feed`] to podcast-level metadata.
 pub fn feed_to_podcast_meta(feed: &Feed) -> PodcastMeta {
     PodcastMeta {
-        title: feed.title.as_ref().map(|t| t.content.clone()).unwrap_or_default(),
+        title: feed
+            .title
+            .as_ref()
+            .map(|t| t.content.clone())
+            .unwrap_or_default(),
         description: feed
             .description
             .as_ref()
@@ -79,7 +84,11 @@ pub fn feed_to_podcast_meta(feed: &Feed) -> PodcastMeta {
             .map(|i| i.uri.clone())
             .or_else(|| feed.icon.as_ref().map(|i| i.uri.clone()))
             .unwrap_or_default(),
-        author: feed.authors.first().map(|p| p.name.clone()).unwrap_or_default(),
+        author: feed
+            .authors
+            .first()
+            .map(|p| p.name.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -111,7 +120,13 @@ fn find_enclosure(entry: &Entry) -> Option<(String, String, i64)> {
         .links
         .iter()
         .find(|link| link.rel.as_deref() == Some("enclosure"))
-        .map(|link| (link.href.clone(), link.media_type.clone().unwrap_or_default(), 0))
+        .map(|link| {
+            (
+                link.href.clone(),
+                link.media_type.clone().unwrap_or_default(),
+                0,
+            )
+        })
 }
 
 /// `entry.id` when present, otherwise the enclosure URL. Defensive only:
@@ -134,7 +149,11 @@ pub fn entry_to_episode_meta(entry: &Entry) -> Option<EpisodeMeta> {
         return None;
     }
     let guid = resolve_guid(&entry.id, &enclosure_url);
-    let title = entry.title.as_ref().map(|t| t.content.clone()).unwrap_or_default();
+    let title = entry
+        .title
+        .as_ref()
+        .map(|t| t.content.clone())
+        .unwrap_or_default();
     let description = entry
         .summary
         .as_ref()
@@ -285,7 +304,10 @@ mod tests {
             resolve_guid("", "https://example.com/ep2.mp3"),
             "https://example.com/ep2.mp3"
         );
-        assert_eq!(resolve_guid("ep-1-guid", "https://example.com/ep1.mp3"), "ep-1-guid");
+        assert_eq!(
+            resolve_guid("ep-1-guid", "https://example.com/ep1.mp3"),
+            "ep-1-guid"
+        );
     }
 
     #[test]

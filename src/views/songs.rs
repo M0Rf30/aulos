@@ -538,26 +538,22 @@ fn build_row<'a>(
 
     if show_rating {
         row = row.push(
-            widget::container(
-                widget::tooltip(
-                    widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
-                        .on_press(SongMessage::PlayNext(original_index)),
-                    widget::text::caption(fl!("queue-play-next")),
-                    widget::tooltip::Position::Top,
-                ),
-            )
+            widget::container(widget::tooltip(
+                widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
+                    .on_press(SongMessage::PlayNext(original_index)),
+                widget::text::caption(fl!("queue-play-next")),
+                widget::tooltip::Position::Top,
+            ))
             .width(QUEUE_ACTION_WIDTH)
             .align_x(Horizontal::Center),
         );
         row = row.push(
-            widget::container(
-                widget::tooltip(
-                    widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
-                        .on_press(SongMessage::AddToQueue(original_index)),
-                    widget::text::caption(fl!("queue-add")),
-                    widget::tooltip::Position::Top,
-                ),
-            )
+            widget::container(widget::tooltip(
+                widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
+                    .on_press(SongMessage::AddToQueue(original_index)),
+                widget::text::caption(fl!("queue-add")),
+                widget::tooltip::Position::Top,
+            ))
             .width(QUEUE_ACTION_WIDTH)
             .align_x(Horizontal::Center),
         );

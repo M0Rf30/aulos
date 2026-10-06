@@ -1252,9 +1252,6 @@ mod tests {
             .find(|cmd| cmd.starts_with("find "))
             .expect("expected a find command to have been sent");
 
-        assert_eq!(
-            find_cmd,
-            "find \"(Album == \\\"\\\\\\\"Clic\\\\\\\"\\\")\""
-        );
+        assert_eq!(find_cmd, "find \"(Album == \\\"\\\\\\\"Clic\\\\\\\"\\\")\"");
     }
 }

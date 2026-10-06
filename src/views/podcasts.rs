@@ -152,7 +152,11 @@ pub fn podcast_view<'a>(props: PodcastViewProps<'a>) -> cosmic::Element<'a, Podc
 
     let mut col = widget::Column::new().spacing(12).padding(16);
     col = col.push(header_row(props.tab, props.add_open));
-    col = col.push(add_form_card(props.add_open, props.add_url, props.add_error));
+    col = col.push(add_form_card(
+        props.add_open,
+        props.add_url,
+        props.add_error,
+    ));
     col = col.push(widget::divider::horizontal::default());
 
     let content = match props.tab {
@@ -168,22 +172,42 @@ pub fn podcast_view<'a>(props: PodcastViewProps<'a>) -> cosmic::Element<'a, Podc
 fn header_row<'a>(tab: PodcastTab, add_open: bool) -> cosmic::Element<'a, PodcastMessage> {
     let add_btn = widget::button::text(fl!("podcast-add-by-url"))
         .on_press(PodcastMessage::ToggleAddForm)
-        .class(if add_open { cosmic::theme::Button::Suggested } else { cosmic::theme::Button::Standard });
+        .class(if add_open {
+            cosmic::theme::Button::Suggested
+        } else {
+            cosmic::theme::Button::Standard
+        });
     widget::Row::new()
         .push(widget::text::title3(fl!("podcasts")))
         .push(widget::Space::new().width(Length::Fill))
-        .push(tab_button(fl!("subscriptions"), tab == PodcastTab::Subscriptions, PodcastTab::Subscriptions))
-        .push(tab_button(fl!("podcast-tab-discover"), tab == PodcastTab::Discover, PodcastTab::Discover))
+        .push(tab_button(
+            fl!("subscriptions"),
+            tab == PodcastTab::Subscriptions,
+            PodcastTab::Subscriptions,
+        ))
+        .push(tab_button(
+            fl!("podcast-tab-discover"),
+            tab == PodcastTab::Discover,
+            PodcastTab::Discover,
+        ))
         .push(add_btn)
         .spacing(4)
         .align_y(Alignment::Center)
         .into()
 }
 
-fn tab_button<'a>(label: String, selected: bool, target: PodcastTab) -> cosmic::Element<'a, PodcastMessage> {
+fn tab_button<'a>(
+    label: String,
+    selected: bool,
+    target: PodcastTab,
+) -> cosmic::Element<'a, PodcastMessage> {
     let btn = widget::button::text(label).on_press(PodcastMessage::TabSelected(target));
-    if selected { btn.class(cosmic::theme::Button::Suggested) } else { btn.class(cosmic::theme::Button::Standard) }
-        .into()
+    if selected {
+        btn.class(cosmic::theme::Button::Suggested)
+    } else {
+        btn.class(cosmic::theme::Button::Standard)
+    }
+    .into()
 }
 
 /// The add-by-URL card's slot. Always present; empty (zero-height) when
@@ -194,7 +218,10 @@ fn add_form_card<'a>(
     error: Option<&'a str>,
 ) -> cosmic::Element<'a, PodcastMessage> {
     if !open {
-        return widget::Space::new().width(Length::Shrink).height(Length::Fixed(0.0)).into();
+        return widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fixed(0.0))
+            .into();
     }
     let fields = widget::Row::new()
         .push(
@@ -204,14 +231,17 @@ fn add_form_card<'a>(
                 .width(Length::Fill),
         )
         .push(widget::button::suggested(fl!("subscribe")).on_press(PodcastMessage::SubmitAdd))
-        .push(widget::button::standard(fl!("podcast-cancel")).on_press(PodcastMessage::ToggleAddForm))
+        .push(
+            widget::button::standard(fl!("podcast-cancel")).on_press(PodcastMessage::ToggleAddForm),
+        )
         .spacing(8)
         .align_y(Alignment::Center);
 
     let mut card = widget::Column::new().spacing(6).push(fields);
     if let Some(err) = error {
         card = card.push(
-            widget::text::caption(err).class(cosmic::theme::Text::Color(Color::from_rgb(0.9, 0.2, 0.2))),
+            widget::text::caption(err)
+                .class(cosmic::theme::Text::Color(Color::from_rgb(0.9, 0.2, 0.2))),
         );
     }
     widget::container(card)
@@ -246,7 +276,8 @@ fn subscriptions_tab<'a>(props: &PodcastViewProps<'a>) -> cosmic::Element<'a, Po
     for podcast in props.podcasts {
         list = list.push(subscription_row(podcast, props));
     }
-    col = col.push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
+    col = col
+        .push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
     col.into()
 }
 
@@ -281,7 +312,11 @@ fn subscription_row<'a>(
     };
 
     let refreshing = props.refreshing.contains(&podcast.id);
-    let refresh_icon = if refreshing { "content-loading-symbolic" } else { "view-refresh-symbolic" };
+    let refresh_icon = if refreshing {
+        "content-loading-symbolic"
+    } else {
+        "view-refresh-symbolic"
+    };
     let refresh_btn = widget::tooltip(
         widget::button::icon(widget::icon::from_name(refresh_icon).size(16))
             .on_press_maybe((!refreshing).then_some(PodcastMessage::RefreshPodcast(podcast.id))),
@@ -318,9 +353,16 @@ fn subscription_row<'a>(
 fn unsubscribe_confirm_row<'a>(podcast: &'a Podcast) -> cosmic::Element<'a, PodcastMessage> {
     widget::Row::new()
         .push(common::clipped_cell(
-            common::cell_text(fl!("podcast-confirm-unsubscribe", name = podcast.title.clone())).into(),
+            common::cell_text(fl!(
+                "podcast-confirm-unsubscribe",
+                name = podcast.title.clone()
+            ))
+            .into(),
         ))
-        .push(widget::button::standard(fl!("podcast-cancel")).on_press(PodcastMessage::CancelUnsubscribe))
+        .push(
+            widget::button::standard(fl!("podcast-cancel"))
+                .on_press(PodcastMessage::CancelUnsubscribe),
+        )
         .push(
             widget::button::standard(fl!("podcast-confirm-unsubscribe-yes"))
                 .class(cosmic::theme::Button::Destructive)
@@ -350,17 +392,28 @@ fn discover_tab<'a>(props: &PodcastViewProps<'a>) -> cosmic::Element<'a, Podcast
     );
 
     let body: cosmic::Element<'a, PodcastMessage> = if props.search_loading {
-        common::empty_state("view-refresh-symbolic", fl!("searching"), fl!("podcast-searching-hint"))
+        common::empty_state(
+            "view-refresh-symbolic",
+            fl!("searching"),
+            fl!("podcast-searching-hint"),
+        )
     } else if let Some(err) = props.search_error {
         widget::Column::new()
             .spacing(8)
             .align_x(Alignment::Center)
             .push(widget::icon::from_name("dialog-error-symbolic").size(48))
             .push(common::cell_text(err))
-            .push(widget::button::standard(fl!("podcast-retry")).on_press(PodcastMessage::RetrySearch))
+            .push(
+                widget::button::standard(fl!("podcast-retry"))
+                    .on_press(PodcastMessage::RetrySearch),
+            )
             .into()
     } else if props.search_results.is_empty() {
-        common::empty_state("edit-find-symbolic", fl!("podcast-no-results"), fl!("podcast-no-results-hint"))
+        common::empty_state(
+            "edit-find-symbolic",
+            fl!("podcast-no-results"),
+            fl!("podcast-no-results-hint"),
+        )
     } else {
         let mut list = widget::Column::new().spacing(2);
         for result in props.search_results {
@@ -369,7 +422,11 @@ fn discover_tab<'a>(props: &PodcastViewProps<'a>) -> cosmic::Element<'a, Podcast
         }
         widget::container(list).width(Length::Fill).into()
     };
-    col = col.push(widget::scrollable(body).height(Length::Fill).width(Length::Fill));
+    col = col.push(
+        widget::scrollable(body)
+            .height(Length::Fill)
+            .width(Length::Fill),
+    );
     col.into()
 }
 
@@ -416,7 +473,11 @@ fn podcast_detail_view<'a>(
     let header = detail_header(podcast, props);
 
     let filters_row = widget::Row::new()
-        .push(filter_chip(fl!("podcast-filter-all"), props.episode_filter == EpisodeFilter::All, EpisodeFilter::All))
+        .push(filter_chip(
+            fl!("podcast-filter-all"),
+            props.episode_filter == EpisodeFilter::All,
+            EpisodeFilter::All,
+        ))
         .push(filter_chip(
             fl!("podcast-filter-unplayed"),
             props.episode_filter == EpisodeFilter::Unplayed,
@@ -428,9 +489,12 @@ fn podcast_detail_view<'a>(
             EpisodeFilter::Downloaded,
         ))
         .push(
-            widget::text_input(fl!("podcast-episode-filter-placeholder"), props.episode_text_filter)
-                .on_input(PodcastMessage::EpisodeTextFilterChanged)
-                .width(Length::FillPortion(2)),
+            widget::text_input(
+                fl!("podcast-episode-filter-placeholder"),
+                props.episode_text_filter,
+            )
+            .on_input(PodcastMessage::EpisodeTextFilterChanged)
+            .width(Length::FillPortion(2)),
         )
         .spacing(6)
         .align_y(Alignment::Center);
@@ -456,8 +520,14 @@ fn podcast_detail_view<'a>(
         ));
     } else {
         for episode in filtered {
-            let is_current = props.is_episode_playing && props.current_episode_id == Some(episode.id);
-            episode_list = episode_list.push(episode_row(episode, props.downloading, is_current, props.is_paused));
+            let is_current =
+                props.is_episode_playing && props.current_episode_id == Some(episode.id);
+            episode_list = episode_list.push(episode_row(
+                episode,
+                props.downloading,
+                is_current,
+                props.is_paused,
+            ));
         }
     }
 
@@ -485,20 +555,27 @@ fn detail_header<'a>(
         widget::tooltip::Position::Top,
     );
 
-    let mut info = widget::Column::new().push(widget::text::title1(podcast.title.as_str())).spacing(8).width(Length::Fill);
+    let mut info = widget::Column::new()
+        .push(widget::text::title1(podcast.title.as_str()))
+        .spacing(8)
+        .width(Length::Fill);
     if !podcast.author.is_empty() {
         info = info.push(common::cell_caption(podcast.author.as_str()));
     }
     if !podcast.description.is_empty() {
-        info = info.push(description_block(&podcast.description, props.description_expanded));
+        info = info.push(description_block(
+            &podcast.description,
+            props.description_expanded,
+        ));
     }
 
     let refreshing = props.refreshing.contains(&podcast.id);
     info = info.push(
         widget::Row::new()
             .push(
-                widget::button::standard(fl!("podcast-refresh"))
-                    .on_press_maybe((!refreshing).then_some(PodcastMessage::RefreshPodcast(podcast.id))),
+                widget::button::standard(fl!("podcast-refresh")).on_press_maybe(
+                    (!refreshing).then_some(PodcastMessage::RefreshPodcast(podcast.id)),
+                ),
             )
             .push(
                 widget::button::standard(fl!("podcast-unsubscribe"))
@@ -508,28 +585,39 @@ fn detail_header<'a>(
             .spacing(8),
     );
 
-    let confirm: cosmic::Element<'a, PodcastMessage> = if props.pending_unsubscribe == Some(podcast.id) {
-        widget::container(
-            widget::Row::new()
-                .push(common::clipped_cell(
-                    common::cell_text(fl!("podcast-confirm-unsubscribe", name = podcast.title.clone())).into(),
-                ))
-                .push(widget::button::standard(fl!("podcast-cancel")).on_press(PodcastMessage::CancelUnsubscribe))
-                .push(
-                    widget::button::standard(fl!("podcast-confirm-unsubscribe-yes"))
-                        .class(cosmic::theme::Button::Destructive)
-                        .on_press(PodcastMessage::ConfirmUnsubscribe(podcast.id)),
-                )
-                .spacing(8)
-                .align_y(Alignment::Center),
-        )
-        .class(cosmic::theme::Container::Card)
-        .padding(8)
-        .width(Length::Fill)
-        .into()
-    } else {
-        widget::Space::new().width(Length::Shrink).height(Length::Fixed(0.0)).into()
-    };
+    let confirm: cosmic::Element<'a, PodcastMessage> =
+        if props.pending_unsubscribe == Some(podcast.id) {
+            widget::container(
+                widget::Row::new()
+                    .push(common::clipped_cell(
+                        common::cell_text(fl!(
+                            "podcast-confirm-unsubscribe",
+                            name = podcast.title.clone()
+                        ))
+                        .into(),
+                    ))
+                    .push(
+                        widget::button::standard(fl!("podcast-cancel"))
+                            .on_press(PodcastMessage::CancelUnsubscribe),
+                    )
+                    .push(
+                        widget::button::standard(fl!("podcast-confirm-unsubscribe-yes"))
+                            .class(cosmic::theme::Button::Destructive)
+                            .on_press(PodcastMessage::ConfirmUnsubscribe(podcast.id)),
+                    )
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .class(cosmic::theme::Container::Card)
+            .padding(8)
+            .width(Length::Fill)
+            .into()
+        } else {
+            widget::Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(0.0))
+                .into()
+        };
 
     widget::Column::new()
         .push(
@@ -548,7 +636,10 @@ fn detail_header<'a>(
 /// Clipped, expandable description block: a truncated caption with a
 /// "Show more" toggle when collapsed, or the full wrapped body text with a
 /// "Show less" toggle when expanded.
-fn description_block<'a>(description: &'a str, expanded: bool) -> cosmic::Element<'a, PodcastMessage> {
+fn description_block<'a>(
+    description: &'a str,
+    expanded: bool,
+) -> cosmic::Element<'a, PodcastMessage> {
     const COLLAPSED_MAX_CHARS: usize = 240;
     if expanded {
         widget::Column::new()
@@ -561,7 +652,10 @@ fn description_block<'a>(description: &'a str, expanded: bool) -> cosmic::Elemen
             .into()
     } else {
         widget::Column::new()
-            .push(common::cell_caption(common::truncate_str(description, COLLAPSED_MAX_CHARS)))
+            .push(common::cell_caption(common::truncate_str(
+                description,
+                COLLAPSED_MAX_CHARS,
+            )))
             .push(
                 widget::button::text(fl!("podcast-description-more"))
                     .on_press(PodcastMessage::ToggleDescriptionExpanded),
@@ -571,10 +665,18 @@ fn description_block<'a>(description: &'a str, expanded: bool) -> cosmic::Elemen
     }
 }
 
-fn filter_chip<'a>(label: String, selected: bool, target: EpisodeFilter) -> cosmic::Element<'a, PodcastMessage> {
+fn filter_chip<'a>(
+    label: String,
+    selected: bool,
+    target: EpisodeFilter,
+) -> cosmic::Element<'a, PodcastMessage> {
     let btn = widget::button::text(label).on_press(PodcastMessage::EpisodeFilterSelected(target));
-    if selected { btn.class(cosmic::theme::Button::Suggested) } else { btn.class(cosmic::theme::Button::Standard) }
-        .into()
+    if selected {
+        btn.class(cosmic::theme::Button::Suggested)
+    } else {
+        btn.class(cosmic::theme::Button::Standard)
+    }
+    .into()
 }
 
 fn episode_row<'a>(
@@ -591,13 +693,21 @@ fn episode_row<'a>(
 
     if should_show_resume(episode) {
         let resumed_at = common::format_duration_coarse((episode.position_ms / 1000).max(0) as u64);
-        info = info.push(common::cell_caption(fl!("resume-at", position = resumed_at)));
+        info = info.push(common::cell_caption(fl!(
+            "resume-at",
+            position = resumed_at
+        )));
     }
     info = info.push(
-        widget::progress_bar::determinate_linear(progress_fraction(episode)).width(Length::Fixed(120.0)),
+        widget::progress_bar::determinate_linear(progress_fraction(episode))
+            .width(Length::Fixed(120.0)),
     );
 
-    let played_icon = if episode.played { "emblem-ok-symbolic" } else { "emblem-default-symbolic" };
+    let played_icon = if episode.played {
+        "emblem-ok-symbolic"
+    } else {
+        "emblem-default-symbolic"
+    };
     let played_btn = widget::tooltip(
         widget::button::icon(widget::icon::from_name(played_icon).size(16))
             .on_press(PodcastMessage::TogglePlayed(episode.id)),
@@ -605,34 +715,39 @@ fn episode_row<'a>(
         widget::tooltip::Position::Top,
     );
 
-    let download_control: cosmic::Element<'a, PodcastMessage> = if !episode.downloaded_path.is_empty() {
-        widget::Row::new()
-            .push(widget::icon::from_name("emblem-downloads-symbolic").size(16))
-            .push(widget::tooltip(
-                widget::button::icon(widget::icon::from_name("user-trash-symbolic").size(16))
-                    .class(cosmic::theme::Button::Destructive)
-                    .on_press(PodcastMessage::DeleteDownload(episode.id)),
-                widget::text::caption(fl!("delete-download-tooltip")),
+    let download_control: cosmic::Element<'a, PodcastMessage> =
+        if !episode.downloaded_path.is_empty() {
+            widget::Row::new()
+                .push(widget::icon::from_name("emblem-downloads-symbolic").size(16))
+                .push(widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("user-trash-symbolic").size(16))
+                        .class(cosmic::theme::Button::Destructive)
+                        .on_press(PodcastMessage::DeleteDownload(episode.id)),
+                    widget::text::caption(fl!("delete-download-tooltip")),
+                    widget::tooltip::Position::Top,
+                ))
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
+        } else if downloading.contains(&episode.id) {
+            widget::button::icon(widget::icon::from_name("content-loading-symbolic").size(16))
+                .on_press_maybe(None::<PodcastMessage>)
+                .into()
+        } else {
+            widget::tooltip(
+                widget::button::icon(widget::icon::from_name("document-save-symbolic").size(16))
+                    .on_press(PodcastMessage::Download(episode.id)),
+                widget::text::caption(fl!("download-episode-tooltip")),
                 widget::tooltip::Position::Top,
-            ))
-            .spacing(4)
-            .align_y(Alignment::Center)
+            )
             .into()
-    } else if downloading.contains(&episode.id) {
-        widget::button::icon(widget::icon::from_name("content-loading-symbolic").size(16))
-            .on_press_maybe(None::<PodcastMessage>)
-            .into()
-    } else {
-        widget::tooltip(
-            widget::button::icon(widget::icon::from_name("document-save-symbolic").size(16))
-                .on_press(PodcastMessage::Download(episode.id)),
-            widget::text::caption(fl!("download-episode-tooltip")),
-            widget::tooltip::Position::Top,
-        )
-        .into()
-    };
+        };
 
-    let play_icon = if is_current && !is_paused { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" };
+    let play_icon = if is_current && !is_paused {
+        "media-playback-pause-symbolic"
+    } else {
+        "media-playback-start-symbolic"
+    };
     let play_tooltip = if is_current {
         fl!("pause")
     } else if should_show_resume(episode) {
@@ -659,7 +774,11 @@ fn episode_row<'a>(
             .align_y(Alignment::Center)
             .padding(4),
     )
-    .class(if is_current { cosmic::theme::Container::Card } else { cosmic::theme::Container::default() })
+    .class(if is_current {
+        cosmic::theme::Container::Card
+    } else {
+        cosmic::theme::Container::default()
+    })
     .width(Length::Fill)
     .into()
 }
@@ -679,7 +798,8 @@ pub fn episode_matches(episode: &Episode, filter: EpisodeFilter, text: &str) -> 
     if needle.is_empty() {
         return true;
     }
-    episode.title.to_lowercase().contains(&needle) || episode.description.to_lowercase().contains(&needle)
+    episode.title.to_lowercase().contains(&needle)
+        || episode.description.to_lowercase().contains(&needle)
 }
 
 /// Progress fraction (0.0-1.0) for an episode's playback progress bar.
@@ -733,7 +853,14 @@ fn format_epoch_date(epoch_secs: i64) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn ep(played: bool, position_ms: i64, duration_secs: i64, downloaded_path: &str, title: &str, description: &str) -> Episode {
+    fn ep(
+        played: bool,
+        position_ms: i64,
+        duration_secs: i64,
+        downloaded_path: &str,
+        title: &str,
+        description: &str,
+    ) -> Episode {
         Episode {
             id: 1,
             podcast_id: 1,
@@ -807,7 +934,11 @@ mod tests {
     #[test]
     fn episode_matches_combines_category_and_text_filters() {
         let played_match = ep(true, 0, 600, "", "Rust Talk", "");
-        assert!(!episode_matches(&played_match, EpisodeFilter::Unplayed, "rust"));
+        assert!(!episode_matches(
+            &played_match,
+            EpisodeFilter::Unplayed,
+            "rust"
+        ));
     }
 
     #[test]
@@ -821,6 +952,9 @@ mod tests {
     fn format_epoch_date_reports_none_when_unset_or_negative() {
         assert_eq!(format_epoch_date(0), None);
         assert_eq!(format_epoch_date(-5), None);
-        assert_eq!(format_epoch_date(1704067200), Some("2024-01-01".to_string()));
+        assert_eq!(
+            format_epoch_date(1704067200),
+            Some("2024-01-01".to_string())
+        );
     }
 }

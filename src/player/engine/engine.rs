@@ -201,15 +201,12 @@ impl PlaySource {
                         // a few seconds into playback. See `icy_reader`'s module
                         // docs for the full explanation; this is the direct fix
                         // for "radio streams play for a few seconds and stop".
-                        let reader = IcyStrippingReader::new(
-                            response,
-                            interval.get(),
-                            move |metadata| {
+                        let reader =
+                            IcyStrippingReader::new(response, interval.get(), move |metadata| {
                                 let title =
                                     metadata.and_then(|m| m.stream_title().map(str::to_string));
                                 *icy_title.lock() = title;
-                            },
-                        );
+                            });
                         SymphoniaDecoder::open_stream(reader, hint_extension.as_deref())
                     }
                     None => SymphoniaDecoder::open_stream(response, hint_extension.as_deref()),
@@ -243,7 +240,12 @@ struct LiveRetry {
 
 fn live_retry_from_source(source: &PlaySource) -> Option<LiveRetry> {
     match source {
-        PlaySource::LiveStream { url, client, hint_extension, icy_title } => Some(LiveRetry {
+        PlaySource::LiveStream {
+            url,
+            client,
+            hint_extension,
+            icy_title,
+        } => Some(LiveRetry {
             url: url.clone(),
             client: client.clone(),
             hint_extension: hint_extension.clone(),
@@ -295,7 +297,8 @@ fn reconnect_live(retry: &LiveRetry, ctx: &ThreadContext) -> Option<SymphoniaDec
                 }
                 // Capped linear backoff, polled in small steps so a
                 // `stop()` fired mid-wait still takes effect promptly.
-                let backoff = Duration::from_millis(300 * u64::from(attempt)).min(Duration::from_secs(3));
+                let backoff =
+                    Duration::from_millis(300 * u64::from(attempt)).min(Duration::from_secs(3));
                 let deadline = std::time::Instant::now() + backoff;
                 while std::time::Instant::now() < deadline {
                     if ctx.stop_flag.load(Ordering::Acquire) {
@@ -713,7 +716,14 @@ fn playback_thread_main(
             }
         }
 
-        match run_pcm(decoder, gain, dsd_target_rate, live_retry.as_ref(), &command_rx, &ctx) {
+        match run_pcm(
+            decoder,
+            gain,
+            dsd_target_rate,
+            live_retry.as_ref(),
+            &command_rx,
+            &ctx,
+        ) {
             PcmOutcome::Advance(next_decoder, next_gain) => {
                 decoder = next_decoder;
                 gain = next_gain;
@@ -1204,10 +1214,9 @@ fn run_pcm(
                                 total_samples = 0;
                                 sink.eq.reset_states();
                                 ctx.status.position_nanos.store(0, Ordering::Release);
-                                ctx.status.duration_nanos.store(
-                                    secs_to_nanos(decoder.duration()),
-                                    Ordering::Release,
-                                );
+                                ctx.status
+                                    .duration_nanos
+                                    .store(secs_to_nanos(decoder.duration()), Ordering::Release);
                                 continue 'buf;
                             }
                             ReconnectOutcome::FormatChanged(nd, ng) => {

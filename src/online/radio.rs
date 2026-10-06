@@ -76,8 +76,12 @@ pub enum SortOrder {
 
 impl SortOrder {
     /// Every order the Discover sort dropdown offers, in display order.
-    pub const ALL: [SortOrder; 4] =
-        [SortOrder::Clickcount, SortOrder::Votes, SortOrder::Name, SortOrder::Bitrate];
+    pub const ALL: [SortOrder; 4] = [
+        SortOrder::Clickcount,
+        SortOrder::Votes,
+        SortOrder::Name,
+        SortOrder::Bitrate,
+    ];
 
     fn as_param(self) -> &'static str {
         match self {
@@ -167,11 +171,17 @@ pub fn top_vote_stations(
 }
 
 fn top_click_url(limit: u32) -> String {
-    format!("https://all.api.radio-browser.info/json/stations/topclick/{}?hidebroken=true", limit.max(1))
+    format!(
+        "https://all.api.radio-browser.info/json/stations/topclick/{}?hidebroken=true",
+        limit.max(1)
+    )
 }
 
 fn top_vote_url(limit: u32) -> String {
-    format!("https://all.api.radio-browser.info/json/stations/topvote/{}?hidebroken=true", limit.max(1))
+    format!(
+        "https://all.api.radio-browser.info/json/stations/topvote/{}?hidebroken=true",
+        limit.max(1)
+    )
 }
 
 fn fetch_stations(
@@ -195,7 +205,11 @@ fn fetch_stations(
 fn map_station_results(raw: Vec<StationRaw>) -> Vec<StationSearchResult> {
     raw.into_iter()
         .map(|s| {
-            let url = if s.url_resolved.is_empty() { s.url } else { s.url_resolved };
+            let url = if s.url_resolved.is_empty() {
+                s.url
+            } else {
+                s.url_resolved
+            };
             StationSearchResult {
                 stationuuid: s.stationuuid,
                 name: s.name,
@@ -228,7 +242,11 @@ pub enum PlaylistFormat {
 /// extension is inconclusive. Returns `None` when neither indicates a
 /// playlist container, meaning `url` is presumably already a direct stream.
 pub fn sniff_playlist_format(url: &str, content_type: Option<&str>) -> Option<PlaylistFormat> {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     if path.ends_with(".pls") {
         return Some(PlaylistFormat::Pls);
     }
@@ -250,7 +268,9 @@ pub fn parse_pls(body: &str) -> Option<String> {
     let mut best: Option<(u32, String)> = None;
     for line in body.lines() {
         let line = line.trim();
-        let Some(eq_idx) = line.find('=') else { continue };
+        let Some(eq_idx) = line.find('=') else {
+            continue;
+        };
         let key = &line[..eq_idx];
         // `key.get(..4)`/`key.get(4..)` (not byte-slicing) so a key
         // containing multi-byte UTF-8 within its first 4 bytes — from a
@@ -261,7 +281,9 @@ pub fn parse_pls(body: &str) -> Option<String> {
             continue;
         }
         let Some(suffix) = key.get(4..) else { continue };
-        let Ok(n) = suffix.parse::<u32>() else { continue };
+        let Ok(n) = suffix.parse::<u32>() else {
+            continue;
+        };
         let value = line[eq_idx + 1..].trim();
         if value.is_empty() {
             continue;
@@ -323,7 +345,10 @@ pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Resu
             .send()
             .map_err(|e| format!("Failed to fetch playlist: {e}"))?;
         if !response.status().is_success() {
-            return Err(format!("Failed to fetch playlist: HTTP {}", response.status()));
+            return Err(format!(
+                "Failed to fetch playlist: HTTP {}",
+                response.status()
+            ));
         }
         let content_type = response
             .headers()
@@ -333,8 +358,8 @@ pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Resu
         let format =
             sniff_playlist_format(&current, content_type.as_deref()).unwrap_or(extension_hint);
         let bytes = super::read_capped_body(response, MAX_PLAYLIST_RESPONSE_BYTES)?;
-        let body = String::from_utf8(bytes)
-            .map_err(|e| format!("Playlist was not valid UTF-8: {e}"))?;
+        let body =
+            String::from_utf8(bytes).map_err(|e| format!("Playlist was not valid UTF-8: {e}"))?;
         current = parse_playlist(&body, format)
             .ok_or_else(|| "Playlist contained no stream URL".to_string())?;
     }
@@ -367,7 +392,10 @@ mod tests {
     #[test]
     fn sniff_playlist_format_from_content_type() {
         assert_eq!(
-            sniff_playlist_format("https://x.example/live", Some("audio/x-scpls; charset=utf-8")),
+            sniff_playlist_format(
+                "https://x.example/live",
+                Some("audio/x-scpls; charset=utf-8")
+            ),
             Some(PlaylistFormat::Pls)
         );
         assert_eq!(
@@ -409,7 +437,10 @@ mod tests {
     #[test]
     fn parse_m3u_skips_comments_and_blank_lines() {
         let body = "#EXTM3U\n#EXTINF:-1,Station Name\n\nhttps://x.example/stream.mp3\n";
-        assert_eq!(parse_m3u(body), Some("https://x.example/stream.mp3".to_string()));
+        assert_eq!(
+            parse_m3u(body),
+            Some("https://x.example/stream.mp3".to_string())
+        );
     }
 
     #[test]
@@ -472,7 +503,11 @@ mod tests {
 
     #[test]
     fn build_search_url_omits_empty_params_but_always_has_order_and_limit() {
-        let query = StationQuery { limit: 25, order: SortOrder::Votes, ..Default::default() };
+        let query = StationQuery {
+            limit: 25,
+            order: SortOrder::Votes,
+            ..Default::default()
+        };
         let url = build_search_url(&query);
         assert!(url.contains("hidebroken=true"));
         assert!(url.contains("reverse=true"));
@@ -503,7 +538,10 @@ mod tests {
 
     #[test]
     fn build_search_url_clamps_zero_limit_to_one() {
-        let query = StationQuery { limit: 0, ..Default::default() };
+        let query = StationQuery {
+            limit: 0,
+            ..Default::default()
+        };
         assert!(build_search_url(&query).contains("limit=1"));
     }
 

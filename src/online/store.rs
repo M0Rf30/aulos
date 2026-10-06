@@ -91,7 +91,13 @@ impl OnlineStore {
                  ON CONFLICT(feed_url) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
                     image_url=excluded.image_url, author=excluded.author",
-                params![feed_url, meta.title, meta.description, meta.image_url, meta.author],
+                params![
+                    feed_url,
+                    meta.title,
+                    meta.description,
+                    meta.image_url,
+                    meta.author
+                ],
             )
             .map_err(|e| format!("Add podcast error: {e}"))?;
         self.conn
@@ -315,7 +321,10 @@ impl OnlineStore {
     /// Rename a saved station in place, leaving every other field untouched.
     pub fn rename_radio_station(&self, id: i64, name: &str) -> Result<(), String> {
         self.conn
-            .execute("UPDATE radio_stations SET name = ?1 WHERE id = ?2", params![name, id])
+            .execute(
+                "UPDATE radio_stations SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )
             .map_err(|e| format!("Rename radio station error: {e}"))?;
         Ok(())
     }
@@ -413,7 +422,9 @@ mod tests {
     #[test]
     fn add_podcast_is_idempotent_by_feed_url() {
         let store = open_migrated_memory();
-        let id1 = store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
+        let id1 = store
+            .add_podcast("https://feed.example/rss", &meta("Show"))
+            .unwrap();
         let id2 = store
             .add_podcast("https://feed.example/rss", &meta("Show Renamed"))
             .unwrap();
@@ -426,7 +437,9 @@ mod tests {
     #[test]
     fn add_podcast_persists_author() {
         let store = open_migrated_memory();
-        store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
+        store
+            .add_podcast("https://feed.example/rss", &meta("Show"))
+            .unwrap();
         let podcasts = store.list_podcasts().unwrap();
         assert_eq!(podcasts[0].author, "Example Author");
     }
@@ -434,7 +447,9 @@ mod tests {
     #[test]
     fn list_podcasts_computes_unplayed_count() {
         let store = open_migrated_memory();
-        let id = store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
+        let id = store
+            .add_podcast("https://feed.example/rss", &meta("Show"))
+            .unwrap();
         store
             .upsert_episodes(id, &[episode("guid-1", "Ep 1"), episode("guid-2", "Ep 2")])
             .unwrap();
@@ -454,8 +469,12 @@ mod tests {
     #[test]
     fn upsert_episodes_preserves_position_on_refresh() {
         let store = open_migrated_memory();
-        let id = store.add_podcast("https://feed.example/rss", &meta("Show")).unwrap();
-        store.upsert_episodes(id, &[episode("guid-1", "Ep 1")]).unwrap();
+        let id = store
+            .add_podcast("https://feed.example/rss", &meta("Show"))
+            .unwrap();
+        store
+            .upsert_episodes(id, &[episode("guid-1", "Ep 1")])
+            .unwrap();
 
         let episodes = store.list_episodes(id).unwrap();
         assert_eq!(episodes.len(), 1);
@@ -478,7 +497,13 @@ mod tests {
     fn radio_station_crud_roundtrip() {
         let store = open_migrated_memory();
         let (id, existed) = store
-            .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
+            .add_radio_station(
+                "Test FM",
+                "https://stream.example/live",
+                "https://example.com",
+                "",
+                "jazz",
+            )
             .unwrap();
         assert!(!existed);
         assert_eq!(store.list_radio_stations().unwrap().len(), 1);
@@ -491,7 +516,13 @@ mod tests {
     fn add_radio_station_reports_already_existed_and_updates_metadata() {
         let store = open_migrated_memory();
         let (id1, existed1) = store
-            .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
+            .add_radio_station(
+                "Test FM",
+                "https://stream.example/live",
+                "https://example.com",
+                "",
+                "jazz",
+            )
             .unwrap();
         assert!(!existed1);
 
@@ -517,7 +548,13 @@ mod tests {
     fn rename_radio_station_updates_only_the_name() {
         let store = open_migrated_memory();
         let (id, _) = store
-            .add_radio_station("Test FM", "https://stream.example/live", "https://example.com", "", "jazz")
+            .add_radio_station(
+                "Test FM",
+                "https://stream.example/live",
+                "https://example.com",
+                "",
+                "jazz",
+            )
             .unwrap();
         store.rename_radio_station(id, "Renamed FM").unwrap();
         let stations = store.list_radio_stations().unwrap();

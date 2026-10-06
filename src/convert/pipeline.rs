@@ -53,8 +53,16 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
     std::fs::create_dir_all(&settings(job).out_dir)?;
     match job.kind {
         JobKind::Convert => {
-            let stem = job.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
-            let out_path = unique_out_path(&settings(job).out_dir, stem, settings(job).format.extension());
+            let stem = job
+                .source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("track");
+            let out_path = unique_out_path(
+                &settings(job).out_dir,
+                stem,
+                settings(job).format.extension(),
+            );
             transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
             copy_tags(&job.source, &out_path, settings(job).format);
             Ok(())
@@ -93,11 +101,23 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         }
 
         let stem = format!("{:02} - {}", track.number, sanitize_filename(&track.title));
-        let out_path = unique_out_path(&settings(job).out_dir, &stem, settings(job).format.extension());
+        let out_path = unique_out_path(
+            &settings(job).out_dir,
+            &stem,
+            settings(job).format.extension(),
+        );
         let start = track.start.as_secs_f64();
         let end = track.end.map(|d| d.as_secs_f64());
         let (progress_base, progress_span) = track_progress_range(i, track_count);
-        transcode(job, &audio_path, &out_path, Some(start), end, progress_base, progress_span)?;
+        transcode(
+            job,
+            &audio_path,
+            &out_path,
+            Some(start),
+            end,
+            progress_base,
+            progress_span,
+        )?;
 
         let write = WriteTags {
             title: Some(track.title.as_str()),
@@ -154,7 +174,14 @@ fn transcode(
     let channels = source.channels;
     let dst_rate = settings(job).target_rate.unwrap_or(src_rate);
     let mut resampler = (dst_rate != src_rate)
-        .then(|| StreamResampler::new(src_rate, dst_rate, channels as usize, ResamplerQuality::SincMedium))
+        .then(|| {
+            StreamResampler::new(
+                src_rate,
+                dst_rate,
+                channels as usize,
+                ResamplerQuality::SincMedium,
+            )
+        })
         .flatten();
 
     let tmp_path = temp_out_path(out_path, job.id);
@@ -170,7 +197,8 @@ fn transcode(
     )?;
 
     // Frame budget for the `[start, end)` window, in source-domain frames.
-    let max_frames = end.map(|e| ((e - start.unwrap_or(0.0)).max(0.0) * f64::from(src_rate)).round() as u64);
+    let max_frames =
+        end.map(|e| ((e - start.unwrap_or(0.0)).max(0.0) * f64::from(src_rate)).round() as u64);
 
     const CHUNK_FRAMES: usize = 8192;
     let mut buf = vec![0f32; CHUNK_FRAMES * channels.max(1) as usize];
@@ -224,7 +252,8 @@ fn transcode(
     sink.finish()?;
     std::fs::rename(&tmp_path, out_path)?;
     tmp_guard.disarm();
-    job.progress.store(progress_base + progress_span, Ordering::Relaxed);
+    job.progress
+        .store(progress_base + progress_span, Ordering::Relaxed);
     Ok(())
 }
 
@@ -232,7 +261,10 @@ fn transcode(
 /// `job_id` so two concurrently-running jobs never collide on the same
 /// temp file.
 fn temp_out_path(out_path: &Path, job_id: JobId) -> PathBuf {
-    let file_name = out_path.file_name().and_then(|f| f.to_str()).unwrap_or("output");
+    let file_name = out_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("output");
     out_path.with_file_name(format!(".{file_name}.{job_id}.part"))
 }
 
@@ -303,7 +335,10 @@ fn shared_tags(src_tags: &track_tags::AudioTags) -> WriteTags<'_> {
 /// rips only embed a single (untyped-as-front) picture, and that's still
 /// the one users expect to see as artwork.
 fn front_cover(pictures: &[Picture]) -> Option<&Picture> {
-    pictures.iter().find(|p| p.is_front_cover).or_else(|| pictures.first())
+    pictures
+        .iter()
+        .find(|p| p.is_front_cover)
+        .or_else(|| pictures.first())
 }
 
 /// Dispatches to the right tag writer for `format`'s output container:
@@ -314,9 +349,9 @@ fn front_cover(pictures: &[Picture]) -> Option<&Picture> {
 fn write_output_tags(path: &Path, format: encoder::OutputFormat, tags: &WriteTags<'_>) {
     match format {
         encoder::OutputFormat::Flac => tag_writer::write_flac_tags(path, tags),
-        encoder::OutputFormat::Wav16 | encoder::OutputFormat::Wav24 | encoder::OutputFormat::Wav32Float => {
-            tag_writer::write_wav_tags(path, tags)
-        }
+        encoder::OutputFormat::Wav16
+        | encoder::OutputFormat::Wav24
+        | encoder::OutputFormat::Wav32Float => tag_writer::write_wav_tags(path, tags),
         // No native AIFF tag chunk is written (yet): AIFF has a standard
         // `ID3 `/`NAME`/`AUTH`/`(c) ` chunk convention, but round-tripping
         // it isn't implemented — matches the "best-effort, never a hard
@@ -358,7 +393,11 @@ fn sanitize_filename(name: &str) -> String {
     }
     let cleaned = cleaned.trim_matches('.').trim();
 
-    if cleaned.is_empty() { "track".to_owned() } else { cleaned.to_owned() }
+    if cleaned.is_empty() {
+        "track".to_owned()
+    } else {
+        cleaned.to_owned()
+    }
 }
 
 /// Builds `dir/stem.ext`, appending ` (N)` before the extension if that
@@ -446,10 +485,17 @@ impl AudioSource {
         let mss = MediaSourceStream::new(Box::new(counting), Default::default());
 
         let reader = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .map_err(|e| ConvertError::Decode(format!("probe failed: {e}")))?;
 
-        let track = reader.default_track(TrackType::Audio).ok_or(ConvertError::NoAudioTrack)?;
+        let track = reader
+            .default_track(TrackType::Audio)
+            .ok_or(ConvertError::NoAudioTrack)?;
         let track_id = track.id;
 
         let audio = match track.codec_params.as_ref() {
@@ -490,7 +536,10 @@ impl AudioSource {
         self.reader
             .seek(
                 SeekMode::Accurate,
-                SeekTo::Time { time, track_id: Some(self.track_id) },
+                SeekTo::Time {
+                    time,
+                    track_id: Some(self.track_id),
+                },
             )
             .map_err(|e| ConvertError::Decode(format!("seek failed: {e}")))?;
         self.decoder.reset();
@@ -524,7 +573,9 @@ impl AudioSource {
                     self.decoder.reset();
                     continue;
                 }
-                Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    break;
+                }
                 Err(e) => return Err(ConvertError::Decode(format!("failed to read packet: {e}"))),
             };
 
@@ -535,7 +586,11 @@ impl AudioSource {
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
                 Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(e) => return Err(ConvertError::Decode(format!("failed to decode packet: {e}"))),
+                Err(e) => {
+                    return Err(ConvertError::Decode(format!(
+                        "failed to decode packet: {e}"
+                    )));
+                }
             };
 
             if decoded.frames() == 0 {
@@ -580,7 +635,9 @@ mod tests {
         let mut writer = hound::WavWriter::create(path, spec).unwrap();
         for i in 0..num_frames {
             let s = (TAU * 440.0 * i as f32 / 44_100.0).sin();
-            writer.write_sample((s * f32::from(i16::MAX)) as i16).unwrap();
+            writer
+                .write_sample((s * f32::from(i16::MAX)) as i16)
+                .unwrap();
         }
         writer.finalize().unwrap();
     }
@@ -608,8 +665,9 @@ mod tests {
             encoder::LossyOptions::default(),
         )
         .unwrap();
-        let samples: Vec<f32> =
-            (0..num_frames).map(|i| (TAU * 440.0 * i as f32 / 44_100.0).sin()).collect();
+        let samples: Vec<f32> = (0..num_frames)
+            .map(|i| (TAU * 440.0 * i as f32 / 44_100.0).sin())
+            .collect();
         sink.write(&samples).unwrap();
         sink.finish().unwrap();
     }
@@ -627,7 +685,10 @@ mod tests {
         write_test_flac(&source);
         tag_writer::write_flac_tags(
             &source,
-            &WriteTags { title: Some("Pipeline Test Track"), ..Default::default() },
+            &WriteTags {
+                title: Some("Pipeline Test Track"),
+                ..Default::default()
+            },
         );
 
         let out_dir = dir.join("out");
@@ -658,7 +719,8 @@ mod tests {
 
     #[test]
     fn run_copies_date_and_cover_art_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("lyra-pipeline-art-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-pipeline-art-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.flac");
         write_test_flac(&source);
@@ -669,11 +731,18 @@ mod tests {
         // since those come from elsewhere for CUE tracks and shouldn't be
         // conflated with the shared fields this test exercises).
         let cover_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xD9]; // minimal fake JPEG payload
-        let picture =
-            Picture { mime_type: "image/jpeg".to_string(), is_front_cover: true, data: cover_bytes.clone() };
+        let picture = Picture {
+            mime_type: "image/jpeg".to_string(),
+            is_front_cover: true,
+            data: cover_bytes.clone(),
+        };
         tag_writer::write_flac_tags(
             &source,
-            &WriteTags { date: Some("2024"), picture: Some(&picture), ..Default::default() },
+            &WriteTags {
+                date: Some("2024"),
+                picture: Some(&picture),
+                ..Default::default()
+            },
         );
 
         let out_dir = dir.join("out");
@@ -687,10 +756,22 @@ mod tests {
         });
         run(&job).expect("conversion job should succeed");
 
-        let probed = track_tags::probe(&out_dir.join("source.flac"), true).expect("probe should succeed");
-        assert_eq!(probed.tags.date.as_deref(), Some("2024"), "release date should carry over");
-        assert_eq!(probed.tags.pictures.len(), 1, "expected exactly one carried-over picture");
-        assert_eq!(probed.tags.pictures[0].data, cover_bytes, "cover art bytes should be preserved");
+        let probed =
+            track_tags::probe(&out_dir.join("source.flac"), true).expect("probe should succeed");
+        assert_eq!(
+            probed.tags.date.as_deref(),
+            Some("2024"),
+            "release date should carry over"
+        );
+        assert_eq!(
+            probed.tags.pictures.len(),
+            1,
+            "expected exactly one carried-over picture"
+        );
+        assert_eq!(
+            probed.tags.pictures[0].data, cover_bytes,
+            "cover art bytes should be preserved"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -701,11 +782,20 @@ mod tests {
             let mut prev_end = 0u32;
             for index in 0..total {
                 let (base, span) = track_progress_range(index, total);
-                assert_eq!(base, prev_end, "track {index}/{total} should start where the previous one ended");
-                assert!(span > 0, "track {index}/{total} got a zero-width progress span");
+                assert_eq!(
+                    base, prev_end,
+                    "track {index}/{total} should start where the previous one ended"
+                );
+                assert!(
+                    span > 0,
+                    "track {index}/{total} got a zero-width progress span"
+                );
                 prev_end = base + span;
             }
-            assert_eq!(prev_end, 1000, "spans for {total} tracks should sum to exactly 1000");
+            assert_eq!(
+                prev_end, 1000,
+                "spans for {total} tracks should sum to exactly 1000"
+            );
         }
     }
 
@@ -723,7 +813,8 @@ mod tests {
 
     #[test]
     fn cancelled_conversion_leaves_no_output_file() {
-        let dir = std::env::temp_dir().join(format!("lyra-pipeline-cancel-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-pipeline-cancel-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         write_test_wav(&source);
@@ -739,19 +830,28 @@ mod tests {
         });
         job.cancel();
         let result = run(&job);
-        assert!(matches!(result, Err(ConvertError::Cancelled)), "expected Cancelled, got {result:?}");
+        assert!(
+            matches!(result, Err(ConvertError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
 
         let entries: Vec<_> = std::fs::read_dir(&out_dir)
             .map(|rd| rd.filter_map(|e| e.ok()).collect())
             .unwrap_or_default();
-        assert!(entries.is_empty(), "expected no leftover files in {out_dir:?}, found {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "expected no leftover files in {out_dir:?}, found {entries:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_with_resample_does_not_drop_a_short_clip() {
-        let dir = std::env::temp_dir().join(format!("lyra-pipeline-resample-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "lyra-pipeline-resample-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         // Shorter than the resampler's internal processing chunk (1024
@@ -792,11 +892,18 @@ mod tests {
             return;
         }
 
-        let dir = std::env::temp_dir().join(format!("lyra-pipeline-mp3-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-pipeline-mp3-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         write_test_wav(&source);
-        tag_writer::write_wav_tags(&source, &WriteTags { title: Some("MP3 Smoke Test"), ..Default::default() });
+        tag_writer::write_wav_tags(
+            &source,
+            &WriteTags {
+                title: Some("MP3 Smoke Test"),
+                ..Default::default()
+            },
+        );
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
@@ -813,7 +920,8 @@ mod tests {
         let out_path = out_dir.join("source.mp3");
         assert!(out_path.exists(), "expected {out_path:?} to exist");
 
-        let probed = track_tags::probe(&out_path, false).expect("probe should succeed decoding the mp3");
+        let probed =
+            track_tags::probe(&out_path, false).expect("probe should succeed decoding the mp3");
         assert!(
             probed.properties.duration.as_secs_f64() > 0.5,
             "expected ~1s of decoded mp3 audio, got {:?}",

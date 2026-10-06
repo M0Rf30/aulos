@@ -1,0 +1,242 @@
+name: Release
+
+# Builds Linux release tarballs and publishes them as a GitHub Release.
+#
+# Trigger: a bare semver tag (e.g. `0.1.0`, matching the Cargo.toml version), or
+# a manual run. A manual run builds and packages everything (as a dry run) but
+# does not publish, since there is no tag to attach a Release to; the tarballs
+# are kept as workflow artifacts.
+#
+# Targets are Linux only (the code depends on wayland, D-Bus portals and
+# keyutils) and glibc only (a GUI app that dlopen()s wayland/GPU libraries
+# cannot be statically linked with musl).
+#
+# Features: the default feature set. The optional `visualizer` feature
+# (ProjectM) is deliberately NOT enabled in release binaries: it statically
+# builds ProjectM from source (needs cmake, clang/libclang, PipeWire and GL
+# development packages), adds a PipeWire/GL runtime requirement, and lengthens
+# the build considerably. It stays a build-from-source option.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Native libraries needed by libcosmic
+  # (wayland/xkbcommon/fontconfig/freetype/expat) and cpal (ALSA). Verified on
+  # Ubuntu 24.04.
+  APT_DEPS: >-
+    pkg-config
+    libxkbcommon-dev
+    libwayland-dev
+    libfontconfig-dev
+    libfreetype-dev
+    libexpat1-dev
+    libasound2-dev
+
+# Two concurrent releases would race onto the same GitHub Release's asset list.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Least privilege by default; only the `release` job widens to `contents:
+# write`.
+permissions:
+  contents: read
+
+jobs:
+  # The same gate ci.yml enforces. Duplicated deliberately: a tag can point at
+  # any commit, including one that never passed CI.
+  test:
+    name: Build, test, lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $APT_DEPS
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Resolved once here and shared via job output so `build` and `release`
+      # agree on it.
+      - name: Resolve crate version
+        id: version
+        run: |
+          ver=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "lyra") | .version')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      # Refuse to release a version the tag does not name (e.g. tagging 0.2.0
+      # while Cargo.toml still says 0.1.0).
+      - name: Tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "$VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != Cargo.toml ${VERSION}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches version ${VERSION}"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          # Native aarch64 runner: a same-arch build, no cross toolchain or
+          # cross pkg-config.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $APT_DEPS
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      # The tarball unpacks to lyra-<version>-<target>/ with the binary next to
+      # the justfile, so `sudo just install` works from inside the extracted
+      # directory.
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="lyra-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp target/release/lyra LICENSE README.md justfile "dist/${name}/"
+          cp -r resources "dist/${name}/resources"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          ls -l dist
+          echo "TARBALL=dist/${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: lyra-${{ matrix.target }}
+          path: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    # `workflow_dispatch` has no tag to attach a Release to; tarballs stay as
+    # artifacts.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            range="${prev}..${tag}"
+          else
+            range="$tag"
+          fi
+          base="lyra-${VERSION}"
+          x86="${base}-x86_64-unknown-linux-gnu"
+          arm="${base}-aarch64-unknown-linux-gnu"
+          {
+            echo "## What's Changed"
+            echo
+            git log "$range" --pretty=format:"- %s (%h)" --no-merges
+            echo
+            echo
+            echo "## Downloads"
+            echo
+            echo "| Platform | Architecture | File |"
+            echo "|----------|--------------|------|"
+            echo "| Linux | x86_64 | \`${x86}.tar.gz\` |"
+            echo "| Linux | aarch64 | \`${arm}.tar.gz\` |"
+            echo
+            echo "A \`.sha256\` file is published next to each tarball."
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "tar xzf ${x86}.tar.gz"
+            echo "cd ${x86}"
+            echo "sudo just install"
+            echo '```'
+            echo
+            echo "Without \`just\`, copy \`lyra\` into your \`PATH\` and the"
+            echo "files under \`resources/\` to the matching \`/usr/share\`."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: lyra ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.sha256
+          generate_release_notes: false

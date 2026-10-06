@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{AppModel, ContextPage, MenuAction, Message, Page, SEARCH_INPUT_ID, unfilter_index};
 #[cfg(feature = "visualizer")]
 use super::VIZ_HUD_HOLD_FRAMES;
-use crate::library::{Album, Artist, Track};
+use super::{AppModel, ContextPage, MenuAction, Message, Page, SEARCH_INPUT_ID, unfilter_index};
 use crate::fl;
+use crate::library::{Album, Artist, Track};
 use crate::player::PlaybackState;
 use crate::views::radio as radio_view;
 use crate::views::{
@@ -310,7 +310,10 @@ impl AppModel {
                 let queue_content = queue::queue_view(
                     queue_data,
                     self.current_track.as_ref(),
-                    self.player.as_ref().map(|p| p.state()).unwrap_or(PlaybackState::Stopped),
+                    self.player
+                        .as_ref()
+                        .map(|p| p.state())
+                        .unwrap_or(PlaybackState::Stopped),
                     &self.cover_images,
                 )
                 .map(|msg| match msg {
@@ -658,14 +661,20 @@ impl AppModel {
             .map(Message::Folders),
 
             Page::Podcasts => {
-                let is_podcast_track =
-                    self.current_track.as_ref().is_some_and(|t| &*t.provider_id == "podcast");
+                let is_podcast_track = self
+                    .current_track
+                    .as_ref()
+                    .is_some_and(|t| &*t.provider_id == "podcast");
                 let playback_state = self.player.as_ref().map(|p| p.state());
                 let is_episode_playing = is_podcast_track
-                    && matches!(playback_state, Some(PlaybackState::Playing) | Some(PlaybackState::Paused));
+                    && matches!(
+                        playback_state,
+                        Some(PlaybackState::Playing) | Some(PlaybackState::Paused)
+                    );
                 let is_paused = matches!(playback_state, Some(PlaybackState::Paused));
-                let selected =
-                    self.selected_podcast.and_then(|id| self.podcasts.iter().find(|p| p.id == id));
+                let selected = self
+                    .selected_podcast
+                    .and_then(|id| self.podcasts.iter().find(|p| p.id == id));
                 let props = podcasts::PodcastViewProps {
                     podcasts: &self.podcasts,
                     tab: self.podcast_tab,
@@ -927,9 +936,13 @@ impl AppModel {
                 .width(Length::Fill)
                 .into()
             } else {
-                widget::container(widget::Space::new().width(Length::Fill).height(Length::Fixed(0.0)))
-                    .width(Length::Fill)
-                    .into()
+                widget::container(
+                    widget::Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fixed(0.0)),
+                )
+                .width(Length::Fill)
+                .into()
             };
             layout_col = layout_col.push(scanning_indicator);
 

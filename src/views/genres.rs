@@ -107,7 +107,9 @@ pub fn genres_view(
                 let row = widget::button::custom(
                     widget::Row::new()
                         .push(genre_icon)
-                        .push(common::clipped_cell(common::cell_text(genre.as_str()).into()))
+                        .push(common::clipped_cell(
+                            common::cell_text(genre.as_str()).into(),
+                        ))
                         .spacing(14)
                         .align_y(Alignment::Center)
                         .padding([10, 8]),

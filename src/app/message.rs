@@ -111,7 +111,10 @@ pub enum Message {
     /// Remove the queue entry at this play-order index.
     QueueRemove(usize),
     /// Move a queue entry between two play-order indices.
-    QueueMove { from: usize, to: usize },
+    QueueMove {
+        from: usize,
+        to: usize,
+    },
     /// Drop every queue entry except the one currently playing.
     QueueClear,
     /// Insert tracks right after the currently playing one.

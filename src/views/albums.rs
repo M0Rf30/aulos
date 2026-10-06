@@ -116,10 +116,12 @@ pub fn albums_view<'a>(
                         CARD_LABEL_HEIGHT,
                         common::clipped_cell(common::cell_text(album.name.as_str()).into()),
                         widget::Row::new()
-                            .push(common::clipped_cell(secondary_caption(artist_display).into()))
-                            .push(common::quality_badge(crate::library::quality::album_quality(
-                                &album.tracks,
-                            )))
+                            .push(common::clipped_cell(
+                                secondary_caption(artist_display).into(),
+                            ))
+                            .push(common::quality_badge(
+                                crate::library::quality::album_quality(&album.tracks),
+                            ))
                             .spacing(4)
                             .align_y(Alignment::Center)
                             .into(),

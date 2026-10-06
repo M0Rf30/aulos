@@ -531,8 +531,10 @@ impl AppModel {
                     // itself is actually the one making sound.
                     #[cfg(feature = "visualizer")]
                     {
-                        self.mpd_playing
-                            .store(state == PlaybackState::Playing, std::sync::atomic::Ordering::Relaxed);
+                        self.mpd_playing.store(
+                            state == PlaybackState::Playing,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
 
                     // The poll runs whenever an MPD backend exists, which

@@ -170,7 +170,11 @@ impl ConvertJob {
     pub fn destination_preview(&self, format: OutputFormat, out_dir: &Path) -> PathBuf {
         match self.kind {
             JobKind::Convert => {
-                let stem = self.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+                let stem = self
+                    .source
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("track");
                 out_dir.join(format!("{stem}.{}", format.extension()))
             }
             JobKind::CueSplit => out_dir.to_path_buf(),
@@ -244,7 +248,10 @@ mod tests {
         let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
         job.start(settings("/out"));
         assert_eq!(job.state, JobState::Running);
-        assert_eq!(job.settings.as_ref().unwrap().out_dir, PathBuf::from("/out"));
+        assert_eq!(
+            job.settings.as_ref().unwrap().out_dir,
+            PathBuf::from("/out")
+        );
     }
 
     #[test]
@@ -254,7 +261,10 @@ mod tests {
         // A second `start` (e.g. a stale re-dispatch) must not clobber the
         // settings the job actually started with.
         job.start(settings("/second"));
-        assert_eq!(job.settings.as_ref().unwrap().out_dir, PathBuf::from("/first"));
+        assert_eq!(
+            job.settings.as_ref().unwrap().out_dir,
+            PathBuf::from("/first")
+        );
     }
 
     #[test]
@@ -289,7 +299,8 @@ mod tests {
     fn retry_requeues_a_failed_job_and_clears_its_settings_and_progress() {
         let mut job = ConvertJob::new(1, PathBuf::from("a.wav"), JobKind::Convert);
         job.start(settings("/out"));
-        job.progress.store(500, std::sync::atomic::Ordering::Relaxed);
+        job.progress
+            .store(500, std::sync::atomic::Ordering::Relaxed);
         job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         job.state = JobState::Failed("boom".to_owned());
 

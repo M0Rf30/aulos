@@ -169,7 +169,10 @@ impl DopOutput {
 
         for frame in 0..primer_frames {
             let dop_silence = dop_primer_sample(frame);
-            primer_samples.extend(std::iter::repeat_n(dop_silence, self.config.channels as usize));
+            primer_samples.extend(std::iter::repeat_n(
+                dop_silence,
+                self.config.channels as usize,
+            ));
         }
 
         let chunk_size = self.config.sample_rate as usize / 50 * self.config.channels as usize;
@@ -315,4 +318,3 @@ mod tests {
         );
     }
 }
-

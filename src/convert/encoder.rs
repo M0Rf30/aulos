@@ -84,7 +84,10 @@ impl OutputFormat {
     /// module docs) — these need `ffmpeg` on `$PATH`, checked once and
     /// cached by [`super::ffmpeg::detect`].
     pub fn requires_ffmpeg(self) -> bool {
-        matches!(self, Self::Mp3 | Self::Aac | Self::Opus | Self::OggVorbis | Self::Alac)
+        matches!(
+            self,
+            Self::Mp3 | Self::Aac | Self::Opus | Self::OggVorbis | Self::Alac
+        )
     }
 }
 
@@ -122,7 +125,10 @@ pub struct FlacOptions {
 
 impl Default for FlacOptions {
     fn default() -> Self {
-        Self { bit_depth: FlacBitDepth::default(), compression_level: 5 }
+        Self {
+            bit_depth: FlacBitDepth::default(),
+            compression_level: 5,
+        }
     }
 }
 
@@ -161,7 +167,12 @@ pub struct LossyOptions {
 
 impl Default for LossyOptions {
     fn default() -> Self {
-        Self { mp3_mode: Mp3Mode::default(), aac_bitrate_kbps: 192, opus_bitrate_kbps: 160, vorbis_quality: 6.0 }
+        Self {
+            mp3_mode: Mp3Mode::default(),
+            aac_bitrate_kbps: 192,
+            opus_bitrate_kbps: 160,
+            vorbis_quality: 6.0,
+        }
     }
 }
 
@@ -218,7 +229,9 @@ fn f32_to_int(sample: f32, bits: u32) -> i32 {
     let scale = (1i64 << (bits - 1)) as f64;
     let max = scale - 1.0;
     let min = -scale;
-    (f64::from(sample.clamp(-1.0, 1.0)) * scale).round().clamp(min, max) as i32
+    (f64::from(sample.clamp(-1.0, 1.0)) * scale)
+        .round()
+        .clamp(min, max) as i32
 }
 
 /// Creates the [`SampleSink`] for `format` at `path`. `source_bits_hint`
@@ -234,7 +247,8 @@ pub fn create_sink(
     lossy_options: LossyOptions,
 ) -> Result<Box<dyn SampleSink>, ConvertError> {
     if format.requires_ffmpeg() {
-        let sink = super::ffmpeg::spawn_encoder(format, path, channels, sample_rate, &lossy_options)?;
+        let sink =
+            super::ffmpeg::spawn_encoder(format, path, channels, sample_rate, &lossy_options)?;
         return Ok(Box::new(sink));
     }
 
@@ -271,10 +285,23 @@ pub fn create_sink(
             Ok(Box::new(WavSink { writer, depth }))
         }
         OutputFormat::Aiff16 | OutputFormat::Aiff24 => {
-            let bits = if format == OutputFormat::Aiff16 { 16 } else { 24 };
-            Ok(Box::new(AiffSink::create(path, channels, sample_rate, bits)?))
+            let bits = if format == OutputFormat::Aiff16 {
+                16
+            } else {
+                24
+            };
+            Ok(Box::new(AiffSink::create(
+                path,
+                channels,
+                sample_rate,
+                bits,
+            )?))
         }
-        OutputFormat::Mp3 | OutputFormat::Aac | OutputFormat::Opus | OutputFormat::OggVorbis | OutputFormat::Alac => {
+        OutputFormat::Mp3
+        | OutputFormat::Aac
+        | OutputFormat::Opus
+        | OutputFormat::OggVorbis
+        | OutputFormat::Alac => {
             unreachable!("requires_ffmpeg formats are handled above")
         }
     }
@@ -324,7 +351,8 @@ struct FlacSink {
 impl SampleSink for FlacSink {
     fn write(&mut self, interleaved: &[f32]) -> Result<(), ConvertError> {
         let bits = self.bits_per_sample;
-        self.samples.extend(interleaved.iter().map(|&s| f32_to_int(s, bits)));
+        self.samples
+            .extend(interleaved.iter().map(|&s| f32_to_int(s, bits)));
         Ok(())
     }
 
@@ -365,7 +393,10 @@ impl SampleSink for FlacSink {
         // frame decodable everywhere; per-frame headers already encode
         // each frame's true size independently, so this touches only
         // informational metadata, never the audio data.
-        stream.stream_info_mut().set_block_sizes(block_size, block_size).ok();
+        stream
+            .stream_info_mut()
+            .set_block_sizes(block_size, block_size)
+            .ok();
 
         let mut sink = flacenc::bitsink::ByteSink::new();
         stream
@@ -409,7 +440,12 @@ const AIFF_SSND_SIZE_OFFSET: u64 = 8 + 4 + 8 + 18 + 4;
 const AIFF_COMM_BODY_LEN: u64 = 2 + 4 + 2 + 10;
 
 impl AiffSink {
-    fn create(path: &Path, channels: u16, sample_rate: u32, bits_per_sample: u16) -> Result<Self, ConvertError> {
+    fn create(
+        path: &Path,
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+    ) -> Result<Self, ConvertError> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
 
@@ -430,7 +466,12 @@ impl AiffSink {
         writer.write_all(&0u32.to_be_bytes())?; // offset (always 0 — no block-alignment padding)
         writer.write_all(&0u32.to_be_bytes())?; // blockSize (always 0, ditto)
 
-        Ok(Self { writer, channels, bits_per_sample, frames_written: 0 })
+        Ok(Self {
+            writer,
+            channels,
+            bits_per_sample,
+            frames_written: 0,
+        })
     }
 }
 
@@ -542,7 +583,10 @@ mod tests {
     }
 
     fn flac_opts(bit_depth: FlacBitDepth) -> FlacOptions {
-        FlacOptions { bit_depth, compression_level: 5 }
+        FlacOptions {
+            bit_depth,
+            compression_level: 5,
+        }
     }
 
     /// Probes `path` with symphonia and returns the decoded frame count.
@@ -599,9 +643,16 @@ mod tests {
         let path = dir.join("wav16.wav");
 
         let samples = sine_1s();
-        let mut sink =
-            create_sink(OutputFormat::Wav16, &path, 1, 44_100, None, FlacOptions::default(), LossyOptions::default())
-                .unwrap();
+        let mut sink = create_sink(
+            OutputFormat::Wav16,
+            &path,
+            1,
+            44_100,
+            None,
+            FlacOptions::default(),
+            LossyOptions::default(),
+        )
+        .unwrap();
         sink.write(&samples).unwrap();
         sink.finish().unwrap();
 
@@ -649,8 +700,10 @@ mod tests {
         // produce a decodable file with the same frame count — this is
         // the only thing exercising `apply_compression_level` at all.
         for level in 0..=8u8 {
-            let dir = std::env::temp_dir()
-                .join(format!("lyra-convert-flaclevel-test-{}-{level}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "lyra-convert-flaclevel-test-{}-{level}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("sine.flac");
 
@@ -661,7 +714,10 @@ mod tests {
                 1,
                 44_100,
                 Some(16),
-                FlacOptions { bit_depth: FlacBitDepth::Bits16, compression_level: level },
+                FlacOptions {
+                    bit_depth: FlacBitDepth::Bits16,
+                    compression_level: level,
+                },
                 LossyOptions::default(),
             )
             .unwrap();
@@ -680,7 +736,8 @@ mod tests {
 
     #[test]
     fn flac_bit_depth_forced_24_ignores_16_bit_source_hint() {
-        let dir = std::env::temp_dir().join(format!("lyra-convert-flac24-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-convert-flac24-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine24.flac");
 
@@ -712,7 +769,8 @@ mod tests {
 
     #[test]
     fn aiff16_roundtrip_preserves_frame_count_and_header() {
-        let dir = std::env::temp_dir().join(format!("lyra-convert-aiff16-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-convert-aiff16-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine.aiff");
 
@@ -764,7 +822,8 @@ mod tests {
     fn aiff24_odd_frame_count_pads_ssnd_to_even_length() {
         // Mono 24-bit => 3 bytes/frame, so an odd frame count makes the
         // SSND payload odd-length and exercises the pad-byte path.
-        let dir = std::env::temp_dir().join(format!("lyra-convert-aiff24-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lyra-convert-aiff24-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sine24.aiff");
 
@@ -784,7 +843,11 @@ mod tests {
 
         let bytes = std::fs::read(&path).unwrap();
         let data_bytes = samples.len() as u64 * 3;
-        assert_eq!(data_bytes % 2, 1, "test fixture should exercise the odd-length pad path");
+        assert_eq!(
+            data_bytes % 2,
+            1,
+            "test fixture should exercise the odd-length pad path"
+        );
         // The physical file has one extra pad byte beyond FORM's declared
         // size (which excludes it, per the IFF pad-byte convention).
         let form_size = u32::from_be_bytes(bytes[4..8].try_into().unwrap());

@@ -433,7 +433,11 @@ impl XorShift64 {
         // of entropy without a `rand` dependency.
         let hash_seed = RandomState::new().build_hasher().finish();
         let seed = time_seed ^ hash_seed.rotate_left(17) ^ 0xD1B5_4A32_D192_ED03;
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     fn next_u64(&mut self) -> u64 {

@@ -29,17 +29,44 @@ Lyra is a sleek, native music player designed specifically for the [COSMIC deskt
 
 ## Installation
 
-### Requirements
+### Prebuilt Binaries
 
-- Rust toolchain (2024 edition)
-- COSMIC desktop environment (or compatible Wayland compositor)
+Download the archive for your architecture from the [GitHub Releases](https://github.com/M0Rf30/lyra/releases) page:
+
+- `lyra-<version>-x86_64-unknown-linux-gnu.tar.gz` — x86_64 Linux
+- `lyra-<version>-aarch64-unknown-linux-gnu.tar.gz` — aarch64 Linux
+
+Verify the checksum, extract, and install:
+
+```bash
+sha256sum -c lyra-<version>-<target>.tar.gz.sha256
+tar xzf lyra-<version>-<target>.tar.gz
+cd lyra-<version>-<target>
+sudo just install
+```
+
+The extracted directory contains the `lyra` binary, `LICENSE`, `README.md`, the `justfile` and `resources/` (desktop entry, AppStream metainfo, icons). If you don't have [just](https://github.com/casey/just), copy those files into place by hand.
+
+### Runtime Requirements
+
+- COSMIC desktop environment (or any compatible Wayland desktop)
+- Optional: `ffmpeg` for lossy audio conversion
 - For visualizer support: OpenGL libraries
 
 ### Building from Source
 
+Requires the Rust toolchain (2024 edition) and [just](https://github.com/casey/just):
+
 ```bash
 git clone https://github.com/M0Rf30/lyra
 cd lyra
+just build-release
+sudo just install
+```
+
+Or build with plain cargo:
+
+```bash
 cargo build --release
 ```
 

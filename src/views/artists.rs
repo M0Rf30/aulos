@@ -66,11 +66,8 @@ pub fn artists_view<'a>(
             let mut list = widget::Column::new().spacing(2);
 
             for (index, artist) in artists.iter().enumerate() {
-                let avatar = common::artist_avatar(
-                    &artist.name,
-                    artist_photos.get(&artist.name),
-                    48.0,
-                );
+                let avatar =
+                    common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 48.0);
 
                 let info = widget::Column::new()
                     .push(common::cell_text(artist.name.as_str()))
@@ -202,22 +199,18 @@ pub fn artist_detail_view<'a>(
                 widget::button::suggested(fl!("play"))
                     .on_press(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
             )
-            .push(
-                widget::tooltip(
-                    widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
-                        .on_press(ArtistMessage::PlayNext(album.tracks.clone())),
-                    widget::text::caption(fl!("queue-play-next")),
-                    widget::tooltip::Position::Top,
-                ),
-            )
-            .push(
-                widget::tooltip(
-                    widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
-                        .on_press(ArtistMessage::AddToQueue(album.tracks.clone())),
-                    widget::text::caption(fl!("queue-add")),
-                    widget::tooltip::Position::Top,
-                ),
-            )
+            .push(widget::tooltip(
+                widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
+                    .on_press(ArtistMessage::PlayNext(album.tracks.clone())),
+                widget::text::caption(fl!("queue-play-next")),
+                widget::tooltip::Position::Top,
+            ))
+            .push(widget::tooltip(
+                widget::button::icon(widget::icon::from_name("insert-object-symbolic").size(16))
+                    .on_press(ArtistMessage::AddToQueue(album.tracks.clone())),
+                widget::text::caption(fl!("queue-add")),
+                widget::tooltip::Position::Top,
+            ))
             .spacing(12)
             .align_y(Alignment::Center);
 

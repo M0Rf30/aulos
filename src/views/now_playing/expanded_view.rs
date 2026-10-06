@@ -1238,9 +1238,7 @@ pub fn expanded_now_playing<'a>(
         // The transient metadata pill is redundant once fullscreen — the
         // control card already surfaces title/artist/album/year.
         #[cfg(feature = "visualizer")]
-        if !fullscreen_mode
-            && let Some(meta_overlay) = viz_metadata_overlay
-        {
+        if !fullscreen_mode && let Some(meta_overlay) = viz_metadata_overlay {
             stack_widget = stack_widget.push(meta_overlay);
         }
 

@@ -504,8 +504,14 @@ mod tests {
 
     #[test]
     fn cache_keys_normalize_case_and_whitespace() {
-        assert_eq!(agents_cache_key("Daft Punk"), agents_cache_key("  daft punk  "));
-        assert_ne!(agents_cache_key("Daft Punk"), subsonic_cache_key("srv1", "Daft Punk"));
+        assert_eq!(
+            agents_cache_key("Daft Punk"),
+            agents_cache_key("  daft punk  ")
+        );
+        assert_ne!(
+            agents_cache_key("Daft Punk"),
+            subsonic_cache_key("srv1", "Daft Punk")
+        );
         assert_ne!(
             subsonic_cache_key("srv1", "Daft Punk"),
             subsonic_cache_key("srv2", "Daft Punk")

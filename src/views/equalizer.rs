@@ -89,20 +89,20 @@ pub fn equalizer_view<'a>(
         })
         .unwrap_or(false);
 
-    let save_btn = widget::button::text(fl!("save")).on_press_maybe(if is_custom_selected && dirty {
-        Some(EqualizerMessage::SavePreset)
-    } else {
-        None
-    });
+    let save_btn =
+        widget::button::text(fl!("save")).on_press_maybe(if is_custom_selected && dirty {
+            Some(EqualizerMessage::SavePreset)
+        } else {
+            None
+        });
 
-    let delete_btn =
-        widget::button::destructive(fl!("equalizer-delete-preset")).on_press_maybe(
-            if is_custom_selected {
-                Some(EqualizerMessage::DeletePreset)
-            } else {
-                None
-            },
-        );
+    let delete_btn = widget::button::destructive(fl!("equalizer-delete-preset")).on_press_maybe(
+        if is_custom_selected {
+            Some(EqualizerMessage::DeletePreset)
+        } else {
+            None
+        },
+    );
 
     let reset_btn =
         widget::button::text(fl!("equalizer-reset-preset")).on_press(EqualizerMessage::ResetPreset);
@@ -118,7 +118,8 @@ pub fn equalizer_view<'a>(
         .on_input(EqualizerMessage::SaveAsNameChanged);
 
     let save_as_btn = if !save_as_name.trim().is_empty() {
-        widget::button::standard(fl!("equalizer-save-preset-as")).on_press(EqualizerMessage::SavePresetAs)
+        widget::button::standard(fl!("equalizer-save-preset-as"))
+            .on_press(EqualizerMessage::SavePresetAs)
     } else {
         widget::button::standard(fl!("equalizer-save-preset-as"))
     };
@@ -133,8 +134,9 @@ pub fn equalizer_view<'a>(
     let autoeq_section: cosmic::Element<'a, EqualizerMessage> = if !autoeq_profiles.is_empty() {
         let query = autoeq_search.trim().to_lowercase();
 
-        let search_input = widget::text_input(fl!("equalizer-autoeq-search-placeholder"), autoeq_search)
-            .on_input(EqualizerMessage::AutoEQSearchChanged);
+        let search_input =
+            widget::text_input(fl!("equalizer-autoeq-search-placeholder"), autoeq_search)
+                .on_input(EqualizerMessage::AutoEQSearchChanged);
 
         if query.len() >= 2 {
             let filtered: Vec<&AutoEQProfileMetadata> = autoeq_profiles
@@ -149,8 +151,11 @@ pub fn equalizer_view<'a>(
             } else if count >= 50 {
                 widget::text::caption(fl!("equalizer-autoeq-too-many-matches")).into()
             } else {
-                widget::text::caption(fl!("equalizer-autoeq-match-count", count = count.to_string()))
-                    .into()
+                widget::text::caption(fl!(
+                    "equalizer-autoeq-match-count",
+                    count = count.to_string()
+                ))
+                .into()
             };
 
             // Build scrollable clickable list of matching profiles

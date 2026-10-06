@@ -8,13 +8,13 @@ pub mod engine;
 pub mod eq_presets;
 pub mod eq_source;
 pub mod equalizer;
-mod icy_reader;
 mod http_range_reader;
+mod icy_reader;
 pub mod local_backend;
 pub mod mpd_backend;
-pub mod queue;
 #[cfg(feature = "visualizer")]
 pub mod pw_capture;
+pub mod queue;
 
 use crate::config::{RepeatMode, ReplayGainMode};
 use crate::library::{Track, TrackSource};
@@ -227,7 +227,12 @@ impl Player {
         if album.is_empty() {
             return false;
         }
-        let same_album_count = self.queue.order().iter().filter(|t| t.album == *album).count();
+        let same_album_count = self
+            .queue
+            .order()
+            .iter()
+            .filter(|t| t.album == *album)
+            .count();
         same_album_count > self.queue.len() / 2
     }
 
@@ -329,7 +334,11 @@ impl Player {
 
     /// Replace the queue with `tracks`, position at `start_index`
     /// (respecting the current shuffle setting), and start playing it.
-    pub fn set_queue(&mut self, tracks: Vec<Track>, start_index: usize) -> Result<Option<Track>, String> {
+    pub fn set_queue(
+        &mut self,
+        tracks: Vec<Track>,
+        start_index: usize,
+    ) -> Result<Option<Track>, String> {
         self.queue.set(tracks, start_index);
         self.next_pre_queued = false;
         self.local_backend.clear_pre_queued();
@@ -509,9 +518,10 @@ impl Player {
             self.local_backend.clear_pre_queued();
             self.active_mut().stop().map_err(|e| e.to_string())?;
             let kept = self.queue.current().cloned();
-            self.current_track = kept
-                .clone()
-                .map(|t| NowPlaying { duration: t.duration, track: t });
+            self.current_track = kept.clone().map(|t| NowPlaying {
+                duration: t.duration,
+                track: t,
+            });
             return Ok(kept);
         }
 
@@ -530,9 +540,10 @@ impl Player {
                 // so a later resume restarts the queue from the top.
                 self.active_mut().stop().map_err(|e| e.to_string())?;
                 let kept = self.queue.current().cloned();
-                self.current_track = kept
-                    .clone()
-                    .map(|t| NowPlaying { duration: t.duration, track: t });
+                self.current_track = kept.clone().map(|t| NowPlaying {
+                    duration: t.duration,
+                    track: t,
+                });
                 Ok(kept)
             }
         }

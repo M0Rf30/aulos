@@ -160,18 +160,32 @@ mod tests {
 
     #[test]
     fn strips_metadata_and_preserves_audio_bytes() {
-        let raw = build_stream(64, 0xAB, &[Some("StreamTitle='Track One';"), None, Some("StreamTitle='Track Two';")]);
+        let raw = build_stream(
+            64,
+            0xAB,
+            &[
+                Some("StreamTitle='Track One';"),
+                None,
+                Some("StreamTitle='Track Two';"),
+            ],
+        );
         let titles: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
         let titles2 = Arc::clone(&titles);
         let reader = IcyStrippingReader::new(Cursor::new(raw), 64, move |m| {
-            titles2.lock().push(m.and_then(|m| m.stream_title().map(str::to_string)));
+            titles2
+                .lock()
+                .push(m.and_then(|m| m.stream_title().map(str::to_string)));
         });
         let audio = read_all_in_chunks(reader, 4096);
         assert_eq!(audio.len(), 64 * 3);
         assert!(audio.iter().all(|&b| b == 0xAB));
         assert_eq!(
             *titles.lock(),
-            vec![Some("Track One".to_string()), None, Some("Track Two".to_string())]
+            vec![
+                Some("Track One".to_string()),
+                None,
+                Some("Track Two".to_string())
+            ]
         );
     }
 
@@ -182,7 +196,14 @@ mod tests {
     #[test]
     fn survives_metaint_larger_than_read_buffer() {
         let metaint = 45_000;
-        let raw = build_stream(metaint, 0x5A, &[Some("StreamTitle='Groove Salad';"), Some("StreamTitle='Next Track';")]);
+        let raw = build_stream(
+            metaint,
+            0x5A,
+            &[
+                Some("StreamTitle='Groove Salad';"),
+                Some("StreamTitle='Next Track';"),
+            ],
+        );
         let reader = IcyStrippingReader::new(Cursor::new(raw), metaint, |_| {});
         // Read with a buffer smaller than metaint, exactly like Symphonia's
         // internal MediaSourceStream fill buffer.

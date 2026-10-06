@@ -67,14 +67,18 @@ impl AppModel {
     pub(super) fn load_podcasts(&self) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
             let podcasts = tokio::task::spawn_blocking(|| {
-                open_online_store().and_then(|store| store.list_podcasts()).unwrap_or_else(|e| {
-                    tracing::warn!("list_podcasts failed: {e}");
-                    Vec::new()
-                })
+                open_online_store()
+                    .and_then(|store| store.list_podcasts())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("list_podcasts failed: {e}");
+                        Vec::new()
+                    })
             })
             .await
             .unwrap_or_default();
-            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::PodcastsLoaded(podcasts)))
+            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::PodcastsLoaded(
+                podcasts,
+            )))
         })
     }
 
@@ -82,14 +86,19 @@ impl AppModel {
     pub(super) fn load_podcast_episodes(&self, podcast_id: i64) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
             let episodes = tokio::task::spawn_blocking(move || {
-                open_online_store().and_then(|store| store.list_episodes(podcast_id)).unwrap_or_else(|e| {
-                    tracing::warn!("list_episodes failed: {e}");
-                    Vec::new()
-                })
+                open_online_store()
+                    .and_then(|store| store.list_episodes(podcast_id))
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("list_episodes failed: {e}");
+                        Vec::new()
+                    })
             })
             .await
             .unwrap_or_default();
-            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::EpisodesLoaded { podcast_id, episodes }))
+            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::EpisodesLoaded {
+                podcast_id,
+                episodes,
+            }))
         })
     }
 
@@ -192,15 +201,24 @@ impl AppModel {
 
     /// Handle an async result dispatched by one of the podcasts page's
     /// tasks.
-    pub(super) fn handle_podcast_event(&mut self, event: PodcastEvent) -> Task<cosmic::Action<Message>> {
+    pub(super) fn handle_podcast_event(
+        &mut self,
+        event: PodcastEvent,
+    ) -> Task<cosmic::Action<Message>> {
         match event {
             PodcastEvent::PodcastsLoaded(podcasts) => {
-                let icon_urls: Vec<String> =
-                    podcasts.iter().map(|p| p.image_url.clone()).filter(|u| !u.is_empty()).collect();
+                let icon_urls: Vec<String> = podcasts
+                    .iter()
+                    .map(|p| p.image_url.clone())
+                    .filter(|u| !u.is_empty())
+                    .collect();
                 self.podcasts = podcasts;
                 self.load_online_icons(icon_urls)
             }
-            PodcastEvent::EpisodesLoaded { podcast_id, episodes } => {
+            PodcastEvent::EpisodesLoaded {
+                podcast_id,
+                episodes,
+            } => {
                 if self.selected_podcast == Some(podcast_id) {
                     self.podcast_episodes = episodes;
                 }
@@ -214,8 +232,11 @@ impl AppModel {
                 self.podcast_search_loading = false;
                 match result {
                     Ok(results) => {
-                        let icon_urls: Vec<String> =
-                            results.iter().map(|r| r.image.clone()).filter(|u| !u.is_empty()).collect();
+                        let icon_urls: Vec<String> = results
+                            .iter()
+                            .map(|r| r.image.clone())
+                            .filter(|u| !u.is_empty())
+                            .collect();
                         self.podcast_search_results = results;
                         self.podcast_search_error = None;
                         self.load_online_icons(icon_urls)
@@ -233,13 +254,16 @@ impl AppModel {
                     self.podcast_add_open = false;
                     self.podcast_add_error = None;
                     self.podcast_search_results.clear();
-                    let toast =
-                        self.push_toast(widget::toaster::Toast::new(fl!("toast-podcast-subscribed", name = title)));
+                    let toast = self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-podcast-subscribed",
+                        name = title
+                    )));
                     Task::batch([self.load_podcasts(), toast])
                 }
-                Err(e) => {
-                    self.push_toast(widget::toaster::Toast::new(fl!("toast-podcast-subscribe-failed", reason = e)))
-                }
+                Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
+                    "toast-podcast-subscribe-failed",
+                    reason = e
+                ))),
             },
             PodcastEvent::Refreshed { id, result } => {
                 self.refreshing_podcasts.remove(&id);
@@ -253,34 +277,46 @@ impl AppModel {
                         };
                         Task::batch([reload_task, episodes_task])
                     }
-                    Err(e) => {
-                        self.push_toast(widget::toaster::Toast::new(fl!("toast-podcast-refresh-failed", reason = e)))
-                    }
+                    Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-podcast-refresh-failed",
+                        reason = e
+                    ))),
                 }
             }
             PodcastEvent::Unsubscribed { result } => match result {
                 Ok(()) => self.load_podcasts(),
-                Err(e) => self
-                    .push_toast(widget::toaster::Toast::new(fl!("toast-podcast-unsubscribe-failed", reason = e))),
+                Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
+                    "toast-podcast-unsubscribe-failed",
+                    reason = e
+                ))),
             },
             PodcastEvent::Downloaded { episode_id, result } => {
                 self.downloading_episodes.remove(&episode_id);
                 match result {
                     Ok(path) => {
-                        if let Some(ep) = self.podcast_episodes.iter_mut().find(|e| e.id == episode_id) {
+                        if let Some(ep) = self
+                            .podcast_episodes
+                            .iter_mut()
+                            .find(|e| e.id == episode_id)
+                        {
                             ep.downloaded_path = path;
                         }
                         Task::none()
                     }
-                    Err(e) => {
-                        self.push_toast(widget::toaster::Toast::new(fl!("toast-episode-download-failed", reason = e)))
-                    }
+                    Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-episode-download-failed",
+                        reason = e
+                    ))),
                 }
             }
             PodcastEvent::DownloadDeleted { episode_id, result } => {
                 match result {
                     Ok(()) => {
-                        if let Some(ep) = self.podcast_episodes.iter_mut().find(|e| e.id == episode_id) {
+                        if let Some(ep) = self
+                            .podcast_episodes
+                            .iter_mut()
+                            .find(|e| e.id == episode_id)
+                        {
                             ep.downloaded_path = String::new();
                         }
                     }
@@ -343,7 +379,11 @@ impl AppModel {
 
     fn refresh_all_podcasts(&mut self) -> Task<cosmic::Action<Message>> {
         let ids: Vec<i64> = self.podcasts.iter().map(|p| p.id).collect();
-        Task::batch(ids.into_iter().map(|id| self.refresh_podcast(id)).collect::<Vec<_>>())
+        Task::batch(
+            ids.into_iter()
+                .map(|id| self.refresh_podcast(id))
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// Unsubscribe from a podcast: drop it from the in-memory list right
@@ -396,7 +436,10 @@ impl AppModel {
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
-            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::SearchResults { generation, result }))
+            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::SearchResults {
+                generation,
+                result,
+            }))
         })
     }
 
@@ -405,7 +448,10 @@ impl AppModel {
     /// marked fully played (a finished episode restarts from the top).
     fn play_episode(&mut self, episode_id: i64) -> Task<cosmic::Action<Message>> {
         let already_current = self.current_podcast_episode_id == Some(episode_id)
-            && self.current_track.as_ref().is_some_and(|t| &*t.provider_id == "podcast");
+            && self
+                .current_track
+                .as_ref()
+                .is_some_and(|t| &*t.provider_id == "podcast");
         if already_current {
             if let Some(player) = &mut self.player {
                 let _ = player.toggle_playback();
@@ -416,7 +462,12 @@ impl AppModel {
         let Some(podcast_id) = self.selected_podcast else {
             return Task::none();
         };
-        let Some(episode) = self.podcast_episodes.iter().find(|e| e.id == episode_id).cloned() else {
+        let Some(episode) = self
+            .podcast_episodes
+            .iter()
+            .find(|e| e.id == episode_id)
+            .cloned()
+        else {
             return Task::none();
         };
         let Some(show) = self.podcasts.iter().find(|p| p.id == podcast_id) else {
@@ -466,7 +517,11 @@ impl AppModel {
     /// Toggle an episode's played marker. Updates the in-memory copy
     /// immediately (instant UI feedback) and persists in the background.
     fn toggle_episode_played(&mut self, episode_id: i64) -> Task<cosmic::Action<Message>> {
-        let Some(episode) = self.podcast_episodes.iter_mut().find(|e| e.id == episode_id) else {
+        let Some(episode) = self
+            .podcast_episodes
+            .iter_mut()
+            .find(|e| e.id == episode_id)
+        else {
             return Task::none();
         };
         episode.played = !episode.played;
@@ -476,7 +531,12 @@ impl AppModel {
     }
 
     fn download_episode(&mut self, episode_id: i64) -> Task<cosmic::Action<Message>> {
-        let Some(episode) = self.podcast_episodes.iter().find(|e| e.id == episode_id).cloned() else {
+        let Some(episode) = self
+            .podcast_episodes
+            .iter()
+            .find(|e| e.id == episode_id)
+            .cloned()
+        else {
             return Task::none();
         };
         if !self.downloading_episodes.insert(episode.id) {
@@ -487,7 +547,12 @@ impl AppModel {
     }
 
     fn delete_episode_download(&mut self, episode_id: i64) -> Task<cosmic::Action<Message>> {
-        let Some(episode) = self.podcast_episodes.iter().find(|e| e.id == episode_id).cloned() else {
+        let Some(episode) = self
+            .podcast_episodes
+            .iter()
+            .find(|e| e.id == episode_id)
+            .cloned()
+        else {
             return Task::none();
         };
         if episode.downloaded_path.is_empty() {
@@ -501,7 +566,10 @@ impl AppModel {
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
-            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::DownloadDeleted { episode_id, result }))
+            cosmic::Action::App(Message::PodcastEvent(PodcastEvent::DownloadDeleted {
+                episode_id,
+                result,
+            }))
         })
     }
 }

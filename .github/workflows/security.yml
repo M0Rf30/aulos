@@ -1,0 +1,73 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Fetch full history for better advisory detection
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo-audit
+        # Ignores mirror deny.toml: all are transitive, unmaintained/unsound
+        # crates pinned by libcosmic/iced git dependencies we do not control.
+        #   RUSTSEC-2024-0436 paste (unmaintained)
+        #   RUSTSEC-2026-0206 rustybuzz (unmaintained)
+        #   RUSTSEC-2026-0192 ttf-parser (unmaintained)
+        #   RUSTSEC-2026-0253 lru 0.16 via cryoglyph (unsound, no fixed release in pinned rev)
+        #   RUSTSEC-2026-0186 memmap2 0.8 via xkbcommon (unsound advise/flush APIs, unused by us)
+        run: >-
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2024-0436
+          --ignore RUSTSEC-2026-0206
+          --ignore RUSTSEC-2026-0192
+          --ignore RUSTSEC-2026-0253
+          --ignore RUSTSEC-2026-0186
+
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check

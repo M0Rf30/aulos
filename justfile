@@ -9,6 +9,10 @@ rootdir := ''
 prefix := '/usr'
 # The location of the cargo target directory.
 cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
+# Binary to install. Defaults to a `lyra` binary next to the justfile (as shipped
+# in release tarballs), falling back to the cargo release build. Override with
+# `just bin-src=/path/to/lyra install`.
+bin-src := if path_exists(justfile_directory() / name) == 'true' { justfile_directory() / name } else { cargo-target-dir / 'release' / name }
 
 # Application's appstream metadata
 appdata := appid + '.metainfo.xml'
@@ -60,7 +64,7 @@ run *args:
 
 # Installs files
 install:
-    install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
+    install -Dm0755 {{bin-src}} {{bin-dst}}
     install -Dm0644 {{ 'resources' / desktop }} {{desktop-dst}}
     install -Dm0644 {{ 'resources' / appdata }} {{appdata-dst}}
     install -Dm0644 resources/icons/hicolor/scalable/apps/{{appid}}.svg {{icon-svg-dst}}/{{appid}}.svg

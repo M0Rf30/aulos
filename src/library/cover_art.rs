@@ -21,7 +21,10 @@ impl CoverArt {
         let pictures = probed.tags.pictures;
 
         // Prefer front cover, but take any picture.
-        let pic = pictures.iter().find(|p| p.is_front_cover).or_else(|| pictures.first())?;
+        let pic = pictures
+            .iter()
+            .find(|p| p.is_front_cover)
+            .or_else(|| pictures.first())?;
 
         Some(pic.data.clone())
     }

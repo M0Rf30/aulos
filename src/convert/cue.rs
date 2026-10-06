@@ -31,7 +31,9 @@ pub enum CueError {
     NoTracks,
     #[error("invalid INDEX timestamp on line {line}: {text:?}")]
     BadTimestamp { line: usize, text: String },
-    #[error("track {track}'s INDEX 01 doesn't come after the previous track's; CUE indexes must increase")]
+    #[error(
+        "track {track}'s INDEX 01 doesn't come after the previous track's; CUE indexes must increase"
+    )]
     OutOfOrder { track: u32 },
 }
 
@@ -92,10 +94,11 @@ pub fn parse(input: &str) -> Result<Vec<CueTrack>, CueError> {
                     if index_number == Some("01")
                         && let Some(ts) = timestamp
                     {
-                        b.start = Some(parse_timestamp(ts).ok_or_else(|| CueError::BadTimestamp {
-                            line: lineno + 1,
-                            text: ts.to_owned(),
-                        })?);
+                        b.start =
+                            Some(parse_timestamp(ts).ok_or_else(|| CueError::BadTimestamp {
+                                line: lineno + 1,
+                                text: ts.to_owned(),
+                            })?);
                     }
                 }
             }
@@ -112,7 +115,9 @@ pub fn parse(input: &str) -> Result<Vec<CueTrack>, CueError> {
     let starts: Vec<Duration> = tracks.iter().map(|t| t.start.unwrap_or_default()).collect();
     for i in 1..starts.len() {
         if starts[i] < starts[i - 1] {
-            return Err(CueError::OutOfOrder { track: tracks[i].number });
+            return Err(CueError::OutOfOrder {
+                track: tracks[i].number,
+            });
         }
     }
     Ok(tracks
@@ -215,7 +220,10 @@ FILE "animals.flac" WAVE
 
     #[test]
     fn rejects_sheet_with_no_tracks() {
-        assert!(matches!(parse("REM nothing here\n"), Err(CueError::NoTracks)));
+        assert!(matches!(
+            parse("REM nothing here\n"),
+            Err(CueError::NoTracks)
+        ));
     }
 
     #[test]
@@ -227,6 +235,9 @@ FILE "animals.flac" WAVE
     #[test]
     fn rejects_out_of_order_track_indexes() {
         let sheet = "TRACK 01 AUDIO\nINDEX 01 02:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\n";
-        assert!(matches!(parse(sheet), Err(CueError::OutOfOrder { track: 2 })));
+        assert!(matches!(
+            parse(sheet),
+            Err(CueError::OutOfOrder { track: 2 })
+        ));
     }
 }

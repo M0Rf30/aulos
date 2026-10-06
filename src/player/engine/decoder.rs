@@ -663,7 +663,6 @@ mod tests {
         assert_eq!(error.0, "Too many consecutive DSD decoder resets");
     }
 
-
     /// Manual repro harness (network-dependent, not run in CI): opens a
     /// real public Icecast/Shoutcast live stream exactly the way
     /// `PlaySource::LiveStream::open_decoder` does (blocking GET +
@@ -725,7 +724,11 @@ mod tests {
             .header("Icy-MetaData", "1")
             .send()
             .expect("connect");
-        eprintln!("status={} headers={:#?}", response.status(), response.headers());
+        eprintln!(
+            "status={} headers={:#?}",
+            response.status(),
+            response.headers()
+        );
         let metadata_interval =
             icy_metadata::IcyHeaders::parse_from_headers(response.headers()).metadata_interval();
         eprintln!("icy metadata_interval={metadata_interval:?}");
@@ -738,15 +741,12 @@ mod tests {
 
         let mut decoder = match metadata_interval {
             Some(interval) => {
-                let reader = icy_metadata::IcyMetadataReader::new(
-                    counting,
-                    Some(interval),
-                    |metadata| {
+                let reader =
+                    icy_metadata::IcyMetadataReader::new(counting, Some(interval), |metadata| {
                         if let Ok(m) = metadata {
                             eprintln!("ICY title: {:?}", m.stream_title());
                         }
-                    },
-                );
+                    });
                 SymphoniaDecoder::open_stream(reader, None).expect("open_stream")
             }
             None => SymphoniaDecoder::open_stream(counting, None).expect("open_stream"),
@@ -775,8 +775,14 @@ mod tests {
                     total_samples += n as u64;
                 }
                 Err(e) => {
-                    eprintln!("[{:>7.3}s] decoder.read() -> Err({e})", start.elapsed().as_secs_f64());
-                    panic!("live stream decode error after {:.1}s: {e}", start.elapsed().as_secs_f64());
+                    eprintln!(
+                        "[{:>7.3}s] decoder.read() -> Err({e})",
+                        start.elapsed().as_secs_f64()
+                    );
+                    panic!(
+                        "live stream decode error after {:.1}s: {e}",
+                        start.elapsed().as_secs_f64()
+                    );
                 }
             }
         }

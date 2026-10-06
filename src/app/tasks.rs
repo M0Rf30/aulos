@@ -22,10 +22,9 @@ pub(super) fn refresh_podcast_task(id: i64, feed_url: String) -> Task<cosmic::Ac
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::PodcastEvent(super::podcast_page::PodcastEvent::Refreshed {
-            id,
-            result,
-        }))
+        cosmic::Action::App(Message::PodcastEvent(
+            super::podcast_page::PodcastEvent::Refreshed { id, result },
+        ))
     })
 }
 
@@ -95,10 +94,9 @@ pub(super) fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Mes
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::PodcastEvent(super::podcast_page::PodcastEvent::Downloaded {
-            episode_id,
-            result,
-        }))
+        cosmic::Action::App(Message::PodcastEvent(
+            super::podcast_page::PodcastEvent::Downloaded { episode_id, result },
+        ))
     })
 }
 
@@ -122,12 +120,14 @@ pub(super) fn resolve_and_play_radio(
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-        cosmic::Action::App(Message::RadioEvent(super::radio_page::RadioEvent::StreamResolved {
-            name,
-            favicon,
-            key,
-            result,
-        }))
+        cosmic::Action::App(Message::RadioEvent(
+            super::radio_page::RadioEvent::StreamResolved {
+                name,
+                favicon,
+                key,
+                result,
+            },
+        ))
     })
 }
 
@@ -135,7 +135,10 @@ pub(super) fn resolve_and_play_radio(
 /// [`crate::mpris::extract_art_url`] parses tags and writes to an on-disk
 /// cache synchronously — then dispatches `Message::MprisArtResolved` so
 /// `publish_mpris` can republish with the real URL once it resolves.
-pub(super) fn resolve_mpris_art_task(track_id: i64, path: PathBuf) -> Task<cosmic::Action<Message>> {
+pub(super) fn resolve_mpris_art_task(
+    track_id: i64,
+    path: PathBuf,
+) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
         let art_url =
             tokio::task::spawn_blocking(move || crate::mpris::extract_art_url(track_id, &path))
