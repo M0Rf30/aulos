@@ -192,11 +192,16 @@ impl SubsonicProvider {
         // Pre-build the authenticated stream URL so the player can use it
         // directly without needing access to the Subsonic client.
         // Pass transcoding parameters from config if configured.
-        let max_bit_rate = self.config.transcoding_max_bitrate.map(|b| b as i32);
-        let format_ref = self.config.transcoding_format.as_deref();
+        let mut stream_opts = opensubsonic::StreamOptions::new();
+        if let Some(b) = self.config.transcoding_max_bitrate {
+            stream_opts = stream_opts.max_bit_rate(b as i32);
+        }
+        if let Some(f) = self.config.transcoding_format.as_deref() {
+            stream_opts = stream_opts.format(f);
+        }
         let source_uri = self
             .client
-            .stream_url(&child.id, max_bit_rate, format_ref)
+            .stream_url(&child.id, &stream_opts)
             .map(|url| url.to_string())
             .unwrap_or_else(|_| child.id.clone());
 
@@ -300,12 +305,9 @@ impl SubsonicProvider {
         self.client
             .get_album_list2(
                 opensubsonic::AlbumListType::AlphabeticalByName,
-                Some(page_size),
-                Some(offset),
-                None,
-                None,
-                None,
-                None,
+                &opensubsonic::AlbumListOptions::new()
+                    .size(page_size)
+                    .offset(offset),
             )
             .await
             .map_err(subsonic_err("getAlbumList2"))
@@ -483,13 +485,10 @@ impl MusicProvider for SubsonicProvider {
                 .client
                 .search3(
                     &query_owned,
-                    Some(0), // no artists
-                    None,
-                    Some(0), // no albums
-                    None,
-                    Some(50), // up to 50 songs
-                    None,
-                    None,
+                    &opensubsonic::Search3Options::new()
+                        .artist_count(0) // no artists
+                        .album_count(0) // no albums
+                        .song_count(50), // up to 50 songs
                 )
                 .await
                 .map_err(subsonic_err("search3"))?;
@@ -706,7 +705,10 @@ impl MusicProvider for SubsonicProvider {
         let name_owned = new_name.to_string();
         self.block_on(async {
             self.client
-                .update_playlist(&id_owned, Some(&name_owned), None, None, &[], &[])
+                .update_playlist(
+                    &id_owned,
+                    &opensubsonic::UpdatePlaylistOptions::new().name(name_owned.as_str()),
+                )
                 .await
                 .map_err(subsonic_err("updatePlaylist"))
         })
@@ -721,9 +723,11 @@ impl MusicProvider for SubsonicProvider {
         let pid = playlist_id.to_string();
         let ids: Vec<String> = track_ids.to_vec();
         self.block_on(async {
-            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             self.client
-                .update_playlist(&pid, None, None, None, &id_refs, &[])
+                .update_playlist(
+                    &pid,
+                    &opensubsonic::UpdatePlaylistOptions::new().add_songs(ids.iter().cloned()),
+                )
                 .await
                 .map_err(subsonic_err("updatePlaylist"))
         })
@@ -838,7 +842,10 @@ impl MusicProvider for SubsonicProvider {
         self.block_on(async {
             let songs = self
                 .client
-                .get_songs_by_genre(&genre_owned, Some(500), None, None)
+                .get_songs_by_genre(
+                    &genre_owned,
+                    &opensubsonic::SongsByGenreOptions::new().count(500),
+                )
                 .await
                 .map_err(subsonic_err("getSongsByGenre"))?;
 

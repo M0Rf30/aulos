@@ -46,7 +46,7 @@ parking_lot = "0.12"
 mpd_client = "1.4"
 
 # OpenSubsonic/Subsonic API client
-opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "b38f9d8aa36515eab945dff0fe8e932808ee49ad" }
+opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "a43fb76058d4457c6d7d9b824fcdd90025652864" }
 
 # Database for music library
 rusqlite = { version = "0.40", features = ["bundled"] }
