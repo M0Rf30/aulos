@@ -627,6 +627,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "aulos"
+version = "0.1.0"
+dependencies = [
+ "ashpd 0.13.13",
+ "audioadapter-buffers",
+ "chrono",
+ "console-subscriber",
+ "cpal",
+ "criterion",
+ "dirs 7.0.0",
+ "feed-rs",
+ "flacenc",
+ "futures-util",
+ "gl",
+ "glutin",
+ "hound",
+ "i18n-embed",
+ "i18n-embed-fl",
+ "icy-metadata",
+ "image",
+ "keyring-core",
+ "libcosmic",
+ "linux-keyutils-keyring-store",
+ "md5",
+ "mpd_client",
+ "mpris-server",
+ "notify",
+ "open",
+ "opensubsonic",
+ "parking_lot",
+ "pipewire",
+ "projectm",
+ "regex",
+ "reqwest",
+ "rubato",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "walkdir",
+ "zbus",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
 name = "auto_enums"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,57 +4315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aulos"
-version = "0.1.0"
-dependencies = [
- "ashpd 0.13.13",
- "audioadapter-buffers",
- "chrono",
- "console-subscriber",
- "cpal",
- "criterion",
- "dirs 7.0.0",
- "feed-rs",
- "flacenc",
- "futures-util",
- "gl",
- "glutin",
- "hound",
- "i18n-embed",
- "i18n-embed-fl",
- "icy-metadata",
- "image",
- "keyring-core",
- "libcosmic",
- "linux-keyutils-keyring-store",
- "md5",
- "mpd_client",
- "mpris-server",
- "notify",
- "open",
- "opensubsonic",
- "parking_lot",
- "pipewire",
- "projectm",
- "regex",
- "reqwest",
- "rubato",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "symphonia",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "walkdir",
- "zbus",
- "zbus-secret-service-keyring-store",
-]
-
-[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5578,9 +5578,8 @@ dependencies = [
 
 [[package]]
 name = "projectm"
-version = "3.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a81ed6e24cd4ca8ceaa5421127abd1b6a0a1ff9a96c397377dfd4a93e867cabb"
+version = "3.1.3"
+source = "git+https://github.com/M0Rf30/projectm-rs.git?rev=d31e0389d388eff8557132958d1e9ba57d8671ea#d31e0389d388eff8557132958d1e9ba57d8671ea"
 dependencies = [
  "libc",
  "projectm-sys",

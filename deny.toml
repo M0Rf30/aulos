@@ -114,6 +114,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/M0Rf30/Symphonia",
     "https://github.com/M0Rf30/opensubsonic-rs",
+    "https://github.com/M0Rf30/projectm-rs",
     "https://github.com/pop-os/libcosmic",
     "https://github.com/pop-os/winit",
     "https://github.com/pop-os/window_clipboard",

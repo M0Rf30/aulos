@@ -155,6 +155,11 @@ inherits = "release"
 debug = true
 strip = false
 
+# projectm 3.1.2 casts C strings to `*const i8`, which does not compile where
+# `c_char` is `u8` (aarch64 Linux). Fork with the fix, pending upstream
+# https://github.com/projectM-visualizer/projectm-rs/pull/22 — drop once released.
+[patch.crates-io]
+projectm = { git = "https://github.com/M0Rf30/projectm-rs.git", rev = "d31e0389d388eff8557132958d1e9ba57d8671ea" }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']
