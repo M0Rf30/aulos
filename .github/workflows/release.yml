@@ -11,11 +11,12 @@ name: Release
 # keyutils) and glibc only (a GUI app that dlopen()s wayland/GPU libraries
 # cannot be statically linked with musl).
 #
-# Features: the default feature set. The optional `visualizer` feature
-# (ProjectM) is deliberately NOT enabled in release binaries: it statically
-# builds ProjectM from source (needs cmake, clang/libclang, PipeWire and GL
-# development packages), adds a PipeWire/GL runtime requirement, and lengthens
-# the build considerably. It stays a build-from-source option.
+# Features: release binaries are built with `--features visualizer`, so the
+# ProjectM visualizer ships enabled. It builds ProjectM statically from source
+# (hence cmake/clang/libclang and the GL headers) and captures MPD audio through
+# PipeWire, so the binary links libpipewire-0.3 and needs GL/EGL at runtime.
+# `tokio-console` is deliberately left out: it replaces normal logging with a
+# debug server on port 6669 and is only meant for local debugging.
 on:
   push:
     tags:
@@ -24,9 +25,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FEATURES: visualizer
   # Native libraries needed by libcosmic
-  # (wayland/xkbcommon/fontconfig/freetype/expat) and cpal (ALSA). Verified on
-  # Ubuntu 24.04.
+  # (wayland/xkbcommon/fontconfig/freetype/expat), cpal (ALSA) and the
+  # `visualizer` feature (ProjectM build: cmake/clang/libclang/GL/EGL/X11;
+  # MPD capture: PipeWire/SPA). Verified on Ubuntu 24.04.
   APT_DEPS: >-
     pkg-config
     libxkbcommon-dev
@@ -35,6 +38,14 @@ env:
     libfreetype-dev
     libexpat1-dev
     libasound2-dev
+    libpipewire-0.3-dev
+    libspa-0.2-dev
+    clang
+    libclang-dev
+    cmake
+    libgl-dev
+    libegl-dev
+    libx11-dev
 
 # Two concurrent releases would race onto the same GitHub Release's asset list.
 concurrency:
@@ -100,10 +111,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked --features "$FEATURES" -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --features "$FEATURES"
 
   build:
     name: Build (${{ matrix.target }})
@@ -140,7 +151,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features "$FEATURES"
 
       # The tarball unpacks to aulos-<version>-<target>/ with the binary next to
       # the justfile, so `sudo just install` works from inside the extracted

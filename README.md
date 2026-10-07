@@ -50,8 +50,8 @@ The extracted directory contains the `aulos` binary, `LICENSE`, `README.md`, the
 ### Runtime Requirements
 
 - COSMIC desktop environment (or any compatible Wayland desktop)
+- PipeWire client library (`libpipewire-0.3`) and OpenGL/EGL drivers — prebuilt binaries ship with the ProjectM visualizer enabled
 - Optional: `ffmpeg` for lossy audio conversion
-- For visualizer support: OpenGL libraries
 
 ### Building from Source
 
@@ -72,11 +72,13 @@ cargo build --release
 
 ### Optional Features
 
+Prebuilt binaries are built with `--features visualizer`. From source:
+
 ```bash
-# Enable visualizer support
+# Enable visualizer support (same as the release binaries)
 cargo build --release --features visualizer
 
-# Enable tokio-console for debugging
+# Enable tokio-console for debugging (replaces normal log output)
 cargo build --release --features tokio-console
 ```
 

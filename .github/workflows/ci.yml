@@ -13,9 +13,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Same feature set as release binaries (see release.yml).
+  FEATURES: visualizer
   # Native libraries needed by libcosmic
-  # (wayland/xkbcommon/fontconfig/freetype/expat) and cpal (ALSA). Verified on
-  # Ubuntu 24.04.
+  # (wayland/xkbcommon/fontconfig/freetype/expat), cpal (ALSA) and the
+  # `visualizer` feature (ProjectM build: cmake/clang/libclang/GL/EGL/X11;
+  # MPD capture: PipeWire/SPA). Verified on Ubuntu 24.04.
   APT_DEPS: >-
     pkg-config
     libxkbcommon-dev
@@ -24,6 +27,14 @@ env:
     libfreetype-dev
     libexpat1-dev
     libasound2-dev
+    libpipewire-0.3-dev
+    libspa-0.2-dev
+    clang
+    libclang-dev
+    cmake
+    libgl-dev
+    libegl-dev
+    libx11-dev
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -56,7 +67,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked --features "$FEATURES" -- -D warnings
 
   test:
     name: Test Suite
@@ -79,7 +90,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --features "$FEATURES"
 
   build:
     name: Build (${{ matrix.target }})
@@ -112,7 +123,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features "$FEATURES"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
