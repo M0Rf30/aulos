@@ -154,35 +154,26 @@ impl AppModel {
     /// single-song MPD queue, `repeat 1` would otherwise loop that one
     /// song forever and `is_finished()` would never fire, silently
     /// freezing playback on the current track.
+    ///
+    /// Sent as one command list: one round trip, and no other client can
+    /// interleave commands between `clear` and `play`.
     pub(super) fn dispatch_mpd_play(&self, uri: String) -> Task<cosmic::Action<Message>> {
+        use mpd_client::commands::{
+            Add, ClearQueue, Play, SetRandom, SetRepeat, SetSingle, SingleMode,
+        };
         if let Some(client) = self.mpd_client() {
             self.dispatch_mpd(async move {
                 client
-                    .command(mpd_client::commands::ClearQueue)
-                    .await
-                    .map_err(|e| format!("MPD clear: {e}"))?;
-                client
-                    .command(mpd_client::commands::Add::uri(&uri))
-                    .await
-                    .map_err(|e| format!("MPD add: {e}"))?;
-                client
-                    .command(mpd_client::commands::SetRandom(false))
-                    .await
-                    .map_err(|e| format!("MPD set_random: {e}"))?;
-                client
-                    .command(mpd_client::commands::SetRepeat(false))
-                    .await
-                    .map_err(|e| format!("MPD set_repeat: {e}"))?;
-                client
-                    .command(mpd_client::commands::SetSingle(
-                        mpd_client::commands::SingleMode::Disabled,
+                    .command_list((
+                        ClearQueue,
+                        Add::uri(&uri),
+                        SetRandom(false),
+                        SetRepeat(false),
+                        SetSingle(SingleMode::Disabled),
+                        Play::current(),
                     ))
                     .await
-                    .map_err(|e| format!("MPD set_single: {e}"))?;
-                client
-                    .command(mpd_client::commands::Play::current())
-                    .await
-                    .map_err(|e| format!("MPD play: {e}"))?;
+                    .map_err(|e| format!("MPD play {uri}: {e}"))?;
                 Ok(())
             })
         } else {

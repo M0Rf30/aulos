@@ -28,20 +28,16 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-/// Filter-expression construction that works around a bug in
-/// `mpd_client::filter::Filter`'s own escaping: its internal
-/// `escape_filter_value` replaces `"` with `\\"` (backslash, backslash,
-/// quote) and never escapes `\` at all, so any tag value containing a
-/// literal `"` or `\` produces a malformed `find`/`list` command that MPD
-/// rejects (verified against a live MPD 0.24 server).
+/// Filter-expression construction. `mpd_client::filter::Filter` escaped
+/// values incorrectly before elomatreb/mpd_client#27 (`"` broke the command,
+/// `\` was dropped); this module predates that fix and is kept because it
+/// also feeds [`FilterQuery`] (`search`, which the crate has no typed
+/// command for).
 ///
-/// Instead of routing values through `Filter`, this module renders the
-/// filter expression text ourselves with correct *filter-level* escaping
-/// (`\` -> `\\`, then `"` -> `\"`) and hands the resulting string to
-/// `mpd_protocol::command::Command::argument`, which applies the normal
-/// *argument-level* escaping used for every other command argument. The
-/// two escaping passes compose correctly by construction; see the
-/// `filter_expr` tests below for the exact wire bytes this produces.
+/// Values get *filter-level* escaping here (`\` -> `\\`, then `"` -> `\"`);
+/// `mpd_protocol::command::Command::argument` then applies the normal
+/// *argument-level* escaping. See the `filter_expr` tests for the exact wire
+/// bytes.
 mod filter_expr {
     /// Filter-level escaping for a value embedded in a filter expression.
     /// Order matters: backslashes must be doubled before quotes are
@@ -67,17 +63,35 @@ mod filter_expr {
     }
 }
 
-/// `find <filterexpr>` sent with a filter expression built by
-/// [`filter_expr`], as a plain, correctly-escaped argument — replacement
-/// for `mpd_client::commands::Find` + `mpd_client::filter::Filter` (see
-/// `filter_expr` module docs for why).
-struct FindExpr(String);
+/// `find <filterexpr>` / `search <filterexpr>` with an expression built by
+/// [`filter_expr`]. `search` is the case-insensitive variant; `mpd_client`
+/// has no typed command for it.
+struct FilterQuery {
+    command: &'static str,
+    expr: String,
+}
 
-impl Command for FindExpr {
+impl FilterQuery {
+    fn find(expr: String) -> Self {
+        Self {
+            command: "find",
+            expr,
+        }
+    }
+
+    fn search(expr: String) -> Self {
+        Self {
+            command: "search",
+            expr,
+        }
+    }
+}
+
+impl Command for FilterQuery {
     type Response = Vec<responses::Song>;
 
     fn command(&self) -> RawCommand {
-        RawCommand::new("find").argument(self.0.as_str())
+        RawCommand::new(self.command).argument(self.expr.as_str())
     }
 
     fn response(self, frame: Frame) -> Result<Self::Response, responses::TypedResponseError> {
@@ -88,6 +102,53 @@ impl Command for FindExpr {
         // `responses::Song::from_frame_multi` internally) — only its
         // (unused) `command()` differs.
         commands::ListAllIn::root().response(frame)
+    }
+}
+
+/// `commands`: the commands this connection may run. Used to detect
+/// sticker support — a server without a sticker database omits `sticker`
+/// here, while `sticker get` itself fails with "sticker database is
+/// disabled", not "unknown command".
+struct AvailableCommands;
+
+impl Command for AvailableCommands {
+    type Response = Vec<String>;
+
+    fn command(&self) -> RawCommand {
+        RawCommand::new("commands")
+    }
+
+    fn response(self, frame: Frame) -> Result<Self::Response, responses::TypedResponseError> {
+        Ok(frame
+            .into_iter()
+            .filter(|(key, _)| &**key == "command")
+            .map(|(_, value)| value)
+            .collect())
+    }
+}
+
+/// `getvol` (MPD 0.23): `Some(volume)`, or `None` when MPD has no mixer.
+/// `Status::volume` reports `0` in both "muted" and "no mixer" cases, so
+/// this disambiguates a `0`.
+pub struct GetVolume;
+
+impl Command for GetVolume {
+    type Response = Option<u8>;
+
+    fn command(&self) -> RawCommand {
+        RawCommand::new("getvol")
+    }
+
+    fn response(self, frame: Frame) -> Result<Self::Response, responses::TypedResponseError> {
+        frame
+            .into_iter()
+            .find(|(key, _)| &**key == "volume")
+            .map(|(_, value)| {
+                value
+                    .parse()
+                    .map_err(|_| responses::TypedResponseError::invalid_value("volume", value))
+            })
+            .transpose()
     }
 }
 
@@ -273,19 +334,18 @@ impl MpdProvider {
     /// from this connection is intentionally dropped — we don't need idle
     /// events from the command connection.
     ///
-    /// Also probes sticker support by attempting a harmless `sticker get`.
+    /// Also probes sticker support via `commands`.
     pub async fn connect_command(&self) -> Result<(), ProviderError> {
         let (client, _events) = self.open_connection().await?;
 
-        // Probe sticker support: try a harmless sticker get on a nonexistent URI.
-        // If the server returns an error about unknown command, stickers are disabled.
-        let stickers_ok = match client.command(StickerGet::new("", "probe")).await {
-            Ok(_) => true,
+        // Sticker support: `commands` lists `sticker` only when MPD has a
+        // sticker database. Older servers without `commands` permission are
+        // treated as unsupported.
+        let stickers_ok = match client.command(AvailableCommands).await {
+            Ok(cmds) => cmds.iter().any(|c| c == "sticker"),
             Err(e) => {
-                let msg = format!("{e}");
-                // "unknown command" means stickers disabled; any other error
-                // (e.g., "no such sticker") means the command itself is supported.
-                !msg.contains("unknown command")
+                tracing::warn!("MPD `commands` failed, assuming no stickers: {e}");
+                false
             }
         };
         self.stickers_supported
@@ -380,7 +440,7 @@ impl MpdProvider {
 
         for album_name in album_names {
             let expr = filter_expr::eq("Album", album_name);
-            let songs = match client.command(FindExpr(expr)).await {
+            let songs = match client.command(FilterQuery::find(expr)).await {
                 Ok(songs) => songs,
                 Err(e) => {
                     tracing::warn!("MPD find failed for album {album_name:?}: {e}");
@@ -634,7 +694,7 @@ impl MusicProvider for MpdProvider {
                         filter_expr::eq("AlbumArtist", artist_name),
                     ]);
                     let songs = client
-                        .command(FindExpr(expr))
+                        .command(FilterQuery::find(expr))
                         .await
                         .map_err(mpd_err("find"))?;
 
@@ -692,11 +752,11 @@ impl MusicProvider for MpdProvider {
         self.block_on(async {
             let client = self.get_client().await?;
 
-            // Use the `any` pseudo-tag with `contains` operator to search
-            // across all metadata fields (Title, Artist, Album, etc.).
+            // `any contains` searches every tag; `search` (unlike `find`)
+            // matches case-insensitively.
             let expr = filter_expr::contains("any", &query_owned);
             let songs = client
-                .command(FindExpr(expr))
+                .command(FilterQuery::search(expr))
                 .await
                 .map_err(mpd_err("search"))?;
 
@@ -959,11 +1019,13 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("sticker find favorite"))?;
 
-            let mut tracks = Vec::with_capacity(results.value.len());
-            for uri in results.value.keys() {
+            let mut uris: Vec<&String> = results.value.keys().collect();
+            uris.sort();
+            let mut tracks = Vec::with_capacity(uris.len());
+            for uri in uris {
                 // Look up each song's metadata
                 let expr = filter_expr::eq("file", uri.as_str());
-                if let Ok(songs) = client.command(FindExpr(expr)).await {
+                if let Ok(songs) = client.command(FilterQuery::find(expr)).await {
                     for song in &songs {
                         let mut track = song_to_track(&self.provider_id, song);
                         track.is_favorite = true;
@@ -997,7 +1059,7 @@ impl MusicProvider for MpdProvider {
             let client = self.get_client().await?;
             let expr = filter_expr::eq("Genre", &genre_owned);
             let songs = client
-                .command(FindExpr(expr))
+                .command(FilterQuery::find(expr))
                 .await
                 .map_err(mpd_err("find genre"))?;
 
@@ -1195,15 +1257,16 @@ mod tests {
     }
 
     #[test]
-    fn find_expr_command_matches_a_raw_command_built_the_same_way() {
+    fn filter_query_commands_match_raw_commands_built_the_same_way() {
         // `Command::command` must hand the whole expression to
         // `RawCommand::argument` as a single plain argument (letting the
         // protocol layer's own argument escaping apply) rather than
         // re-escaping it or embedding it unescaped.
         let expr = filter_expr::eq("Album", "\"Clic\"");
-        let actual = FindExpr(expr.clone()).command();
-        let expected = RawCommand::new("find").argument(expr.as_str());
-        assert_eq!(actual, expected);
+        let find = FilterQuery::find(expr.clone()).command();
+        assert_eq!(find, RawCommand::new("find").argument(expr.as_str()));
+        let search = FilterQuery::search(expr.clone()).command();
+        assert_eq!(search, RawCommand::new("search").argument(expr.as_str()));
     }
 
     #[test]

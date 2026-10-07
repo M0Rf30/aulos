@@ -322,12 +322,25 @@ fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
                             IDLE_INTERVAL
                         };
 
+                        // `Status::volume` is 0 both when muted and when MPD
+                        // has no mixer; only then ask `getvol` (0.23+), which
+                        // returns nothing without a mixer. Pre-0.23 servers
+                        // reject `getvol`: keep the 0.
+                        let volume = if status.volume == 0 {
+                            client
+                                .command(crate::provider::mpd::GetVolume)
+                                .await
+                                .unwrap_or(Some(0))
+                        } else {
+                            Some(status.volume)
+                        };
+
                         _ = emitter
                             .send(Message::MpdStatusUpdate {
                                 position: status.elapsed.unwrap_or(Duration::ZERO),
                                 duration: status.duration.unwrap_or(Duration::ZERO),
                                 state,
-                                volume: status.volume as f32 / 100.0,
+                                volume: volume.map(|v| f32::from(v) / 100.0),
                                 song,
                             })
                             .await;

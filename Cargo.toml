@@ -42,8 +42,12 @@ audioadapter-buffers = "5.2"
 # type is fixed by `Player`/`App`'s existing `std::sync::Mutex` signature.
 parking_lot = "0.12"
 
-# MPD protocol client
-mpd_client = "1.4"
+# MPD protocol client. Pinned to the `aulos` branch of the M0Rf30 fork, which
+# merges the fixes submitted upstream (elomatreb/mpd_client#26-#33): argument
+# and filter escaping, every idle `changed:` line, MPD 0.24 `status`
+# (`consume oneshot`, `updating_db`), `stats` without a DB, `album_art`
+# returning `None`. Switch back to crates.io once they're released.
+mpd_client = { git = "https://github.com/M0Rf30/mpd_client.git", rev = "49b12544278f6f149bbde8d74bf8d7d907653803" }
 
 # OpenSubsonic/Subsonic API client
 opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "a43fb76058d4457c6d7d9b824fcdd90025652864" }

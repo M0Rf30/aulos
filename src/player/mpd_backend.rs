@@ -62,17 +62,21 @@ impl MpdBackend {
     }
 
     /// Update cached status from a polled `MpdStatusUpdate` message.
+    /// `volume` is `None` when MPD has no mixer; the cached value is kept
+    /// rather than reported as 0.
     pub fn update_status(
         &mut self,
         position: Duration,
         duration: Duration,
         state: PlaybackState,
-        volume: f32,
+        volume: Option<f32>,
     ) {
         self.position = position;
         self.duration = duration;
         self.state = state;
-        self.volume = volume;
+        if let Some(volume) = volume {
+            self.volume = volume;
+        }
     }
 
     /// Mark the backend as having been actively playing, without going

@@ -292,7 +292,8 @@ pub enum Message {
         position: Duration,
         duration: Duration,
         state: PlaybackState,
-        volume: f32,
+        /// `None` when MPD has no mixer (volume unknown).
+        volume: Option<f32>,
         song: Option<Track>,
     },
     /// An async MPD command failed — log and let the next poll self-correct.
