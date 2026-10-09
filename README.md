@@ -41,7 +41,7 @@ The name comes from the *aulos*, the double pipe of ancient Greece.
 
 The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capable fork) to decode and [cpal](https://github.com/RustAudio/cpal) for output.
 
-- **Formats**: FLAC, MP3, Ogg Vorbis, Opus, AAC/M4A, ALAC, WAV, AIFF, APE, WavPack, Musepack, CAF and DSF/DFF, plus the audio in MP4, WebM and MKA files.
+- **Formats**: FLAC, MP3, Ogg Vorbis, Opus (including multichannel family 3), AAC/M4A (including AAC-LD/ELD and raw ADIF), ALAC, WAV, AIFF, APE, WavPack (including hybrid lossless with a `.wvc` correction file), Musepack, CAF and DSF/DFF, plus the audio in MP4, WebM, MKA, FLV, MPEG-TS and MPEG-PS files. Seeking is sample-accurate and chained Ogg streams report their full duration.
 - **DSD**: sent bit-exact as DoP (DSD over PCM) to DACs that support it, otherwise converted to PCM.
 - **Gapless** playback and **crossfade** with an adjustable length.
 - **ReplayGain**: Off, Track, Album or Auto mode, read from file tags.

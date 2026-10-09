@@ -25,9 +25,13 @@ use symphonia::core::codecs::audio::{
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
+use symphonia::core::formats::well_known::FORMAT_ID_OGG;
+use symphonia::core::formats::{
+    FormatId, FormatOptions, FormatReader, MediaInfo, SeekMode, SeekTo, SeekedTo, TrackType,
+};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 // DSD codec type (from the Symphonia fork's `dsd` feature).
 use symphonia::default::formats::CODEC_TYPE_DSD;
@@ -149,6 +153,9 @@ pub struct SymphoniaDecoder {
     channel_data_layout: Option<ChannelDataLayout>,
     bit_order: Option<BitOrder>,
     uses_pcm_conversion: bool,
+    /// Pending sample-accurate seek: decoded frames before the requested timestamp are
+    /// discarded.
+    seek_skip: Option<SeekSkip>,
 }
 
 const MAX_CONSECUTIVE_DSD_RESETS: usize = 1024;
@@ -159,21 +166,24 @@ enum DsdPacketEvent<T> {
     End,
 }
 
-fn next_dsd_packet<T>(
-    track_id: u32,
-    mut next_event: impl FnMut() -> Result<DsdPacketEvent<T>>,
-    mut reset: impl FnMut(),
+/// Pull the next packet of the current DSD track, handling resets via `reset` (which may
+/// change the track id, hence it is re-read from `state` for every packet).
+fn next_dsd_packet<S, T>(
+    state: &mut S,
+    track_id: impl Fn(&S) -> u32,
+    mut next_event: impl FnMut(&mut S) -> Result<DsdPacketEvent<T>>,
+    mut reset: impl FnMut(&mut S) -> Result<()>,
 ) -> Result<Option<T>> {
     let mut consecutive_resets = 0;
 
     loop {
-        match next_event()? {
+        match next_event(state)? {
             DsdPacketEvent::Packet {
                 track_id: packet_track_id,
                 packet,
             } => {
                 consecutive_resets = 0;
-                if packet_track_id == track_id {
+                if packet_track_id == track_id(state) {
                     return Ok(Some(packet));
                 }
             }
@@ -184,10 +194,142 @@ fn next_dsd_packet<T>(
                         "Too many consecutive DSD decoder resets".to_owned(),
                     ));
                 }
-                reset();
+                reset(state)?;
             }
             DsdPacketEvent::End => return Ok(None),
         }
+    }
+}
+
+/// `FormatOptions` for probing the local file `path`: a WavPack `.wv` gets its sibling `.wvc`
+/// correction file attached (hybrid lossless); everything else gets the defaults. Never use
+/// for streams/remote sources.
+pub fn local_file_format_options(path: &Path) -> FormatOptions {
+    let opts = FormatOptions::default();
+    let is_wv = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("wv"));
+    if is_wv {
+        symphonia::default::formats::wavpack_with_sibling_correction(path, opts)
+    } else {
+        opts
+    }
+}
+
+/// How often a seek is repeated after the demuxer returned `ResetRequired` (a time seek that
+/// crosses into another link of a chained Ogg stream switches links and asks for a reset; the
+/// repeated seek then completes inside the new link).
+pub(crate) const MAX_SEEK_RESETS: u32 = 2;
+
+/// Something that can seek and be rebuilt after a reset (the decoder; a mock in tests).
+pub(crate) trait ResettableSeek {
+    fn try_seek(&mut self, time: Time) -> std::result::Result<SeekedTo, SymphoniaError>;
+    fn rebuild_after_reset(&mut self) -> std::result::Result<(), SymphoniaError>;
+}
+
+impl ResettableSeek for SymphoniaDecoder {
+    fn try_seek(&mut self, time: Time) -> std::result::Result<SeekedTo, SymphoniaError> {
+        // The track id is read on every attempt: it changes when the reset switched links.
+        self.reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time,
+                track_id: Some(self.track_id),
+            },
+        )
+    }
+
+    fn rebuild_after_reset(&mut self) -> std::result::Result<(), SymphoniaError> {
+        self.reinit_after_reset()
+    }
+}
+
+/// Seek, and on `ResetRequired` rebuild and repeat the same seek, at most `max_resets` times.
+pub(crate) fn seek_with_resets<T: ResettableSeek + ?Sized>(
+    target: &mut T,
+    time: Time,
+    max_resets: u32,
+) -> std::result::Result<SeekedTo, SymphoniaError> {
+    let mut resets = 0;
+    loop {
+        match target.try_seek(time) {
+            Err(SymphoniaError::ResetRequired) if resets < max_resets => {
+                resets += 1;
+                target.rebuild_after_reset()?;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Duration in seconds of a whole chained Ogg stream, if the reader describes one (media info
+/// with a nanosecond timebase). `None` for anything else, so the per-track duration is used.
+#[must_use]
+pub fn chain_duration_secs(format: FormatId, media_info: &MediaInfo) -> Option<f64> {
+    if format != FORMAT_ID_OGG {
+        return None;
+    }
+    let tb = media_info.time_base?;
+    if tb.numer.get() != 1 || tb.denom.get() != 1_000_000_000 {
+        return None;
+    }
+    tb.calc_duration(media_info.duration?)
+        .map(|t| t.as_secs_f64())
+}
+
+/// Convert a span of `ticks` of timebase `tb` into frames at `rate` Hz (rounded to nearest).
+fn ticks_to_frames(ticks: u64, tb: TimeBase, rate: u32) -> u64 {
+    let denom = u128::from(tb.denom.get());
+    let num = u128::from(ticks) * u128::from(tb.numer.get()) * u128::from(rate);
+    u64::try_from((num + denom / 2) / denom).unwrap_or(u64::MAX)
+}
+
+/// Frames to drop after a seek so playback starts exactly at the requested timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SeekSkip {
+    /// The timestamp playback must start at, in the track timebase.
+    required: Timestamp,
+    /// Upper bound of frames to discard: the announced distance plus one second.
+    budget: u64,
+}
+
+impl SeekSkip {
+    /// `None` when nothing has to be discarded (landed exactly on, or after, the target).
+    pub(crate) fn new(
+        required: Timestamp,
+        actual: Timestamp,
+        tb: Option<TimeBase>,
+        rate: u32,
+    ) -> Option<Self> {
+        let tb = tb?;
+        let gap = required.duration_from(actual)?;
+        if gap.is_zero() {
+            return None;
+        }
+        let budget = ticks_to_frames(gap.get(), tb, rate).saturating_add(u64::from(rate));
+        Some(Self { required, budget })
+    }
+
+    /// Account for one decoded buffer of `decoded_frames` frames whose first valid frame is at
+    /// `valid_start`. Returns how many leading frames to discard and whether the target has
+    /// been reached.
+    pub(crate) fn advance(
+        &mut self,
+        valid_start: Timestamp,
+        decoded_frames: usize,
+        tb: TimeBase,
+        rate: u32,
+    ) -> (usize, bool) {
+        let gap = match self.required.duration_from(valid_start) {
+            Some(gap) if !gap.is_zero() => gap,
+            _ => return (0, true),
+        };
+        let gap_frames = ticks_to_frames(gap.get(), tb, rate);
+        let skip = gap_frames.min(decoded_frames as u64).min(self.budget);
+        self.budget -= skip;
+        let reached = gap_frames <= decoded_frames as u64 || self.budget == 0;
+        (skip as usize, reached)
     }
 }
 
@@ -203,7 +345,8 @@ impl SymphoniaDecoder {
             .map_err(|e| PlayerError(format!("Failed to open file: {e}")))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-        Self::from_media_source(mss, hint)
+        // A local WavPack `.wv` picks up a sibling `.wvc` (hybrid lossless).
+        Self::from_media_source(mss, hint, local_file_format_options(path))
     }
 
     /// Open an arbitrary seekable byte source for decoding — e.g. a remote
@@ -231,7 +374,7 @@ impl SymphoniaDecoder {
         let source = ReadSeekMediaSource::new(reader, byte_len);
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-        Self::from_media_source(mss, hint)
+        Self::from_media_source(mss, hint, FormatOptions::default())
     }
 
     /// Convenience wrapper over [`Self::open_reader`] for aulos's own
@@ -263,21 +406,20 @@ impl SymphoniaDecoder {
         let source = StreamMediaSource::new(reader);
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-        Self::from_media_source(mss, hint)
+        Self::from_media_source(mss, hint, FormatOptions::default())
     }
 
     /// Shared probe + track-selection + decoder-construction logic used by
     /// both [`Self::open`] and [`Self::open_reader`], so it's written once
     /// regardless of where the bytes come from.
-    fn from_media_source(mss: MediaSourceStream<'static>, hint: Hint) -> Result<Self> {
+    fn from_media_source(
+        mss: MediaSourceStream<'static>,
+        hint: Hint,
+        format_opts: FormatOptions,
+    ) -> Result<Self> {
         // Probe the media source.
         let reader = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                mss,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+            .probe(&hint, mss, format_opts, MetadataOptions::default())
             .map_err(|e| PlayerError(format!("Failed to probe format: {e}")))?;
 
         // Find the default audio track.
@@ -308,19 +450,30 @@ impl SymphoniaDecoder {
         let channel_data_layout = audio.channel_data_layout;
         let bit_order = audio.bit_order;
 
-        // Calculate total duration from the track frame count and timebase.
-        let total_duration = match (track.num_frames, time_base) {
-            (Some(n_frames), Some(tb)) => tb
-                .calc_time(Timestamp::new(n_frames as i64))
-                .map(|t| t.as_secs_f64()),
-            _ => None,
-        };
+        // Total duration. A chained Ogg stream reports the whole chain's duration at the media
+        // level (the track only describes the first link); otherwise use the track frame
+        // count and timebase.
+        let total_duration = chain_duration_secs(reader.format_info().format, reader.media_info())
+            .or_else(|| match (track.num_frames, time_base) {
+                (Some(n_frames), Some(tb)) => tb
+                    .calc_time(Timestamp::new(n_frames as i64))
+                    .map(|t| t.as_secs_f64()),
+                _ => None,
+            });
 
         // Create decoder in pass-through mode (no PCM conversion).
         // PCM conversion can be enabled later if needed.
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(audio, &AudioDecoderOptions::default())
             .map_err(|e| PlayerError(format!("Failed to create decoder: {e}")))?;
+
+        // The decoder may report a different output rate than the container (explicitly
+        // signalled HE-AAC decodes at twice the AAC core rate). Raw DSD keeps the DSD rate.
+        let sample_rate = if codec_id == CODEC_TYPE_DSD {
+            sample_rate
+        } else {
+            decoder.codec_params().sample_rate.unwrap_or(sample_rate)
+        };
 
         Ok(Self {
             reader,
@@ -337,6 +490,7 @@ impl SymphoniaDecoder {
             channel_data_layout,
             bit_order,
             uses_pcm_conversion: false,
+            seek_skip: None,
         })
     }
 
@@ -428,7 +582,9 @@ impl SymphoniaDecoder {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break, // End of stream.
                 Err(SymphoniaError::ResetRequired) => {
-                    self.decoder.reset();
+                    self.reinit_after_reset().map_err(|e| {
+                        PlayerError(format!("Failed to reinitialise after stream change: {e}"))
+                    })?;
                     continue;
                 }
                 Err(SymphoniaError::IoError(e))
@@ -447,9 +603,10 @@ impl SymphoniaDecoder {
                 continue;
             }
 
-            // Calculate instantaneous bitrate from the packet.
+            // Calculate instantaneous bitrate from the packet (full block duration, not the
+            // trimmed one, so trimmed edge packets don't spike the figure).
             if let Some(tb) = self.time_base
-                && let Some(time) = tb.calc_time(Timestamp::new(packet.dur.get() as i64))
+                && let Some(time) = tb.calc_time(Timestamp::new(packet.block_dur().get() as i64))
             {
                 let duration_secs = time.as_secs_f64();
                 if duration_secs > 0.0 {
@@ -486,14 +643,21 @@ impl SymphoniaDecoder {
             }
 
             // Copy decoded audio as interleaved f32 into the reusable buffer.
+            let frames = decoded.frames();
+            let rate = decoded.spec().rate();
+            let channel_count = decoded.spec().channels().count();
             decoded.copy_to_vec_interleaved(&mut self.sample_buf);
-            self.sample_pos = 0;
+            // After a seek, drop the frames in front of the requested position.
+            let skip_frames = self.seek_skip_frames(&packet, frames, rate);
+            self.sample_pos = (skip_frames * channel_count).min(self.sample_buf.len());
         }
 
         Ok(samples_written)
     }
 
-    /// Seek to `position` seconds from the start of the track.
+    /// Seek to `position` seconds from the start of the track. Sample-accurate: the demuxer
+    /// lands at or before the target (Opus/MKV even start a pre-roll earlier) and the
+    /// frames before the requested timestamp are discarded by [`Self::read`].
     pub fn seek(&mut self, position: f64) -> Result<()> {
         if position < 0.0 {
             return Err(PlayerError("Invalid seek position".to_owned()));
@@ -502,20 +666,112 @@ impl SymphoniaDecoder {
         let time = Time::try_from_secs_f64(position)
             .ok_or_else(|| PlayerError("Invalid seek position".to_owned()))?;
 
-        self.reader
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )
+        // The demuxer may need a reset to complete the seek (a time seek into another link of
+        // a chained Ogg stream): re-read the tracks, re-create the decoder, repeat the seek.
+        self.seek_skip = None;
+        let seeked = seek_with_resets(self, time, MAX_SEEK_RESETS)
             .map_err(|e| PlayerError(format!("Seek failed: {e}")))?;
 
         self.decoder.reset();
         self.sample_buf.clear();
         self.sample_pos = 0;
 
+        // Raw (pass-through) DSD is not decoded here, so there is nothing to discard.
+        let raw_dsd = self.codec_id == CODEC_TYPE_DSD && !self.uses_pcm_conversion;
+        self.seek_skip = (!raw_dsd).then_some(seeked).and_then(|s| {
+            SeekSkip::new(s.required_ts, s.actual_ts, self.time_base, self.sample_rate)
+        });
+
+        Ok(())
+    }
+
+    /// Number of leading frames of the just-decoded `packet` to discard to honour a pending
+    /// sample-accurate seek, updating (and eventually clearing) the seek state.
+    fn seek_skip_frames(&mut self, packet: &Packet, frames: usize, rate: u32) -> usize {
+        let Some(tb) = self.time_base else {
+            self.seek_skip = None;
+            return 0;
+        };
+        let Some(skip) = self.seek_skip.as_mut() else {
+            return 0;
+        };
+        // `pts` is the start of the decoded block; `trim_start` frames (encoder delay /
+        // pre-roll flagged by the demuxer) are already removed from the decoded buffer.
+        let valid_start = packet.pts.saturating_add(packet.trim_start);
+        let (n, done) = skip.advance(valid_start, frames, tb, rate);
+        if done {
+            self.seek_skip = None;
+        }
+        n
+    }
+
+    /// Re-read the track list after the demuxer returned `ResetRequired` (a new link of a
+    /// chained Ogg stream, ...) and re-create the decoder for the default audio track.
+    fn reinit_after_reset(&mut self) -> std::result::Result<(), SymphoniaError> {
+        let (track_id, time_base, audio) =
+            {
+                let track = self.reader.default_track(TrackType::Audio).ok_or(
+                    SymphoniaError::Unsupported("no audio track after stream reset"),
+                )?;
+                let audio = match track.codec_params.as_ref() {
+                    Some(CodecParameters::Audio(audio)) => audio.clone(),
+                    _ => {
+                        return Err(SymphoniaError::Unsupported(
+                            "no audio codec parameters after stream reset",
+                        ));
+                    }
+                };
+                (track.id, track.time_base, audio)
+            };
+
+        let is_dsd = audio.codec == CODEC_TYPE_DSD;
+        let keep_pcm = self.uses_pcm_conversion && is_dsd;
+        let mut params = audio.clone();
+        if keep_pcm {
+            // `sample_rate` is the PCM output rate while DSD-to-PCM conversion is active.
+            params.extra_data = Some(self.sample_rate.to_le_bytes().to_vec().into_boxed_slice());
+        }
+        let decoder = symphonia::default::get_codecs()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())?;
+
+        // Pass-through DSD keeps the container (DSD) rate, which DoP needs.
+        let new_rate = if keep_pcm {
+            self.sample_rate
+        } else if is_dsd {
+            audio.sample_rate.unwrap_or(self.sample_rate)
+        } else {
+            decoder
+                .codec_params()
+                .sample_rate
+                .or(audio.sample_rate)
+                .unwrap_or(self.sample_rate)
+        };
+        let new_channels = audio.channels.as_ref().map(|c| c.count() as u8);
+        if new_rate != self.sample_rate || (new_channels.is_some() && new_channels != self.channels)
+        {
+            // The output was opened for the first link's format and cannot follow.
+            tracing::warn!(
+                "stream format changed mid-stream: {} Hz/{:?} ch -> {} Hz/{:?} ch",
+                self.sample_rate,
+                self.channels,
+                new_rate,
+                new_channels
+            );
+        }
+
+        self.decoder = decoder;
+        self.track_id = track_id;
+        self.time_base = time_base;
+        self.codec_id = audio.codec;
+        self.sample_rate = new_rate;
+        self.channels = new_channels;
+        self.channel_data_layout = audio.channel_data_layout;
+        self.bit_order = audio.bit_order;
+        self.uses_pcm_conversion = keep_pcm;
+        self.sample_buf.clear();
+        self.sample_pos = 0;
+        self.seek_skip = None;
+        self.current_bitrate = None;
         Ok(())
     }
 
@@ -559,29 +815,29 @@ impl SymphoniaDecoder {
     pub fn read_dsd_raw(&mut self, buffer: &mut Vec<u8>) -> Result<usize> {
         buffer.clear();
 
-        let track_id = self.track_id;
-        let packet = {
-            let reader = &mut self.reader;
-            let decoder = &mut self.decoder;
-            next_dsd_packet(
-                track_id,
-                || match reader.next_packet() {
-                    Ok(Some(packet)) => Ok(DsdPacketEvent::Packet {
-                        track_id: packet.track_id,
-                        packet,
-                    }),
-                    Ok(None) => Ok(DsdPacketEvent::End),
-                    Err(SymphoniaError::IoError(e))
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                    {
-                        Ok(DsdPacketEvent::End)
-                    }
-                    Err(SymphoniaError::ResetRequired) => Ok(DsdPacketEvent::Reset),
-                    Err(e) => Err(PlayerError(format!("Failed to read DSD packet: {e}"))),
-                },
-                || decoder.reset(),
-            )
-        }?;
+        let packet = next_dsd_packet(
+            self,
+            |d| d.track_id,
+            |d| match d.reader.next_packet() {
+                Ok(Some(packet)) => Ok(DsdPacketEvent::Packet {
+                    track_id: packet.track_id,
+                    packet,
+                }),
+                Ok(None) => Ok(DsdPacketEvent::End),
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    Ok(DsdPacketEvent::End)
+                }
+                Err(SymphoniaError::ResetRequired) => Ok(DsdPacketEvent::Reset),
+                Err(e) => Err(PlayerError(format!("Failed to read DSD packet: {e}"))),
+            },
+            |d| {
+                d.reinit_after_reset().map_err(|e| {
+                    PlayerError(format!("Failed to reinitialise after stream change: {e}"))
+                })
+            },
+        )?;
 
         let Some(packet) = packet else {
             return Ok(0);
@@ -629,22 +885,23 @@ mod tests {
     fn dsd_packet_skip_loop_handles_many_events() {
         let mut skipped = 100_000;
         let packet = next_dsd_packet(
-            1,
-            || {
-                if skipped == 0 {
+            &mut skipped,
+            |_| 1,
+            |skipped| {
+                if *skipped == 0 {
                     Ok(DsdPacketEvent::Packet {
                         track_id: 1,
                         packet: 7,
                     })
                 } else {
-                    skipped -= 1;
+                    *skipped -= 1;
                     Ok(DsdPacketEvent::Packet {
                         track_id: 2,
                         packet: 0,
                     })
                 }
             },
-            || {},
+            |_| Ok(()),
         )
         .unwrap();
 
@@ -654,13 +911,44 @@ mod tests {
     #[test]
     fn dsd_packet_skip_loop_rejects_repeated_resets() {
         let error = next_dsd_packet(
-            1,
-            || Ok::<_, PlayerError>(DsdPacketEvent::<()>::Reset),
-            || {},
+            &mut (),
+            |_| 1,
+            |_| Ok::<_, PlayerError>(DsdPacketEvent::<()>::Reset),
+            |_| Ok(()),
         )
         .unwrap_err();
 
         assert_eq!(error.0, "Too many consecutive DSD decoder resets");
+    }
+
+    #[test]
+    fn dsd_reset_can_change_the_track_id() {
+        // After the reset the track id is 5; packets of the old id 1 must be skipped.
+        let mut state = (1u32, 0u32);
+        let packet = next_dsd_packet(
+            &mut state,
+            |s| s.0,
+            |s| {
+                s.1 += 1;
+                Ok(match s.1 {
+                    1 => DsdPacketEvent::Reset,
+                    2 => DsdPacketEvent::Packet {
+                        track_id: 1,
+                        packet: 0,
+                    },
+                    _ => DsdPacketEvent::Packet {
+                        track_id: 5,
+                        packet: 9,
+                    },
+                })
+            },
+            |s| {
+                s.0 = 5;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(packet, Some(9));
     }
 
     /// Manual repro harness (network-dependent, not run in CI): opens a
@@ -790,5 +1078,212 @@ mod tests {
             "OK: still streaming after {:.1}s ({iterations} read() calls, {total_samples} samples)",
             start.elapsed().as_secs_f64()
         );
+    }
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use symphonia::core::errors::SeekErrorKind;
+
+    type SeekResult = std::result::Result<SeekedTo, SymphoniaError>;
+
+    fn seeked(required: i64, actual: i64) -> SeekedTo {
+        SeekedTo {
+            track_id: 0,
+            required_ts: Timestamp::new(required),
+            actual_ts: Timestamp::new(actual),
+        }
+    }
+
+    /// Scripted reader: each seek pops the next result; records the targets and rebuilds.
+    struct Mock {
+        results: VecDeque<SeekResult>,
+        seeks: Vec<Time>,
+        rebuilds: u32,
+        rebuild_fails: bool,
+    }
+
+    impl Mock {
+        fn new(results: Vec<SeekResult>) -> Self {
+            Self {
+                results: results.into(),
+                seeks: Vec::new(),
+                rebuilds: 0,
+                rebuild_fails: false,
+            }
+        }
+    }
+
+    impl ResettableSeek for Mock {
+        fn try_seek(&mut self, time: Time) -> SeekResult {
+            self.seeks.push(time);
+            self.results.pop_front().expect("unexpected extra seek")
+        }
+
+        fn rebuild_after_reset(&mut self) -> std::result::Result<(), SymphoniaError> {
+            self.rebuilds += 1;
+            if self.rebuild_fails {
+                Err(SymphoniaError::Unsupported("no track"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn seek_without_reset_does_not_rebuild() {
+        let mut m = Mock::new(vec![Ok(seeked(10, 8))]);
+        let t = Time::from_millis(1500);
+        let got = seek_with_resets(&mut m, t, MAX_SEEK_RESETS).unwrap();
+        assert_eq!(got.actual_ts, Timestamp::new(8));
+        assert_eq!(m.rebuilds, 0);
+        assert_eq!(m.seeks, vec![t]);
+    }
+
+    #[test]
+    fn reset_rebuilds_and_repeats_the_same_seek() {
+        let mut m = Mock::new(vec![Err(SymphoniaError::ResetRequired), Ok(seeked(10, 10))]);
+        let t = Time::from_millis(90_000);
+        assert!(seek_with_resets(&mut m, t, MAX_SEEK_RESETS).is_ok());
+        assert_eq!(m.rebuilds, 1);
+        assert_eq!(m.seeks, vec![t, t], "the very same target must be retried");
+    }
+
+    #[test]
+    fn endless_resets_are_bounded() {
+        let mut m = Mock::new(vec![
+            Err(SymphoniaError::ResetRequired),
+            Err(SymphoniaError::ResetRequired),
+            Err(SymphoniaError::ResetRequired),
+        ]);
+        let err = seek_with_resets(&mut m, Time::from_millis(1), 2).unwrap_err();
+        assert!(matches!(err, SymphoniaError::ResetRequired));
+        assert_eq!(m.rebuilds, 2);
+        assert_eq!(m.seeks.len(), 3);
+    }
+
+    #[test]
+    fn other_errors_pass_through_without_rebuild() {
+        let mut m = Mock::new(vec![Err(SymphoniaError::SeekError(
+            SeekErrorKind::OutOfRange,
+        ))]);
+        let err = seek_with_resets(&mut m, Time::from_millis(1), 2).unwrap_err();
+        assert!(matches!(
+            err,
+            SymphoniaError::SeekError(SeekErrorKind::OutOfRange)
+        ));
+        assert_eq!(m.rebuilds, 0);
+    }
+
+    #[test]
+    fn rebuild_failure_aborts_the_seek() {
+        let mut m = Mock::new(vec![Err(SymphoniaError::ResetRequired)]);
+        m.rebuild_fails = true;
+        let err = seek_with_resets(&mut m, Time::from_millis(1), 2).unwrap_err();
+        assert!(matches!(err, SymphoniaError::Unsupported(_)));
+        assert_eq!(m.seeks.len(), 1);
+    }
+
+    fn tb(denom: u32) -> TimeBase {
+        TimeBase::try_new(1, denom).unwrap()
+    }
+
+    #[test]
+    fn skips_the_seek_pre_roll_exactly() {
+        // Matroska audio (timebase 1/rate): 200 ms pre-roll before the requested timestamp.
+        let rate = 48_000;
+        let required = 5 * 48_000 + 123;
+        let actual = required - 9_600;
+        let mut skip = SeekSkip::new(
+            Timestamp::new(required),
+            Timestamp::new(actual),
+            Some(tb(rate)),
+            rate,
+        )
+        .unwrap();
+        let mut skipped = 0;
+        let mut reached = false;
+        for i in 0..64 {
+            let pts = Timestamp::new(actual + i * 1152);
+            let (n, done) = skip.advance(pts, 1152, tb(rate), rate);
+            skipped += n;
+            if done {
+                reached = true;
+                break;
+            }
+        }
+        assert_eq!(skipped, 9_600, "exactly required - actual frames");
+        assert!(reached);
+    }
+
+    #[test]
+    fn skips_within_a_packet_after_a_coarse_landing() {
+        let rate = 44_100;
+        let mut skip = SeekSkip::new(
+            Timestamp::new(10_000),
+            Timestamp::new(9_000),
+            Some(tb(rate)),
+            rate,
+        )
+        .unwrap();
+        assert_eq!(
+            skip.advance(Timestamp::new(9_000), 4096, tb(rate), rate),
+            (1_000, true)
+        );
+    }
+
+    #[test]
+    fn nothing_to_skip_when_the_seek_landed_on_or_after_the_target() {
+        let t = Some(tb(48_000));
+        assert!(SeekSkip::new(Timestamp::new(100), Timestamp::new(100), t, 48_000).is_none());
+        assert!(SeekSkip::new(Timestamp::new(100), Timestamp::new(200), t, 48_000).is_none());
+        assert!(SeekSkip::new(Timestamp::new(100), Timestamp::new(0), None, 48_000).is_none());
+    }
+
+    #[test]
+    fn unreliable_timestamps_cannot_swallow_the_stream() {
+        let rate = 48_000;
+        let mut skip = SeekSkip::new(
+            Timestamp::new(48_000),
+            Timestamp::new(38_400),
+            Some(tb(rate)),
+            rate,
+        )
+        .unwrap();
+        let mut skipped = 0usize;
+        for _ in 0..1000 {
+            let (n, done) = skip.advance(Timestamp::new(0), 1024, tb(rate), rate);
+            skipped += n;
+            if done {
+                break;
+            }
+        }
+        assert!(skipped as u64 <= 9_600 + u64::from(rate));
+    }
+
+    fn ns_media_info(secs: u64) -> MediaInfo {
+        let mut mi = MediaInfo::new();
+        mi.with_time_base(TimeBase::try_new(1, 1_000_000_000).unwrap());
+        mi.with_duration(symphonia::core::units::Duration::new(secs * 1_000_000_000));
+        mi
+    }
+
+    #[test]
+    fn ogg_chain_duration_comes_from_media_info() {
+        let d = chain_duration_secs(FORMAT_ID_OGG, &ns_media_info(95)).unwrap();
+        assert!((d - 95.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn chain_duration_is_ogg_and_ns_timebase_only() {
+        use symphonia::core::formats::well_known::FORMAT_ID_FLAC;
+        assert!(chain_duration_secs(FORMAT_ID_FLAC, &ns_media_info(95)).is_none());
+        let mut mi = MediaInfo::new();
+        mi.with_time_base(TimeBase::try_new(1, 48_000).unwrap());
+        mi.with_duration(symphonia::core::units::Duration::new(48_000));
+        assert!(chain_duration_secs(FORMAT_ID_OGG, &mi).is_none());
+        assert!(chain_duration_secs(FORMAT_ID_OGG, &MediaInfo::new()).is_none());
     }
 }

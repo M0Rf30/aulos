@@ -21,12 +21,17 @@ use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
+use symphonia::core::formats::{FormatReader, SeekMode, SeekTo, SeekedTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::units::Time;
+use symphonia::core::packet::Packet;
+use symphonia::core::units::{Time, TimeBase};
 
 use crate::library::tags::{self as track_tags, Picture};
+use crate::player::engine::decoder::{
+    MAX_SEEK_RESETS, ResettableSeek, SeekSkip, chain_duration_secs, local_file_format_options,
+    seek_with_resets,
+};
 use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 
 use super::cue;
@@ -465,6 +470,26 @@ struct AudioSource {
     read_bytes: Arc<AtomicU64>,
     sample_buf: Vec<f32>,
     sample_pos: usize,
+    time_base: Option<TimeBase>,
+    /// Pending sample-accurate seek (frames before the target are discarded).
+    seek_skip: Option<SeekSkip>,
+}
+
+impl ResettableSeek for AudioSource {
+    fn try_seek(&mut self, time: Time) -> Result<SeekedTo, SymphoniaError> {
+        // The track id is read on every attempt: it changes when a reset switched links.
+        self.reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time,
+                track_id: Some(self.track_id),
+            },
+        )
+    }
+
+    fn rebuild_after_reset(&mut self) -> Result<(), SymphoniaError> {
+        self.reinit_after_reset()
+    }
 }
 
 impl AudioSource {
@@ -488,7 +513,8 @@ impl AudioSource {
             .probe(
                 &hint,
                 mss,
-                FormatOptions::default(),
+                // A local WavPack `.wv` picks up a sibling `.wvc` (hybrid lossless).
+                local_file_format_options(path),
                 MetadataOptions::default(),
             )
             .map_err(|e| ConvertError::Decode(format!("probe failed: {e}")))?;
@@ -508,10 +534,20 @@ impl AudioSource {
         let channels = audio.channels.as_ref().map_or(2, |c| c.count() as u16);
         let bits_per_sample = audio.bits_per_sample;
         let total_frames = track.num_frames;
+        let time_base = track.time_base;
 
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(&audio, &AudioDecoderOptions::default())
             .map_err(|e| ConvertError::Decode(format!("no decoder available: {e}")))?;
+
+        // The decoder may report a different output rate than the container (explicitly
+        // signalled HE-AAC decodes at twice the AAC core rate).
+        let sample_rate = decoder.codec_params().sample_rate.unwrap_or(sample_rate);
+
+        // A chained Ogg stream reports the whole chain's duration at the media level.
+        let total_frames = chain_duration_secs(reader.format_info().format, reader.media_info())
+            .map(|secs| (secs * f64::from(sample_rate)).round() as u64)
+            .or(total_frames);
 
         Ok(Self {
             reader,
@@ -525,6 +561,8 @@ impl AudioSource {
             read_bytes,
             sample_buf: Vec::new(),
             sample_pos: 0,
+            time_base,
+            seek_skip: None,
         })
     }
 
@@ -533,18 +571,67 @@ impl AudioSource {
     fn seek(&mut self, secs: f64) -> Result<(), ConvertError> {
         let time = Time::try_from_secs_f64(secs.max(0.0))
             .ok_or_else(|| ConvertError::Decode("invalid seek position".to_owned()))?;
-        self.reader
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )
+        self.seek_skip = None;
+        let seeked = seek_with_resets(self, time, MAX_SEEK_RESETS)
             .map_err(|e| ConvertError::Decode(format!("seek failed: {e}")))?;
         self.decoder.reset();
         self.sample_buf.clear();
         self.sample_pos = 0;
+        // The demuxer lands at or before the target (long pre-roll for Opus/MKV): the frames
+        // before the requested timestamp are discarded by `read`.
+        self.seek_skip = SeekSkip::new(
+            seeked.required_ts,
+            seeked.actual_ts,
+            self.time_base,
+            self.sample_rate,
+        );
+        Ok(())
+    }
+
+    /// Number of leading frames of the just-decoded `packet` to discard to honour a pending
+    /// sample-accurate seek.
+    fn seek_skip_frames(&mut self, packet: &Packet, frames: usize, rate: u32) -> usize {
+        let Some(tb) = self.time_base else {
+            self.seek_skip = None;
+            return 0;
+        };
+        let Some(skip) = self.seek_skip.as_mut() else {
+            return 0;
+        };
+        let valid_start = packet.pts.saturating_add(packet.trim_start);
+        let (n, done) = skip.advance(valid_start, frames, tb, rate);
+        if done {
+            self.seek_skip = None;
+        }
+        n
+    }
+
+    /// Re-read the default audio track and re-create the decoder after the demuxer returned
+    /// `ResetRequired` (a new link of a chained Ogg stream has a new track id). The output
+    /// format negotiated for the first link is kept.
+    fn reinit_after_reset(&mut self) -> Result<(), SymphoniaError> {
+        let (track_id, time_base, audio) =
+            {
+                let track = self.reader.default_track(TrackType::Audio).ok_or(
+                    SymphoniaError::Unsupported("no audio track after stream reset"),
+                )?;
+                let audio = match track.codec_params.as_ref() {
+                    Some(CodecParameters::Audio(audio)) => audio.clone(),
+                    _ => {
+                        return Err(SymphoniaError::Unsupported(
+                            "no audio codec parameters after stream reset",
+                        ));
+                    }
+                };
+                (track.id, track.time_base, audio)
+            };
+        self.decoder = symphonia::default::get_codecs()
+            .make_audio_decoder(&audio, &AudioDecoderOptions::default())?;
+        self.track_id = track_id;
+        self.time_base = time_base;
+        self.sample_buf.clear();
+        self.sample_pos = 0;
+        self.seek_skip = None;
         Ok(())
     }
 
@@ -570,7 +657,9 @@ impl AudioSource {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break,
                 Err(SymphoniaError::ResetRequired) => {
-                    self.decoder.reset();
+                    self.reinit_after_reset().map_err(|e| {
+                        ConvertError::Decode(format!("failed to reinitialise after reset: {e}"))
+                    })?;
                     continue;
                 }
                 Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -597,8 +686,13 @@ impl AudioSource {
                 continue;
             }
 
+            let frames = decoded.frames();
+            let rate = decoded.spec().rate();
+            let channel_count = decoded.spec().channels().count();
             decoded.copy_to_vec_interleaved(&mut self.sample_buf);
-            self.sample_pos = 0;
+            // After a seek, drop the frames in front of the requested position.
+            let skip_frames = self.seek_skip_frames(&packet, frames, rate);
+            self.sample_pos = (skip_frames * channel_count).min(self.sample_buf.len());
         }
 
         Ok(written)
