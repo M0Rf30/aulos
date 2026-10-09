@@ -28,7 +28,7 @@ futures-util = "0.3"
 # out of core) that rodio 0.22 doesn't compile against. Depending on the
 # fork directly (not via `[patch.crates-io]`) sidesteps that conflict
 # entirely, matching the working approach in the sibling `rmpd` project.
-symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "2c160a8a3a01b97ec01f8cb19d487119d67ebe7a", features = [
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "d787e636970492cec3eecdac5b666bb27fedf4bc", features = [
     "all",
     "dsd",
 ] }

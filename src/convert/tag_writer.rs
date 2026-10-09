@@ -463,10 +463,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `crate::library::tags::probe` has a WAV-specific fallback
-    /// (`wav_id3_fallback`) that reads exactly this `id3 ` chunk back via
-    /// Symphonia's own `Id3v2Reader`, since `symphonia-format-riff`'s WAV
-    /// demuxer itself never surfaces it (see that function's doc comment).
+    /// `crate::library::tags::probe` reads this `id3 ` chunk back through the
+    /// fork's WAV demuxer, which surfaces `id3 ` chunks wherever they sit in
+    /// the file (including after `data`).
     /// This test both checks the writer's on-disk byte layout directly
     /// (RIFF size bookkeeping, chunk framing, ID3v2.4 header/frame
     /// structure) and round-trips through the real reader.

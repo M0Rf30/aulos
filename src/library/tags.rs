@@ -15,20 +15,20 @@
 //! output is handled separately by `crate::convert::tag_writer`.
 
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, MediaInfo, Track, TrackType};
+use symphonia::core::formats::{FormatId, MediaInfo, Track, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{
-    Metadata, MetadataOptions, MetadataReader, MetadataRevision, StandardTag, StandardVisualKey,
-    Tag as SymTag, Visual,
+    Metadata, MetadataOptions, MetadataRevision, StandardTag, StandardVisualKey, Tag as SymTag,
+    Visual,
 };
 use symphonia::core::units::Duration as SymDuration;
-use symphonia::default::meta::Id3v2Reader;
+
+use crate::player::engine::decoder::{chain_duration_secs, local_file_format_options};
 
 /// An embedded picture (cover art), as extracted from a tag.
 #[derive(Debug, Clone)]
@@ -111,7 +111,7 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
         .probe(
             &hint,
             mss,
-            FormatOptions::default(),
+            local_file_format_options(path),
             MetadataOptions::default(),
         )
         .ok()?;
@@ -123,27 +123,16 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
             _ => None,
         });
         let sample_rate = audio.and_then(|a| a.sample_rate);
-        let duration = track_duration(track, reader.media_info());
+        let duration = track_duration(track, reader.media_info(), reader.format_info().format);
         let track_id = track.map(|t| u64::from(t.id));
         (duration, sample_rate, track_id)
     };
 
-    let (mut raw_tags, mut pictures, mut visual_bytes) =
+    // The fork's WAV demuxer reads `id3 ` and `LIST INFO` chunks wherever they sit (including
+    // after `data`, where Mp3tag, foobar2000 and `crate::convert::tag_writer` put them), so the
+    // container's own revision already carries them.
+    let (raw_tags, pictures, visual_bytes) =
         drain_metadata(&mut reader.metadata(), want_pictures, track_id);
-
-    // WAV-only fallback: see `wav_id3_fallback`'s docs for why this
-    // fork's own WAV demuxer never surfaces an `id3 ` chunk's tags.
-    // Cheap no-op for every other container (an immediate magic-byte
-    // mismatch inside `find_wav_id3_chunk`).
-    if let Some((id3_tags, id3_pictures, id3_visual_bytes)) = wav_id3_fallback(path, want_pictures)
-    {
-        // Prepended so ID3 wins per-field over whatever the container's
-        // own revision (RIFF INFO) provided — `apply_tags` folds a tag
-        // list by keeping each field's *first* occurrence.
-        raw_tags = id3_tags.into_iter().chain(raw_tags).collect();
-        pictures = id3_pictures.into_iter().chain(pictures).collect();
-        visual_bytes += id3_visual_bytes;
-    }
 
     let bitrate = duration.filter(|d| d.as_secs_f64() > 0.0).map(|d| {
         let audio_bytes = file_size.saturating_sub(visual_bytes);
@@ -166,80 +155,22 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
     })
 }
 
-/// For a RIFF/WAVE file, looks for an `id3 ` (or `ID3 `) top-level chunk
-/// and parses it with Symphonia's own [`Id3v2Reader`] — the fork's WAV
-/// demuxer (`symphonia-format-riff`) recognizes only `fmt `/`LIST`/`fact`/
-/// `data` as chunk types and returns as soon as it parses `data` (see its
-/// `WavReader::try_new`), so a trailing `id3 ` chunk — where
-/// Mp3tag/foobar2000/`crate::convert::tag_writer` all place it — is
-/// otherwise silently skipped as an unknown RIFF chunk and its tags never
-/// reach a `MetadataRevision` at all.
-///
-/// Returns `None` for anything that isn't a RIFF/WAVE file, has no `id3 `
-/// chunk, or whose ID3 payload doesn't parse.
-fn wav_id3_fallback(path: &Path, want_pictures: bool) -> Option<(Vec<SymTag>, Vec<Picture>, u64)> {
-    let mut file = fs::File::open(path).ok()?;
-    let id3_bytes = find_wav_id3_chunk(&mut file)?;
-
-    let cursor = io::Cursor::new(id3_bytes);
-    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-    let mut reader = Id3v2Reader::try_new(mss, MetadataOptions::default()).ok()?;
-    let rev = reader.read_all().ok()?.revision;
-
-    let visual_bytes = rev.media.visuals.iter().map(|v| v.data.len() as u64).sum();
-    let mut pictures = Vec::new();
-    if want_pictures {
-        push_pictures(rev.media.visuals, &mut pictures);
-    }
-    Some((rev.media.tags, pictures, visual_bytes))
-}
-
-/// Finds a top-level `id3 `/`ID3 ` RIFF chunk's raw payload bytes in a
-/// RIFF/WAVE file. Walks the chunk chain by seeking past each chunk's
-/// declared length (plus a pad byte for odd lengths) rather than reading
-/// payloads into memory — `data` in particular can be the entire rest of
-/// a large file, and is never read here just to skip past it.
-fn find_wav_id3_chunk(file: &mut fs::File) -> Option<Vec<u8>> {
-    let file_len = file.metadata().ok()?.len();
-
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let mut riff_header = [0u8; 12];
-    file.read_exact(&mut riff_header).ok()?;
-    if &riff_header[0..4] != b"RIFF" || &riff_header[8..12] != b"WAVE" {
-        return None;
-    }
-    let riff_size = u32::from_le_bytes(riff_header[4..8].try_into().ok()?) as u64;
-    let end = 8u64.checked_add(riff_size)?.min(file_len);
-
-    let mut pos: u64 = 12;
-    loop {
-        if pos.checked_add(8)? > end {
-            return None;
-        }
-        file.seek(SeekFrom::Start(pos)).ok()?;
-        let mut chunk_header = [0u8; 8];
-        file.read_exact(&mut chunk_header).ok()?;
-        let chunk_id = &chunk_header[0..4];
-        let chunk_len = u32::from_le_bytes(chunk_header[4..8].try_into().ok()?) as u64;
-        let data_start = pos.checked_add(8)?;
-
-        if chunk_id.eq_ignore_ascii_case(b"id3 ") {
-            let mut buf = vec![0u8; chunk_len as usize];
-            file.seek(SeekFrom::Start(data_start)).ok()?;
-            file.read_exact(&mut buf).ok()?;
-            return Some(buf);
-        }
-
-        let padded_len = chunk_len.checked_add(chunk_len & 1)?;
-        pos = data_start.checked_add(padded_len)?;
-    }
-}
-
 /// Compute a track's duration, falling back through every level of
 /// precision symphonia exposes: the track's own frame count, then its
 /// declared duration in timebase units, then the reader's overall media
 /// duration (the only value some demuxers ever populate).
-fn track_duration(track: Option<&Track>, media_info: &MediaInfo) -> Option<Duration> {
+fn track_duration(
+    track: Option<&Track>,
+    media_info: &MediaInfo,
+    format: FormatId,
+) -> Option<Duration> {
+    // A chained Ogg stream reports the whole chain's duration at the media level; the track
+    // only describes the first link.
+    if let Some(secs) = chain_duration_secs(format, media_info)
+        && let Ok(d) = Duration::try_from_secs_f64(secs)
+    {
+        return Some(d);
+    }
     let from_track = track.and_then(|t| {
         let tb = t.time_base?;
         let dur = match t.num_frames {
