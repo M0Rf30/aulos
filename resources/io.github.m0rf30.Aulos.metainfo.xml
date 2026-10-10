@@ -27,6 +27,7 @@
     <binary>aulos</binary>
   </provides>
   <releases>
+    <release version="0.5.0" date="2026-10-10" />
     <release version="0.4.0" date="2026-10-10" />
     <release version="0.3.0" date="2026-10-10" />
     <release version="0.2.0" date="2026-10-10" />
