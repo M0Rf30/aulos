@@ -284,19 +284,28 @@ impl AppModel {
             ContextPage::Equalizer => {
                 let save_as = self.save_as_name.clone();
 
-                let eq_content = equalizer::equalizer_view(
-                    &self.config.equalizer_bands,
-                    self.config.equalizer_enabled,
-                    self.config.equalizer_preamp,
-                    &self.all_presets,
-                    self.active_preset_name.as_deref(),
-                    self.eq_dirty,
-                    &self.save_as_name,
-                    &self.autoeq_profiles,
-                    self.autoeq_loading,
-                    &self.autoeq_search,
-                )
-                .map(move |msg| match msg {
+                // MPD plays audio itself, so the local EQ has no effect there.
+                let mpd_active = self
+                    .player
+                    .as_ref()
+                    .is_some_and(|p| p.mpd_backend_ref().is_some());
+                let eq_view = if mpd_active {
+                    equalizer::mpd_unavailable_view()
+                } else {
+                    equalizer::equalizer_view(
+                        &self.config.equalizer_bands,
+                        self.config.equalizer_enabled,
+                        self.config.equalizer_preamp,
+                        &self.all_presets,
+                        self.active_preset_name.as_deref(),
+                        self.eq_dirty,
+                        &self.save_as_name,
+                        &self.autoeq_profiles,
+                        self.autoeq_loading,
+                        &self.autoeq_search,
+                    )
+                };
+                let eq_content = eq_view.map(move |msg| match msg {
                     equalizer::EqualizerMessage::SetBand(i, v) => Message::EqSetBand(i, v),
                     equalizer::EqualizerMessage::ToggleEnabled(e) => Message::EqToggle(e),
                     equalizer::EqualizerMessage::SetPreamp(v) => Message::EqSetPreamp(v),

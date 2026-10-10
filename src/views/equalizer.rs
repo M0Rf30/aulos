@@ -96,6 +96,19 @@ pub fn equalizer_view<'a>(
         .into()
 }
 
+/// Shown instead of the controls while an MPD provider is active: MPD decodes
+/// and outputs audio itself, so Aulos's in-process EQ never touches what the
+/// user hears and its sliders would silently do nothing.
+pub fn mpd_unavailable_view<'a>() -> cosmic::Element<'a, EqualizerMessage> {
+    widget::settings::section()
+        .add(
+            widget::settings::item::builder(fl!("equalizer-unavailable-mpd"))
+                .description(fl!("equalizer-unavailable-mpd-description"))
+                .control(widget::icon::from_name("dialog-information-symbolic").size(24)),
+        )
+        .into()
+}
+
 /// Prominent on/off switch: a whole-row toggle in its own section.
 fn enable_section<'a>(enabled: bool) -> cosmic::Element<'a, EqualizerMessage> {
     let description = if enabled {
