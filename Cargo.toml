@@ -58,6 +58,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Lyrics fetching and AutoEQ profile fetching
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
 icy-metadata = "0.6"
+# Held at 2.x: feed-rs 3.0 drops an item's iTunes media object unless it
+# also carries an itunes title/summary, losing `<itunes:duration>` for
+# many real feeds (and failing podcast::tests). Revisit on 3.x updates.
 feed-rs = "2.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
