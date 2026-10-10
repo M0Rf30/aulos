@@ -297,6 +297,51 @@ pub fn on_color_for(color: [f32; 3]) -> [f32; 3] {
     }
 }
 
+fn relative_luminance(color: [f32; 3]) -> f32 {
+    fn linearize(c: f32) -> f32 {
+        if c <= 0.039_28 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * linearize(color[0]) + 0.7152 * linearize(color[1]) + 0.0722 * linearize(color[2])
+}
+
+impl Accent {
+    /// This accent adjusted to stand out against the window background: on
+    /// a dark theme a deep cover colour (navy, maroon…) is lifted toward
+    /// white until it reaches a minimum luminance, on a light theme a pale
+    /// one is pushed toward black. Hue is preserved; `on_color` is
+    /// recomputed for the adjusted colour.
+    #[must_use]
+    pub fn legible(self, dark_theme: bool) -> Self {
+        const MIN_ON_DARK: f32 = 0.22;
+        const MAX_ON_LIGHT: f32 = 0.35;
+        let target = if dark_theme { [1.0; 3] } else { [0.0; 3] };
+        let ok = |c: [f32; 3]| {
+            let l = relative_luminance(c);
+            if dark_theme {
+                l >= MIN_ON_DARK
+            } else {
+                l <= MAX_ON_LIGHT
+            }
+        };
+        let mut color = self.color;
+        let mut step = 0;
+        while !ok(color) && step < 20 {
+            for i in 0..3 {
+                color[i] += (target[i] - color[i]) * 0.1;
+            }
+            step += 1;
+        }
+        Self {
+            color,
+            on_color: on_color_for(color),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,7 +16,6 @@ use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
-use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(feature = "visualizer")]
@@ -95,60 +94,13 @@ fn play_pause_button<'a, M: Clone + 'static>(
     accent: Option<&Accent>,
 ) -> cosmic::Element<'a, M> {
     let class = accent
-        .map(accent_button_class)
+        .map(common::accent_button_class)
         .unwrap_or(cosmic::theme::Button::Suggested);
     let button = widget::button::icon(widget::icon::from_name(icon_name).size(icon_size))
         .class(class)
+        .padding(cosmic::theme::active().cosmic().spacing.space_s)
         .on_press(on_press);
     widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
-}
-
-/// Button class that fills with the cover-art accent colour instead of the
-/// theme accent, mirroring `Button::Suggested`'s filled/pill shape via
-/// `radius_xl` corners so the play/pause button stays visually consistent
-/// while matching the current artwork. Hover/pressed/disabled states dim
-/// the same fill via alpha rather than deriving separate colours from the
-/// palette.
-fn accent_button_class(accent: &Accent) -> cosmic::theme::Button {
-    let background = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
-    let on = Color::from_rgb(accent.on_color[0], accent.on_color[1], accent.on_color[2]);
-    let style = move |theme: &cosmic::Theme, alpha: f32| cosmic::widget::button::Style {
-        background: Some(Background::Color(Color {
-            a: alpha,
-            ..background
-        })),
-        text_color: Some(on),
-        icon_color: Some(on),
-        border_radius: theme.cosmic().corner_radii.radius_xl.into(),
-        ..cosmic::widget::button::Style::new()
-    };
-    cosmic::theme::Button::Custom {
-        active: Box::new(move |_focused, theme| style(theme, 1.0)),
-        hovered: Box::new(move |_focused, theme| style(theme, 0.85)),
-        pressed: Box::new(move |_focused, theme| style(theme, 0.7)),
-        disabled: Box::new(move |theme| style(theme, 0.5)),
-    }
-}
-
-/// Slider class that tints only the active (played) portion of the rail
-/// and the drag handle with the cover-art accent colour. Starts from
-/// `Slider::Standard`'s own computed style via `Catalog::style` so border,
-/// rail thickness and handle shape stay perfectly in sync with the theme;
-/// only the two accent-carrying fields are overridden.
-fn accent_slider_class(accent: &Accent) -> cosmic::theme::iced::Slider {
-    let color = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
-    let style = move |theme: &cosmic::Theme, status: widget::slider::Status| {
-        let mut base =
-            widget::slider::Catalog::style(theme, &cosmic::theme::iced::Slider::default(), status);
-        base.rail.backgrounds.0 = Background::Color(color);
-        base.handle.background = Background::Color(color);
-        base
-    };
-    cosmic::theme::iced::Slider::Custom {
-        active: Rc::new(move |t| style(t, widget::slider::Status::Active)),
-        hovered: Rc::new(move |t| style(t, widget::slider::Status::Hovered)),
-        dragging: Rc::new(move |t| style(t, widget::slider::Status::Dragged)),
-    }
 }
 
 /// Small "LIVE" pill shown in place of the elapsed/remaining time labels
@@ -215,11 +167,39 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
         .push(collapse_button())
         .align_y(Alignment::Center);
 
+    // A rounded, card-coloured art tile stands in for the cover so the
+    // empty state has the same shape as the playing layout.
+    let art_tile = widget::container(
+        widget::icon::icon(widget::icon::from_name("audio-x-generic-symbolic").handle()).size(96),
+    )
+    .width(Length::Fixed(220.0))
+    .height(Length::Fixed(220.0))
+    .align_x(Horizontal::Center)
+    .align_y(Vertical::Center)
+    .class(cosmic::theme::Container::custom(|theme| {
+        let cosmic = theme.cosmic();
+        let component = &cosmic.background(false).component;
+        cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(component.base.into())),
+            icon_color: Some(component.on_disabled.into()),
+            border: cosmic::iced::Border {
+                radius: cosmic.corner_radii.radius_l.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }));
+
+    let hint = widget::text::body(fl!("expanded-empty-hint")).class(cosmic::theme::Text::Color(
+        cosmic::theme::active().cosmic().palette.neutral_7.into(),
+    ));
+
     let message = widget::Column::new()
-        .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
-        .push(widget::text::title3(fl!("no-track-playing")))
-        .push(widget::text::body(fl!("expanded-empty-hint")))
-        .spacing(space_s)
+        .push(art_tile)
+        .push(widget::Space::new().height(Length::Fixed(space_s)))
+        .push(widget::text::title2(fl!("no-track-playing")))
+        .push(hint)
+        .spacing(space_xxs)
         .align_x(Alignment::Center);
 
     // A real `Slider` has no `disabled()` flag — its `on_change` is a
@@ -321,18 +301,20 @@ fn seek_bar_row<'a>(
     space_s: f32,
     accent: Option<&Accent>,
     is_live: bool,
+    playing: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let seek_widget: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         widget::determinate_linear(0.0).width(Length::Fill).into()
     } else {
-        let mut seek_slider = widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-            .step(0.001_f32)
-            .on_release(NowPlayingMessage::SeekCommit)
-            .width(Length::Fill);
-        if let Some(accent) = accent {
-            seek_slider = seek_slider.class(accent_slider_class(accent));
-        }
-        seek_slider.into()
+        super::seek_bar::smooth_seek(
+            progress,
+            duration,
+            playing,
+            accent.map(|a| Color::from_rgb(a.color[0], a.color[1], a.color[2])),
+            NowPlayingMessage::SeekPreview,
+            NowPlayingMessage::SeekCommit,
+        )
+        .into()
     };
     let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         live_badge()
@@ -366,7 +348,7 @@ fn transport_row<'a>(
     state: PlaybackState,
     shuffle: bool,
     repeat_mode: RepeatMode,
-    space_xxs: f32,
+    _space_xxs: f32,
     accent: Option<&Accent>,
     is_live: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
@@ -392,36 +374,36 @@ fn transport_row<'a>(
     let core = widget::Row::new()
         .push(transport_button(
             "media-skip-backward-symbolic",
-            28,
+            32,
             false,
             fl!("previous"),
             (!is_live).then_some(NowPlayingMessage::Previous),
         ))
         .push(play_pause_button(
             play_icon,
-            36,
+            40,
             play_label,
             NowPlayingMessage::TogglePlayback,
             accent,
         ))
         .push(transport_button(
             "media-playback-stop-symbolic",
-            28,
+            24,
             false,
             fl!("stop"),
             stop_enabled.then_some(NowPlayingMessage::Stop),
         ))
         .push(transport_button(
             "media-skip-forward-symbolic",
-            28,
+            32,
             false,
             fl!("next"),
             (!is_live).then_some(NowPlayingMessage::Next),
         ))
-        .spacing(space_xxs)
+        .spacing(f32::from(cosmic::theme::active().cosmic().spacing.space_xs))
         .align_y(Alignment::Center);
 
-    widget::Row::new()
+    let row = widget::Row::new()
         .push(transport_button(
             shuffle_icon,
             24,
@@ -447,7 +429,11 @@ fn transport_row<'a>(
             fl!("repeat"),
             (!is_live).then_some(NowPlayingMessage::CycleRepeat),
         ))
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Center);
+
+    widget::container(row)
+        .width(Length::Fill)
+        .align_x(Horizontal::Center)
         .into()
 }
 
@@ -553,8 +539,7 @@ fn utility_row<'a>(
         "audio-volume-high-symbolic"
     };
 
-    #[allow(unused_mut)]
-    let mut row = widget::Row::new()
+    widget::Row::new()
         .push(widget::icon::from_name(volume_icon_name).size(20))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
@@ -562,8 +547,32 @@ fn utility_row<'a>(
                 .on_release(NowPlayingMessage::VolumeCommit)
                 .width(Length::Fixed(160.0)),
         )
+        .push(utility_buttons(
+            #[cfg(feature = "visualizer")]
+            visualizer_active,
+            #[cfg(feature = "visualizer")]
+            viz_browser_open,
+            is_queue_open,
+            space_xs,
+        ))
+        .spacing(space_xs)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// The lyrics toggle and the Up Next queue-drawer toggle, plus (visualizer
+/// builds) the visualizer on/off toggle and, while active, the next-preset
+/// and preset-browser-toggle buttons.
+fn utility_buttons<'a>(
+    #[cfg(feature = "visualizer")] visualizer_active: bool,
+    #[cfg(feature = "visualizer")] viz_browser_open: bool,
+    is_queue_open: bool,
+    space_xs: f32,
+) -> cosmic::Element<'a, NowPlayingMessage> {
+    #[allow(unused_mut)]
+    let mut row = widget::Row::new()
         .push(transport_button(
-            "view-list-lyrics-symbolic",
+            "format-justify-left-symbolic",
             24,
             false,
             fl!("lyrics"),
@@ -579,18 +588,21 @@ fn utility_row<'a>(
 
     #[cfg(feature = "visualizer")]
     {
-        let viz_icon = "applications-multimedia-symbolic";
-        row = row.push(
-            widget::button::icon(widget::icon::from_name(viz_icon).size(24))
-                .on_press(NowPlayingMessage::ToggleVisualizer),
-        );
+        row = row.push(transport_button(
+            "applications-multimedia-symbolic",
+            24,
+            visualizer_active,
+            fl!("viz-toggle"),
+            Some(NowPlayingMessage::ToggleVisualizer),
+        ));
         if visualizer_active {
-            row = row.push(
-                widget::button::icon(
-                    widget::icon::from_name("media-skip-forward-symbolic").size(20),
-                )
-                .on_press(NowPlayingMessage::NextPreset),
-            );
+            row = row.push(transport_button(
+                "media-skip-forward-symbolic",
+                20,
+                false,
+                fl!("viz-next-preset"),
+                Some(NowPlayingMessage::NextPreset),
+            ));
             row = row.push(transport_button(
                 "view-grid-symbolic",
                 20,
@@ -602,6 +614,50 @@ fn utility_row<'a>(
     }
 
     row.spacing(space_xs).align_y(Alignment::Center).into()
+}
+
+/// Hero-layout footer: a full-width volume slider flanked by quiet/loud
+/// speaker glyphs (Apple Music style), with the utility buttons centred
+/// beneath it — instead of cramming everything into one wrapping row.
+fn utility_panel<'a>(
+    volume: f32,
+    #[cfg(feature = "visualizer")] visualizer_active: bool,
+    #[cfg(feature = "visualizer")] viz_browser_open: bool,
+    is_queue_open: bool,
+    space_xs: f32,
+    space_s: f32,
+) -> cosmic::Element<'a, NowPlayingMessage> {
+    let volume = volume.clamp(0.0, 1.0);
+    let volume_row = widget::Row::new()
+        .push(widget::icon::from_name("audio-volume-low-symbolic").size(18))
+        .push(
+            widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
+                .step(0.01_f32)
+                .on_release(NowPlayingMessage::VolumeCommit)
+                .width(Length::Fill),
+        )
+        .push(widget::icon::from_name("audio-volume-high-symbolic").size(18))
+        .spacing(space_s)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let buttons = widget::container(utility_buttons(
+        #[cfg(feature = "visualizer")]
+        visualizer_active,
+        #[cfg(feature = "visualizer")]
+        viz_browser_open,
+        is_queue_open,
+        space_xs,
+    ))
+    .width(Length::Fill)
+    .align_x(Horizontal::Center);
+
+    widget::Column::new()
+        .push(volume_row)
+        .push(buttons)
+        .spacing(space_xs)
+        .width(Length::Fill)
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -716,7 +772,7 @@ pub fn expanded_now_playing<'a>(
             }))
             .into()
         } else {
-            widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(36))
+            widget::container(widget::icon::from_name("media-optical-symbolic").size(36))
                 .width(Length::Fixed(48.0))
                 .height(Length::Fixed(48.0))
                 .align_x(Horizontal::Center)
@@ -787,6 +843,7 @@ pub fn expanded_now_playing<'a>(
                 space_s,
                 accent,
                 is_live,
+                state == PlaybackState::Playing && seeking_preview.is_none(),
             ))
             .push(transport_centered)
             .push(utility_full)
@@ -859,45 +916,27 @@ pub fn expanded_now_playing<'a>(
     } else {
         // --- Non-fullscreen: existing 50/50 cover-art + controls split. ---
         let cover_col: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
-            widget::container(
-                widget::icon::icon(handle.clone())
-                    .content_fit(cosmic::iced::ContentFit::Contain)
+            // Square, rounded, elevated artwork sized to the panel (capped
+            // at 480px so it doesn't balloon on large displays). The art is
+            // drawn by `common::cover_art`, which clips the image itself to
+            // rounded corners and casts the shadow from the art's own
+            // bounds rather than from a padded box around it.
+            let handle = handle.clone();
+            widget::responsive(move |size| {
+                let side = (size.width.min(size.height) - 2.0 * space_l).clamp(64.0, 480.0);
+                let radius = cosmic::theme::active().cosmic().corner_radii.radius_l[0];
+                widget::container(common::cover_art(&handle, side, radius, true))
                     .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .padding(space_l)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            // iced has no length that means "percentage of the parent", so a
-            // literal `min(60% height, 480px)` isn't directly expressible:
-            // `Length::Fill` already shrinks the art to whatever the panel's
-            // actual size is on small windows, and `max_width`/`max_height`
-            // caps it from growing arbitrarily large on big displays instead.
-            .max_width(480.0)
-            .max_height(480.0)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .class(cosmic::theme::Container::custom(|theme| {
-                let cosmic = theme.cosmic();
-                cosmic::iced::widget::container::Style {
-                    border: cosmic::iced::Border {
-                        color: Color::TRANSPARENT,
-                        width: 0.0,
-                        radius: cosmic.radius_l().into(),
-                    },
-                    shadow: cosmic::iced::Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
-                        offset: cosmic::iced::Vector::new(0.0, 8.0),
-                        blur_radius: 24.0,
-                    },
-                    ..Default::default()
-                }
-            }))
+                    .height(Length::Fill)
+                    .align_x(Horizontal::Center)
+                    .align_y(Vertical::Center)
+                    .into()
+            })
             .into()
         } else {
             // No artwork for this track: pure theme surface, no hard-coded
             // scrim — matches the "no artwork" rule for the whole view.
-            widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(160))
+            widget::container(widget::icon::from_name("media-optical-symbolic").size(160))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Horizontal::Center)
@@ -954,39 +993,20 @@ pub fn expanded_now_playing<'a>(
                 .height(Length::Fixed(space_xxs)),
         );
 
-        let mut sub_parts: Vec<String> = Vec::new();
-        if !track.artist.is_empty() {
-            sub_parts.push(track.artist.clone());
-        }
-        if !track.album.is_empty() {
-            sub_parts.push(track.album.clone());
-        }
-        if track.year > 0 {
-            sub_parts.push(track.year.to_string());
-        }
-        if !sub_parts.is_empty() {
-            let subtitle_class = if has_backdrop {
-                cosmic::theme::Text::Color(BACKDROP_SUBTEXT)
-            } else {
-                // Pulled from the active theme's palette, not a fixed hex
-                // value — still a "pure theme color" per the rule. `Custom`
-                // takes a bare `fn` pointer (no captures allowed), so this
-                // branch can only read its `theme` argument.
-                cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
-                    color: Some(theme.cosmic().palette.neutral_7.into()),
-                    ..Default::default()
-                })
-            };
-            let subtitle_text = widget::text::body(sub_parts.join(" \u{2022} "))
-                .wrapping(Wrapping::None)
-                .class(subtitle_class);
-            right_col = right_col.push(common::clipped_cell(subtitle_text.into()));
+        if !track.artist.is_empty() || !track.album.is_empty() || track.year > 0 {
+            let line = super::artist_album_line(
+                track,
+                false,
+                has_backdrop.then_some(BACKDROP_SUBTEXT),
+                " \u{2022} ",
+            );
+            right_col = right_col.push(common::clipped_cell(line));
         }
 
         right_col = right_col.push(
             widget::Space::new()
                 .width(Length::Shrink)
-                .height(Length::Fixed(space_m)),
+                .height(Length::Fixed(space_l)),
         );
 
         right_col = right_col.push(seek_bar_row(
@@ -996,12 +1016,13 @@ pub fn expanded_now_playing<'a>(
             space_s,
             accent,
             is_live,
+            state == PlaybackState::Playing && seeking_preview.is_none(),
         ));
 
         right_col = right_col.push(
             widget::Space::new()
                 .width(Length::Shrink)
-                .height(Length::Fixed(space_s)),
+                .height(Length::Fixed(space_m)),
         );
 
         right_col = right_col.push(transport_row(
@@ -1016,10 +1037,10 @@ pub fn expanded_now_playing<'a>(
         right_col = right_col.push(
             widget::Space::new()
                 .width(Length::Shrink)
-                .height(Length::Fixed(space_s)),
+                .height(Length::Fixed(space_l)),
         );
 
-        right_col = right_col.push(utility_row(
+        right_col = right_col.push(utility_panel(
             volume,
             #[cfg(feature = "visualizer")]
             visualizer_active,
@@ -1027,7 +1048,7 @@ pub fn expanded_now_playing<'a>(
             viz_browser_open,
             is_queue_open,
             space_xs,
-            space_xxs,
+            space_s,
         ));
 
         right_col = right_col.push(

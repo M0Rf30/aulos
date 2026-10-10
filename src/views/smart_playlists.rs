@@ -10,6 +10,8 @@ use crate::library::smart_playlist::{
 };
 use crate::views::common;
 use crate::views::list_row_button_class;
+use crate::views::track_row;
+use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::core::Color;
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
@@ -71,6 +73,8 @@ pub enum SmartPlaylistMessage {
     TracksLoaded(Vec<Track>),
     /// Resolved tracks ready for immediate playback (bypasses the detail view).
     PlayResolved(Vec<Track>),
+    /// Jump to another view (artist page).
+    Navigate(crate::views::Route),
 }
 
 /// In-progress edit state for the rules editor: the playlist being built,
@@ -294,7 +298,13 @@ fn order_label(field: OrderField) -> String {
 pub fn smart_playlists_view(
     playlists: &[SmartPlaylist],
 ) -> cosmic::Element<'_, SmartPlaylistMessage> {
-    let mut col = widget::Column::new().spacing(12).padding(16);
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let mut col = widget::Column::new().spacing(spacing.space_s).padding([
+        spacing.space_m,
+        spacing.space_m + 16,
+        0,
+        spacing.space_m,
+    ]);
 
     let header = widget::Row::new()
         .push(widget::Space::new().width(Length::Fill))
@@ -320,10 +330,8 @@ pub fn smart_playlists_view(
 
     for (index, playlist) in playlists.iter().enumerate() {
         let info = widget::Column::new()
-            .push(common::cell_text(playlist.name.as_str()))
-            .push(common::cell_caption(smart_playlist_track_count_label(
-                playlist.track_count,
-            )))
+            .push(common::cell_text(playlist.name.as_str()).font(cosmic::font::semibold()))
+            .push(secondary_caption(smart_playlist_rule_summary(playlist)))
             .spacing(2);
 
         let play_btn = widget::tooltip(
@@ -340,37 +348,90 @@ pub fn smart_playlists_view(
         );
         let delete_btn = widget::tooltip(
             widget::button::icon(widget::icon::from_name("edit-delete-symbolic").size(16))
-                .class(cosmic::theme::Button::Destructive)
                 .on_press(SmartPlaylistMessage::Delete(index)),
             widget::text::caption(fl!("delete-smart-playlist-tooltip")),
             widget::tooltip::Position::Top,
         );
 
-        let icon: cosmic::Element<'_, SmartPlaylistMessage> =
-            widget::icon::from_name("starred-symbolic").size(40).into();
+        let art: cosmic::Element<'_, SmartPlaylistMessage> =
+            common::list_art_icon(None, 52, "starred-symbolic");
 
         let row = widget::button::custom(
             widget::Row::new()
-                .push(icon)
-                .push(common::clipped_cell(info.into()))
+                .push(art)
+                .push(
+                    widget::container(common::clipped_cell(info.into()))
+                        .width(Length::FillPortion(5)),
+                )
+                .push(
+                    widget::container(secondary_caption(smart_playlist_track_count_label(
+                        playlist.track_count,
+                    )))
+                    .width(LIST_TRACKS_WIDTH)
+                    .align_x(Horizontal::Right),
+                )
                 .push(play_btn)
                 .push(edit_btn)
                 .push(delete_btn)
-                .spacing(12)
+                .spacing(16)
+                .height(Length::Fill)
                 .align_y(Alignment::Center)
-                .padding(8),
+                .padding([0, 12]),
         )
         .on_press(SmartPlaylistMessage::Select(index))
         .width(Length::Fill)
+        .height(Length::Fixed(LIST_ROW_HEIGHT))
+        .padding(0)
         .class(list_row_button_class(false));
 
         list = list.push(row);
     }
 
-    col = col
-        .push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    col = col.push(
+        widget::scrollable(
+            widget::container(list)
+                .padding([0, spacing.space_m + 16, spacing.space_m, 0])
+                .width(Length::Fill),
+        )
+        .height(Length::Fill),
+    );
 
     col.into()
+}
+
+/// List row geometry shared with the Albums list.
+const LIST_ROW_HEIGHT: f32 = 68.0;
+const LIST_TRACKS_WIDTH: f32 = 90.0;
+
+/// Caption text dimmed to the theme's secondary colour.
+fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> common::Text<'a> {
+    common::cell_caption(content).class(cosmic::theme::Text::Custom(|theme| {
+        cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().palette.neutral_7.into()),
+            ..Default::default()
+        }
+    }))
+}
+
+/// One-line rule summary: first rule as "Field op value", plus "+N" for the rest.
+fn smart_playlist_rule_summary(playlist: &SmartPlaylist) -> String {
+    let Some(first) = playlist.rules.first() else {
+        return "\u{a0}".to_string();
+    };
+    let mut text = format!("{} {}", field_label(first.field), op_label(first.op));
+    if !first.value.is_empty() {
+        text.push(' ');
+        text.push_str(&first.value);
+        if !first.value2.is_empty() {
+            text.push_str(" – ");
+            text.push_str(&first.value2);
+        }
+    }
+    if playlist.rules.len() > 1 {
+        text.push_str(&format!("  +{}", playlist.rules.len() - 1));
+    }
+    text
 }
 
 /// Render the detail view for a selected smart playlist: its resolved tracks.
@@ -411,54 +472,46 @@ pub fn smart_playlist_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::Column::new().spacing(2);
-
-    for (track_idx, track) in tracks.iter().enumerate() {
-        let is_playing = now_playing_id == Some(track.id);
-        let track_id = track.id.to_string();
-        let rating_track_id = track_id.clone();
-
-        let title_col = widget::container(common::clipped_cell(
-            common::cell_text(track.title.as_str()).into(),
-        ))
-        .width(Length::FillPortion(4));
-        let artist_col = widget::container(common::clipped_cell(
-            common::cell_text(track.artist.as_str()).into(),
-        ))
-        .width(Length::FillPortion(3));
-
-        let row = widget::button::custom(
-            widget::Row::new()
-                .push(common::cell_text((track_idx + 1).to_string()).width(40))
-                .push(title_col)
-                .push(artist_col)
-                .push(common::favorite_button(
-                    track.is_favorite,
-                    SmartPlaylistMessage::ToggleFavorite(track_id.clone()),
-                ))
-                .push(common::star_rating(track.rating, move |r| {
-                    SmartPlaylistMessage::SetRating(rating_track_id.clone(), r)
-                }))
-                .push(common::duration_cell(track.duration.as_secs()))
-                .spacing(8)
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .padding(4),
-        )
-        .on_press(SmartPlaylistMessage::PlayTrack(track_idx))
-        .width(Length::Fill)
-        .class(list_row_button_class(is_playing));
-
-        track_list = track_list.push(row);
-    }
-
-    if tracks.is_empty() {
-        track_list = track_list.push(common::empty_state(
+    let track_list: cosmic::Element<'a, SmartPlaylistMessage> = if tracks.is_empty() {
+        common::empty_state(
             "starred-symbolic",
             fl!("smart-playlist-empty"),
             fl!("smart-playlist-empty-hint"),
-        ));
-    }
+        )
+    } else {
+        let columns = track_row::Columns {
+            artist: true,
+            album: true,
+            favorite: true,
+            rating: true,
+            quality: true,
+            ..Default::default()
+        };
+        track_row::width_aware(tracks.len(), true, move |width| {
+            let columns = columns.responsive(width);
+            track_row::rows_column(
+                Some(track_row::Header::new(columns)),
+                tracks.iter().enumerate().map(|(track_idx, track)| {
+                    let track_id = track.id.to_string();
+                    let rating_track_id = track_id.clone();
+                    track_row::TrackRow::new(
+                        track,
+                        (track_idx + 1).to_string(),
+                        now_playing_id == Some(track.id),
+                        columns,
+                        SmartPlaylistMessage::PlayTrack(track_idx),
+                    )
+                    .with_navigate(SmartPlaylistMessage::Navigate)
+                    .with_favorite(SmartPlaylistMessage::ToggleFavorite(track_id))
+                    .with_rating(move |r| {
+                        SmartPlaylistMessage::SetRating(rating_track_id.clone(), r)
+                    })
+                    .with_artist_subtitle(!columns.artist)
+                    .view()
+                }),
+            )
+        })
+    };
 
     widget::scrollable(
         widget::Column::new()

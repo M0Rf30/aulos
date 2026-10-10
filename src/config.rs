@@ -219,6 +219,12 @@ pub struct Config {
     /// server's own artist info instead — see
     /// `crate::provider::subsonic::SubsonicProvider::get_artist_info`.
     pub fetch_artist_info: bool,
+    /// Size multiplier for cards in grid views (albums, artists, genres,
+    /// folders, radio, podcasts…), 0.7–1.6; 1.0 is the default size.
+    pub grid_scale: f32,
+    /// Whether the first-run intro jingle ("it really pipes the satyr's
+    /// ass") has already been played.
+    pub intro_played: bool,
 }
 
 impl Default for Config {
@@ -261,6 +267,8 @@ impl Default for Config {
             lossy_options: crate::convert::encoder::LossyOptions::default(),
             active_provider: None,
             fetch_artist_info: false,
+            grid_scale: 1.0,
+            intro_played: false,
         }
     }
 }

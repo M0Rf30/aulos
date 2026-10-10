@@ -131,12 +131,13 @@ pub fn preset_browser_overlay<'a>(
 
     let header = widget::Row::new()
         .push(
-            widget::text::title4(fl!("viz-presets"))
+            widget::text::title3(fl!("viz-presets"))
                 .class(cosmic::theme::Text::Color(BACKDROP_TEXT)),
         )
         .push(
-            widget::text_input(fl!("viz-preset-search"), search)
+            widget::search_input(fl!("viz-preset-search"), search)
                 .on_input(NowPlayingMessage::PresetSearchInput)
+                .on_clear(NowPlayingMessage::PresetSearchInput(String::new()))
                 .width(Length::Fill),
         )
         .push(panel_icon_button(
@@ -184,14 +185,30 @@ pub fn preset_browser_overlay<'a>(
     }
     if !any_match {
         list = list.push(
-            widget::text::body(fl!("viz-preset-empty"))
-                .class(cosmic::theme::Text::Color(BACKDROP_SUBTEXT)),
+            widget::container(
+                widget::Column::new()
+                    .push(
+                        widget::icon::from_name("edit-find-symbolic")
+                            .size(32)
+                            .icon(),
+                    )
+                    .push(
+                        widget::text::body(fl!("viz-preset-empty"))
+                            .class(cosmic::theme::Text::Color(BACKDROP_SUBTEXT)),
+                    )
+                    .spacing(space_xs)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(space_m)
+            .align_x(Horizontal::Center),
         );
     }
 
     let scroll = widget::scrollable(widget::container(list).width(Length::Fill))
         .height(Length::Fixed(LIST_HEIGHT));
 
+    // Next + lock on the left, beat sensitivity pushed to the right.
     let controls = widget::Row::new()
         .push(panel_icon_button(
             "media-skip-forward-symbolic",
@@ -201,6 +218,11 @@ pub fn preset_browser_overlay<'a>(
         ))
         .push(widget::toggler(locked).on_toggle(NowPlayingMessage::SetVizLocked))
         .push(widget::text::body(fl!("viz-lock")).class(cosmic::theme::Text::Color(BACKDROP_TEXT)))
+        .push(
+            widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Shrink),
+        )
         .push(
             widget::text::body(fl!("viz-beat-sensitivity"))
                 .class(cosmic::theme::Text::Color(BACKDROP_TEXT)),
@@ -223,19 +245,19 @@ pub fn preset_browser_overlay<'a>(
         .push(scroll)
         .push(widget::divider::horizontal::default())
         .push(controls)
-        .spacing(space_xs)
+        .spacing(space_s)
         .width(Length::Fill);
 
     let panel = widget::container(panel_col)
         .padding(space_m)
         .width(Length::Fill)
         .max_width(PANEL_MAX_WIDTH)
-        .class(cosmic::theme::Container::custom(|_theme| {
+        .class(cosmic::theme::Container::custom(|theme| {
             cosmic::iced::widget::container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.62).into()),
                 text_color: Some(BACKDROP_TEXT),
                 border: cosmic::iced::Border {
-                    radius: [16.0; 4].into(),
+                    radius: theme.cosmic().corner_radii.radius_l.into(),
                     ..Default::default()
                 },
                 ..Default::default()

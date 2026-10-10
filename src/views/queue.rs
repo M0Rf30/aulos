@@ -34,6 +34,20 @@ pub enum QueueMessage {
     Remove(usize),
     /// Drop every entry except the one currently playing.
     Clear,
+    /// Jump to another view (artist page).
+    Navigate(crate::views::Route),
+}
+
+/// Artist caption that links to the artist page (plain when empty).
+fn artist_link(track: &Track) -> cosmic::Element<'_, QueueMessage> {
+    if track.artist.trim().is_empty() {
+        return common::cell_caption(track.artist.as_str()).into();
+    }
+    common::link(
+        common::cell_caption(track.artist.as_str()),
+        true,
+        QueueMessage::Navigate(crate::views::Route::Artist(track.artist.clone())),
+    )
 }
 
 /// How many already-played entries stay visible above the current one, for
@@ -83,67 +97,230 @@ fn up_next_label(count: usize, duration: Duration) -> String {
     }
 }
 
+/// Theme-driven dimmed text colour for already-played entries.
+fn dim_text() -> cosmic::theme::Text {
+    cosmic::theme::Text::Color(cosmic::theme::active().cosmic().palette.neutral_7.into())
+}
+
+/// Where a queue row sits relative to the entry being played.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    Played,
+    Current,
+    Upcoming,
+}
+
+/// Small quiet icon button with a tooltip, for the per-row actions.
+fn row_action<'a>(
+    icon_name: &'static str,
+    label: String,
+    on_press: Option<QueueMessage>,
+) -> cosmic::Element<'a, QueueMessage> {
+    widget::tooltip(
+        widget::button::icon(widget::icon::from_name(icon_name).size(14))
+            .extra_small()
+            .on_press_maybe(on_press),
+        widget::text::caption(label),
+        TooltipPosition::Top,
+    )
+    .into()
+}
+
 /// One queue row: small art, title/artist, duration, and move-up/down +
 /// remove icon buttons. Clicking the row jumps to and plays that entry.
 #[allow(clippy::too_many_arguments)]
 fn queue_row<'a>(
     index: usize,
     track: &'a Track,
-    is_current: bool,
+    kind: RowKind,
+    state: PlaybackState,
     can_move_up: bool,
     can_move_down: bool,
     cover_images: &'a HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, QueueMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
     let art = common::list_art_icon(
         cover_images.get(&cover_key(track)),
         40,
-        "media-optical-cd-audio-symbolic",
+        "media-optical-symbolic",
     );
 
+    let title = if kind == RowKind::Played {
+        common::cell_text(track.title.as_str()).class(dim_text())
+    } else {
+        common::cell_text(track.title.as_str())
+    };
     let info = widget::Column::new()
-        .push(common::cell_text(track.title.as_str()))
-        .push(common::cell_caption(track.artist.as_str()))
+        .push(title)
+        .push(artist_link(track))
         .spacing(2);
 
-    let move_up = widget::tooltip(
-        widget::button::icon(widget::icon::from_name("go-up-symbolic").size(14))
-            .on_press_maybe(can_move_up.then_some(QueueMessage::MoveUp(index))),
-        widget::text::caption(fl!("queue-move-up")),
-        TooltipPosition::Top,
-    );
-    let move_down = widget::tooltip(
-        widget::button::icon(widget::icon::from_name("go-down-symbolic").size(14))
-            .on_press_maybe(can_move_down.then_some(QueueMessage::MoveDown(index))),
-        widget::text::caption(fl!("queue-move-down")),
-        TooltipPosition::Top,
-    );
-    let remove = widget::tooltip(
-        widget::button::icon(widget::icon::from_name("list-remove-symbolic").size(14))
-            .on_press(QueueMessage::Remove(index)),
-        widget::text::caption(fl!("queue-remove")),
-        TooltipPosition::Top,
-    );
-
-    let row = widget::Row::new()
+    let mut row = widget::Row::new()
         .push(art)
         .push(common::clipped_cell(info.into()))
-        .push(common::duration_cell(track.duration.as_secs()))
-        .push(move_up)
-        .push(move_down)
-        .push(remove)
-        .spacing(10)
+        .spacing(sp.space_xs)
         .align_y(Alignment::Center)
-        .padding([6, 8]);
+        .padding([sp.space_xxs, sp.space_xs]);
+
+    if kind == RowKind::Current {
+        let icon_name = if state == PlaybackState::Playing {
+            "media-playback-start-symbolic"
+        } else {
+            "media-playback-pause-symbolic"
+        };
+        row = row.push(widget::icon::from_name(icon_name).size(16));
+    }
+
+    row = row
+        .push(common::duration_cell(track.duration.as_secs()))
+        .push(
+            widget::Row::new()
+                .push(row_action(
+                    "go-up-symbolic",
+                    fl!("queue-move-up"),
+                    can_move_up.then_some(QueueMessage::MoveUp(index)),
+                ))
+                .push(row_action(
+                    "go-down-symbolic",
+                    fl!("queue-move-down"),
+                    can_move_down.then_some(QueueMessage::MoveDown(index)),
+                ))
+                .push(row_action(
+                    "list-remove-symbolic",
+                    fl!("queue-remove"),
+                    Some(QueueMessage::Remove(index)),
+                ))
+                .align_y(Alignment::Center),
+        );
 
     widget::button::custom(row)
         .on_press(QueueMessage::Jump(index))
         .width(Length::Fill)
         .padding(0)
-        .class(list_row_button_class(is_current))
+        .class(list_row_button_class(kind == RowKind::Current))
         .into()
 }
 
-/// Render the queue drawer.
+/// Pinned header for the queue drawer (placed above the scrolling rows via
+/// `ContextDrawer::header`): a now-playing card with art, then the
+/// "Up next · N tracks · duration" summary with the Clear action. `None`
+/// when there is nothing queued.
+pub fn queue_header_view<'a>(
+    queue_data: Option<(&'a [Track], usize)>,
+    current_track: Option<&'a Track>,
+    state: PlaybackState,
+    cover_images: &'a HashMap<String, widget::icon::Handle>,
+) -> Option<cosmic::Element<'a, QueueMessage>> {
+    let (queue, current_index) = queue_data.filter(|(q, _)| !q.is_empty())?;
+    let sp = cosmic::theme::active().cosmic().spacing;
+
+    let current_index = current_index.min(queue.len() - 1);
+    let upcoming_count = queue.len() - (current_index + 1);
+    let upcoming_duration: Duration = queue[current_index + 1..].iter().map(|t| t.duration).sum();
+
+    let mut col = widget::Column::new()
+        .spacing(sp.space_s)
+        .width(Length::Fill);
+
+    if let Some(track) = current_track {
+        let art: cosmic::Element<'a, QueueMessage> = match cover_images.get(&cover_key(track)) {
+            Some(handle) => common::cover_art(
+                handle,
+                56.0,
+                cosmic::theme::active().cosmic().corner_radii.radius_s[0],
+                true,
+            ),
+            None => common::list_art_icon(None, 56, "media-optical-symbolic"),
+        };
+        let indicator = if state == PlaybackState::Playing {
+            "media-playback-start-symbolic"
+        } else {
+            "media-playback-pause-symbolic"
+        };
+        col = col.push(
+            widget::container(
+                widget::Row::new()
+                    .push(art)
+                    .push(common::clipped_cell(
+                        widget::Column::new()
+                            .push(
+                                widget::text::caption(fl!("queue-now-playing-label"))
+                                    .class(dim_text()),
+                            )
+                            .push(
+                                widget::text::heading(track.title.as_str())
+                                    .wrapping(cosmic::iced::core::text::Wrapping::None),
+                            )
+                            .push(artist_link(track))
+                            .spacing(2)
+                            .into(),
+                    ))
+                    .push(widget::icon::from_name(indicator).size(20))
+                    .spacing(sp.space_s)
+                    .align_y(Alignment::Center)
+                    .padding(sp.space_xs),
+            )
+            .class(cosmic::theme::Container::Card)
+            .width(Length::Fill),
+        );
+    }
+
+    let clear_enabled = upcoming_count > 0;
+    col = col.push(
+        widget::Row::new()
+            .push(
+                widget::text::body(up_next_label(upcoming_count, upcoming_duration))
+                    .class(dim_text())
+                    .width(Length::Fill),
+            )
+            .push(
+                widget::button::text(fl!("queue-clear"))
+                    .on_press_maybe(clear_enabled.then_some(QueueMessage::Clear)),
+            )
+            .spacing(sp.space_xs)
+            .align_y(Alignment::Center),
+    );
+
+    Some(col.into())
+}
+
+/// Empty-queue placeholder. Not `common::empty_state`: the drawer's own
+/// scrollable gives its content unbounded height, so a `Length::Fill`
+/// height can't centre anything here.
+fn empty_queue<'a>() -> cosmic::Element<'a, QueueMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    widget::container(
+        widget::Column::new()
+            .push(
+                widget::icon::icon(
+                    widget::icon::from_name("media-playlist-consecutive-symbolic").handle(),
+                )
+                .size(56)
+                .class(cosmic::theme::Svg::custom(|theme| {
+                    cosmic::iced::widget::svg::Style {
+                        color: Some(theme.cosmic().palette.neutral_6.into()),
+                    }
+                })),
+            )
+            .push(widget::text::title3(fl!("queue-empty")))
+            .push(
+                widget::text::body(fl!("queue-empty-hint"))
+                    .class(dim_text())
+                    .align_x(cosmic::iced::alignment::Horizontal::Center),
+            )
+            .spacing(sp.space_xs)
+            .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([sp.space_xl, sp.space_s])
+    .align_x(cosmic::iced::alignment::Horizontal::Center)
+    .into()
+}
+
+/// Render the queue drawer body: the current entry, the upcoming rows, and
+/// (at the end, so the list opens on what's playing) a short run of
+/// recently played entries. The now-playing card and Clear action live in
+/// [`queue_header_view`], pinned above this scrolling list.
 ///
 /// `queue_data` is `self.player.as_ref().map(|p| (p.queue(), p.queue_index()))`
 /// — `None` when there is no active player (nothing has ever played).
@@ -153,100 +330,60 @@ pub fn queue_view<'a>(
     state: PlaybackState,
     cover_images: &'a HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, QueueMessage> {
-    let _ = state;
+    let _ = current_track;
+    let sp = cosmic::theme::active().cosmic().spacing;
 
     let Some((queue, current_index)) = queue_data.filter(|(q, _)| !q.is_empty()) else {
-        return common::empty_state(
-            "media-playlist-consecutive-symbolic",
-            fl!("queue-empty"),
-            fl!("queue-empty-hint"),
-        );
+        return empty_queue();
     };
 
     let current_index = current_index.min(queue.len() - 1);
-    let upcoming_count = queue.len() - (current_index + 1);
-    let upcoming_duration: Duration = queue[current_index + 1..].iter().map(|t| t.duration).sum();
-
-    // Compact, non-interactive summary of the current entry: stays visible
-    // even once the row list below has scrolled past it.
-    let now_playing_row: cosmic::Element<'a, QueueMessage> = if let Some(track) = current_track {
-        let art = common::list_art_icon(
-            cover_images.get(&cover_key(track)),
-            48,
-            "media-optical-cd-audio-symbolic",
-        );
-        widget::container(
-            widget::Row::new()
-                .push(art)
-                .push(common::clipped_cell(
-                    widget::Column::new()
-                        .push(common::cell_text(track.title.as_str()))
-                        .push(common::cell_caption(track.artist.as_str()))
-                        .spacing(2)
-                        .into(),
-                ))
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .padding(8),
-        )
-        .class(cosmic::theme::Container::Card)
-        .width(Length::Fill)
-        .into()
-    } else {
-        widget::Space::new().width(0).height(0).into()
-    };
-
-    let clear_enabled = upcoming_count > 0;
-    let header = widget::Column::new()
-        .push(widget::text::title4(fl!("queue-now-playing-label")))
-        .push(now_playing_row)
-        .push(
-            widget::Row::new()
-                .push(
-                    widget::text::body(up_next_label(upcoming_count, upcoming_duration))
-                        .width(Length::Fill),
-                )
-                .push(
-                    widget::button::standard(fl!("queue-clear"))
-                        .on_press_maybe(clear_enabled.then_some(QueueMessage::Clear)),
-                )
-                .spacing(8)
-                .align_y(Alignment::Center),
-        )
-        .spacing(8)
-        .padding([12, 12, 4, 12]);
-
     let window = visible_window(queue.len(), current_index);
     let hidden_after = queue.len() - window.end;
 
-    let mut rows = widget::Column::new().spacing(2);
-    for i in window {
-        rows = rows.push(queue_row(
+    let make_row = |i: usize, kind: RowKind| {
+        queue_row(
             i,
             &queue[i],
-            i == current_index,
+            kind,
+            state,
             i > 0,
             i + 1 < queue.len(),
             cover_images,
-        ));
+        )
+    };
+
+    let mut rows = widget::Column::new().spacing(2).width(Length::Fill);
+    rows = rows.push(make_row(current_index, RowKind::Current));
+    for i in current_index + 1..window.end {
+        rows = rows.push(make_row(i, RowKind::Upcoming));
     }
     if hidden_after > 0 {
         rows = rows.push(
-            widget::container(common::cell_caption(fl!(
-                "queue-more-hidden",
-                count = hidden_after.to_string()
-            )))
-            .padding([6, 8]),
+            widget::container(
+                common::cell_caption(fl!("queue-more-hidden", count = hidden_after.to_string()))
+                    .class(dim_text()),
+            )
+            .padding([sp.space_xxs, sp.space_xs]),
         );
     }
 
-    widget::Column::new()
-        .push(header)
-        .push(widget::divider::horizontal::default())
-        .push(widget::scrollable(widget::container(rows).width(Length::Fill)).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    if window.start < current_index {
+        rows = rows.push(
+            widget::container(widget::text::heading(fl!("queue-history-label"))).padding([
+                sp.space_s,
+                sp.space_xs,
+                sp.space_xxs,
+                sp.space_xs,
+            ]),
+        );
+        // Most recently played first.
+        for i in (window.start..current_index).rev() {
+            rows = rows.push(make_row(i, RowKind::Played));
+        }
+    }
+
+    rows.into()
 }
 
 #[cfg(test)]

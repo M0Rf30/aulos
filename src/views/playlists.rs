@@ -8,6 +8,8 @@ use crate::fl;
 use crate::library::{Playlist, Track};
 use crate::views::common;
 use crate::views::list_row_button_class;
+use crate::views::track_row;
+use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
@@ -40,6 +42,8 @@ pub enum PlaylistMessage {
     PlayNext(Vec<Track>),
     /// Append every track in this playlist to the end of the queue.
     AddToQueue(Vec<Track>),
+    /// Jump to another view (artist page).
+    Navigate(crate::views::Route),
 }
 
 /// Render the playlist list view.
@@ -47,7 +51,13 @@ pub fn playlist_list_view<'a>(
     playlists: &'a [Playlist],
     new_playlist_name: &'a str,
 ) -> cosmic::Element<'a, PlaylistMessage> {
-    let mut col = widget::Column::new().spacing(12).padding(16);
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let mut col = widget::Column::new().spacing(spacing.space_s).padding([
+        spacing.space_m,
+        spacing.space_m + 16,
+        0,
+        spacing.space_m,
+    ]);
 
     // Create playlist row
     let create_row = widget::Row::new()
@@ -97,45 +107,92 @@ pub fn playlist_list_view<'a>(
     for (index, playlist) in playlists.iter().enumerate() {
         let track_count = playlist.track_count;
         let info = widget::Column::new()
-            .push(common::cell_text(playlist.name.as_str()))
-            .push(common::cell_caption(format!(
+            .push(common::cell_text(playlist.name.as_str()).font(cosmic::font::semibold()))
+            .push(secondary_caption(format!(
                 "{}  -  {}",
                 playlist_track_count_label(track_count),
                 common::format_duration_coarse(playlist.total_duration.as_secs())
             )))
             .spacing(2);
 
+        let art: cosmic::Element<'_, PlaylistMessage> =
+            common::list_art_icon(None, 52, "playlist-symbolic");
+
+        let play_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("media-playback-start-symbolic").size(16))
+                .on_press_maybe((track_count > 0).then_some(PlaylistMessage::PlayPlaylist(index))),
+            widget::text::caption(fl!("play-all")),
+            widget::tooltip::Position::Top,
+        );
         let delete_btn = widget::tooltip(
             widget::button::icon(widget::icon::from_name("edit-delete-symbolic").size(16))
-                .class(cosmic::theme::Button::Destructive)
                 .on_press(PlaylistMessage::DeletePlaylist(index)),
             widget::text::caption(fl!("delete-playlist-tooltip")),
             widget::tooltip::Position::Top,
         );
 
-        let playlist_icon: cosmic::Element<'_, PlaylistMessage> =
-            widget::icon::from_name("playlist-symbolic").size(40).into();
-
         let row = widget::button::custom(
             widget::Row::new()
-                .push(playlist_icon)
-                .push(common::clipped_cell(info.into()))
+                .push(art)
+                .push(
+                    widget::container(common::clipped_cell(info.into()))
+                        .width(Length::FillPortion(5)),
+                )
+                .push(
+                    widget::container(secondary_caption(playlist_track_count_label(track_count)))
+                        .width(LIST_TRACKS_WIDTH)
+                        .align_x(Horizontal::Right),
+                )
+                .push(
+                    widget::container(secondary_caption(common::format_duration_coarse(
+                        playlist.total_duration.as_secs(),
+                    )))
+                    .width(LIST_DURATION_WIDTH)
+                    .align_x(Horizontal::Right),
+                )
+                .push(play_btn)
                 .push(delete_btn)
-                .spacing(12)
+                .spacing(16)
+                .height(Length::Fill)
                 .align_y(Alignment::Center)
-                .padding(8),
+                .padding([0, 12]),
         )
         .on_press(PlaylistMessage::SelectPlaylist(index))
         .width(Length::Fill)
+        .height(Length::Fixed(LIST_ROW_HEIGHT))
+        .padding(0)
         .class(list_row_button_class(false));
 
         list = list.push(row);
     }
 
-    col = col
-        .push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    col = col.push(
+        widget::scrollable(
+            widget::container(list)
+                .padding([0, spacing.space_m + 16, spacing.space_m, 0])
+                .width(Length::Fill),
+        )
+        .height(Length::Fill),
+    );
 
     col.into()
+}
+
+/// List row geometry shared with the Albums list: fixed height and
+/// right-hand metadata column widths so columns line up.
+const LIST_ROW_HEIGHT: f32 = 68.0;
+const LIST_TRACKS_WIDTH: f32 = 90.0;
+const LIST_DURATION_WIDTH: f32 = 64.0;
+
+/// Caption text dimmed to the theme's secondary colour.
+fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> common::Text<'a> {
+    common::cell_caption(content).class(cosmic::theme::Text::Custom(|theme| {
+        cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().palette.neutral_7.into()),
+            ..Default::default()
+        }
+    }))
 }
 
 pub fn playlist_detail_view<'a>(
@@ -224,51 +281,52 @@ pub fn playlist_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::Column::new().spacing(2);
-
-    for (track_idx, track) in playlist.tracks.iter().enumerate() {
-        let remove_btn = widget::tooltip(
-            widget::button::icon(widget::icon::from_name("list-remove-symbolic").size(16))
-                .on_press(PlaylistMessage::RemoveTrack(playlist_index, track_idx)),
-            widget::text::caption(fl!("remove-from-playlist")),
-            widget::tooltip::Position::Top,
-        );
-
-        let title_col = widget::container(common::clipped_cell(
-            common::cell_text(track.title.as_str()).into(),
-        ))
-        .width(Length::FillPortion(4));
-        let artist_col = widget::container(common::clipped_cell(
-            common::cell_text(track.artist.as_str()).into(),
-        ))
-        .width(Length::FillPortion(3));
-
-        let row = widget::button::custom(
-            widget::Row::new()
-                .push(common::cell_text((track_idx + 1).to_string()).width(40))
-                .push(title_col)
-                .push(artist_col)
-                .push(common::duration_cell(track.duration.as_secs()))
-                .push(remove_btn)
-                .spacing(8)
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .padding(4),
-        )
-        .on_press(PlaylistMessage::PlayTrack(playlist_index, track_idx))
-        .width(Length::Fill)
-        .class(list_row_button_class(false));
-
-        track_list = track_list.push(row);
-    }
-
-    if playlist.tracks.is_empty() {
-        track_list = track_list.push(common::empty_state(
+    let track_list: cosmic::Element<'a, PlaylistMessage> = if playlist.tracks.is_empty() {
+        common::empty_state(
             "playlist-symbolic",
             fl!("playlist-empty"),
             fl!("playlist-empty-hint"),
-        ));
-    }
+        )
+    } else {
+        let columns = track_row::Columns {
+            artist: true,
+            album: true,
+            queue_actions: true,
+            trailing: true,
+            ..Default::default()
+        };
+        track_row::width_aware(playlist.tracks.len(), true, move |width| {
+            let columns = columns.responsive(width);
+            track_row::rows_column(
+                Some(track_row::Header::new(columns)),
+                playlist
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .map(|(track_idx, track)| {
+                        track_row::TrackRow::new(
+                            track,
+                            (track_idx + 1).to_string(),
+                            false,
+                            columns,
+                            PlaylistMessage::PlayTrack(playlist_index, track_idx),
+                        )
+                        .with_navigate(PlaylistMessage::Navigate)
+                        .with_queue_actions(
+                            PlaylistMessage::PlayNext(vec![track.clone()]),
+                            PlaylistMessage::AddToQueue(vec![track.clone()]),
+                        )
+                        .with_trailing_action(
+                            "list-remove-symbolic",
+                            fl!("remove-from-playlist"),
+                            PlaylistMessage::RemoveTrack(playlist_index, track_idx),
+                        )
+                        .with_artist_subtitle(!columns.artist)
+                        .view()
+                    }),
+            )
+        })
+    };
 
     widget::scrollable(
         widget::Column::new()

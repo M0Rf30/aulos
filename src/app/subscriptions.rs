@@ -101,14 +101,6 @@ impl AppModel {
             subs.push(Subscription::run(convert_tick_stream));
         }
 
-        // Expand/collapse animation tick (~60fps, only during transitions)
-        if self.expand_target.is_some() {
-            subs.push(
-                cosmic::iced::time::every(Duration::from_millis(16))
-                    .map(|_| Message::ExpandAnimTick),
-            );
-        }
-
         // Visualizer render subscription (~30fps, only when active and expanded)
         //
         // IMPORTANT: The projectM renderer requires a current EGL/GL context

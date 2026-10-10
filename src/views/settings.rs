@@ -6,6 +6,7 @@
 
 use crate::config::ReplayGainMode;
 use crate::fl;
+use crate::views::common;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 use std::path::PathBuf;
@@ -47,6 +48,8 @@ pub enum SettingsMessage {
     /// Toggle fetching artist images/biography from online sources
     /// (Local/MPD mode only — ignored in Subsonic mode).
     SetFetchArtistInfo(bool),
+    /// Grid card size multiplier changed (`common::GRID_SCALE_RANGE`).
+    SetGridScale(f32),
 }
 
 /// All replay gain modes, in the order shown in the dropdown.
@@ -57,7 +60,8 @@ const REPLAY_GAIN_MODES: [ReplayGainMode; 4] = [
     ReplayGainMode::Auto,
 ];
 
-/// Render the Settings page.
+/// Render the Settings page (shown in the context drawer, which already
+/// supplies the outer padding and the scrolling).
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     music_dirs: &'a [PathBuf],
@@ -68,76 +72,170 @@ pub fn view<'a>(
     experimental_converter: bool,
     fetch_artist_info: bool,
     artist_tag_delimiters_input: &'a str,
+    grid_scale: f32,
 ) -> cosmic::Element<'a, SettingsMessage> {
-    let col = widget::Column::new()
-        .spacing(24)
-        .push(library_section(
-            music_dirs,
+    let sp = cosmic::theme::active().cosmic().spacing;
+
+    widget::Column::new()
+        .spacing(sp.space_l)
+        .width(Length::Fill)
+        .push(library_section(music_dirs))
+        .push(artist_tags_section(
             split_artist_tags,
             artist_tag_delimiters_input,
         ))
         .push(playback_section(crossfade_secs, replay_gain_mode, volume))
+        .push(appearance_section(grid_scale))
         .push(artist_info_section(fetch_artist_info))
         .push(experimental_section(experimental_converter))
         .push(shortcuts_section())
-        .push(about_section());
-
-    widget::scrollable(widget::container(col).width(Length::Fill).padding(24))
-        .height(Length::Fill)
+        .push(about_section())
         .into()
 }
 
-/// Library section: configured music directories, with add/remove, plus
-/// the multi-artist-tag-splitting toggle and delimiter editor.
-fn library_section<'a>(
-    music_dirs: &'a [PathBuf],
-    split_artist_tags: bool,
-    artist_tag_delimiters_input: &'a str,
+/// Section header: heading plus a dimmed one-line explanation.
+fn section_header<'a>(
+    title: impl Into<std::borrow::Cow<'a, str>> + 'a,
+    description: impl Into<std::borrow::Cow<'a, str>> + 'a,
 ) -> cosmic::Element<'a, SettingsMessage> {
-    let mut section = widget::settings::section().title(fl!("settings-library"));
+    widget::Column::new()
+        .push(widget::text::heading(title))
+        .push(widget::text::caption(description).class(dim_text()))
+        .spacing(2)
+        .into()
+}
+
+/// Theme-driven dimmed text colour for secondary labels and values.
+fn dim_text() -> cosmic::theme::Text {
+    cosmic::theme::Text::Color(cosmic::theme::active().cosmic().palette.neutral_7.into())
+}
+
+/// A slider setting: title with the current value on the right, and the
+/// slider spanning the full row underneath (a narrow drawer has no room for
+/// a fixed-width slider beside the label).
+fn slider_item<'a>(
+    title: String,
+    value_label: String,
+    slider: impl Into<cosmic::Element<'a, SettingsMessage>>,
+) -> cosmic::Element<'a, SettingsMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    widget::Column::new()
+        .push(
+            widget::Row::new()
+                .push(widget::text::body(title))
+                .push(widget::space::horizontal())
+                .push(widget::text::caption(value_label).class(dim_text()))
+                .align_y(Alignment::Center),
+        )
+        .push(slider)
+        .spacing(sp.space_xxs)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Library section: configured music directories, with add/remove.
+fn library_section<'a>(music_dirs: &'a [PathBuf]) -> cosmic::Element<'a, SettingsMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let mut section = widget::settings::section().header(section_header(
+        fl!("settings-library"),
+        fl!("settings-library-description"),
+    ));
 
     if music_dirs.is_empty() {
-        section = section.add(widget::text::body(fl!("no-music-dirs")));
+        section = section.add(
+            widget::Column::new()
+                .push(widget::text::body(fl!("no-music-dirs")))
+                .push(widget::text::caption(fl!("no-music-dirs-hint")).class(dim_text()))
+                .spacing(2),
+        );
     } else {
         for (i, dir) in music_dirs.iter().enumerate() {
-            section = section.add(widget::settings::item(
-                dir.to_string_lossy(),
-                widget::button::destructive(fl!("remove"))
-                    .on_press(SettingsMessage::RemoveMusicDir(i)),
-            ));
+            let children: Vec<cosmic::Element<'a, SettingsMessage>> = vec![
+                widget::icon::from_name("folder-symbolic").size(16).into(),
+                common::clipped_cell(common::cell_text(dir.to_string_lossy()).into()),
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("edit-delete-symbolic").size(16))
+                        .extra_small()
+                        .on_press(SettingsMessage::RemoveMusicDir(i)),
+                    widget::text::caption(fl!("remove")),
+                    widget::tooltip::Position::Top,
+                )
+                .into(),
+            ];
+            section = section.add(widget::settings::item_row(children));
         }
     }
 
-    section = section
-        .add(widget::button::text(fl!("add-music-folder")).on_press(SettingsMessage::AddMusicDir));
+    // The primary call to action only when there is nothing yet; otherwise
+    // a secondary button so the list stays the focus.
+    let add_label = fl!("add-music-folder");
+    let add_button = if music_dirs.is_empty() {
+        widget::button::suggested(add_label)
+    } else {
+        widget::button::standard(add_label)
+    }
+    .leading_icon(widget::icon::from_name("list-add-symbolic").size(16))
+    .on_press(SettingsMessage::AddMusicDir);
+    section = section.add(
+        widget::Row::new()
+            .push(widget::space::horizontal())
+            .push(add_button)
+            .padding([sp.space_xxs, 0])
+            .width(Length::Fill),
+    );
+
+    section.into()
+}
+
+/// Artist tags section: multi-artist tag splitting toggle and delimiter
+/// editor (the editor is inert while splitting is off).
+fn artist_tags_section<'a>(
+    split_artist_tags: bool,
+    artist_tag_delimiters_input: &'a str,
+) -> cosmic::Element<'a, SettingsMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
 
     let split_item = widget::settings::item::builder(fl!("split-artist-tags"))
         .description(fl!("split-artist-tags-description"))
-        .control(widget::toggler(split_artist_tags).on_toggle(SettingsMessage::SetSplitArtistTags));
-    section = section.add(split_item);
+        .toggler(split_artist_tags, SettingsMessage::SetSplitArtistTags);
 
-    let delimiters_row = widget::Row::new()
-        .push(
-            widget::text_input(
-                fl!("artist-tag-delimiters-placeholder"),
-                artist_tag_delimiters_input,
-            )
+    let mut input = widget::text_input(
+        fl!("artist-tag-delimiters-placeholder"),
+        artist_tag_delimiters_input,
+    );
+    if split_artist_tags {
+        input = input
             .on_input(SettingsMessage::EditArtistTagDelimiters)
-            .on_submit_maybe(Some(SettingsMessage::SubmitArtistTagDelimiters)),
+            .on_submit_maybe(Some(SettingsMessage::SubmitArtistTagDelimiters));
+    }
+    let reset = widget::button::text(fl!("reset-to-defaults"))
+        .on_press_maybe(split_artist_tags.then_some(SettingsMessage::ResetArtistTagDelimiters));
+
+    let delimiters_item = widget::Column::new()
+        .push(widget::text::body(fl!("artist-tag-delimiters")))
+        .push(
+            widget::text::caption(fl!("artist-tag-delimiters-description"))
+                .class(dim_text())
+                .wrapping(cosmic::iced::core::text::Wrapping::Word),
         )
         .push(
-            widget::button::text(fl!("reset-to-defaults"))
-                .on_press(SettingsMessage::ResetArtistTagDelimiters),
+            widget::Row::new()
+                .push(input.width(Length::Fill))
+                .push(reset)
+                .spacing(sp.space_xs)
+                .align_y(Alignment::Center),
         )
-        .spacing(8)
-        .align_y(Alignment::Center);
+        .spacing(sp.space_xxs)
+        .width(Length::Fill);
 
-    let delimiters_item = widget::settings::item::builder(fl!("artist-tag-delimiters"))
-        .description(fl!("artist-tag-delimiters-description"))
-        .control(delimiters_row);
-    section = section.add(delimiters_item);
-
-    section.into()
+    widget::settings::section()
+        .header(section_header(
+            fl!("settings-artist-tags"),
+            fl!("settings-artist-tags-description"),
+        ))
+        .add(split_item)
+        .add(delimiters_item)
+        .into()
 }
 
 /// Playback section: crossfade duration, replay gain mode, volume.
@@ -151,13 +249,16 @@ fn playback_section<'a>(
     } else {
         fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
     };
-    let crossfade_item = widget::settings::item::builder(fl!("crossfade-duration"))
-        .description(crossfade_label)
-        .control(
+    let crossfade_item = widget::Column::new()
+        .push(slider_item(
+            fl!("crossfade-duration"),
+            crossfade_label,
             widget::slider(0.0..=12.0, crossfade_secs, SettingsMessage::SetCrossfade)
                 .step(0.5_f32)
-                .width(Length::Fixed(200.0)),
-        );
+                .width(Length::Fill),
+        ))
+        .push(widget::text::caption(fl!("crossfade-description")).class(dim_text()))
+        .spacing(2);
 
     let replay_gain_labels = vec![
         fl!("replay-gain-off"),
@@ -168,23 +269,80 @@ fn playback_section<'a>(
     let replay_gain_selected = REPLAY_GAIN_MODES
         .iter()
         .position(|mode| *mode == replay_gain_mode);
-    let replay_gain_item = widget::settings::item::builder(fl!("replay-gain")).control(
-        widget::dropdown(replay_gain_labels, replay_gain_selected, |i| {
-            SettingsMessage::SetReplayGainMode(REPLAY_GAIN_MODES[i])
-        }),
-    );
+    let replay_gain_item = widget::settings::item::builder(fl!("replay-gain"))
+        .description(fl!("replay-gain-description"))
+        .control(widget::dropdown(
+            replay_gain_labels,
+            replay_gain_selected,
+            |i| SettingsMessage::SetReplayGainMode(REPLAY_GAIN_MODES[i]),
+        ));
 
-    let volume_item = widget::settings::item::builder(fl!("volume")).control(
+    let volume_item = slider_item(
+        fl!("volume"),
+        format!("{:.0}%", volume * 100.0),
         widget::slider(0.0..=1.0, volume, SettingsMessage::SetVolume)
             .step(0.01_f32)
-            .width(Length::Fixed(200.0)),
+            .width(Length::Fill),
     );
 
     widget::settings::section()
-        .title(fl!("settings-playback"))
+        .header(section_header(
+            fl!("settings-playback"),
+            fl!("settings-playback-description"),
+        ))
         .add(crossfade_item)
         .add(replay_gain_item)
         .add(volume_item)
+        .into()
+}
+
+/// Appearance section: grid card size (shared by every card grid; also
+/// adjustable from the header zoom slider).
+fn appearance_section<'a>(grid_scale: f32) -> cosmic::Element<'a, SettingsMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let range = common::GRID_SCALE_RANGE;
+    let is_default = (grid_scale - 1.0).abs() < 0.001;
+
+    let slider_row = widget::Row::new()
+        .push(widget::icon::from_name("zoom-out-symbolic").size(16))
+        .push(
+            widget::slider(range, grid_scale, SettingsMessage::SetGridScale)
+                .step(0.05_f32)
+                .width(Length::Fill),
+        )
+        .push(widget::icon::from_name("zoom-in-symbolic").size(16))
+        .spacing(sp.space_xs)
+        .align_y(Alignment::Center);
+
+    let grid_item = widget::Column::new()
+        .push(slider_item(
+            fl!("grid-size"),
+            format!("{:.0}%", grid_scale * 100.0),
+            slider_row,
+        ))
+        .push(
+            widget::Row::new()
+                .push(
+                    widget::text::caption(fl!("grid-size-description"))
+                        .class(dim_text())
+                        .width(Length::Fill),
+                )
+                .push(
+                    widget::button::text(fl!("reset-to-defaults")).on_press_maybe(
+                        (!is_default).then_some(SettingsMessage::SetGridScale(1.0)),
+                    ),
+                )
+                .spacing(sp.space_xs)
+                .align_y(Alignment::Center),
+        )
+        .spacing(sp.space_xxs);
+
+    widget::settings::section()
+        .header(section_header(
+            fl!("settings-appearance"),
+            fl!("settings-appearance-description"),
+        ))
+        .add(grid_item)
         .into()
 }
 
@@ -196,9 +354,9 @@ fn playback_section<'a>(
 fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a, SettingsMessage> {
     let item = widget::settings::item::builder(fl!("experimental-converter"))
         .description(fl!("experimental-converter-description"))
-        .control(
-            widget::toggler(experimental_converter)
-                .on_toggle(SettingsMessage::SetExperimentalConverter),
+        .toggler(
+            experimental_converter,
+            SettingsMessage::SetExperimentalConverter,
         );
 
     widget::settings::section()
@@ -214,7 +372,7 @@ fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a,
 fn artist_info_section<'a>(fetch_artist_info: bool) -> cosmic::Element<'a, SettingsMessage> {
     let item = widget::settings::item::builder(fl!("fetch-artist-info"))
         .description(fl!("fetch-artist-info-description"))
-        .control(widget::toggler(fetch_artist_info).on_toggle(SettingsMessage::SetFetchArtistInfo));
+        .toggler(fetch_artist_info, SettingsMessage::SetFetchArtistInfo);
 
     widget::settings::section()
         .title(fl!("settings-artist-info"))
@@ -228,10 +386,12 @@ fn shortcuts_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
         .title(fl!("settings-shortcuts"))
         .add(drawer_link_row(
             fl!("equalizer"),
+            fl!("settings-equalizer-description"),
             SettingsMessage::OpenEqualizer,
         ))
         .add(drawer_link_row(
             fl!("providers"),
+            fl!("settings-providers-description"),
             SettingsMessage::OpenProviders,
         ))
         .into()
@@ -241,19 +401,26 @@ fn shortcuts_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
 fn about_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
     widget::settings::section()
         .title(fl!("settings-about"))
-        .add(drawer_link_row(fl!("about"), SettingsMessage::OpenAbout))
+        .add(drawer_link_row(
+            fl!("about"),
+            fl!("settings-about-description"),
+            SettingsMessage::OpenAbout,
+        ))
         .into()
 }
 
 /// A settings row that is entirely clickable, opening a drawer/dialog via
-/// `message`, with a trailing chevron hinting at the navigation.
+/// `message`, with a description and a trailing chevron hinting at the
+/// navigation.
 fn drawer_link_row<'a>(
-    title: impl Into<std::borrow::Cow<'a, str>> + 'a,
+    title: String,
+    description: String,
     message: SettingsMessage,
 ) -> widget::list::ListButton<'a, SettingsMessage> {
-    widget::list::button(widget::settings::item(
-        title,
-        widget::icon::from_name("go-next-symbolic"),
-    ))
+    widget::list::button(
+        widget::settings::item::builder(title)
+            .description(description)
+            .control(widget::icon::from_name("go-next-symbolic")),
+    )
     .on_press(message)
 }

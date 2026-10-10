@@ -800,12 +800,26 @@ impl AppModel {
             }
 
             Message::Folders(msg) => match msg {
+                crate::views::folders::FolderMessage::Navigate(route) => {
+                    return self.navigate(route);
+                }
                 crate::views::folders::FolderMessage::Open(dir) => self.folder_state.open(dir),
                 crate::views::folders::FolderMessage::Up => self.folder_state.up(),
                 crate::views::folders::FolderMessage::GoTo(index) => {
                     self.folder_state.go_to(index);
                 }
                 crate::views::folders::FolderMessage::PlayTrack(index) => {
+                    // Play the folder's own tracks (not the whole library)
+                    // starting at the clicked one.
+                    let dir = self.folder_state.effective_current();
+                    let direct = self.folder_state.tree().direct_tracks(&dir);
+                    if let Some(position) = direct.iter().position(|&i| i == index) {
+                        let tracks: Vec<_> = direct
+                            .iter()
+                            .filter_map(|&i| self.all_tracks.get(i).cloned())
+                            .collect();
+                        return self.play_track_list(tracks, position);
+                    }
                     return self.play_track_list(self.all_tracks.clone(), index);
                 }
                 crate::views::folders::FolderMessage::PlayFolder => {
@@ -885,6 +899,9 @@ impl AppModel {
             }
 
             Message::BackToAlbumGrid => {
+                if let Some(task) = self.go_back() {
+                    return task;
+                }
                 self.selected_album = None;
             }
 
@@ -897,8 +914,19 @@ impl AppModel {
             }
 
             Message::BackToArtistList => {
-                self.selected_artist = None;
                 self.artist_bio_expanded = false;
+                if let Some(task) = self.go_back() {
+                    return task;
+                }
+                self.selected_artist = None;
+            }
+
+            Message::DetailArtReady(key, blurred, accent) => {
+                self.apply_detail_art(key, blurred, accent);
+            }
+
+            Message::Navigate(route) => {
+                return self.navigate(route);
             }
 
             Message::ToggleArtistBioExpanded => {
@@ -926,6 +954,10 @@ impl AppModel {
                 self.songs_sort = field;
                 self.sort_tracks(field);
                 self.refresh_search_filter();
+            }
+
+            Message::SongsScrolled(offset) => {
+                self.songs_scroll_offset = offset;
             }
 
             Message::ToggleFavoritesFilter => {
@@ -1320,6 +1352,12 @@ impl AppModel {
                         tracing::error!("Failed to load AutoEQ profile: {}", e);
                     }
                 }
+            }
+
+            Message::SetGridScale(scale) => {
+                crate::views::common::set_grid_scale(scale);
+                self.config.grid_scale = crate::views::common::grid_scale();
+                self.save_config();
             }
 
             Message::ToggleAlbumsViewMode => {
@@ -1891,9 +1929,9 @@ impl AppModel {
             }
 
             Message::ExpandNowPlaying => {
-                self.expand_target = Some(1.0);
-                self.expand_anim_start = Some(std::time::Instant::now());
-                self.expand_anim_from = self.expand_progress;
+                // Mount the sheet immediately; it animates itself open.
+                self.expand_progress = 1.0;
+                return self.begin_expand_transition(1.0);
             }
 
             Message::CollapseNowPlaying => {
@@ -1908,38 +1946,25 @@ impl AppModel {
                     self.viz_browser_open = false;
                     return Task::none();
                 }
-                self.expand_target = Some(0.0);
-                self.expand_anim_start = Some(std::time::Instant::now());
-                self.expand_anim_from = self.expand_progress;
                 self.lyrics_overlay_active = false;
+                let transition = self.begin_expand_transition(0.0);
                 // Leaving the expanded view must also leave fullscreen, else the
                 // header bar / nav sidebar would stay hidden with no visualizer.
                 #[cfg(feature = "visualizer")]
-                return self.exit_viz_fullscreen();
+                return transition.chain(self.exit_viz_fullscreen());
+                #[cfg(not(feature = "visualizer"))]
+                return transition;
             }
 
             Message::ExpandAnimTick => {
-                use crate::views::now_playing::animation;
-
-                if let (Some(target), Some(start)) = (self.expand_target, self.expand_anim_start) {
-                    let elapsed = start.elapsed().as_secs_f32() * 1000.0;
-                    let t = (elapsed / animation::ANIMATION_DURATION_MS).min(1.0);
-
-                    // Apply easing based on direction
-                    let eased = if target > self.expand_anim_from {
-                        animation::ease_out(t)
-                    } else {
-                        animation::ease_in(t)
-                    };
-
-                    self.expand_progress = animation::lerp(self.expand_anim_from, target, eased);
-
-                    // Check if animation is complete
-                    if t >= 1.0 {
-                        self.expand_progress = target;
-                        self.expand_target = None;
-                        self.expand_anim_start = None;
-                    }
+                // Fired once per transition, after `sheet::DURATION`. Ignore
+                // ticks from a transition that has since been superseded.
+                if let (Some(target), Some(start)) = (self.expand_target, self.expand_anim_start)
+                    && start.elapsed() >= crate::views::now_playing::sheet::DURATION
+                {
+                    self.expand_progress = target;
+                    self.expand_target = None;
+                    self.expand_anim_start = None;
                 }
             }
 
@@ -1973,7 +1998,11 @@ impl AppModel {
                         self.blurred_cover = Some(handle);
                         self.blurred_cover_key = Some(key.clone());
                     }
-                    self.accent = accent;
+                    // Lift/darken deep or pale cover colours so the accent
+                    // (seek bar, play button, current lyric) stays visible
+                    // against the window background.
+                    let dark = cosmic::theme::active().cosmic().is_dark;
+                    self.accent = accent.map(|a| a.legible(dark));
                     // Same "keep the old value on failure" behavior as
                     // the blur handle above.
                     if let Some(large) = large_handle {
@@ -2248,6 +2277,9 @@ impl AppModel {
                 use crate::views::smart_playlists::SmartPlaylistMessage;
 
                 match msg {
+                    SmartPlaylistMessage::Navigate(route) => {
+                        return self.navigate(route);
+                    }
                     // List view
                     SmartPlaylistMessage::New => {
                         self.smart_playlist_editor =
@@ -2514,13 +2546,33 @@ impl AppModel {
             }
 
             Message::BackToGenreGrid => {
-                self.selected_genre = None;
                 self.genre_tracks.clear();
+                if let Some(task) = self.go_back() {
+                    return task;
+                }
+                self.selected_genre = None;
             }
 
             Message::PlayGenreTrack(idx) => {
                 if !self.genre_tracks.is_empty() {
                     return self.play_track_list(self.genre_tracks.clone(), idx);
+                }
+            }
+
+            Message::ShuffleGenre => {
+                if !self.genre_tracks.is_empty() {
+                    if !self.config.shuffle {
+                        self.config.shuffle = true;
+                        if let Some(player) = &mut self.player {
+                            player.set_shuffle(true);
+                        }
+                    }
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as usize)
+                        .unwrap_or(0);
+                    let start = nanos % self.genre_tracks.len();
+                    return self.play_track_list(self.genre_tracks.clone(), start);
                 }
             }
 
@@ -2805,6 +2857,7 @@ impl AppModel {
 
     pub(super) fn select_nav(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Message>> {
         self.nav.activate(id);
+        self.clear_nav_history();
         // Reset sub-view selections when switching pages
         self.selected_album = None;
         self.selected_artist = None;
@@ -2815,18 +2868,15 @@ impl AppModel {
         self.selected_podcast = None;
 
         // Collapse expanded now-playing view when navigating
-        #[cfg(feature = "visualizer")]
-        let mut fs_task = Task::none();
-        if self.expand_progress > 0.0 || self.expand_target.is_some() {
+        let collapse_task = if self.expand_progress > 0.0 || self.expand_target.is_some() {
             self.lyrics_overlay_active = false;
-            self.expand_target = Some(0.0);
-            self.expand_anim_start = Some(std::time::Instant::now());
-            self.expand_anim_from = self.expand_progress;
+            let transition = self.begin_expand_transition(0.0);
             #[cfg(feature = "visualizer")]
-            {
-                fs_task = self.exit_viz_fullscreen();
-            }
-        }
+            let transition = transition.chain(self.exit_viz_fullscreen());
+            transition
+        } else {
+            Task::none()
+        };
 
         // Lazy-load data for Playlists and Genres pages
         let page = self.nav.active_data::<Page>().cloned();
@@ -2867,9 +2917,19 @@ impl AppModel {
         };
 
         let title_task = self.update_title();
-        #[cfg(feature = "visualizer")]
-        return Task::batch([title_task, page_task, fs_task]);
-        #[cfg(not(feature = "visualizer"))]
-        Task::batch([title_task, page_task])
+        Task::batch([title_task, page_task, collapse_task])
+    }
+
+    /// Start an expand (`target = 1.0`) or collapse (`0.0`) transition of
+    /// the now-playing sheet. The sheet animates itself at draw time; this
+    /// only schedules a single `ExpandAnimTick` for when it has finished,
+    /// which unmounts the sheet after a collapse.
+    pub(super) fn begin_expand_transition(&mut self, target: f32) -> Task<cosmic::Action<Message>> {
+        self.expand_target = Some(target);
+        self.expand_anim_start = Some(std::time::Instant::now());
+        cosmic::task::future(async {
+            tokio::time::sleep(crate::views::now_playing::sheet::DURATION).await;
+            cosmic::Action::App(Message::ExpandAnimTick)
+        })
     }
 }

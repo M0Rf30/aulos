@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
-use cosmic::iced::core::text::Wrapping;
+use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
 use cosmic::iced::{Alignment, Color, ContentFit, Length};
 use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
@@ -66,14 +66,20 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Body text pinned to a single line: clipped at the cell edge, never wraps.
+/// Body text pinned to a single line, ending in "…" when it doesn't fit
+/// (the containing cell still clips as a safety net).
 pub fn cell_text<'a>(content: impl Into<Cow<'a, str>> + 'a) -> Text<'a> {
-    widget::text::body(content).wrapping(Wrapping::None)
+    widget::text::body(content)
+        .wrapping(Wrapping::None)
+        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
 }
 
-/// Caption (small, dim) text pinned to a single line.
+/// Caption (small, dim) text pinned to a single line, ellipsized like
+/// [`cell_text`].
 pub fn cell_caption<'a>(content: impl Into<Cow<'a, str>> + 'a) -> Text<'a> {
-    widget::text::caption(content).wrapping(Wrapping::None)
+    widget::text::caption(content)
+        .wrapping(Wrapping::None)
+        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
 }
 
 /// Right-aligned, fixed-width duration cell for track rows.
@@ -93,6 +99,263 @@ pub fn clipped_cell<'a, M: 'a>(content: cosmic::Element<'a, M>) -> cosmic::Eleme
         .align_y(Vertical::Center)
         .clip(true)
         .into()
+}
+
+/// Single-line clickable text that navigates somewhere (artist, album,
+/// genre…). Reads as plain text — `secondary` dims it like the caption
+/// columns — and turns accent-coloured on hover, like a web link, so
+/// interlinked metadata is discoverable without cluttering the layout.
+/// Nested inside a row button, it captures its own click, so the row's
+/// action (usually "play") only fires outside the link.
+pub fn link<'a, M: Clone + 'a>(
+    content: Text<'a>,
+    secondary: bool,
+    on_press: M,
+) -> cosmic::Element<'a, M> {
+    link_styled(content, on_press, move |theme, hovered| {
+        let cosmic = theme.cosmic();
+        if hovered {
+            cosmic.accent_text_color().into()
+        } else if secondary {
+            cosmic.palette.neutral_7.into()
+        } else {
+            cosmic.background(false).component.on.into()
+        }
+    })
+}
+
+/// [`link`] for text drawn on a fixed-colour backdrop (e.g. the blurred
+/// cover behind the expanded now-playing view): `color` at rest, fully
+/// opaque on hover, independent of the theme.
+pub fn link_on<'a, M: Clone + 'a>(
+    content: Text<'a>,
+    color: Color,
+    on_press: M,
+) -> cosmic::Element<'a, M> {
+    link_styled(content, on_press, move |_, hovered| {
+        if hovered {
+            Color { a: 1.0, ..color }
+        } else {
+            color
+        }
+    })
+}
+
+fn link_styled<'a, M: Clone + 'a>(
+    content: Text<'a>,
+    on_press: M,
+    color: impl Fn(&cosmic::Theme, bool) -> Color + Copy + 'static,
+) -> cosmic::Element<'a, M> {
+    let style = move |theme: &cosmic::Theme, hovered: bool| ButtonStyle {
+        background: None,
+        text_color: Some(color(theme, hovered)),
+        icon_color: Some(color(theme, hovered)),
+        ..ButtonStyle::new()
+    };
+    widget::button::custom(content)
+        .padding(0)
+        .on_press(on_press)
+        .class(cosmic::theme::Button::Custom {
+            active: Box::new(move |_, theme| style(theme, false)),
+            hovered: Box::new(move |_, theme| style(theme, true)),
+            pressed: Box::new(move |_, theme| style(theme, true)),
+            disabled: Box::new(move |theme| style(theme, false)),
+        })
+        .into()
+}
+
+/// Button class that fills with the cover-art accent colour instead of the
+/// theme accent, mirroring `Button::Suggested`'s filled/pill shape via
+/// `radius_xl` corners so the play/pause button stays visually consistent
+/// while matching the current artwork. Hover/pressed/disabled states dim
+/// the same fill via alpha rather than deriving separate colours from the
+/// palette.
+pub fn accent_button_class(accent: &crate::library::palette::Accent) -> cosmic::theme::Button {
+    let background = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
+    let on = Color::from_rgb(accent.on_color[0], accent.on_color[1], accent.on_color[2]);
+    let style = move |theme: &cosmic::Theme, alpha: f32| cosmic::widget::button::Style {
+        background: Some(Background::Color(Color {
+            a: alpha,
+            ..background
+        })),
+        text_color: Some(on),
+        icon_color: Some(on),
+        border_radius: theme.cosmic().corner_radii.radius_xl.into(),
+        ..cosmic::widget::button::Style::new()
+    };
+    cosmic::theme::Button::Custom {
+        active: Box::new(move |_focused, theme| style(theme, 1.0)),
+        hovered: Box::new(move |_focused, theme| style(theme, 0.85)),
+        pressed: Box::new(move |_focused, theme| style(theme, 0.7)),
+        disabled: Box::new(move |theme| style(theme, 0.5)),
+    }
+}
+
+/// Height of the hero header on album/artist detail pages.
+pub const HERO_HEIGHT: f32 = 280.0;
+
+/// Detail-page hero header: `content` (cover, title, actions) laid over the
+/// album's blurred artwork, washed toward the window background so theme
+/// text stays legible, and tinted with the cover's accent colour. Without
+/// artwork it degrades to an accent glow, and without either to a plain
+/// card — so the layout never changes as artwork finishes loading.
+pub fn hero_header<'a, M: 'a>(
+    blurred: Option<&widget::icon::Handle>,
+    accent: Option<&crate::library::palette::Accent>,
+    back: Option<cosmic::Element<'a, M>>,
+    content: cosmic::Element<'a, M>,
+) -> cosmic::Element<'a, M> {
+    use cosmic::iced::gradient::Linear;
+    use cosmic::iced::{Gradient, Radians};
+
+    let radius = cosmic::theme::active().cosmic().corner_radii.radius_l[0];
+    let accent = accent.map(|a| Color::from_rgb(a.color[0], a.color[1], a.color[2]));
+    let has_art = blurred.is_some();
+
+    let mut stack = cosmic::iced::widget::Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(HERO_HEIGHT))
+        // Base layer fixes the stack's size.
+        .push(
+            widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fixed(HERO_HEIGHT)),
+        );
+
+    if let Some(widget::icon::Data::Image(image)) = blurred.map(|h| &h.data) {
+        stack = stack.push(
+            widget::container(
+                widget::image(image.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(ContentFit::Cover)
+                    .border_radius([radius; 4]),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .clip(true),
+        );
+    }
+
+    // Veil: wash the artwork toward the page background (top lighter,
+    // bottom nearly opaque), with an accent tint near the top.
+    stack = stack.push(
+        widget::container(
+            widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let bg: Color = cosmic.background(false).base.into();
+            let top = match (has_art, accent) {
+                (true, Some(a)) => mix(Color { a: 0.55, ..bg }, Color { a: 0.55, ..a }, 0.35),
+                (true, None) => Color { a: 0.5, ..bg },
+                (false, Some(a)) => Color { a: 0.28, ..a },
+                (false, None) => cosmic.background(false).component.base.into(),
+            };
+            // With artwork, fade fully into the page so the hero has no
+            // visible bottom edge.
+            let bottom = if has_art {
+                bg
+            } else if accent.is_some() {
+                Color { a: 0.0, ..bg }
+            } else {
+                top
+            };
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Gradient(Gradient::Linear(
+                    Linear::new(Radians(std::f32::consts::PI))
+                        .add_stop(0.0, top)
+                        .add_stop(1.0, bottom),
+                ))),
+                border: cosmic::iced::Border {
+                    radius: radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })),
+    );
+
+    stack = stack.push(
+        widget::container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(24)
+            .align_y(Vertical::Bottom),
+    );
+    if let Some(back) = back {
+        stack = stack.push(
+            widget::container(back)
+                .padding(12)
+                .align_x(Horizontal::Left)
+                .align_y(Vertical::Top),
+        );
+    }
+    stack.into()
+}
+
+/// Round, translucent "back" button for the top-left corner of a
+/// [`hero_header`], with a tooltip.
+pub fn hero_back_button<'a, M: Clone + 'static>(
+    label: String,
+    on_press: M,
+) -> cosmic::Element<'a, M> {
+    widget::tooltip(
+        widget::button::icon(widget::icon::from_name("go-previous-symbolic").size(16))
+            .on_press(on_press)
+            .padding(8)
+            .class(cosmic::theme::Button::Custom {
+                active: Box::new(|_, theme| hero_back_style(theme, 0.35)),
+                hovered: Box::new(|_, theme| hero_back_style(theme, 0.55)),
+                pressed: Box::new(|_, theme| hero_back_style(theme, 0.7)),
+                disabled: Box::new(|theme| hero_back_style(theme, 0.2)),
+            }),
+        widget::text::caption(label),
+        TooltipPosition::Bottom,
+    )
+    .into()
+}
+
+fn hero_back_style(theme: &cosmic::Theme, alpha: f32) -> ButtonStyle {
+    let cosmic = theme.cosmic();
+    let bg: Color = cosmic.background(false).base.into();
+    let on: Color = cosmic.background(false).on.into();
+    ButtonStyle {
+        background: Some(Background::Color(Color { a: alpha, ..bg })),
+        text_color: Some(on),
+        icon_color: Some(on),
+        border_radius: cosmic.corner_radii.radius_xl.into(),
+        ..ButtonStyle::new()
+    }
+}
+
+/// Linear blend of two colours (`t` = share of `b`).
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+/// [`link`] over single-line body text for a table cell that may be empty:
+/// plain (non-clickable) text when `content` is blank, so missing metadata
+/// never becomes a link.
+pub fn link_cell<'a, M: Clone + 'a>(
+    content: &'a str,
+    secondary: bool,
+    on_press: impl FnOnce() -> M,
+) -> cosmic::Element<'a, M> {
+    if content.trim().is_empty() {
+        cell_text(content).into()
+    } else {
+        link(cell_text(content), secondary, on_press())
+    }
 }
 
 /// Compact interactive five-star rating (roughly 100px wide).
@@ -221,43 +484,40 @@ pub fn favorite_button<'a, M: Clone + 'static>(
 /// wider than `"CD"`).
 pub const QUALITY_BADGE_WIDTH: f32 = 64.0;
 
-/// Compact icon-and-label pill for a track or album's audio quality tier.
+/// Compact pill marking a track or album as high-resolution (Hi-Res / DSD).
 ///
-/// Renders a zero-size element for
-/// [`AudioQuality::Unknown`](crate::library::quality::AudioQuality::Unknown)
-/// rather than an empty pill, so a track that fails to classify leaves its
-/// column blank instead of drawing an empty box; callers still wrap the
-/// result in a fixed-width container (the same way `star_rating`'s column
-/// is wrapped) so the column itself never jitters.
+/// Only premium tiers get a badge: CD-quality and lossy are the norm for
+/// most libraries, and labelling every row "CD"/"LOSSY" was pure noise.
+/// Anything else renders a zero-size element; callers still wrap the result
+/// in a fixed-width container so columns never jitter.
 pub fn quality_badge<'a, M: 'static>(
     quality: crate::library::quality::AudioQuality,
 ) -> cosmic::Element<'a, M> {
-    if !quality.is_known() {
+    use crate::library::quality::AudioQuality;
+    if !matches!(quality, AudioQuality::HiRes | AudioQuality::Dsd) {
         return widget::Space::new().into();
     }
-    let pill = widget::Row::new()
-        .push(widget::icon::from_name(quality.icon_name()).size(12))
-        .push(widget::text::caption(quality.label()))
-        .spacing(4)
-        .align_y(Alignment::Center);
-    widget::container(pill)
-        .padding([2, 6])
-        .width(QUALITY_BADGE_WIDTH)
-        .align_x(Horizontal::Center)
-        .class(cosmic::theme::Container::custom(|theme| {
-            let cosmic = theme.cosmic();
-            cosmic::iced::widget::container::Style {
-                background: Some(Background::Color(
-                    cosmic.background(false).component.divider.into(),
-                )),
-                border: cosmic::iced::Border {
-                    radius: cosmic.corner_radii.radius_xs.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }))
-        .into()
+    widget::container(
+        widget::text::caption(quality.label())
+            .wrapping(Wrapping::None)
+            .font(cosmic::font::semibold()),
+    )
+    .padding([1, 8])
+    .class(cosmic::theme::Container::custom(|theme| {
+        let cosmic = theme.cosmic();
+        let accent: Color = cosmic.accent_text_color().into();
+        cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.14, ..accent })),
+            text_color: Some(accent),
+            border: cosmic::iced::Border {
+                radius: cosmic.corner_radii.radius_xl.into(),
+                color: Color { a: 0.35, ..accent },
+                width: 1.0,
+            },
+            ..Default::default()
+        }
+    }))
+    .into()
 }
 
 /// Icon button wrapped in a caption tooltip — for transport/utility controls.
@@ -283,7 +543,15 @@ pub fn empty_state<'a, M: 'static>(
 ) -> cosmic::Element<'a, M> {
     widget::container(
         widget::Column::new()
-            .push(widget::icon::from_name(icon_name).size(64))
+            .push(
+                widget::icon::icon(widget::icon::from_name(icon_name).handle())
+                    .size(56)
+                    .class(cosmic::theme::Svg::custom(|theme| {
+                        cosmic::iced::widget::svg::Style {
+                            color: Some(theme.cosmic().palette.neutral_6.into()),
+                        }
+                    })),
+            )
             .push(widget::text::title3(title))
             .push(widget::text::body(subtitle))
             .spacing(8)
@@ -325,20 +593,84 @@ pub fn view_mode_toggle_header<'a, M: Clone + 'static>(
         .into()
 }
 
-/// Grid-card artwork tile: the cached cover/avatar icon at `size`, or a
-/// card-styled placeholder frame with a 64px fallback icon when nothing is
-/// cached yet. Shared by every card grid (albums, artists) so a missing
-/// cover's frame never differs from the album/artist that has one.
+/// Rounded cover artwork at `size`×`size`, optionally lifted off the
+/// surface with a soft drop shadow.
+///
+/// Raster covers are drawn through `widget::image` (which supports a
+/// native corner radius) using the very same `image::Handle` the icon
+/// handle wraps, so the GPU texture cache is shared rather than doubled;
+/// anything else (SVG/symbolic) falls back to a plain icon.
+pub fn cover_art<'a, M: 'static>(
+    handle: &widget::icon::Handle,
+    size: f32,
+    radius: f32,
+    elevated: bool,
+) -> cosmic::Element<'a, M> {
+    let art: cosmic::Element<'a, M> = match &handle.data {
+        widget::icon::Data::Image(image) => widget::image(image.clone())
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .content_fit(ContentFit::Cover)
+            .border_radius([radius; 4])
+            .into(),
+        widget::icon::Data::Svg(_) => widget::icon::icon(handle.clone()).size(size as u16).into(),
+    };
+    if !elevated {
+        return art;
+    }
+    widget::container(art)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .class(cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            cosmic::iced::widget::container::Style {
+                // Painted under the cover only so the shadow quad has a
+                // body; never visible once the artwork is drawn on top.
+                background: Some(Background::Color(
+                    cosmic.background(false).component.base.into(),
+                )),
+                border: cosmic::iced::Border {
+                    radius: radius.into(),
+                    ..Default::default()
+                },
+                shadow: cosmic::iced::Shadow {
+                    color: Color::from_rgba(
+                        0.0,
+                        0.0,
+                        0.0,
+                        if cosmic.is_dark { 0.45 } else { 0.22 },
+                    ),
+                    offset: cosmic::iced::Vector::new(0.0, 4.0),
+                    blur_radius: 14.0,
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// Grid-card artwork tile: the cached cover/avatar, rounded and elevated,
+/// or a card-styled placeholder frame with a 64px fallback icon when
+/// nothing is cached yet. Shared by every card grid (albums, artists) so a
+/// missing cover's frame never differs from the album/artist that has one.
 pub fn grid_art_tile<'a, M: 'static>(
     handle: Option<&widget::icon::Handle>,
     size: u16,
     placeholder_icon: &'static str,
 ) -> cosmic::Element<'a, M> {
+    let radius = cosmic::theme::active().cosmic().corner_radii.radius_m[0];
     match handle {
-        Some(handle) => widget::icon::icon(handle.clone()).size(size).into(),
+        Some(handle) => cover_art(handle, f32::from(size), radius, true),
         None => {
             let placeholder: cosmic::Element<'a, M> =
-                widget::icon::from_name(placeholder_icon).size(64).into();
+                widget::icon::icon(widget::icon::from_name(placeholder_icon).handle())
+                    .size(size / 3)
+                    .class(cosmic::theme::Svg::custom(|theme| {
+                        cosmic::iced::widget::svg::Style {
+                            color: Some(theme.cosmic().palette.neutral_6.into()),
+                        }
+                    }))
+                    .into();
             widget::container(placeholder)
                 .width(f32::from(size))
                 .height(f32::from(size))
@@ -350,17 +682,113 @@ pub fn grid_art_tile<'a, M: 'static>(
     }
 }
 
-/// List-row artwork icon: the cached cover/avatar icon at `size`, or an
-/// unstyled fallback icon at the same size when nothing is cached.
+/// List-row artwork: the cached cover/avatar at `size`, with small rounded
+/// corners, or an unstyled fallback icon at the same size when nothing is
+/// cached.
 pub fn list_art_icon<'a, M: 'static>(
     handle: Option<&widget::icon::Handle>,
     size: u16,
     placeholder_icon: &'static str,
 ) -> cosmic::Element<'a, M> {
     match handle {
-        Some(handle) => widget::icon::icon(handle.clone()).size(size).into(),
-        None => widget::icon::from_name(placeholder_icon).size(size).into(),
+        Some(handle) => {
+            let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
+            cover_art(handle, f32::from(size), radius, false)
+        }
+        // Same footprint as real artwork: a rounded card tile with a
+        // smaller, dimmed glyph, instead of a bare full-size white icon.
+        None => widget::container(
+            widget::icon::icon(widget::icon::from_name(placeholder_icon).handle())
+                .size(size / 2)
+                .class(cosmic::theme::Svg::custom(|theme| {
+                    cosmic::iced::widget::svg::Style {
+                        color: Some(theme.cosmic().palette.neutral_6.into()),
+                    }
+                })),
+        )
+        .width(f32::from(size))
+        .height(f32::from(size))
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .class(cosmic::theme::Container::Card)
+        .into(),
     }
+}
+
+/// Horizontal space a scrollable's scrollbar may overlay on the right.
+const GRID_SCROLLBAR_CLEARANCE: f32 = 16.0;
+
+/// Allowed range for the grid card size multiplier.
+pub const GRID_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.7..=1.6;
+
+/// Current grid card size multiplier, mirrored from `Config::grid_scale`
+/// by the app (stored as f32 bits) so every `fluid_card_grid` call honours
+/// it without threading the value through each view's signature.
+static GRID_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0
+
+pub fn set_grid_scale(scale: f32) {
+    let scale = scale.clamp(*GRID_SCALE_RANGE.start(), *GRID_SCALE_RANGE.end());
+    GRID_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn grid_scale() -> f32 {
+    f32::from_bits(GRID_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Scrollable card grid that fills the available width exactly.
+///
+/// Fits as many columns as possible at `min_card` (outer card width,
+/// including the card button's own padding), then stretches every card —
+/// up to `max_card` — so rows span the full width with uniform gaps,
+/// instead of a fixed-size `flex_row` leaving ragged, jumpy margins as the
+/// window resizes. The last row stays left-aligned with the rows above it.
+///
+/// `make_card(index, card_width)` builds card `index` at the given outer
+/// width.
+pub fn fluid_card_grid<'a, M: 'a>(
+    count: usize,
+    min_card: f32,
+    max_card: f32,
+    make_card: impl Fn(usize, f32) -> cosmic::Element<'a, M> + 'a,
+) -> cosmic::Element<'a, M> {
+    // User-chosen card size (Settings / header zoom slider).
+    let scale = grid_scale();
+    let (min_card, max_card) = (min_card * scale, max_card * scale);
+    widget::responsive(move |size| {
+        let spacing = cosmic::theme::active().cosmic().spacing;
+        let pad = f32::from(spacing.space_m);
+        let gap = f32::from(spacing.space_s);
+        let avail = (size.width - 2.0 * pad - GRID_SCROLLBAR_CLEARANCE).max(min_card);
+        let columns = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
+        let card = ((avail - gap * (columns - 1) as f32) / columns as f32).min(max_card);
+
+        let mut grid = widget::Column::new().spacing(gap);
+        for start in (0..count).step_by(columns) {
+            let mut row = widget::Row::new().spacing(gap);
+            for index in start..(start + columns).min(count) {
+                row = row.push(
+                    widget::container(make_card(index, card))
+                        .width(Length::Fixed(card))
+                        .align_x(Horizontal::Center),
+                );
+            }
+            grid = grid.push(row);
+        }
+
+        widget::scrollable(
+            widget::container(grid)
+                .padding(cosmic::iced::Padding {
+                    top: pad,
+                    right: pad + GRID_SCROLLBAR_CLEARANCE,
+                    bottom: pad,
+                    left: pad,
+                })
+                .width(Length::Fill),
+        )
+        .height(Length::Fill)
+        .into()
+    })
+    .into()
 }
 
 /// Round artist avatar: a real photo (clipped to a circle via

@@ -19,10 +19,9 @@ use crate::views::common;
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
-use cosmic::iced::{Alignment, ContentFit, Length};
+use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
-use std::rc::Rc;
 use std::time::Duration;
 
 /// Fixed height of the compact bar — never grows regardless of content.
@@ -39,27 +38,9 @@ const SEEK_TRACK_HEIGHT: f32 = 16.0;
 /// Visible thickness of the inert seek-track placeholder's rail.
 const SEEK_TRACK_THICKNESS: f32 = 4.0;
 
-/// Slider class that tints only the active (played) portion of the rail
-/// and the drag handle with the cover-art accent colour, starting from
-/// `Slider::Standard`'s own computed style via `Catalog::style` so border,
-/// thickness and handle shape stay in sync with the theme — mirrors
-/// `expanded_view::accent_slider_class` but kept file-local since the two
-/// views don't otherwise share private helpers.
-fn accent_slider_class(accent: &Accent) -> cosmic::theme::iced::Slider {
-    let color = cosmic::iced::Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
-    let style = move |theme: &cosmic::Theme, status: widget::slider::Status| {
-        let mut base =
-            widget::slider::Catalog::style(theme, &cosmic::theme::iced::Slider::default(), status);
-        base.rail.backgrounds.0 = Background::Color(color);
-        base.handle.background = Background::Color(color);
-        base
-    };
-    cosmic::theme::iced::Slider::Custom {
-        active: Rc::new(move |t| style(t, widget::slider::Status::Active)),
-        hovered: Rc::new(move |t| style(t, widget::slider::Status::Hovered)),
-        dragging: Rc::new(move |t| style(t, widget::slider::Status::Dragged)),
-    }
-}
+/// Fixed width of the elapsed / total time labels, so the seek rail never
+/// jitters as the digits change.
+const TIME_WIDTH: f32 = 40.0;
 
 /// An icon button with a caption tooltip, disabled (and non-interactive)
 /// whenever `enabled` is false — for every transport/utility control whose
@@ -90,6 +71,60 @@ fn toggle_icon_button<'a, M: Clone + 'static>(
         .selected(active)
         .on_press_maybe(enabled.then_some(on_press));
     widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
+}
+
+/// The bar's one primary action: play/pause rendered as a filled accent
+/// button (cover-derived accent when available, else the theme's suggested
+/// style) so it reads as the focal point of the transport cluster.
+fn play_pause_button<'a>(
+    icon_name: &'static str,
+    enabled: bool,
+    label: String,
+    accent: Option<&Accent>,
+) -> cosmic::Element<'a, NowPlayingMessage> {
+    let class = accent
+        .map(common::accent_button_class)
+        .unwrap_or(cosmic::theme::Button::Suggested);
+    let button = widget::button::icon(widget::icon::from_name(icon_name).size(24))
+        .class(class)
+        .padding(cosmic::theme::active().cosmic().spacing.space_xs)
+        .on_press_maybe(enabled.then_some(NowPlayingMessage::TogglePlayback));
+    widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
+}
+
+/// Rounded, card-coloured tile shown in place of the cover when the track
+/// has no artwork (`has_track`) or nothing is loaded (muted glyph). Same
+/// footprint and corner radius as a real cover so nothing shifts.
+fn cover_placeholder<'a, M: 'static>(has_track: bool) -> cosmic::Element<'a, M> {
+    let glyph = if has_track {
+        "media-optical-symbolic"
+    } else {
+        "audio-x-generic-symbolic"
+    };
+    widget::container(widget::icon::from_name(glyph).size(28))
+        .width(Length::Fixed(COVER_SIZE))
+        .height(Length::Fixed(COVER_SIZE))
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .class(cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let component = &cosmic.background(false).component;
+            let tint = if has_track {
+                component.on
+            } else {
+                component.on_disabled
+            };
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(component.base.into())),
+                icon_color: Some(tint.into()),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_s.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
 }
 
 /// Themed, non-interactive placeholder for the seek slider shown when no
@@ -190,35 +225,13 @@ pub fn playback_bar<'a>(
         (p, position)
     };
 
-    // --- Cover art: fixed 56x56, cropped to fill; placeholder when missing ---
+    // --- Cover art: fixed 56x56, rounded; framed placeholder when missing ---
     let art: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
-        widget::icon::icon(handle.clone())
-            .content_fit(ContentFit::Cover)
-            .width(Length::Fixed(COVER_SIZE))
-            .height(Length::Fixed(COVER_SIZE))
-            .into()
-    } else if has_track {
-        // Track loaded but no artwork available for it.
-        widget::icon::from_name("media-optical-cd-audio-symbolic")
-            .size(40)
-            .into()
+        let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
+        common::cover_art(handle, COVER_SIZE, radius, false)
     } else {
-        // No track loaded — muted placeholder, same footprint as a loaded cover.
-        widget::icon::icon(widget::icon::from_name("audio-x-generic-symbolic").handle())
-            .size(56)
-            .class(cosmic::theme::Svg::custom(|theme| {
-                cosmic::iced::widget::svg::Style {
-                    color: Some(
-                        theme
-                            .cosmic()
-                            .background(false)
-                            .component
-                            .on_disabled
-                            .into(),
-                    ),
-                }
-            }))
-            .into()
+        // Track loaded but no artwork, or nothing loaded at all (muted).
+        cover_placeholder(has_track)
     };
 
     // --- Track info: single-line title + single-line "artist — album" ---
@@ -226,16 +239,15 @@ pub fn playback_bar<'a>(
         cosmic::Element<'_, NowPlayingMessage>,
         cosmic::Element<'_, NowPlayingMessage>,
     ) = if let Some(track) = current_track {
-        let subtitle = if track.album.is_empty() {
-            track.artist.clone()
-        } else {
-            format!("{} — {}", track.artist, track.album)
-        };
         let column = widget::Column::new()
             .push(common::clipped_cell(
-                common::cell_text(track.title.clone()).into(),
+                common::cell_text(track.title.clone())
+                    .font(cosmic::font::semibold())
+                    .into(),
             ))
-            .push(common::clipped_cell(common::cell_caption(subtitle).into()))
+            .push(common::clipped_cell(super::artist_album_line(
+                track, true, None, " — ",
+            )))
             .spacing(2)
             .width(Length::Fill)
             .into();
@@ -297,10 +309,12 @@ pub fn playback_bar<'a>(
     let repeat_icon = repeat_mode.icon_name();
     let repeat_active = repeat_mode != RepeatMode::None;
 
+    // Secondary controls (shuffle / stop / repeat) are a size smaller than
+    // the skip buttons, and play/pause is the filled focal point.
     let transport = widget::Row::new()
         .push(toggle_icon_button(
             shuffle_icon,
-            24,
+            20,
             shuffle,
             has_track && !is_live,
             fl!("shuffle"),
@@ -313,16 +327,10 @@ pub fn playback_bar<'a>(
             fl!("previous"),
             NowPlayingMessage::Previous,
         ))
-        .push(transport_icon_button(
-            play_icon,
-            32,
-            has_track,
-            play_label,
-            NowPlayingMessage::TogglePlayback,
-        ))
+        .push(play_pause_button(play_icon, has_track, play_label, accent))
         .push(transport_icon_button(
             "media-playback-stop-symbolic",
-            24,
+            20,
             stop_enabled,
             fl!("stop"),
             NowPlayingMessage::Stop,
@@ -336,7 +344,7 @@ pub fn playback_bar<'a>(
         ))
         .push(toggle_icon_button(
             repeat_icon,
-            24,
+            20,
             repeat_active,
             has_track && !is_live,
             fl!("repeat"),
@@ -348,26 +356,32 @@ pub fn playback_bar<'a>(
     let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         live_badge()
     } else {
-        common::cell_caption(format_time(display_position)).into()
+        widget::container(common::cell_caption(format_time(display_position)))
+            .width(Length::Fixed(TIME_WIDTH))
+            .align_x(Horizontal::Right)
+            .into()
     };
     let time_end_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         widget::Space::new().width(0).height(0).into()
     } else {
-        common::cell_caption(format_time(duration)).into()
+        widget::container(common::cell_caption(format_time(duration)))
+            .width(Length::Fixed(TIME_WIDTH))
+            .align_x(Horizontal::Left)
+            .into()
     };
 
     let seek_bar = widget::Row::new()
         .push(time_start_slot)
         .push(if has_track && !is_live {
-            let mut seek_slider =
-                widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-                    .step(0.001_f32)
-                    .on_release(NowPlayingMessage::SeekCommit)
-                    .width(Length::Fill);
-            if let Some(accent) = accent {
-                seek_slider = seek_slider.class(accent_slider_class(accent));
-            }
-            seek_slider.into()
+            super::seek_bar::smooth_seek(
+                progress,
+                duration,
+                state == PlaybackState::Playing && seeking_preview.is_none(),
+                accent.map(|a| cosmic::iced::Color::from_rgb(a.color[0], a.color[1], a.color[2])),
+                NowPlayingMessage::SeekPreview,
+                NowPlayingMessage::SeekCommit,
+            )
+            .into()
         } else {
             inert_seek_track()
         })
@@ -401,7 +415,7 @@ pub fn playback_bar<'a>(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
                 .step(0.01_f32)
                 .on_release(NowPlayingMessage::VolumeCommit)
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(110.0)),
         )
         .spacing(8)
         .align_y(Alignment::Center);
@@ -409,7 +423,7 @@ pub fn playback_bar<'a>(
     // --- Utility buttons ---
     let utility_buttons = widget::Row::new()
         .push(transport_icon_button(
-            "view-list-lyrics-symbolic",
+            "format-justify-left-symbolic",
             20,
             has_track,
             fl!("lyrics"),
@@ -432,7 +446,7 @@ pub fn playback_bar<'a>(
         .push(center_column)
         .push(volume_block)
         .push(utility_buttons)
-        .spacing(12)
+        .spacing(16)
         .padding([8, 16])
         .align_y(Alignment::Center);
 

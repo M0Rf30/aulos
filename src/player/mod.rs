@@ -10,6 +10,7 @@ pub mod eq_source;
 pub mod equalizer;
 mod http_range_reader;
 mod icy_reader;
+pub mod intro;
 pub mod local_backend;
 pub mod mpd_backend;
 #[cfg(feature = "visualizer")]

@@ -103,8 +103,10 @@ impl AppModel {
                     self.radio_add_name.clear();
                     self.radio_add_url.clear();
                     self.radio_add_error = None;
+                    return Task::none();
                 }
-                Task::none()
+                widget::text_input::focus(widget::Id::new(crate::views::radio::ADD_NAME_INPUT_ID))
+                    .map(cosmic::Action::App)
             }
             RadioMessage::AddNameChanged(v) => {
                 self.radio_add_name = v;
@@ -128,7 +130,8 @@ impl AppModel {
             RadioMessage::StartRename(id, name) => {
                 self.radio_renaming_id = Some(id);
                 self.radio_rename_input = name;
-                Task::none()
+                widget::text_input::focus(widget::Id::new(crate::views::radio::RENAME_INPUT_ID))
+                    .map(cosmic::Action::App)
             }
             RadioMessage::RenameInputChanged(v) => {
                 self.radio_rename_input = v;

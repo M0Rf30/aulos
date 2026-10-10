@@ -9,6 +9,7 @@ pub mod equalizer;
 pub mod folders;
 pub mod genres;
 pub mod lyrics;
+pub mod lyrics_follow;
 pub mod now_playing;
 pub mod playlists;
 pub mod podcasts;
@@ -18,10 +19,38 @@ pub mod radio;
 pub mod settings;
 pub mod smart_playlists;
 pub mod songs;
+pub mod track_row;
 
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::core::Background;
 use cosmic::widget::button::Style as ButtonStyle;
+
+/// A cross-view navigation target. Any view can emit one (e.g. clicking an
+/// artist name inside an album) and the app resolves it to the right page
+/// and detail selection, remembering where the user came from so "Back"
+/// returns there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Artist(String),
+    Album { artist: String, album: String },
+    Genre(String),
+}
+
+impl Route {
+    /// The album page a track belongs to (keyed by album artist, falling
+    /// back to the track artist, as albums are grouped).
+    pub fn album_of(track: &crate::library::Track) -> Self {
+        let artist = if track.album_artist.is_empty() {
+            &track.artist
+        } else {
+            &track.album_artist
+        };
+        Route::Album {
+            artist: artist.clone(),
+            album: track.album.clone(),
+        }
+    }
+}
 
 pub fn card_button_class() -> cosmic::theme::Button {
     cosmic::theme::Button::Custom {

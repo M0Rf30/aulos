@@ -17,7 +17,9 @@
 
 use std::path::Path;
 
-use cosmic::iced::{Alignment, Length};
+use cosmic::cosmic_theme::palette::WithAlpha;
+use cosmic::iced::core::Background;
+use cosmic::iced::{Alignment, Border, Color, Length};
 use cosmic::widget;
 
 use crate::convert::encoder::{FlacBitDepth, FlacOptions, LossyOptions, Mp3Mode};
@@ -174,7 +176,18 @@ fn overall_progress(jobs: &[ConvertJob]) -> f32 {
 /// `ffmpeg` is currently available — see [`output_section`]'s separate
 /// warning caption for the unavailable case.
 fn format_label(format: OutputFormat) -> String {
-    let base = match format {
+    let base = format_short_label(format);
+    if format.requires_ffmpeg() {
+        fl!("convert-format-needs-ffmpeg", format = base)
+    } else {
+        base
+    }
+}
+
+/// Localized format name without the "(needs ffmpeg)" suffix — used on the
+/// job rows' target-format chips, where the suffix would just be noise.
+fn format_short_label(format: OutputFormat) -> String {
+    match format {
         OutputFormat::Flac => fl!("convert-format-flac"),
         OutputFormat::Wav16 => fl!("convert-format-wav16"),
         OutputFormat::Wav24 => fl!("convert-format-wav24"),
@@ -186,11 +199,6 @@ fn format_label(format: OutputFormat) -> String {
         OutputFormat::Opus => fl!("convert-format-opus"),
         OutputFormat::OggVorbis => fl!("convert-format-vorbis"),
         OutputFormat::Alac => fl!("convert-format-alac"),
-    };
-    if format.requires_ffmpeg() {
-        fl!("convert-format-needs-ffmpeg", format = base)
-    } else {
-        base
     }
 }
 
@@ -408,18 +416,162 @@ fn quality_items(
     }
 }
 
-/// Output settings card: destination folder, format, sample rate, and
-/// format-specific quality options applied to jobs the moment `Start` runs
-/// them.
-fn output_section<'a>(
+/// Semantic colour of a chip/banner, resolved against the active theme so
+/// it follows light/dark and the user's accent.
+#[derive(Clone, Copy)]
+enum Tone {
+    Neutral,
+    Accent,
+    Success,
+    Warning,
+    Danger,
+}
+
+fn tone_color(theme: &cosmic::Theme, tone: Tone) -> Color {
+    let cosmic = theme.cosmic();
+    match tone {
+        Tone::Neutral => cosmic.palette.neutral_7.into(),
+        Tone::Accent => cosmic.accent_color().into(),
+        Tone::Success => cosmic.success_color().into(),
+        Tone::Warning => cosmic.warning_color().into(),
+        Tone::Danger => cosmic.destructive_color().into(),
+    }
+}
+
+/// Soft tinted background with tone-coloured text/icons (pill or rounded rect).
+fn tint_class(tone: Tone, pill: bool) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let color = tone_color(theme, tone);
+        let radii = theme.cosmic().corner_radii;
+        let radius = if pill {
+            radii.radius_xl
+        } else {
+            radii.radius_m
+        };
+        cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.14, ..color })),
+            text_color: Some(color),
+            icon_color: Some(color),
+            border: Border {
+                radius: radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    })
+}
+
+/// Tinted banner surface with a thin tone-coloured outline; only icons take
+/// the tone colour so multi-line text stays readable.
+fn banner_class(tone: Tone) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let color = tone_color(theme, tone);
+        cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.10, ..color })),
+            icon_color: Some(color),
+            border: Border {
+                radius: theme.cosmic().corner_radii.radius_m.into(),
+                width: 1.0,
+                color: Color { a: 0.45, ..color },
+            },
+            ..Default::default()
+        }
+    })
+}
+
+/// Caption text dimmed to the theme's secondary colour.
+fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> common::Text<'a> {
+    common::cell_caption(content).class(cosmic::theme::Text::Custom(|theme| {
+        cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().palette.neutral_7.into()),
+            ..Default::default()
+        }
+    }))
+}
+
+/// Caption text in the theme's destructive colour (failure reasons).
+fn danger_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> common::Text<'a> {
+    common::cell_caption(content).class(cosmic::theme::Text::Custom(|theme| {
+        cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().destructive_color().into()),
+            ..Default::default()
+        }
+    }))
+}
+
+/// Small tinted pill with an optional leading icon.
+fn chip<'a>(
+    icon_name: Option<&'static str>,
+    label: String,
+    tone: Tone,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let mut row = widget::Row::new().spacing(4).align_y(Alignment::Center);
+    if let Some(name) = icon_name {
+        row = row.push(widget::icon::from_name(name).size(12));
+    }
+    row = row.push(common::cell_caption(label));
+    widget::container(row)
+        .padding([2, 8])
+        .class(tint_class(tone, true))
+        .into()
+}
+
+/// Full-width banner: tone icon, bold title, optional body lines.
+fn banner<'a>(
+    icon_name: &'static str,
+    title: String,
+    body: Vec<cosmic::Element<'a, ConvertMessage>>,
+    tone: Tone,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let mut text = widget::Column::new()
+        .push(widget::text::heading(title))
+        .spacing(2);
+    for line in body {
+        text = text.push(line);
+    }
+    widget::container(
+        widget::Row::new()
+            .push(widget::icon::from_name(icon_name).size(24))
+            .push(text.width(Length::Fill))
+            .spacing(spacing.space_s)
+            .align_y(Alignment::Center),
+    )
+    .padding(spacing.space_s)
+    .width(Length::Fill)
+    .class(banner_class(tone))
+    .into()
+}
+
+/// Output destination row: folder glyph, the path (clipped) and its actions.
+fn destination_row<'a>(out_dir: &Path) -> cosmic::Element<'a, ConvertMessage> {
+    widget::settings::item_row(vec![
+        widget::icon::from_name("folder-symbolic").size(20).into(),
+        common::clipped_cell(common::cell_text(out_dir.display().to_string()).into()),
+        widget::button::standard(fl!("convert-dir-change"))
+            .on_press(ConvertMessage::ChangeOutputDir)
+            .into(),
+        job_icon_button(
+            "folder-open-symbolic",
+            fl!("convert-dir-open"),
+            ConvertMessage::OpenOutputDir,
+            false,
+        ),
+    ])
+    .into()
+}
+
+/// Settings pane: destination card, then format/rate/quality card plus a
+/// hint. The quality slot's content varies with the selected format; its
+/// position never does.
+fn settings_pane<'a>(
     out_dir: &Path,
     format: OutputFormat,
     sample_rate: Option<u32>,
-    dir_error: Option<&'a str>,
     flac_options: FlacOptions,
     lossy_options: LossyOptions,
-    ffmpeg_available: Option<bool>,
 ) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
     let format_index = OutputFormat::ALL
         .iter()
         .position(|f| *f == format)
@@ -429,24 +581,12 @@ fn output_section<'a>(
         .position(|r| *r == sample_rate)
         .unwrap_or(0);
 
-    let dir_row = widget::Row::new()
-        .push(common::clipped_cell(
-            common::cell_text(out_dir.display().to_string()).into(),
-        ))
-        .push(
-            widget::button::standard(fl!("convert-dir-change"))
-                .on_press(ConvertMessage::ChangeOutputDir),
-        )
-        .push(
-            widget::button::standard(fl!("convert-dir-open"))
-                .on_press(ConvertMessage::OpenOutputDir),
-        )
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let destination = widget::settings::section()
+        .title(fl!("convert-destination-section"))
+        .add(destination_row(out_dir));
 
-    let mut section = widget::settings::section()
+    let mut output = widget::settings::section()
         .title(fl!("convert-output-section"))
-        .add(widget::settings::item(fl!("convert-output-dir"), dir_row))
         .add(widget::settings::item(
             fl!("convert-format"),
             widget::dropdown(
@@ -471,93 +611,125 @@ fn output_section<'a>(
         ));
 
     for item in quality_items(format, flac_options, lossy_options) {
-        section = section.add(item);
+        output = output.add(item);
     }
 
-    if format.requires_ffmpeg() && ffmpeg_available != Some(true) {
-        section = section.add(widget::text::body(fl!("convert-requires-ffmpeg")));
-    }
-
-    if let Some(reason) = dir_error {
-        section = section.add(widget::text::body(fl!(
-            "convert-dir-error",
-            reason = reason.to_owned()
-        )));
-    }
-    section = section.add(widget::text::caption(fl!("convert-settings-hint")));
-
-    section.into()
+    widget::Column::new()
+        .push(destination)
+        .push(output)
+        .push(
+            secondary_caption(fl!("convert-settings-hint"))
+                .wrapping(cosmic::iced::widget::text::Wrapping::Word),
+        )
+        .spacing(spacing.space_m)
+        .into()
 }
 
-/// Queue summary card: per-state counts, an always-present overall
-/// progress bar, and Start/Cancel-all/Clear-finished actions that disable
-/// (rather than disappear) when not applicable. `Start` also stays
-/// disabled while the configured format needs `ffmpeg` and it isn't
-/// available, since every job would just fail immediately otherwise.
-fn summary_section<'a>(
+/// Queue summary card: title, per-state chips (only the non-zero ones),
+/// primary Start action plus secondary actions that only appear when
+/// applicable, and a slim overall progress bar. `Start` stays disabled while
+/// the configured format needs `ffmpeg` and it isn't available.
+fn summary_card<'a>(
     jobs: &'a [ConvertJob],
     format: OutputFormat,
     ffmpeg_available: Option<bool>,
 ) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
     let counts = JobCounts::compute(jobs);
     let format_blocked = format.requires_ffmpeg() && ffmpeg_available != Some(true);
 
-    let counts_row = widget::Row::new()
-        .push(common::cell_caption(fl!(
-            "convert-summary-queued",
-            count = counts.queued
-        )))
-        .push(common::cell_caption(fl!(
-            "convert-summary-running",
-            count = counts.running
-        )))
-        .push(common::cell_caption(fl!(
-            "convert-summary-done",
-            count = counts.done
-        )))
-        .push(common::cell_caption(fl!(
-            "convert-summary-failed",
-            count = counts.failed
-        )))
-        .spacing(16);
+    let mut chips = widget::Row::new()
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center);
+    if counts.running > 0 {
+        chips = chips.push(chip(
+            Some("emblem-synchronizing-symbolic"),
+            fl!("convert-summary-running", count = counts.running),
+            Tone::Accent,
+        ));
+    }
+    if counts.queued > 0 {
+        chips = chips.push(chip(
+            Some("document-open-recent-symbolic"),
+            fl!("convert-summary-queued", count = counts.queued),
+            Tone::Neutral,
+        ));
+    }
+    if counts.done > 0 {
+        chips = chips.push(chip(
+            Some("object-select-symbolic"),
+            fl!("convert-summary-done", count = counts.done),
+            Tone::Success,
+        ));
+    }
+    if counts.failed > 0 {
+        chips = chips.push(chip(
+            Some("dialog-error-symbolic"),
+            fl!("convert-summary-failed", count = counts.failed),
+            Tone::Danger,
+        ));
+    }
 
-    let progress =
-        widget::progress_bar::determinate_linear(overall_progress(jobs)).width(Length::Fill);
-
-    let buttons = widget::Row::new()
-        .push(
-            widget::button::suggested(fl!("convert-start")).on_press_maybe(
+    let mut actions = widget::Row::new()
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center);
+    if counts.done + counts.failed > 0 {
+        actions = actions.push(
+            widget::button::standard(fl!("convert-clear-finished"))
+                .on_press(ConvertMessage::ClearFinished),
+        );
+    }
+    if counts.queued + counts.running > 0 {
+        actions = actions.push(
+            widget::button::destructive(fl!("convert-cancel-all"))
+                .on_press(ConvertMessage::CancelAll),
+        );
+    }
+    actions = actions.push(
+        widget::button::suggested(fl!("convert-start"))
+            .leading_icon(widget::icon::from_name("media-playback-start-symbolic").handle())
+            .on_press_maybe(
                 (counts.queued > 0 && !format_blocked).then_some(ConvertMessage::StartQueue),
             ),
-        )
-        .push(
-            widget::button::destructive(fl!("convert-cancel-all")).on_press_maybe(
-                (counts.queued + counts.running > 0).then_some(ConvertMessage::CancelAll),
-            ),
-        )
-        .push(
-            widget::button::standard(fl!("convert-clear-finished")).on_press_maybe(
-                (counts.done + counts.failed > 0).then_some(ConvertMessage::ClearFinished),
-            ),
-        )
-        .spacing(8);
+    );
+
+    let top = widget::Row::new()
+        .push(widget::text::title4(fl!("convert-queue-title")))
+        .push(widget::Space::new().width(Length::Fill))
+        .push(actions)
+        .spacing(spacing.space_s)
+        .align_y(Alignment::Center);
 
     widget::container(
         widget::Column::new()
-            .push(counts_row)
-            .push(progress)
-            .push(buttons)
-            .spacing(8)
-            .padding(12),
+            .push(top)
+            .push(chips)
+            .push(
+                widget::progress_bar::determinate_linear(overall_progress(jobs))
+                    .width(Length::Fill),
+            )
+            .spacing(spacing.space_s)
+            .padding(spacing.space_s),
     )
     .width(Length::Fill)
     .class(cosmic::theme::Container::Card)
     .into()
 }
 
-/// One job row: kind icon, filename, target-format/destination caption
-/// (plus the failure reason when applicable), a status chip, a
-/// constant-height progress slot, and state-appropriate actions.
+/// Icon + tone for a job's status chip.
+fn state_visual(state: &JobState) -> (&'static str, Tone) {
+    match state {
+        JobState::Queued => ("document-open-recent-symbolic", Tone::Neutral),
+        JobState::Running => ("emblem-synchronizing-symbolic", Tone::Accent),
+        JobState::Done => ("object-select-symbolic", Tone::Success),
+        JobState::Failed(_) => ("dialog-error-symbolic", Tone::Danger),
+        JobState::Cancelled => ("process-stop-symbolic", Tone::Warning),
+    }
+}
+
+/// One job row: kind tile, filename, source → target format chips,
+/// destination, failure reason (when failed), a constant-height progress
+/// slot, a status chip and state-appropriate actions.
 ///
 /// `pending_*` are the *current* output settings, used to preview a job
 /// that hasn't started yet — its own `settings` are `None` until `Start`
@@ -568,6 +740,7 @@ fn job_row<'a>(
     pending_rate: Option<u32>,
     pending_out_dir: &Path,
 ) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
     let (format, rate, out_dir): (OutputFormat, Option<u32>, &Path) = match &job.settings {
         Some(settings) => (
             settings.format,
@@ -583,22 +756,45 @@ fn job_row<'a>(
         .and_then(|n| n.to_str())
         .unwrap_or("?");
 
-    let caption = fl!(
-        "convert-job-caption",
-        kind = kind_label(job.kind),
-        format = format_label(format),
-        rate = rate_label(rate),
-        dest = destination.display().to_string()
-    );
+    let source_label = match job.kind {
+        JobKind::CueSplit => "CUE".to_owned(),
+        JobKind::Convert => job
+            .source
+            .extension()
+            .and_then(|e| e.to_str())
+            .map_or_else(|| "?".to_owned(), str::to_uppercase),
+    };
+
+    let mut chips = widget::Row::new()
+        .spacing(spacing.space_xxs)
+        .align_y(Alignment::Center)
+        .push(chip(None, source_label, Tone::Neutral))
+        .push(widget::icon::from_name("go-next-symbolic").size(12))
+        .push(chip(None, format_short_label(format), Tone::Accent));
+    if let Some(hz) = rate {
+        chips = chips.push(chip(None, rate_label(Some(hz)), Tone::Neutral));
+    }
+    if job.kind == JobKind::CueSplit {
+        chips = chips.push(chip(None, kind_label(job.kind), Tone::Neutral));
+    }
+
+    let dest_line = widget::Row::new()
+        .push(widget::icon::from_name("folder-symbolic").size(12))
+        .push(common::clipped_cell(
+            secondary_caption(destination.display().to_string()).into(),
+        ))
+        .spacing(spacing.space_xxs)
+        .align_y(Alignment::Center);
 
     let mut info = widget::Column::new()
         .push(common::cell_text(filename))
-        .push(common::cell_caption(caption))
-        .spacing(2);
+        .push(chips)
+        .push(dest_line)
+        .spacing(spacing.space_xxs);
 
     if let JobState::Failed(reason) = &job.state {
         info = info.push(widget::tooltip(
-            common::cell_caption(fl!("convert-state-failed", error = reason.clone())),
+            danger_caption(fl!("convert-state-failed", error = reason.clone())),
             widget::text::caption(reason.clone()),
             widget::tooltip::Position::Top,
         ));
@@ -606,23 +802,33 @@ fn job_row<'a>(
 
     // Constant-height progress slot regardless of state, so a row's height
     // never jumps as the job moves through the queue.
-    let fraction = match &job.state {
-        JobState::Running => job.progress_permille() as f32 / 1000.0,
-        JobState::Done => 1.0,
-        JobState::Queued | JobState::Failed(_) | JobState::Cancelled => 0.0,
+    let progress_slot: cosmic::Element<'a, ConvertMessage> = if job.state == JobState::Running {
+        widget::progress_bar::determinate_linear(job.progress_permille() as f32 / 1000.0)
+            .width(Length::Fill)
+            .into()
+    } else {
+        widget::Space::new().height(Length::Fixed(4.0)).into()
     };
-    info = info.push(widget::progress_bar::determinate_linear(fraction).width(Length::Fill));
+    info = info.push(progress_slot);
 
     let kind_icon = match job.kind {
         JobKind::Convert => "audio-x-generic-symbolic",
         JobKind::CueSplit => "playlist-symbolic",
     };
+    let kind_tile = widget::container(widget::icon::from_name(kind_icon).size(22))
+        .padding(spacing.space_xs)
+        .class(tint_class(Tone::Accent, false));
 
-    let status_chip = widget::container(common::cell_caption(state_label(&job.state)))
-        .padding(6)
-        .class(cosmic::theme::Container::Card);
+    let (state_icon, state_tone) = state_visual(&job.state);
+    let mut state_text = state_label(&job.state);
+    if job.state == JobState::Running {
+        state_text = format!("{state_text} {}%", job.progress_permille() / 10);
+    }
+    let status_chip = chip(Some(state_icon), state_text, state_tone);
 
-    let mut actions = widget::Row::new().spacing(4).align_y(Alignment::Center);
+    let mut actions = widget::Row::new()
+        .spacing(spacing.space_xxs)
+        .align_y(Alignment::Center);
     match job.state {
         JobState::Queued => {
             actions = actions
@@ -630,7 +836,7 @@ fn job_row<'a>(
                     "process-stop-symbolic",
                     fl!("convert-cancel-tooltip"),
                     ConvertMessage::CancelJob(job.id),
-                    true,
+                    false,
                 ))
                 .push(job_icon_button(
                     "user-trash-symbolic",
@@ -681,18 +887,118 @@ fn job_row<'a>(
 
     widget::container(
         widget::Row::new()
-            .push(widget::icon::from_name(kind_icon).size(32))
+            .push(kind_tile)
             .push(common::clipped_cell(info.into()))
             .push(status_chip)
             .push(actions)
-            .spacing(12)
+            .spacing(spacing.space_s)
             .align_y(Alignment::Center)
-            .padding(8),
+            .padding(spacing.space_s),
     )
     .width(Length::Fill)
     .class(cosmic::theme::Container::Card)
     .into()
 }
+
+/// Empty queue: a drop-zone-style tile inviting the user to add files. The
+/// whole tile is one big "Add Files" target (the inner pill is only a
+/// visual affordance, not a nested button).
+fn drop_zone<'a>(fixed_height: Option<f32>) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+
+    let glyph = widget::container(widget::icon::from_name("document-import-symbolic").size(40))
+        .padding(spacing.space_m)
+        .class(tint_class(Tone::Accent, true));
+
+    let add_pill = widget::container(
+        widget::Row::new()
+            .push(widget::icon::from_name("list-add-symbolic").size(16))
+            .push(widget::text::body(fl!("convert-add-files")))
+            .spacing(spacing.space_xs)
+            .align_y(Alignment::Center),
+    )
+    .padding([spacing.space_xs, spacing.space_m])
+    .class(tint_class(Tone::Accent, true));
+
+    let content = widget::Column::new()
+        .push(glyph)
+        .push(widget::text::title3(fl!("no-convert-jobs")))
+        .push(
+            secondary_caption(fl!("convert-empty-hint"))
+                .wrapping(cosmic::iced::widget::text::Wrapping::Word)
+                .align_x(cosmic::iced::alignment::Horizontal::Center),
+        )
+        .push(add_pill)
+        .push(secondary_caption(fl!("convert-dropzone-formats")))
+        .spacing(spacing.space_s)
+        .align_x(Alignment::Center);
+
+    let tile = widget::container(content)
+        .padding(spacing.space_l)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(cosmic::iced::alignment::Horizontal::Center)
+        .align_y(cosmic::iced::alignment::Vertical::Center)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            let outline: Color = cosmic.palette.neutral_7.with_alpha(0.35).into();
+            cosmic::iced::widget::container::Style {
+                border: Border {
+                    radius: cosmic.corner_radii.radius_m.into(),
+                    width: 2.0,
+                    color: outline,
+                },
+                ..Default::default()
+            }
+        }));
+
+    widget::button::custom(tile)
+        .on_press(ConvertMessage::AddFiles)
+        .width(Length::Fill)
+        .height(fixed_height.map_or(Length::Fill, Length::Fixed))
+        .padding(0)
+        .class(crate::views::card_button_class())
+        .into()
+}
+
+/// Queue pane: the drop zone while empty, otherwise the summary card above
+/// the job list. `scroll` wraps the list in its own scrollable (wide
+/// layout); the narrow layout lets the whole page scroll instead.
+fn queue_pane<'a>(
+    jobs: &'a [ConvertJob],
+    format: OutputFormat,
+    sample_rate: Option<u32>,
+    out_dir: &Path,
+    ffmpeg_available: Option<bool>,
+    scroll: bool,
+) -> cosmic::Element<'a, ConvertMessage> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    if jobs.is_empty() {
+        return drop_zone((!scroll).then_some(280.0));
+    }
+
+    let mut list = widget::Column::new().spacing(spacing.space_xs);
+    for job in jobs {
+        list = list.push(job_row(job, format, sample_rate, out_dir));
+    }
+
+    let mut col = widget::Column::new()
+        .spacing(spacing.space_s)
+        .push(summary_card(jobs, format, ffmpeg_available));
+    if scroll {
+        col = col.push(
+            widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill),
+        );
+    } else {
+        col = col.push(list);
+    }
+    col.into()
+}
+
+/// Below this width the settings and queue stack in one scrolling column.
+const WIDE_BREAKPOINT: f32 = 860.0;
+/// Width of the settings pane in the two-pane layout.
+const SETTINGS_PANE_WIDTH: f32 = 400.0;
 
 pub fn convert_view<'a, 'b>(
     props: ConvertViewProps<'a, 'b>,
@@ -707,45 +1013,113 @@ pub fn convert_view<'a, 'b>(
         lossy_options,
         ffmpeg_available,
     } = props;
+    let spacing = cosmic::theme::active().cosmic().spacing;
 
     let header = widget::Row::new()
-        .push(widget::text::title3(fl!("convert")))
+        .push(
+            widget::Column::new()
+                .push(widget::text::title3(fl!("convert")))
+                .push(secondary_caption(fl!("convert-subtitle")))
+                .spacing(2),
+        )
         .push(widget::Space::new().width(Length::Fill))
         .push(
-            widget::button::suggested(fl!("convert-add-files")).on_press(ConvertMessage::AddFiles),
+            widget::button::suggested(fl!("convert-add-files"))
+                .leading_icon(widget::icon::from_name("list-add-symbolic").handle())
+                .on_press(ConvertMessage::AddFiles),
         )
         .align_y(Alignment::Center);
 
-    let mut col = widget::Column::new()
-        .spacing(16)
-        .padding(16)
-        .push(header)
-        .push(output_section(
-            out_dir,
-            format,
-            sample_rate,
-            dir_error,
-            flac_options,
-            lossy_options,
-            ffmpeg_available,
-        ))
-        .push(summary_section(jobs, format, ffmpeg_available));
-
-    if jobs.is_empty() {
-        col = col.push(common::empty_state(
-            "document-import-symbolic",
-            fl!("no-convert-jobs"),
-            fl!("convert-empty-hint"),
+    // Always-present banner slot (zero-height when empty) so the page tree
+    // keeps its shape whether or not a warning is showing.
+    let mut banners = widget::Column::new().spacing(spacing.space_xs);
+    if format.requires_ffmpeg() && ffmpeg_available != Some(true) {
+        banners = banners.push(banner(
+            "dialog-warning-symbolic",
+            fl!("convert-ffmpeg-missing-title"),
+            vec![
+                widget::text::body(fl!("convert-requires-ffmpeg")).into(),
+                secondary_caption(fl!("convert-ffmpeg-missing-hint")).into(),
+            ],
+            Tone::Warning,
         ));
-        return col.into();
+    }
+    if let Some(reason) = dir_error {
+        banners = banners.push(banner(
+            "dialog-error-symbolic",
+            fl!("convert-dir-error", reason = reason.to_owned()),
+            Vec::new(),
+            Tone::Danger,
+        ));
     }
 
-    let mut list = widget::Column::new().spacing(4);
-    for job in jobs {
-        list = list.push(job_row(job, format, sample_rate, out_dir));
-    }
+    let out_dir = out_dir.to_path_buf();
+    let body = widget::responsive(move |size| {
+        let spacing = cosmic::theme::active().cosmic().spacing;
+        if size.width >= WIDE_BREAKPOINT {
+            let settings = widget::scrollable(
+                widget::container(settings_pane(
+                    &out_dir,
+                    format,
+                    sample_rate,
+                    flac_options,
+                    lossy_options,
+                ))
+                .padding([0, spacing.space_s, 0, 0]),
+            )
+            .width(Length::Fixed(SETTINGS_PANE_WIDTH))
+            .height(Length::Fill);
+            widget::Row::new()
+                .push(settings)
+                .push(
+                    widget::container(queue_pane(
+                        jobs,
+                        format,
+                        sample_rate,
+                        &out_dir,
+                        ffmpeg_available,
+                        true,
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                )
+                .spacing(spacing.space_l)
+                .into()
+        } else {
+            widget::scrollable(
+                widget::Column::new()
+                    .push(settings_pane(
+                        &out_dir,
+                        format,
+                        sample_rate,
+                        flac_options,
+                        lossy_options,
+                    ))
+                    .push(queue_pane(
+                        jobs,
+                        format,
+                        sample_rate,
+                        &out_dir,
+                        ffmpeg_available,
+                        false,
+                    ))
+                    .spacing(spacing.space_m)
+                    .padding([0, spacing.space_s, 0, 0]),
+            )
+            .height(Length::Fill)
+            .into()
+        }
+    });
 
-    col = col
-        .push(widget::scrollable(widget::container(list).width(Length::Fill)).height(Length::Fill));
-    col.into()
+    widget::Column::new()
+        .push(header)
+        .push(banners)
+        .push(
+            widget::container(body)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .spacing(spacing.space_m)
+        .padding(spacing.space_m)
+        .into()
 }

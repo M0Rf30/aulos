@@ -1,4 +1,5 @@
 app-title = Aulos
+app-motto = Aulos: it really pipes the satyr's ass.
 about = About
 repository = Repository
 file = File
@@ -16,6 +17,7 @@ add-music-folder = Add Music Folder
 scan-library = Scan Library
 scanning-library = Scanning library...
 no-albums = No albums found
+unknown-album = Unknown album
 no-artists = No artists found
 no-songs = No songs found
 play = Play
@@ -134,6 +136,8 @@ no-tracks-found = No tracks found
 genre-empty-hint = No tracks found for this genre.
 genre-track-count-one = { $count } track
 genre-track-count-other = { $count } tracks
+genre-label = Genre
+back-to-genres = Back to genres
 new-playlist-placeholder = New playlist name...
 playlist-name-placeholder = Playlist name...
 playlists-empty-hint = Create a playlist to organize your music
@@ -160,6 +164,11 @@ songs-favorites-filter = Favorites
 songs-empty-hint = Scan your library from File > Rescan
 songs-no-matches = No matching tracks
 songs-no-matches-hint = Try clearing the favorites or genre filter
+songs-column-genre = Genre
+songs-column-rating = Rating
+songs-clear-genre-filter = Clear genre filter
+songs-track-count-one = { $count } track
+songs-track-count-other = { $count } tracks
 
 # PodcastsView
 podcasts = Podcasts
@@ -170,7 +179,7 @@ podcast-url-placeholder = Podcast feed URL...
 refresh-all = Refresh All
 subscriptions = Subscriptions
 no-podcasts = No podcasts subscribed
-podcasts-empty-hint = Search the directory above or paste a feed URL to subscribe
+podcasts-empty-hint = Search the directory or paste a feed URL to subscribe
 refresh-podcast-tooltip = Refresh feed
 unsubscribe-tooltip = Unsubscribe
 back-to-podcasts = Back to podcasts
@@ -210,6 +219,9 @@ play-folder = Play Folder
 queue-folder-tooltip = Queue folder
 folder-track-count-one = { $count } track
 folder-track-count-other = { $count } tracks
+folder-subfolder-count-one = { $count } folder
+folder-subfolder-count-other = { $count } folders
+folder-section-tracks = Tracks
 queued-tracks = Added { $count } tracks to the queue
 
 # --- artist tags ---
@@ -340,7 +352,8 @@ radio-add-station = Add Station
 radio-cancel = Cancel
 radio-tab-my-stations = My Stations
 radio-tab-discover = Discover
-radio-idle-hint = Nothing playing — choose a station below
+radio-idle-title = Nothing playing
+radio-idle-hint = Pick a station below to start listening
 radio-search-placeholder = Search radio stations...
 radio-filter-placeholder = Filter your stations...
 station-name-placeholder = Station name...
@@ -350,7 +363,7 @@ radio-add-url-invalid = URL must start with http:// or https://
 play-station-tooltip = Play station
 radio-rename-tooltip = Rename station
 no-stations = No stations saved
-stations-empty-hint = Search the directory above or paste a stream URL to add one
+stations-empty-hint = Browse the directory in Discover or paste a stream URL to add one
 radio-go-discover = Go to Discover
 radio-add-by-url = Add by URL
 radio-no-filter-matches = No matching stations
@@ -375,6 +388,16 @@ toast-radio-save-failed = Failed to save station: { $reason }
 toast-radio-play-failed = Failed to play station: { $reason }
 toast-radio-removed = Removed "{ $name }"
 radio-undo = Undo
+radio-paused = Paused
+radio-subtitle = Internet radio from around the world
+radio-station-count-one = 1 saved station
+radio-station-count-other = { $count } saved stations
+radio-add-title = Add a station
+radio-add-hint = Paste a direct stream URL (MP3, AAC, Ogg) or a .pls / .m3u playlist.
+radio-name-label = Name
+radio-url-label = Stream URL
+radio-search-failed = Couldn't reach the station directory
+radio-results-count = { $count } stations found
 
 ## Converter
 settings-experimental = Experimental
@@ -400,6 +423,12 @@ convert-bitrate = Bitrate
 convert-rate-hz-kbps = { $kbps } kbps
 convert-vorbis-quality = Quality
 convert-requires-ffmpeg = This format needs the ffmpeg command-line tool, which wasn't found on your system.
+convert-subtitle = Convert, transcode or rip audio, video and CUE sheets
+convert-destination-section = Destination
+convert-queue-title = Queue
+convert-ffmpeg-missing-title = ffmpeg is needed for this format
+convert-ffmpeg-missing-hint = Install ffmpeg from your package manager, or choose FLAC, WAV or AIFF, which work without it.
+convert-dropzone-formats = Audio files · Video containers · CUE sheets
 
 ## Podcasts
 podcast-tab-discover = Discover
@@ -432,6 +461,23 @@ podcast-no-filter-matches-hint = Try a different search term, or clear the filte
 podcast-play-tooltip = Play episode
 podcast-resume-tooltip = Resume episode
 podcast-now-playing-badge = Now playing
+podcast-discover-title = Discover new shows
+podcast-discover-hint = Search the directory by name, topic or host
+podcast-refreshing = Refreshing…
+podcast-play-latest = Play latest
+podcast-continue = Continue listening
+podcast-episodes = Episodes
+podcast-episode-count =
+    { $count ->
+        [one] { $count } episode
+       *[other] { $count } episodes
+    }
+podcast-time-left = { $time } left
+podcast-downloading-tooltip = Downloading…
+podcast-loading-episodes = Loading episodes…
+podcast-loading-episodes-hint = Fetching the latest feed
+podcast-about = About
+podcast-open-show-tooltip = Open show
 
 ## Artists
 settings-artist-info = Artist Info
@@ -439,3 +485,35 @@ fetch-artist-info = Fetch artist images and info online
 fetch-artist-info-description = Look up artist photos (via Deezer) and biography text (via Wikipedia) when browsing in Local or MPD mode. Off by default. Ignored in Subsonic/Navidrome mode, which always shows the server's own artist info instead.
 artist-bio-more = Show more
 artist-bio-less = Show less
+
+# Header chrome
+zoom-grid-tooltip = Card size
+viz-toggle = Visualizer
+
+## Drawers (settings, providers, equalizer, lyrics, queue)
+settings-library-description = Folders Aulos scans for music.
+no-music-dirs-hint = Add a folder to build your library.
+settings-artist-tags = Artist Tags
+settings-artist-tags-description = How multi-artist tags are read from your files.
+settings-playback-description = Transitions and loudness.
+crossfade-description = Fade between tracks for smoother transitions.
+replay-gain-description = Even out loudness between tracks or albums.
+settings-appearance = Appearance
+settings-appearance-description = How the library looks.
+grid-size = Grid size
+grid-size-description = Size of album, artist and other cards.
+settings-equalizer-description = Shape the sound with a 10-band equalizer
+settings-providers-description = Connect MPD and Subsonic servers
+settings-about-description = Version, license and links
+providers-description = Stream from a remote MPD or Subsonic/Navidrome server alongside your local library.
+providers-empty-hint = Add a server below to browse and play its music.
+provider-not-tested = Not tested
+subsonic-accept-invalid-certs-hint = Only enable this for self-signed servers you trust.
+transcoding-description = Reduce bandwidth by streaming a lower-quality version.
+equalizer-enabled-description = Adjust the sound with the bands below.
+equalizer-disabled-hint = Off — changes apply once the equalizer is enabled.
+equalizer-unsaved-changes = Unsaved changes
+equalizer-autoeq-description = Apply a correction profile tuned for your headphones.
+equalizer-autoeq-refresh = Refresh profiles
+lyrics-unavailable-hint = Search online sources for lyrics for this track.
+queue-history-label = Recently played

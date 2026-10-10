@@ -60,6 +60,10 @@ impl cosmic::Application for AppModel {
         let label = message_label(&message);
         let start = std::time::Instant::now();
         let task = self.handle_message(message);
+        // Detail pages can be entered from many messages (selection,
+        // links, back history, library reloads); checking here once keeps
+        // their hero artwork in sync without touching each handler.
+        let task = Task::batch([task, self.maybe_update_detail_art()]);
         log_elapsed("update", label, start.elapsed());
         task
     }

@@ -18,6 +18,8 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
+    /// Set the grid card size multiplier (clamped to `GRID_SCALE_RANGE`).
+    SetGridScale(f32),
     /// Toggle albums view between grid and list.
     ToggleAlbumsViewMode,
     /// Toggle artists view between grid and list.
@@ -146,6 +148,11 @@ pub enum Message {
     SortSongs(songs::SortField),
     /// Toggle the favorites-only filter in the Songs view.
     ToggleFavoritesFilter,
+    /// The Songs list was scrolled to this vertical offset (px); drives
+    /// which rows the virtualized list builds.
+    SongsScrolled(f32),
+    /// Cross-view navigation (artist/album/genre link clicked anywhere).
+    Navigate(crate::views::Route),
 
     // Favorites & ratings
     /// Toggle favorite status for a track (by track ID string).
@@ -196,6 +203,8 @@ pub enum Message {
     BackToGenreGrid,
     /// Play a track in the genre detail view (index within genre_tracks).
     PlayGenreTrack(usize),
+    /// Play the selected genre's tracks in shuffled order.
+    ShuffleGenre,
     /// Genres have been loaded from the provider.
     GenresLoaded(Vec<String>),
     /// Genre tracks have been loaded.
@@ -325,6 +334,13 @@ pub enum Message {
     ExpandNowPlaying,
     CollapseNowPlaying,
     ExpandAnimTick,
+    /// Blurred backdrop and accent for a detail page's hero header are
+    /// ready for this album key.
+    DetailArtReady(
+        String,
+        Option<widget::icon::Handle>,
+        Option<crate::library::palette::Accent>,
+    ),
     /// Blurred cover art, accent colour, and a separately-decoded larger
     /// cover handle (for the expanded now-playing view) are ready for
     /// `album_key`. The blur/large-cover handles are `None` when their
@@ -436,6 +452,7 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
             albums::AlbumMessage::SetRating(id, r) => Message::SetRating(id, r),
             albums::AlbumMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+            albums::AlbumMessage::Navigate(route) => Message::Navigate(route),
             albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
             albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
             albums::AlbumMessage::PlayNext(tracks) => Message::PlayNext(tracks),
@@ -454,6 +471,7 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
             artists::ArtistMessage::SetRating(id, r) => Message::SetRating(id, r),
             artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+            artists::ArtistMessage::Navigate(route) => Message::Navigate(route),
             artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
             artists::ArtistMessage::PlayNext(tracks) => Message::PlayNext(tracks),
             artists::ArtistMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),

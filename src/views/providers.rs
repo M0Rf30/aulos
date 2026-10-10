@@ -5,6 +5,7 @@
 
 use crate::fl;
 use cosmic::iced::Alignment;
+use cosmic::iced::Length;
 use cosmic::iced::core::Color;
 use cosmic::widget;
 
@@ -197,20 +198,36 @@ pub enum ProvidersMessage {
 
 // ── View ───────────────────────────────────────────────────────────────────
 
-/// Render the providers settings panel (shown in the context drawer).
+/// Transcoding bitrate choices, in dropdown order (`None` = original).
+const BITRATES: [Option<u32>; 7] = [
+    None,
+    Some(320),
+    Some(256),
+    Some(192),
+    Some(128),
+    Some(96),
+    Some(64),
+];
+
+/// Transcoding format choices, in dropdown order (`None` = original).
+const FORMATS: [Option<&str>; 5] = [None, Some("mp3"), Some("ogg"), Some("opus"), Some("aac")];
+
+/// Render the providers settings panel (shown in the context drawer, which
+/// already supplies the outer padding and the scrolling).
 pub fn providers_view<'a>(
     mpd_servers: &'a [MpdEditState],
     mpd_connection_status: &'a [Option<String>],
     subsonic_servers: &'a [SubsonicEditState],
     subsonic_connection_status: &'a [Option<String>],
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let mut col = widget::Column::new().spacing(16).padding(16);
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let mut col = widget::Column::new()
+        .spacing(sp.space_m)
+        .width(Length::Fill)
+        .push(widget::text::body(fl!("providers-description")).class(dim_text()));
 
-    // Remote providers section
-    let has_any = !mpd_servers.is_empty() || !subsonic_servers.is_empty();
-
-    if !has_any {
-        col = col.push(widget::text::body(fl!("no-providers")));
+    if mpd_servers.is_empty() && subsonic_servers.is_empty() {
+        col = col.push(empty_state());
     }
 
     // MPD servers
@@ -225,18 +242,58 @@ pub fn providers_view<'a>(
         col = col.push(subsonic_server_card(i, server, status));
     }
 
-    // Add buttons
+    // Add buttons (wrap instead of overflowing a narrow drawer)
+    let add_icon = || widget::icon::from_name("list-add-symbolic").size(16);
     col = col.push(
-        widget::Row::new()
-            .push(widget::button::text(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd))
-            .push(
-                widget::button::text(fl!("add-subsonic-server"))
-                    .on_press(ProvidersMessage::AddSubsonic),
-            )
-            .spacing(8),
+        widget::flex_row(vec![
+            widget::button::standard(fl!("add-mpd-server"))
+                .leading_icon(add_icon())
+                .on_press(ProvidersMessage::AddMpd)
+                .into(),
+            widget::button::standard(fl!("add-subsonic-server"))
+                .leading_icon(add_icon())
+                .on_press(ProvidersMessage::AddSubsonic)
+                .into(),
+        ])
+        .spacing(sp.space_xs),
     );
 
     col.into()
+}
+
+/// Theme-driven dimmed text colour for secondary labels.
+fn dim_text() -> cosmic::theme::Text {
+    cosmic::theme::Text::Color(cosmic::theme::active().cosmic().palette.neutral_7.into())
+}
+
+/// Placeholder shown while no server is configured.
+fn empty_state<'a>() -> cosmic::Element<'a, ProvidersMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    widget::container(
+        widget::Column::new()
+            .push(
+                widget::icon::icon(widget::icon::from_name("network-server-symbolic").handle())
+                    .size(48)
+                    .class(cosmic::theme::Svg::custom(|theme| {
+                        cosmic::iced::widget::svg::Style {
+                            color: Some(theme.cosmic().palette.neutral_6.into()),
+                        }
+                    })),
+            )
+            .push(widget::text::title4(fl!("no-providers")))
+            .push(
+                widget::text::caption(fl!("providers-empty-hint"))
+                    .class(dim_text())
+                    .align_x(cosmic::iced::alignment::Horizontal::Center),
+            )
+            .spacing(sp.space_xs)
+            .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([sp.space_l, sp.space_s])
+    .align_x(cosmic::iced::alignment::Horizontal::Center)
+    .class(cosmic::theme::Container::Card)
+    .into()
 }
 
 // ── MPD card ───────────────────────────────────────────────────────────────
@@ -246,40 +303,43 @@ fn mpd_server_card<'a>(
     server: &'a MpdEditState,
     connection_status: Option<&'a str>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+
     let name_input = widget::text_input(fl!("mpd-name"), &server.name)
         .on_input(move |v| ProvidersMessage::EditName(index, v));
 
-    let host_input = widget::text_input(fl!("mpd-host"), &server.host)
+    let host_input = widget::text_input("localhost", &server.host)
         .on_input(move |v| ProvidersMessage::EditHost(index, v));
 
-    let port_input = widget::text_input(fl!("mpd-port"), &server.port)
+    let port_input = widget::text_input("6600", &server.port)
         .on_input(move |v| ProvidersMessage::EditPort(index, v));
 
     let password_input = widget::text_input(fl!("mpd-password"), &server.password)
         .on_input(move |v| ProvidersMessage::EditPassword(index, v))
         .password();
 
-    let buttons = provider_action_buttons(
+    let body = widget::Column::new()
+        .push(field(fl!("mpd-name"), name_input, Length::Fill))
+        .push(field(fl!("mpd-host"), host_input, Length::Fill))
+        .push(
+            widget::Row::new()
+                .push(field(fl!("mpd-port"), port_input, Length::FillPortion(1)))
+                .push(field(
+                    fl!("mpd-password"),
+                    password_input,
+                    Length::FillPortion(2),
+                ))
+                .spacing(sp.space_xs),
+        )
+        .spacing(sp.space_xs);
+
+    let actions = provider_action_buttons(
         ProvidersMessage::Save(index),
         ProvidersMessage::TestConnection(index),
         ProvidersMessage::Remove(index),
-        connection_status,
     );
 
-    widget::Column::new()
-        .push(widget::text::title4(format!("MPD: {}", server.name)))
-        .push(name_input)
-        .push(host_input)
-        .push(
-            widget::Row::new()
-                .push(port_input)
-                .push(password_input)
-                .spacing(8),
-        )
-        .push(widget::divider::horizontal::default())
-        .push(buttons)
-        .spacing(8)
-        .into()
+    server_card("MPD", &server.name, connection_status, body.into(), actions)
 }
 
 // ── Subsonic card ──────────────────────────────────────────────────────────
@@ -289,10 +349,12 @@ fn subsonic_server_card<'a>(
     server: &'a SubsonicEditState,
     connection_status: Option<&'a str>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+
     let name_input = widget::text_input(fl!("subsonic-name"), &server.name)
         .on_input(move |v| ProvidersMessage::SubsonicEditName(index, v));
 
-    let url_input = widget::text_input(fl!("subsonic-url"), &server.url)
+    let url_input = widget::text_input("https://music.example.com", &server.url)
         .on_input(move |v| ProvidersMessage::SubsonicEditUrl(index, v));
 
     let username_input = widget::text_input(fl!("subsonic-username"), &server.username)
@@ -302,145 +364,246 @@ fn subsonic_server_card<'a>(
         .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v))
         .password();
 
-    let tls_toggle = widget::toggler(server.accept_invalid_certs)
-        .label(fl!("subsonic-accept-invalid-certs"))
-        .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
+    let tls_item = widget::settings::item::builder(fl!("subsonic-accept-invalid-certs"))
+        .description(fl!("subsonic-accept-invalid-certs-hint"))
+        .control(
+            widget::toggler(server.accept_invalid_certs)
+                .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v)),
+        );
 
-    // Save + Test Connection on the left, Remove pushed to the right
-    let buttons = provider_action_buttons(
+    // Transcoding: two compact dropdowns instead of a wall of buttons.
+    let bitrate_labels: Vec<String> = BITRATES
+        .iter()
+        .map(|b| match b {
+            None => fl!("transcoding-original"),
+            Some(kbps) => format!("{kbps} kbps"),
+        })
+        .collect();
+    let bitrate_selected = BITRATES
+        .iter()
+        .position(|b| *b == server.transcoding_max_bitrate);
+    let bitrate_item = widget::settings::item::builder(fl!("transcoding-bitrate")).control(
+        widget::dropdown(bitrate_labels, bitrate_selected, move |i| {
+            ProvidersMessage::SubsonicTranscodingBitrate(index, BITRATES[i])
+        }),
+    );
+
+    let format_labels: Vec<String> = FORMATS
+        .iter()
+        .map(|f| match f {
+            None => fl!("transcoding-original"),
+            Some("mp3") => "MP3".to_string(),
+            Some("ogg") => "OGG Vorbis".to_string(),
+            Some("opus") => "Opus".to_string(),
+            Some("aac") => "AAC".to_string(),
+            Some(other) => other.to_string(),
+        })
+        .collect();
+    let format_selected = FORMATS
+        .iter()
+        .position(|f| f.map(str::to_string) == server.transcoding_format);
+    let format_item = widget::settings::item::builder(fl!("transcoding-format")).control(
+        widget::dropdown(format_labels, format_selected, move |i| {
+            ProvidersMessage::SubsonicTranscodingFormat(index, FORMATS[i].map(str::to_string))
+        }),
+    );
+
+    let mut transcoding_col = widget::Column::new()
+        .push(widget::text::heading(fl!("transcoding")))
+        .push(widget::text::caption(fl!("transcoding-description")).class(dim_text()))
+        .push(bitrate_item)
+        .push(format_item)
+        .spacing(sp.space_xs);
+
+    if let Some(bitrate) = server.transcoding_max_bitrate {
+        // Rough estimate: typical FLAC ~1000 kbps, so savings ≈ (1 - bitrate/1000) * 100
+        let savings_pct = ((1.0 - (bitrate as f32 / 1000.0)) * 100.0).max(0.0) as u32;
+        transcoding_col = transcoding_col.push(
+            widget::text::caption(fl!(
+                "transcoding-bandwidth-estimate",
+                percent = savings_pct.to_string()
+            ))
+            .class(dim_text()),
+        );
+    }
+
+    let body = widget::Column::new()
+        .push(field(fl!("subsonic-name"), name_input, Length::Fill))
+        .push(field(fl!("subsonic-url"), url_input, Length::Fill))
+        .push(
+            widget::Row::new()
+                .push(field(
+                    fl!("subsonic-username"),
+                    username_input,
+                    Length::FillPortion(1),
+                ))
+                .push(field(
+                    fl!("subsonic-password"),
+                    password_input,
+                    Length::FillPortion(1),
+                ))
+                .spacing(sp.space_xs),
+        )
+        .push(tls_item)
+        .push(widget::divider::horizontal::default())
+        .push(transcoding_col)
+        .spacing(sp.space_xs);
+
+    let actions = provider_action_buttons(
         ProvidersMessage::SubsonicSave(index),
         ProvidersMessage::SubsonicTestConnection(index),
         ProvidersMessage::SubsonicRemove(index),
-        connection_status,
     );
 
-    // Task 109: Transcoding controls — use a wrapping column layout to avoid overflow
-    let bitrate_options: Vec<(Option<u32>, String)> = vec![
-        (None, fl!("transcoding-original")),
-        (Some(320), "320 kbps".to_string()),
-        (Some(256), "256 kbps".to_string()),
-        (Some(192), "192 kbps".to_string()),
-        (Some(128), "128 kbps".to_string()),
-        (Some(96), "96 kbps".to_string()),
-        (Some(64), "64 kbps".to_string()),
-    ];
-
-    let format_options: Vec<(Option<String>, String)> = vec![
-        (None, fl!("transcoding-original")),
-        (Some("mp3".to_string()), "MP3".to_string()),
-        (Some("ogg".to_string()), "OGG Vorbis".to_string()),
-        (Some("opus".to_string()), "Opus".to_string()),
-        (Some("aac".to_string()), "AAC".to_string()),
-    ];
-
-    let current_bitrate = server.transcoding_max_bitrate;
-    let mut bitrate_children: Vec<cosmic::Element<ProvidersMessage>> =
-        vec![widget::text::body(fl!("transcoding-bitrate")).into()];
-    for (bitrate, label) in bitrate_options {
-        let btn = if bitrate == current_bitrate {
-            widget::button::standard(label)
-        } else {
-            widget::button::text(label)
-        };
-        bitrate_children.push(
-            btn.on_press(ProvidersMessage::SubsonicTranscodingBitrate(index, bitrate))
-                .into(),
-        );
-    }
-    let bitrate_row = widget::flex_row(bitrate_children).spacing(4);
-
-    let current_format = server.transcoding_format.clone();
-    let mut format_children: Vec<cosmic::Element<ProvidersMessage>> =
-        vec![widget::text::body(fl!("transcoding-format")).into()];
-    for (fmt, label) in format_options {
-        let btn = if fmt == current_format {
-            widget::button::standard(label)
-        } else {
-            widget::button::text(label)
-        };
-        let f = fmt;
-        format_children.push(
-            btn.on_press(ProvidersMessage::SubsonicTranscodingFormat(index, f))
-                .into(),
-        );
-    }
-    let format_row = widget::flex_row(format_children).spacing(4);
-
-    // Task 110: Bandwidth savings estimate
-    let mut transcoding_col = widget::Column::new()
-        .push(widget::text::title4(fl!("transcoding")))
-        .push(bitrate_row)
-        .push(format_row)
-        .spacing(8);
-
-    if let Some(bitrate) = current_bitrate {
-        // Rough estimate: typical FLAC ~1000 kbps, so savings ≈ (1 - bitrate/1000) * 100
-        let savings_pct = ((1.0 - (bitrate as f32 / 1000.0)) * 100.0).max(0.0) as u32;
-        transcoding_col = transcoding_col.push(widget::text::caption(fl!(
-            "transcoding-bandwidth-estimate",
-            percent = savings_pct.to_string()
-        )));
-    }
-
-    widget::Column::new()
-        .push(widget::text::title4(format!("Subsonic: {}", server.name)))
-        .push(name_input)
-        .push(url_input)
-        .push(
-            widget::Row::new()
-                .push(username_input)
-                .push(password_input)
-                .spacing(8),
-        )
-        .push(widget::container(tls_toggle).padding([8, 0]))
-        .push(transcoding_col)
-        .push(widget::divider::horizontal::default())
-        .push(buttons)
-        .spacing(8)
-        .into()
+    server_card(
+        "Subsonic",
+        &server.name,
+        connection_status,
+        body.into(),
+        actions,
+    )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-/// Save/Test-connection/status row, plus a Remove button pushed to the far
-/// right. Identical scaffolding for both provider kinds' server cards.
+
+/// A labelled form field: small dimmed label above the input.
+fn field<'a>(
+    label: String,
+    input: impl Into<cosmic::Element<'a, ProvidersMessage>>,
+    width: Length,
+) -> cosmic::Element<'a, ProvidersMessage> {
+    widget::Column::new()
+        .push(widget::text::caption(label).class(dim_text()))
+        .push(input)
+        .spacing(2)
+        .width(width)
+        .into()
+}
+
+/// Per-server card: kind + name header with a connection status indicator,
+/// the form body, a divider, the action row and (after a failed test) the
+/// error detail.
+fn server_card<'a>(
+    kind: &'static str,
+    name: &'a str,
+    connection_status: Option<&'a str>,
+    body: cosmic::Element<'a, ProvidersMessage>,
+    actions: cosmic::Element<'a, ProvidersMessage>,
+) -> cosmic::Element<'a, ProvidersMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let title = if name.trim().is_empty() { kind } else { name };
+
+    let header = widget::Row::new()
+        .push(
+            widget::Column::new()
+                .push(widget::text::title4(title))
+                .push(widget::text::caption(kind).class(dim_text()))
+                .width(Length::Fill),
+        )
+        .push(status_badge(connection_status))
+        .spacing(sp.space_xs)
+        .align_y(Alignment::Center);
+
+    let mut col = widget::Column::new()
+        .push(header)
+        .push(widget::divider::horizontal::default())
+        .push(body)
+        .push(widget::divider::horizontal::default())
+        .push(actions)
+        .spacing(sp.space_s);
+
+    if let Some(status) = connection_status
+        && !is_connected(status)
+    {
+        let failed = fl!("connection-failed");
+        let detail = status
+            .strip_prefix(failed.as_str())
+            .map(|rest| rest.trim_start_matches(':').trim())
+            .filter(|rest| !rest.is_empty());
+        if let Some(detail) = detail {
+            col = col.push(
+                widget::text::caption(detail.to_string())
+                    .class(cosmic::theme::Text::Color(destructive_color())),
+            );
+        }
+    }
+
+    widget::container(col)
+        .padding(sp.space_s)
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::Card)
+        .into()
+}
+
+/// Save (primary) / Test connection (secondary) on the left, a quiet red
+/// Remove on the far right.
 fn provider_action_buttons<'a>(
     save: ProvidersMessage,
     test: ProvidersMessage,
     remove: ProvidersMessage,
-    connection_status: Option<&'a str>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
-    action_buttons = action_buttons.push(widget::button::standard(fl!("save")).on_press(save));
-    action_buttons =
-        action_buttons.push(widget::button::text(fl!("test-connection")).on_press(test));
-    if let Some(status) = connection_status {
-        action_buttons = action_buttons.push(status_label(status));
-    }
+    let sp = cosmic::theme::active().cosmic().spacing;
+
+    let remove_button = widget::button::custom(
+        widget::text::body(fl!("remove")).class(cosmic::theme::Text::Color(destructive_color())),
+    )
+    .padding([sp.space_xxs, sp.space_s])
+    .class(cosmic::theme::Button::Text)
+    .on_press(remove);
 
     widget::Row::new()
-        .push(action_buttons)
+        .push(widget::button::suggested(fl!("save")).on_press(save))
+        .push(widget::button::standard(fl!("test-connection")).on_press(test))
         .push(widget::space::horizontal())
-        .push(widget::button::destructive(fl!("remove")).on_press(remove))
+        .push(remove_button)
+        .spacing(sp.space_xs)
         .align_y(Alignment::Center)
         .into()
 }
 
-/// Render a connection status label with color coding.
-///
-/// Green for "Connected", red for anything else (connection failed + error).
-fn status_label<'a, M: 'a>(status: &str) -> cosmic::Element<'a, M> {
-    let connected_text = crate::fl!("connected");
-    let is_connected = status == connected_text;
+fn destructive_color() -> Color {
+    cosmic::theme::active().cosmic().destructive_color().into()
+}
 
-    let color = if is_connected {
-        Color::from_rgb(0.2, 0.8, 0.2) // green
-    } else {
-        Color::from_rgb(0.9, 0.2, 0.2) // red
+fn is_connected(status: &str) -> bool {
+    status == crate::fl!("connected")
+}
+
+/// Status dot + short label: green "Connected", red "Connection Failed",
+/// or a dim "Not tested" before any attempt.
+fn status_badge<'a>(status: Option<&str>) -> cosmic::Element<'a, ProvidersMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let theme = cosmic::theme::active();
+    let (color, label) = match status {
+        Some(s) if is_connected(s) => (
+            Color::from(theme.cosmic().success_color()),
+            fl!("connected"),
+        ),
+        Some(_) => (destructive_color(), fl!("connection-failed")),
+        None => (
+            Color::from(theme.cosmic().palette.neutral_7),
+            fl!("provider-not-tested"),
+        ),
     };
 
-    let dot = "● ";
+    let dot = widget::container(widget::Space::new())
+        .width(Length::Fixed(8.0))
+        .height(Length::Fixed(8.0))
+        .class(cosmic::theme::Container::custom(move |_theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(color)),
+                border: cosmic::iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }));
 
-    widget::text::caption(format!("{dot}{status}"))
-        .class(cosmic::theme::Text::Color(color))
+    widget::Row::new()
+        .push(dot)
+        .push(widget::text::caption(label).class(cosmic::theme::Text::Color(color)))
+        .spacing(sp.space_xxs)
+        .align_y(Alignment::Center)
         .into()
 }

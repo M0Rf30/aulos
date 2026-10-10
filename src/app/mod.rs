@@ -27,6 +27,7 @@ mod convert_page;
 mod helpers;
 mod init;
 mod message;
+mod navigation;
 mod podcast_page;
 mod radio_page;
 mod subscriptions;
@@ -263,6 +264,12 @@ pub struct AppModel {
     songs_sort: songs::SortField,
     /// When true, the Songs list column headers show a descending arrow.
     songs_sort_descending: bool,
+    /// Current vertical scroll offset of the Songs list (virtualization).
+    songs_scroll_offset: f32,
+    /// Locations to return to when leaving a detail view that was reached
+    /// through a cross-view link (album → artist → …). Cleared whenever
+    /// the user picks a page from the sidebar.
+    nav_history: Vec<Location>,
     /// When true, the Songs view shows only favorite tracks.
     favorites_filter: bool,
     /// When set, the Songs view shows only tracks matching this genre.
@@ -384,6 +391,10 @@ pub struct AppModel {
     /// otherwise build a brand-new handle even though the result is
     /// identical.
     blur_pending_key: Option<String>,
+    /// Blurred backdrop + accent for the album/artist detail page hero
+    /// header (keyed by album key), and the key of a computation in flight.
+    detail_art: Option<DetailArt>,
+    detail_art_pending: Option<String>,
     /// Larger, separately decoded cover handle for the current track's
     /// album, used by the expanded now-playing view so it doesn't have
     /// to reuse the smaller grid-thumbnail handle from `cover_images`.
@@ -400,14 +411,14 @@ pub struct AppModel {
     /// when there is no current cover or extraction found no legible
     /// dominant hue; consumers fall back to the theme accent.
     accent: Option<crate::library::palette::Accent>,
-    /// 0.0 = fully collapsed (compact bar), 1.0 = fully expanded.
+    /// Whether the expanded now-playing sheet is mounted: 1.0 while it is
+    /// open or animating, 0.0 once a collapse has finished. The slide
+    /// itself is animated at draw time by `views::now_playing::sheet`.
     expand_progress: f32,
-    /// Animation target: 0.0 for collapsing, 1.0 for expanding. None when idle.
+    /// Transition in flight: 0.0 collapsing, 1.0 expanding. None when idle.
     expand_target: Option<f32>,
-    /// Timestamp when the current animation started.
+    /// When the current transition started.
     expand_anim_start: Option<std::time::Instant>,
-    /// Progress value when the current animation started (for reversals).
-    expand_anim_from: f32,
 
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
@@ -520,6 +531,23 @@ pub enum Page {
     Podcasts,
     Radio,
     Convert,
+}
+
+/// A restorable place in the library UI, for link-navigation history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Location {
+    page: Page,
+    album: Option<usize>,
+    artist: Option<usize>,
+    genre: Option<usize>,
+}
+
+/// Hero-header artwork derived from one album cover.
+#[derive(Clone, Debug)]
+pub(crate) struct DetailArt {
+    key: String,
+    blurred: Option<widget::icon::Handle>,
+    accent: Option<crate::library::palette::Accent>,
 }
 
 /// Context drawer pages.

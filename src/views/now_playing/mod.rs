@@ -7,12 +7,13 @@
 //! volume slider, and utility buttons. Clicking the bar expands into a full
 //! now-playing view with large cover art, metadata, and optional visualizer.
 
-pub mod animation;
 pub mod blur;
 pub mod compact_bar;
 pub mod expanded_view;
 #[cfg(feature = "visualizer")]
 pub mod preset_browser;
+pub mod seek_bar;
+pub mod sheet;
 #[cfg(feature = "visualizer")]
 pub mod visualizer;
 #[cfg(feature = "visualizer")]
@@ -81,6 +82,75 @@ pub enum NowPlayingMessage {
     /// Adjust beat-reactivity sensitivity.
     #[cfg(feature = "visualizer")]
     SetVizBeatSensitivity(f32),
+    /// Jump to the current track's artist or album page.
+    Navigate(crate::views::Route),
+}
+
+/// "Artist — Album [— year]" line for the playing track, where the artist
+/// and album are links to their library pages. `small` uses caption-size
+/// text (compact bar); `backdrop` draws in that fixed colour instead of
+/// theme colours (expanded view over blurred art). Streams and podcasts,
+/// which have no library pages, render as plain text.
+pub fn artist_album_line<'a>(
+    track: &'a Track,
+    small: bool,
+    backdrop: Option<cosmic::iced::Color>,
+    separator: &'static str,
+) -> cosmic::Element<'a, NowPlayingMessage> {
+    use crate::views::{Route, common};
+    use cosmic::iced::core::text::Wrapping;
+    use cosmic::widget;
+
+    let text = move |s: String| -> common::Text<'a> {
+        let t = if small {
+            widget::text::caption(s)
+        } else {
+            widget::text::body(s)
+        }
+        .wrapping(Wrapping::None);
+        match backdrop {
+            Some(color) => t.class(cosmic::theme::Text::Color(color)),
+            None => t,
+        }
+    };
+    let linkable = !is_live_stream(track) && &*track.provider_id != "podcast";
+    let part = move |label: &str, route: Route| -> cosmic::Element<'a, NowPlayingMessage> {
+        let label = label.to_string();
+        if !linkable {
+            return text(label).into();
+        }
+        let msg = NowPlayingMessage::Navigate(route);
+        let plain = if small {
+            widget::text::caption(label)
+        } else {
+            widget::text::body(label)
+        }
+        .wrapping(Wrapping::None);
+        match backdrop {
+            Some(color) => common::link_on(plain, color, msg),
+            None => common::link(plain, true, msg),
+        }
+    };
+
+    let mut parts: Vec<cosmic::Element<'a, NowPlayingMessage>> = Vec::new();
+    if !track.artist.is_empty() {
+        parts.push(part(&track.artist, Route::Artist(track.artist.clone())));
+    }
+    if !track.album.is_empty() {
+        parts.push(part(&track.album, Route::album_of(track)));
+    }
+    if track.year > 0 && !small {
+        parts.push(text(track.year.to_string()).into());
+    }
+
+    let mut row = widget::Row::new().align_y(cosmic::iced::Alignment::Center);
+    for (i, element) in parts.into_iter().enumerate() {
+        if i > 0 {
+            row = row.push(text(separator.to_string()));
+        }
+        row = row.push(element);
+    }
+    row.into()
 }
 
 /// Format a duration as `H:MM:SS` / `M:SS`.

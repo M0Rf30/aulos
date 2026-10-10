@@ -33,7 +33,7 @@ impl AudioQuality {
     /// names Euphonica's own theme ships:
     /// - `Lossy`/`Unknown`: `audio-x-generic-symbolic` — the app's existing
     ///   generic-audio glyph (e.g. `songs.rs`'s empty state, `convert.rs`).
-    /// - `CdLossless`: `media-optical-cd-audio-symbolic` — already the
+    /// - `CdLossless`: `media-optical-symbolic` — already the
     ///   album/CD placeholder icon in `albums.rs` and `artists.rs`; CD
     ///   quality is literally what it depicts.
     /// - `HiRes`: `audio-card-symbolic` — already used in `genres.rs` for
@@ -46,7 +46,7 @@ impl AudioQuality {
     pub fn icon_name(self) -> &'static str {
         match self {
             Self::Unknown | Self::Lossy => "audio-x-generic-symbolic",
-            Self::CdLossless => "media-optical-cd-audio-symbolic",
+            Self::CdLossless => "media-optical-symbolic",
             Self::HiRes => "audio-card-symbolic",
             Self::Dsd => "applications-multimedia-symbolic",
         }

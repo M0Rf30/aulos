@@ -20,9 +20,35 @@ use cosmic::widget::{self, icon, menu};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Map lyrics drawer messages (shared by its pinned header and its body).
+fn map_lyrics_message(msg: lyrics::LyricsMessage) -> Message {
+    match msg {
+        lyrics::LyricsMessage::FetchLyrics => Message::FetchLyricsOnline,
+        lyrics::LyricsMessage::Close => Message::ToggleContextPage(ContextPage::Lyrics),
+    }
+}
+
+/// Map queue drawer messages (shared by its pinned header and its rows).
+fn map_queue_message(msg: queue::QueueMessage) -> Message {
+    match msg {
+        queue::QueueMessage::Jump(i) => Message::QueueJump(i),
+        queue::QueueMessage::MoveUp(i) => Message::QueueMove {
+            from: i,
+            to: i.saturating_sub(1),
+        },
+        queue::QueueMessage::MoveDown(i) => Message::QueueMove { from: i, to: i + 1 },
+        queue::QueueMessage::Remove(i) => Message::QueueRemove(i),
+        queue::QueueMessage::Clear => Message::QueueClear,
+        queue::QueueMessage::Navigate(route) => Message::Navigate(route),
+    }
+}
+
 impl AppModel {
     /// Header bar start: menu bar.
     pub(super) fn header_start_elements(&self) -> Vec<Element<'_, Message>> {
+        // Leading glyph for every menu entry, so the dropdowns read as a
+        // scannable list instead of a wall of plain text.
+        let glyph = |name: &'static str| Some(icon::from_name(name).handle());
         let menu_bar = menu::bar(vec![
             menu::Tree::with_children(
                 menu::root(fl!("file")).apply(Element::from),
@@ -33,9 +59,21 @@ impl AppModel {
                         // block (not a thin line) in this pinned libcosmic
                         // revision -- omitted rather than shipping a
                         // visibly-broken separator.
-                        menu::Item::Button(fl!("add-music-folder"), None, MenuAction::AddMusicDir),
-                        menu::Item::Button(fl!("scan-library"), None, MenuAction::ScanLibrary),
-                        menu::Item::Button(fl!("quit"), None, MenuAction::Quit),
+                        menu::Item::Button(
+                            fl!("add-music-folder"),
+                            glyph("folder-new-symbolic"),
+                            MenuAction::AddMusicDir,
+                        ),
+                        menu::Item::Button(
+                            fl!("scan-library"),
+                            glyph("view-refresh-symbolic"),
+                            MenuAction::ScanLibrary,
+                        ),
+                        menu::Item::Button(
+                            fl!("quit"),
+                            glyph("application-exit-symbolic"),
+                            MenuAction::Quit,
+                        ),
                     ],
                 ),
             ),
@@ -44,12 +82,36 @@ impl AppModel {
                 menu::items(
                     &self.key_binds,
                     vec![
-                        menu::Item::Button(fl!("search"), None, MenuAction::Search),
-                        menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
-                        menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
-                        menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
-                        menu::Item::Button(fl!("queue"), None, MenuAction::Queue),
-                        menu::Item::Button(fl!("about"), None, MenuAction::About),
+                        menu::Item::Button(
+                            fl!("search"),
+                            glyph("edit-find-symbolic"),
+                            MenuAction::Search,
+                        ),
+                        menu::Item::Button(
+                            fl!("equalizer"),
+                            glyph("multimedia-equalizer-symbolic"),
+                            MenuAction::Equalizer,
+                        ),
+                        menu::Item::Button(
+                            fl!("providers"),
+                            glyph("network-server-symbolic"),
+                            MenuAction::Providers,
+                        ),
+                        menu::Item::Button(
+                            fl!("settings"),
+                            glyph("preferences-system-symbolic"),
+                            MenuAction::Settings,
+                        ),
+                        menu::Item::Button(
+                            fl!("queue"),
+                            glyph("media-playlist-consecutive-symbolic"),
+                            MenuAction::Queue,
+                        ),
+                        menu::Item::Button(
+                            fl!("about"),
+                            glyph("help-about-symbolic"),
+                            MenuAction::About,
+                        ),
                     ],
                 ),
             ),
@@ -59,7 +121,9 @@ impl AppModel {
     }
 
     /// Header bar center: library search input, shown when search is
-    /// active (playback controls are in the bottom bar).
+    /// active (playback controls are in the bottom bar). The field fills
+    /// the centre slot up to a comfortable reading width so it never looks
+    /// stranded or cramped as the window is resized.
     pub(super) fn header_center_elements(&self) -> Vec<Element<'_, Message>> {
         if !self.search_active {
             return vec![];
@@ -69,9 +133,14 @@ impl AppModel {
             .id(widget::Id::new(SEARCH_INPUT_ID))
             .on_input(Message::LibrarySearchChanged)
             .on_clear(Message::ClearLibrarySearch)
-            .width(Length::Fixed(320.0));
+            .width(Length::Fill);
 
-        vec![input.into()]
+        vec![
+            widget::container(input)
+                .width(Length::Fill)
+                .max_width(420.0)
+                .into(),
+        ]
     }
 
     /// Header bar end: library search toggle, plus the provider selector
@@ -84,6 +153,51 @@ impl AppModel {
                 .on_press(Message::ToggleLibrarySearch)
                 .into(),
         ];
+
+        // Card-size zoom, only on pages currently showing a card grid.
+        let shows_card_grid = match self.nav.active_data::<Page>() {
+            Some(Page::Albums) => {
+                self.selected_album.is_none()
+                    && self.config.albums_view_mode == crate::config::ViewMode::Grid
+            }
+            Some(Page::Artists) => {
+                self.selected_artist.is_none()
+                    && self.config.artists_view_mode == crate::config::ViewMode::Grid
+            }
+            Some(Page::Genres) => {
+                self.selected_genre.is_none()
+                    && self.config.genres_view_mode == crate::config::ViewMode::Grid
+            }
+            Some(Page::Folders | Page::Radio) => true,
+            Some(Page::Podcasts) => self.selected_podcast.is_none(),
+            _ => false,
+        };
+        if shows_card_grid {
+            let space_xs = cosmic::theme::active().cosmic().spacing.space_xs;
+            let zoom = widget::Row::new()
+                .push(icon::from_name("zoom-out-symbolic").size(16))
+                .push(
+                    widget::slider(
+                        crate::views::common::GRID_SCALE_RANGE,
+                        crate::views::common::grid_scale(),
+                        Message::SetGridScale,
+                    )
+                    .step(0.05_f32)
+                    .width(Length::Fixed(120.0)),
+                )
+                .push(icon::from_name("zoom-in-symbolic").size(16))
+                .spacing(space_xs)
+                .align_y(Alignment::Center);
+            elements.insert(
+                0,
+                widget::tooltip(
+                    zoom,
+                    widget::text::caption(fl!("zoom-grid-tooltip")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            );
+        }
 
         if self.provider_list.len() > 1 {
             let provider_names: Vec<String> = self
@@ -98,7 +212,15 @@ impl AppModel {
                 Message::SwitchProvider,
             );
 
-            elements.push(dropdown.into());
+            // A leading server glyph makes the selector read as "source",
+            // not as an unlabeled floating dropdown next to the search button.
+            let selector = widget::Row::new()
+                .push(icon::from_name("network-server-symbolic").size(16))
+                .push(dropdown)
+                .spacing(cosmic::theme::active().cosmic().spacing.space_xs)
+                .align_y(Alignment::Center);
+
+            elements.push(selector.into());
         }
 
         elements
@@ -235,6 +357,7 @@ impl AppModel {
                     self.config.experimental_converter,
                     self.config.fetch_artist_info,
                     &self.artist_tag_delimiters_input,
+                    self.config.grid_scale,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -244,6 +367,7 @@ impl AppModel {
                         Message::SetReplayGainMode(m)
                     }
                     settings::SettingsMessage::SetVolume(v) => Message::SetVolume(v),
+                    settings::SettingsMessage::SetGridScale(v) => Message::SetGridScale(v),
                     settings::SettingsMessage::OpenEqualizer => {
                         Message::ToggleContextPage(ContextPage::Equalizer)
                     }
@@ -288,50 +412,58 @@ impl AppModel {
 
                 let lyrics_content = lyrics::lyrics_view(
                     self.lyrics_text.as_ref(),
-                    title,
-                    artist,
                     self.lyrics_loading,
                     self.playback_position,
                     self.accent.as_ref(),
                 )
-                .map(|msg| match msg {
-                    lyrics::LyricsMessage::FetchLyrics => Message::FetchLyricsOnline,
-                    lyrics::LyricsMessage::Close => Message::ToggleContextPage(ContextPage::Lyrics),
-                });
+                .map(map_lyrics_message);
+                let lyrics_header = lyrics::lyrics_header_view(
+                    self.lyrics_text.as_ref(),
+                    title,
+                    artist,
+                    self.playback_position,
+                    self.accent.as_ref(),
+                )
+                .map(map_lyrics_message);
 
                 context_drawer::context_drawer(
                     lyrics_content,
                     Message::ToggleContextPage(ContextPage::Lyrics),
                 )
                 .title(fl!("lyrics"))
+                .header(lyrics_header)
             }
             ContextPage::Queue => {
                 let queue_data = self.player.as_ref().map(|p| (p.queue(), p.queue_index()));
+                let playback_state = self
+                    .player
+                    .as_ref()
+                    .map(|p| p.state())
+                    .unwrap_or(PlaybackState::Stopped);
                 let queue_content = queue::queue_view(
                     queue_data,
                     self.current_track.as_ref(),
-                    self.player
-                        .as_ref()
-                        .map(|p| p.state())
-                        .unwrap_or(PlaybackState::Stopped),
+                    playback_state,
                     &self.cover_images,
                 )
-                .map(|msg| match msg {
-                    queue::QueueMessage::Jump(i) => Message::QueueJump(i),
-                    queue::QueueMessage::MoveUp(i) => Message::QueueMove {
-                        from: i,
-                        to: i.saturating_sub(1),
-                    },
-                    queue::QueueMessage::MoveDown(i) => Message::QueueMove { from: i, to: i + 1 },
-                    queue::QueueMessage::Remove(i) => Message::QueueRemove(i),
-                    queue::QueueMessage::Clear => Message::QueueClear,
-                });
+                .map(map_queue_message);
+                let queue_header = queue::queue_header_view(
+                    queue_data,
+                    self.current_track.as_ref(),
+                    playback_state,
+                    &self.cover_images,
+                )
+                .map(|header| header.map(map_queue_message));
 
-                context_drawer::context_drawer(
+                let drawer = context_drawer::context_drawer(
                     queue_content,
                     Message::ToggleContextPage(ContextPage::Queue),
                 )
-                .title(fl!("queue"))
+                .title(fl!("queue"));
+                match queue_header {
+                    Some(header) => drawer.header(header),
+                    None => drawer,
+                }
             }
         })
     }
@@ -364,6 +496,10 @@ impl AppModel {
                             &self.cover_images,
                             &self.playlists,
                             self.current_track.as_ref().map(|t| t.id),
+                            self.detail_hero(&crate::library::CoverArt::album_key(
+                                &album.artist,
+                                &album.name,
+                            )),
                         )
                         .map(Message::from)
                     } else {
@@ -409,6 +545,12 @@ impl AppModel {
                             self.artist_bio_expanded,
                             &self.cover_images,
                             self.current_track.as_ref().map(|t| t.id),
+                            artist.albums.iter().find_map(|a| {
+                                self.detail_hero(&crate::library::CoverArt::album_key(
+                                    &artist.name,
+                                    &a.name,
+                                ))
+                            }),
                         )
                         .map(Message::from)
                     } else {
@@ -471,8 +613,10 @@ impl AppModel {
                     self.genre_filter.as_deref(),
                     &self.playlists,
                     self.current_track.as_ref().map(|t| t.id),
+                    self.songs_scroll_offset,
                 )
                 .map(move |msg| match msg {
+                    songs::SongMessage::Navigate(route) => Message::Navigate(route),
                     songs::SongMessage::PlayTrack(i) => {
                         Message::PlayTrackIndex(unfilter_index(track_map, i))
                     }
@@ -483,6 +627,7 @@ impl AppModel {
                     songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
                     songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
                     songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
+                    songs::SongMessage::Scrolled(y) => Message::SongsScrolled(y),
                     // `i` indexes `tracks_data` (the slice actually shown,
                     // filtered or not), so resolve it there directly —
                     // `unfilter_index` maps into `all_tracks` instead.
@@ -504,6 +649,7 @@ impl AppModel {
                             &self.rename_playlist_input,
                         )
                         .map(|msg| match msg {
+                            playlists::PlaylistMessage::Navigate(route) => Message::Navigate(route),
                             playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
                             playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
                             playlists::PlaylistMessage::PlayTrack(pi, ti) => {
@@ -554,6 +700,7 @@ impl AppModel {
                     };
                     playlists::playlist_list_view(playlists_data, &self.new_playlist_name).map(
                         move |msg| match msg {
+                            playlists::PlaylistMessage::Navigate(route) => Message::Navigate(route),
                             playlists::PlaylistMessage::SelectPlaylist(i) => {
                                 Message::SelectPlaylist(unfilter_index(playlist_map, i))
                             }
@@ -617,15 +764,20 @@ impl AppModel {
             Page::Genres => {
                 if let Some(genre_idx) = self.selected_genre {
                     if let Some(genre_name) = self.all_genres.get(genre_idx) {
-                        genres::genre_detail_view(genre_name, &self.genre_tracks).map(|msg| {
-                            match msg {
-                                genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
-                                genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
-                                genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
-                                genres::GenreMessage::ToggleViewMode => {
-                                    Message::ToggleGenresViewMode
-                                }
-                            }
+                        genres::genre_detail_view(
+                            genre_name,
+                            &self.genre_tracks,
+                            self.current_track.as_ref().map(|t| t.id),
+                        )
+                        .map(|msg| match msg {
+                            genres::GenreMessage::Navigate(route) => Message::Navigate(route),
+                            genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                            genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                            genres::GenreMessage::Shuffle => Message::ShuffleGenre,
+                            genres::GenreMessage::PlayNext(t) => Message::PlayNext(t),
+                            genres::GenreMessage::AddToQueue(t) => Message::AddToQueue(t),
+                            genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                            genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
                         })
                     } else {
                         widget::text("Genre not found").into()
@@ -642,11 +794,15 @@ impl AppModel {
                         };
                     genres::genres_view(genres_data, self.config.genres_view_mode).map(move |msg| {
                         match msg {
+                            genres::GenreMessage::Navigate(route) => Message::Navigate(route),
                             genres::GenreMessage::SelectGenre(i) => {
                                 Message::SelectGenre(unfilter_index(genre_map, i))
                             }
                             genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                             genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                            genres::GenreMessage::Shuffle => Message::ShuffleGenre,
+                            genres::GenreMessage::PlayNext(t) => Message::PlayNext(t),
+                            genres::GenreMessage::AddToQueue(t) => Message::AddToQueue(t),
                             genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
                         }
                     })
@@ -657,6 +813,7 @@ impl AppModel {
                 &self.folder_state,
                 &self.all_tracks,
                 self.current_track.as_ref(),
+                &self.cover_images,
             )
             .map(Message::Folders),
 
@@ -799,6 +956,7 @@ impl AppModel {
 
         // Helper closure to map NowPlayingMessage to Message
         let map_now_playing_msg = |msg| match msg {
+            now_playing::NowPlayingMessage::Navigate(route) => Message::Navigate(route),
             now_playing::NowPlayingMessage::TogglePlayback => Message::TogglePlayback,
             now_playing::NowPlayingMessage::Next => Message::NextTrack,
             now_playing::NowPlayingMessage::Previous => Message::PreviousTrack,
@@ -860,14 +1018,85 @@ impl AppModel {
         )
         .map(map_now_playing_msg);
 
-        // Main layout: content + optional scanning indicator + bottom playback bar
-        // When expand_progress > 0, show expanded now-playing view replacing normal content
-        let layout: Element<'_, Message> = if self.expand_progress > 0.0 {
+        // Main layout: library content + optional scanning indicator +
+        // bottom playback bar, always mounted (so scroll positions survive
+        // an expand/collapse), with the expanded now-playing view sliding
+        // up over it as a sheet while `expand_progress > 0`. Both layers
+        // animate themselves at draw time — see `now_playing::sheet`.
+        let mut layout_col = widget::Column::new().push(
+            widget::container(content)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        );
+
+        // Always push a slot for the scanning indicator, varying only
+        // its content -- conditionally pushing/removing this sibling
+        // before `bar` (a stateful widget tree) would shift `bar`'s
+        // position in the column, resetting/flashing its state (see
+        // module-level notes on iced's tree-position-keyed widget
+        // state).
+        let scanning_indicator: Element<'_, Message> = if self.library_scanning {
+            use cosmic::cosmic_theme::palette::WithAlpha;
+            let space_xs = cosmic::theme::active().cosmic().spacing.space_xs;
+            let pill = widget::container(
+                widget::Row::new()
+                    .push(widget::indeterminate_circular().size(14.0).bar_height(2.0))
+                    .push(widget::text::caption(fl!("scanning-library")))
+                    .spacing(space_xs)
+                    .align_y(Alignment::Center),
+            )
+            .padding([4, 12])
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                let accent = cosmic.accent_color();
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(
+                        accent.with_alpha(0.14).into(),
+                    )),
+                    text_color: Some(accent.into()),
+                    icon_color: Some(accent.into()),
+                    border: cosmic::iced::Border {
+                        radius: cosmic.corner_radii.radius_xl.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }));
+            widget::container(pill)
+                .padding([space_xs, 0])
+                .width(Length::Fill)
+                .align_x(cosmic::iced::alignment::Horizontal::Center)
+                .into()
+        } else {
+            widget::container(
+                widget::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(0.0)),
+            )
+            .width(Length::Fill)
+            .into()
+        };
+        layout_col = layout_col.push(scanning_indicator);
+        layout_col = layout_col.push(bar);
+
+        let sheet_open = self
+            .expand_target
+            .map_or(self.expand_progress > 0.0, |t| t > 0.5);
+        let sheet_transitioning = self.expand_target.is_some();
+        let mut stack = cosmic::iced::widget::Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(now_playing::sheet::underlay(
+                layout_col,
+                sheet_open,
+                sheet_transitioning,
+            ));
+
+        if self.expand_progress > 0.0 {
             #[cfg(feature = "visualizer")]
             let viz_hud_visible = self.viz_hud_pointer_over
                 || self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES
                 || self.viz_browser_open;
-            // Expanded/animating: show expanded now-playing view
             let expanded = now_playing::expanded_view::expanded_now_playing(
                 self.current_track.as_ref(),
                 state,
@@ -910,46 +1139,16 @@ impl AppModel {
             )
             .map(map_now_playing_msg);
 
-            widget::container(expanded).width(Length::Fill).into()
-        } else {
-            // Collapsed state: normal layout
-            let mut layout_col = widget::Column::new().push(
-                widget::container(content)
+            stack = stack.push(now_playing::sheet::sheet(
+                widget::container(expanded)
                     .width(Length::Fill)
                     .height(Length::Fill),
-            );
+                sheet_open,
+                sheet_transitioning,
+            ));
+        }
 
-            // Always push a slot for the scanning indicator, varying only
-            // its content -- conditionally pushing/removing this sibling
-            // before `bar` (a stateful widget tree) would shift `bar`'s
-            // position in the column, resetting/flashing its state (see
-            // module-level notes on iced's tree-position-keyed widget
-            // state).
-            let scanning_indicator: Element<'_, Message> = if self.library_scanning {
-                widget::container(
-                    widget::Row::new()
-                        .push(widget::text::caption(fl!("scanning-library")))
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                )
-                .padding(4)
-                .width(Length::Fill)
-                .into()
-            } else {
-                widget::container(
-                    widget::Space::new()
-                        .width(Length::Fill)
-                        .height(Length::Fixed(0.0)),
-                )
-                .width(Length::Fill)
-                .into()
-            };
-            layout_col = layout_col.push(scanning_indicator);
-
-            layout_col = layout_col.push(bar);
-
-            layout_col.into()
-        };
+        let layout: Element<'_, Message> = stack.into();
 
         // WindowBackground pins the app surface to background.base color and
         // sets icon_color/text_color to background.on so all child widgets

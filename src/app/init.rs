@@ -56,12 +56,12 @@ impl AppModel {
         nav.insert()
             .text(fl!("smart-playlists"))
             .data::<Page>(Page::SmartPlaylists)
-            .icon(icon::from_name("starred-symbolic"));
+            .icon(icon::from_name("folder-saved-search-symbolic"));
 
         nav.insert()
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
-            .icon(icon::from_name("folder-music-symbolic"));
+            .icon(icon::from_name("media-tape-symbolic"));
 
         nav.insert()
             .text(fl!("folders"))
@@ -71,7 +71,8 @@ impl AppModel {
         nav.insert()
             .text(fl!("podcasts"))
             .data::<Page>(Page::Podcasts)
-            .icon(icon::from_name("application-rss+xml-symbolic"));
+            .icon(icon::from_name("audio-input-microphone-symbolic"))
+            .divider_above(true);
 
         nav.insert()
             .text(fl!("radio"))
@@ -80,6 +81,7 @@ impl AppModel {
 
         let about = About::default()
             .name(fl!("app-title"))
+            .comments(fl!("app-motto"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
             .version(env!("CARGO_PKG_VERSION"))
             .links([(fl!("repository"), REPOSITORY)])
@@ -94,6 +96,19 @@ impl AppModel {
                 Err((_errors, config)) => config,
             })
             .unwrap_or_default();
+        crate::views::common::set_grid_scale(config.grid_scale);
+
+        // First launch: play the intro jingle once, Winamp-style, and
+        // remember that it has been heard.
+        if !config.intro_played {
+            crate::player::intro::play();
+            config.intro_played = true;
+            if let Some(context) = &config_context
+                && let Err(e) = config.write_entry(context)
+            {
+                tracing::error!("Failed to save config after intro: {e:?}");
+            }
+        }
 
         if config.experimental_converter {
             insert_convert_nav_entry(&mut nav);
@@ -435,6 +450,8 @@ impl AppModel {
             selected_artist: None,
             songs_sort: songs::SortField::Title,
             songs_sort_descending: false,
+            songs_scroll_offset: 0.0,
+            nav_history: Vec::new(),
             favorites_filter: false,
             genre_filter: None,
             playlists: Vec::new(),
@@ -491,12 +508,13 @@ impl AppModel {
             blurred_cover: None,
             blurred_cover_key: None,
             blur_pending_key: None,
+            detail_art: None,
+            detail_art_pending: None,
             current_cover_large: None,
             accent: None,
             expand_progress: 0.0,
             expand_target: None,
             expand_anim_start: None,
-            expand_anim_from: 0.0,
             #[cfg(feature = "visualizer")]
             visualizer_active: false,
             #[cfg(feature = "visualizer")]
@@ -617,5 +635,6 @@ fn insert_convert_nav_entry(nav: &mut nav_bar::Model) {
     nav.insert()
         .text(fl!("convert"))
         .data::<Page>(Page::Convert)
-        .icon(icon::from_name("document-import-symbolic"));
+        .icon(icon::from_name("document-save-as-symbolic"))
+        .divider_above(true);
 }
