@@ -296,6 +296,12 @@ pub struct Config {
     pub scrobble_streams: bool,
     /// Love/unlove on Last.fm when a track is (un)favorited in Aulos.
     pub scrobble_lastfm_love_sync: bool,
+    /// Import a service's listening history right after connecting it.
+    pub scrobble_import_on_connect: bool,
+    /// Show "Because you listened to…" shelves (similar artists from
+    /// Last.fm / ListenBrainz) on Home. Only effective while a scrobbling
+    /// service is connected.
+    pub home_online_suggestions: bool,
 }
 
 impl Default for Config {
@@ -360,6 +366,8 @@ impl Default for Config {
             scrobble_lastfm_api_key: String::new(),
             scrobble_streams: false,
             scrobble_lastfm_love_sync: true,
+            scrobble_import_on_connect: false,
+            home_online_suggestions: true,
         }
     }
 }

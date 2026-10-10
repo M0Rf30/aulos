@@ -258,6 +258,8 @@ pub enum Message {
 
     // Settings
     AddMusicDir,
+    /// The Settings drawer's search box changed.
+    SettingsSearch(String),
     /// Scrobbling settings / connect-flow message.
     Scrobble(crate::online::scrobble::ScrobbleMessage),
     /// Result from the XDG Desktop Portal directory picker.

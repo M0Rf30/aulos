@@ -6,7 +6,8 @@
 
 use super::{AppModel, Message};
 use crate::fl;
-use crate::online::scrobble::ScrobbleMessage;
+use crate::online::scrobble::import::ImportOutcome;
+use crate::online::scrobble::{ScrobbleMessage, Service};
 use cosmic::prelude::*;
 use std::collections::HashSet;
 
@@ -31,11 +32,73 @@ impl AppModel {
         if let ScrobbleMessage::LovedFetched(Ok(loved)) = msg {
             return self.apply_loved_tracks(&loved);
         }
+        let import_done = match &msg {
+            ScrobbleMessage::ImportDone(service, res) => Some((*service, res.clone())),
+            _ => None,
+        };
+        // Messages after which the Home suggestions may have to appear,
+        // vanish or change (a service connected/disconnected, the toggle).
+        let affects_suggestions = matches!(
+            msg,
+            ScrobbleMessage::SetOnlineSuggestions(_)
+                | ScrobbleMessage::LbValidated(_)
+                | ScrobbleMessage::AuthCompleted(..)
+                | ScrobbleMessage::Disconnect(_)
+                | ScrobbleMessage::SaveLastFmKeys
+        );
         let (task, changed) = self.scrobble.update(msg, &mut self.config);
         if changed {
             self.save_config();
         }
-        task.map(|m| cosmic::Action::App(Message::Scrobble(m)))
+        let mut tasks = vec![task.map(|m| cosmic::Action::App(Message::Scrobble(m)))];
+        if changed && affects_suggestions {
+            tasks.push(self.load_similar());
+        }
+        if let Some((service, res)) = import_done {
+            tasks.push(self.finish_history_import(service, res));
+        }
+        Task::batch(tasks)
+    }
+
+    /// A history import ended: toast the result and, if plays were added,
+    /// reload Home so its shelves reflect them.
+    fn finish_history_import(
+        &mut self,
+        service: Service,
+        res: Result<ImportOutcome, String>,
+    ) -> Task<cosmic::Action<Message>> {
+        let name = service.display_name().to_string();
+        let (text, imported) = match res {
+            Err(message) => (
+                fl!("toast-import-failed", service = name, message = message),
+                0,
+            ),
+            Ok(out) => {
+                let imported = out.progress.imported;
+                let text = match (&out.error, out.cancelled) {
+                    (Some(message), _) => {
+                        fl!(
+                            "toast-import-failed",
+                            service = name,
+                            message = message.clone()
+                        )
+                    }
+                    (None, true) => fl!("toast-import-cancelled", service = name),
+                    (None, false) => fl!(
+                        "toast-import-done",
+                        service = name,
+                        imported = imported.to_string()
+                    ),
+                };
+                (text, imported)
+            }
+        };
+        let toast = self.push_toast(cosmic::widget::toaster::Toast::new(text));
+        if imported > 0 {
+            Task::batch([toast, self.load_home(true)])
+        } else {
+            toast
+        }
     }
 
     /// A track was (un)favorited in Aulos: mirror it to Last.fm if enabled.

@@ -5,6 +5,7 @@
 //! between playback ticks and the background worker.
 
 use super::audioscrobbler::{self, Endpoint};
+use super::import::{self, ImportOutcome, ImportProgress, ImportRequest};
 use super::listenbrainz;
 use super::tracker::PlayTracker;
 use super::worker::{Cmd, WorkerHandle, WorkerSettings};
@@ -13,6 +14,8 @@ use crate::config::Config;
 use crate::fl;
 use cosmic::iced::Task;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -41,7 +44,25 @@ pub enum ScrobbleMessage {
     /// Loved `(artist, title)` pairs from Last.fm; handled by the app, which
     /// owns the library.
     LovedFetched(Result<Vec<(String, String)>, String>),
+    /// Import the service's listening history into the play history.
+    ImportStart(Service),
+    /// Ask a running import to stop after the current page.
+    ImportCancel(Service),
+    /// Running totals of an import (never emitted by the view).
+    ImportProgress(Service, ImportProgress),
+    /// An import ended; the app refreshes Home and shows a toast.
+    ImportDone(Service, Result<ImportOutcome, String>),
+    /// Start an import right after connecting a service.
+    SetImportOnConnect(bool),
+    /// Show "Because you listened to…" shelves on Home.
+    SetOnlineSuggestions(bool),
     Noop,
+}
+
+/// A running history import.
+struct ImportRun {
+    cancel: Arc<AtomicBool>,
+    progress: ImportProgress,
 }
 
 pub struct ScrobbleController {
@@ -59,6 +80,8 @@ pub struct ScrobbleController {
     /// Track ids whose next favorite toggle must not be echoed to Last.fm
     /// (they were changed *by* the loved-track sync).
     suppress_love: HashSet<String>,
+    /// Running history imports (at most one at a time).
+    imports: HashMap<Service, ImportRun>,
     active: bool,
     allow_streams: bool,
     love_enabled: bool,
@@ -77,6 +100,7 @@ impl ScrobbleController {
             busy: HashSet::new(),
             status: HashMap::new(),
             suppress_love: HashSet::new(),
+            imports: HashMap::new(),
             active: false,
             allow_streams: false,
             love_enabled: false,
@@ -115,6 +139,16 @@ impl ScrobbleController {
 
     pub fn is_pending(&self, service: Service) -> bool {
         self.pending.contains_key(&service)
+    }
+
+    /// Counters of the running import of `service`, if any.
+    pub fn import_progress(&self, service: Service) -> Option<&ImportProgress> {
+        self.imports.get(&service).map(|run| &run.progress)
+    }
+
+    /// Whether any history import is running.
+    pub fn is_importing(&self) -> bool {
+        !self.imports.is_empty()
     }
 
     pub fn is_busy(&self, service: Service) -> bool {
@@ -226,6 +260,7 @@ impl ScrobbleController {
         config: &mut Config,
     ) -> (Task<ScrobbleMessage>, bool) {
         let mut changed = false;
+        let mut auto_import = false;
         let task = match msg {
             ScrobbleMessage::SetEnabled(service, on) => {
                 set_enabled(config, service, on);
@@ -279,13 +314,18 @@ impl ScrobbleController {
                         self.lb_token_input.clear();
                         self.status.remove(&Service::ListenBrainz);
                         changed = true;
+                        auto_import = config.scrobble_import_on_connect;
                     }
                     Err(e) => {
                         self.status
                             .insert(Service::ListenBrainz, fl!("scrobble-error", message = e));
                     }
                 }
-                Task::none()
+                if auto_import {
+                    self.start_import(Service::ListenBrainz, config)
+                } else {
+                    Task::none()
+                }
             }
             ScrobbleMessage::LastFmKeyInput(v) => {
                 self.lastfm_key_input = v;
@@ -357,15 +397,23 @@ impl ScrobbleController {
                         set_user(config, service, user);
                         set_enabled(config, service, true);
                         changed = true;
+                        auto_import = config.scrobble_import_on_connect;
                     }
                     Err(e) => {
                         self.status
                             .insert(service, fl!("scrobble-error", message = e));
                     }
                 }
-                Task::none()
+                if auto_import {
+                    self.start_import(service, config)
+                } else {
+                    Task::none()
+                }
             }
             ScrobbleMessage::Disconnect(service) => {
+                if let Some(run) = self.imports.get(&service) {
+                    run.cancel.store(true, Ordering::Relaxed);
+                }
                 set_user(config, service, String::new());
                 set_enabled(config, service, false);
                 self.pending.remove(&service);
@@ -414,12 +462,74 @@ impl ScrobbleController {
                 }
                 Task::none()
             }
+            ScrobbleMessage::ImportStart(service) => self.start_import(service, config),
+            ScrobbleMessage::ImportCancel(service) => {
+                if let Some(run) = self.imports.get(&service) {
+                    run.cancel.store(true, Ordering::Relaxed);
+                }
+                Task::none()
+            }
+            ScrobbleMessage::ImportProgress(service, progress) => {
+                if let Some(run) = self.imports.get_mut(&service) {
+                    run.progress = progress;
+                }
+                Task::none()
+            }
+            ScrobbleMessage::ImportDone(service, res) => {
+                self.imports.remove(&service);
+                let text = match res {
+                    Ok(out) => import_summary(&out),
+                    Err(e) => fl!("scrobble-error", message = e),
+                };
+                self.status.insert(service, text);
+                Task::none()
+            }
+            ScrobbleMessage::SetImportOnConnect(on) => {
+                config.scrobble_import_on_connect = on;
+                changed = true;
+                Task::none()
+            }
+            ScrobbleMessage::SetOnlineSuggestions(on) => {
+                config.home_online_suggestions = on;
+                changed = true;
+                Task::none()
+            }
             ScrobbleMessage::Noop => Task::none(),
         };
         if changed {
             self.reconfigure(config);
         }
         (task, changed)
+    }
+
+    /// Start importing `service`'s listening history in the background.
+    /// Only one import runs at a time, so a second service's listens are
+    /// de-duplicated against the first one's.
+    fn start_import(&mut self, service: Service, config: &Config) -> Task<ScrobbleMessage> {
+        let user = user_of(config, service).to_string();
+        if user.is_empty() || !self.imports.is_empty() {
+            return Task::none();
+        }
+        if service == Service::LastFm && config.scrobble_lastfm_api_key.is_empty() {
+            self.status.insert(service, fl!("scrobble-error-no-keys"));
+            return Task::none();
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.imports.insert(
+            service,
+            ImportRun {
+                cancel: Arc::clone(&cancel),
+                progress: ImportProgress::default(),
+            },
+        );
+        self.status.remove(&service);
+        let request = ImportRequest {
+            service,
+            user,
+            lastfm_api_key: config.scrobble_lastfm_api_key.clone(),
+            db_path: import::library_db_path(),
+        };
+        Task::stream(import_stream(request, cancel))
     }
 
     fn start_auth(&mut self, service: Service, config: &Config) -> Task<ScrobbleMessage> {
@@ -466,6 +576,71 @@ impl ScrobbleController {
             move |r| ScrobbleMessage::AuthCompleted(service, r),
         )
     }
+}
+
+/// One-line, localized result of an import.
+pub fn import_summary(out: &ImportOutcome) -> String {
+    let p = &out.progress;
+    if let Some(e) = &out.error {
+        return fl!(
+            "scrobble-import-failed",
+            message = e.clone(),
+            imported = p.imported.to_string()
+        );
+    }
+    if out.cancelled {
+        return fl!(
+            "scrobble-import-cancelled",
+            fetched = p.fetched.to_string(),
+            imported = p.imported.to_string()
+        );
+    }
+    fl!(
+        "scrobble-import-done",
+        imported = p.imported.to_string(),
+        matched = p.matched.to_string(),
+        fetched = p.fetched.to_string(),
+        skipped = p.skipped().to_string()
+    )
+}
+
+/// Run an import on the blocking pool and stream its progress; ends with
+/// exactly one `ImportDone`.
+fn import_stream(
+    request: ImportRequest,
+    cancel: Arc<AtomicBool>,
+) -> impl cosmic::iced::futures::Stream<Item = ScrobbleMessage> {
+    use cosmic::iced::futures::SinkExt;
+    let service = request.service;
+    cosmic::iced::stream::channel(
+        8,
+        move |mut out: cosmic::iced::futures::channel::mpsc::Sender<ScrobbleMessage>| async move {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScrobbleMessage>();
+            let worker = tokio::task::spawn_blocking(move || {
+                let progress_tx = tx.clone();
+                let result = import::run_request(&request, &cancel, &mut |p| {
+                    let _ = progress_tx.send(ScrobbleMessage::ImportProgress(service, p));
+                });
+                let _ = tx.send(ScrobbleMessage::ImportDone(service, result));
+            });
+            let mut finished = false;
+            while let Some(msg) = rx.recv().await {
+                finished |= matches!(msg, ScrobbleMessage::ImportDone(..));
+                if out.send(msg).await.is_err() {
+                    return;
+                }
+            }
+            let _ = worker.await;
+            if !finished {
+                let _ = out
+                    .send(ScrobbleMessage::ImportDone(
+                        service,
+                        Err("import task failed".into()),
+                    ))
+                    .await;
+            }
+        },
+    )
 }
 
 /// `(api key, secret)` for `service`; the Last.fm secret comes from the keyring.

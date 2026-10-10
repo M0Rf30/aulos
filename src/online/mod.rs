@@ -7,6 +7,7 @@
 pub mod podcast;
 pub mod radio;
 pub mod scrobble;
+pub mod similar;
 pub mod store;
 
 /// Reads a blocking HTTP response body into memory, capped at `max_bytes`.

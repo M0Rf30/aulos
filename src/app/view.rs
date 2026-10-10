@@ -404,12 +404,17 @@ impl AppModel {
                     self.config.grid_scale,
                     self.config.show_compilations_in_artists,
                     self.config.m3u_relative_paths,
-                    crate::online::scrobble::view::view(&self.scrobble, &self.config)
-                        .map(settings::SettingsMessage::Scrobble),
+                    crate::online::scrobble::view::view(
+                        &self.scrobble,
+                        &self.config,
+                        &self.settings_search,
+                    )
+                    .map(settings::SettingsMessage::Scrobble),
                     self.playback_extras_settings()
                         .map(settings::SettingsMessage::PlaybackExtras),
                     self.startup_settings()
                         .map(settings::SettingsMessage::Startup),
+                    &self.settings_search,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -456,6 +461,7 @@ impl AppModel {
                     settings::SettingsMessage::Scrobble(m) => Message::Scrobble(m),
                     settings::SettingsMessage::PlaybackExtras(m) => Message::Playback(m),
                     settings::SettingsMessage::Startup(m) => Message::Startup(m),
+                    settings::SettingsMessage::Search(q) => Message::SettingsSearch(q),
                 });
 
                 context_drawer::context_drawer(
@@ -556,7 +562,9 @@ impl AppModel {
                 crate::views::home::HomeContext {
                     library_albums: self.all_albums.len(),
                     scanning: self.library_scanning,
-                    has_music_dirs: !self.config.music_dirs.is_empty(),
+                    // A configured folder that doesn't exist (e.g. the
+                    // default XDG Music dir on a fresh system) isn't "done".
+                    has_music_dirs: self.config.music_dirs.iter().any(|d| d.is_dir()),
                     has_servers: !self.config.mpd_servers.is_empty()
                         || !self.config.subsonic_servers.is_empty(),
                 },

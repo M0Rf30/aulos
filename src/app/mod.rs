@@ -270,6 +270,8 @@ pub struct AppModel {
     scrobble_sent: bool,
     /// Multi-service scrobbling (ListenBrainz / Last.fm / Libre.fm) state.
     scrobble: crate::online::scrobble::ScrobbleController,
+    /// Text of the Settings drawer's search box.
+    settings_search: String,
 
     // View state
     selected_album: Option<usize>,

@@ -476,6 +476,229 @@ impl LibraryDb {
     }
 }
 
+/// A library track as the listening-history importer sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportTrack {
+    pub id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album_artist: String,
+    pub album: String,
+    /// Track length in seconds (0 = unknown).
+    pub duration_secs: u32,
+}
+
+/// One play to be merged into the history by [`LibraryDb::import_plays`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportPlay {
+    pub track_id: i64,
+    /// Original listen time, Unix seconds.
+    pub played_at: i64,
+    /// Plays of the same track already in the history within this many
+    /// seconds count as the same listen (see [`LibraryDb::import_plays`]).
+    pub window_secs: i64,
+}
+
+/// An artist's taste profile, used to derive "similar artists" locally when
+/// no online source is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistProfile {
+    pub name: String,
+    /// Lower-cased genre labels found on the artist's tracks.
+    pub genres: Vec<String>,
+    /// Mean release year of the dated tracks, `0` when none is dated.
+    pub year: u32,
+}
+
+/// Library artist name expression shared by the artist queries: the album
+/// artist, else the track artist (same identity as `most_played_artists`).
+const ARTIST_NAME_EXPR: &str = "COALESCE(NULLIF(t.album_artist, ''), t.artist)";
+
+/// Split a genre tag (`"Rock; Alt/Indie"`) into lower-cased labels.
+pub fn genre_labels(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split([';', '/', ',']) {
+        let label = part.trim().to_lowercase();
+        if !label.is_empty() && !out.contains(&label) {
+            out.push(label);
+        }
+    }
+    out
+}
+
+impl LibraryDb {
+    /// Every track of `provider` with the fields the importer matches on.
+    pub fn import_tracks(&self, provider: &str) -> Result<Vec<ImportTrack>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, title, artist, album_artist, album, duration_ms
+                 FROM tracks WHERE provider = ?1",
+            )
+            .map_err(|e| format!("Import tracks query error: {e}"))?;
+        let rows = stmt
+            .query_map(params![provider], |row| {
+                Ok(ImportTrack {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album_artist: row.get(3)?,
+                    album: row.get(4)?,
+                    duration_secs: (row.get::<_, i64>(5)?.max(0) / 1000) as u32,
+                })
+            })
+            .map_err(|e| format!("Import tracks query error: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Import tracks row error: {e}"))
+    }
+
+    /// Highest `play_history` row id (0 when empty). Take it *before* an
+    /// import and hand it to [`Self::import_plays`].
+    pub fn max_play_id(&self) -> Result<i64, String> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM play_history", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| format!("Max play id error: {e}"))
+    }
+
+    /// Merge `plays` into the history; returns how many rows were added.
+    ///
+    /// Idempotent: a play is skipped when the track already has a play at
+    /// exactly that timestamp (so re-importing adds nothing), or — for rows
+    /// with an id `<= preexisting_max_id`, i.e. recorded before this import
+    /// started — one within `window_secs` of it. The latter keeps a listen
+    /// Aulos recorded itself (stamped when the half-way mark was crossed)
+    /// from being counted a second time when the service reports it (stamped
+    /// with the track's start), and a second service's copy of the same
+    /// listen likewise. Genuine repeats *inside* one import are kept.
+    pub fn import_plays(
+        &self,
+        plays: &[ImportPlay],
+        preexisting_max_id: i64,
+    ) -> Result<u32, String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Import transaction error: {e}"))?;
+        let mut added = 0u32;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO play_history (track_id, played_at)
+                     SELECT ?1, ?2
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM play_history
+                         WHERE track_id = ?1
+                           AND (played_at = ?2
+                                OR (id <= ?4 AND played_at BETWEEN ?2 - ?3 AND ?2 + ?3)))",
+                )
+                .map_err(|e| format!("Import prepare error: {e}"))?;
+            for p in plays {
+                let n = stmt
+                    .execute(params![
+                        p.track_id,
+                        p.played_at,
+                        p.window_secs.max(0),
+                        preexisting_max_id
+                    ])
+                    .map_err(|e| format!("Import insert error: {e}"))?;
+                added += n as u32;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Import commit error: {e}"))?;
+        Ok(added)
+    }
+
+    /// Artists with favorited tracks, most favorites first.
+    pub fn favorite_artists(&self, provider: &str, limit: u32) -> Result<Vec<String>, String> {
+        let sql = format!(
+            "SELECT {ARTIST_NAME_EXPR} AS name FROM tracks t
+             WHERE t.provider = ?1 AND t.is_favorite = 1 AND name != ''
+             GROUP BY name ORDER BY COUNT(*) DESC, name LIMIT ?2"
+        );
+        self.query_names(&sql, params![provider, limit])
+    }
+
+    /// Random library artists.
+    pub fn random_artists(&self, provider: &str, limit: u32) -> Result<Vec<String>, String> {
+        let sql = format!(
+            "SELECT {ARTIST_NAME_EXPR} AS name FROM tracks t
+             WHERE t.provider = ?1 AND name != ''
+             GROUP BY name ORDER BY RANDOM() LIMIT ?2"
+        );
+        self.query_names(&sql, params![provider, limit])
+    }
+
+    /// Every distinct library artist name.
+    pub fn library_artists(&self, provider: &str) -> Result<Vec<String>, String> {
+        let sql = format!(
+            "SELECT {ARTIST_NAME_EXPR} AS name FROM tracks t
+             WHERE t.provider = ?1 AND name != '' GROUP BY name ORDER BY name"
+        );
+        self.query_names(&sql, params![provider])
+    }
+
+    fn query_names(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("Artist names query error: {e}"))?;
+        let rows = stmt
+            .query_map(params, |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Artist names query error: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Artist names row error: {e}"))
+    }
+
+    /// Genre/decade profile of every library artist.
+    pub fn artist_profiles(&self, provider: &str) -> Result<Vec<ArtistProfile>, String> {
+        let sql = format!(
+            "SELECT {ARTIST_NAME_EXPR} AS name, t.genre, t.year FROM tracks t
+             WHERE t.provider = ?1 AND name != ''"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("Artist profiles query error: {e}"))?;
+        let rows = stmt
+            .query_map(params![provider], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Artist profiles query error: {e}"))?;
+
+        // name -> (genres, year sum, dated tracks)
+        let mut acc: std::collections::BTreeMap<String, (Vec<String>, i64, i64)> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let (name, genre, year) = row.map_err(|e| format!("Artist profiles row error: {e}"))?;
+            let entry = acc.entry(name).or_default();
+            for g in genre_labels(&genre) {
+                if !entry.0.contains(&g) {
+                    entry.0.push(g);
+                }
+            }
+            if year >= 1900 {
+                entry.1 += year;
+                entry.2 += 1;
+            }
+        }
+        Ok(acc
+            .into_iter()
+            .map(|(name, (genres, sum, n))| ArtistProfile {
+                name,
+                genres,
+                year: if n > 0 { (sum / n) as u32 } else { 0 },
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,5 +1045,136 @@ mod tests {
         assert_eq!(db.total_plays().unwrap(), 1);
         db.remove_track_by_path("/m/c1.flac").unwrap();
         assert_eq!(db.total_plays().unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn add(db: &LibraryDb, path: &str, artist: &str, genre: &str, year: u32, fav: bool) -> i64 {
+        let track = Track {
+            id: 0,
+            path: PathBuf::from(path),
+            title: path.to_string(),
+            artist: artist.to_string(),
+            album_artist: artist.to_string(),
+            album: "Album".to_string(),
+            genre: genre.to_string(),
+            track_number: 1,
+            disc_number: 1,
+            year,
+            duration: Duration::from_secs(200),
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from("local"),
+            source_uri: path.to_string(),
+            is_favorite: fav,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        };
+        db.upsert_track(&track, 1).unwrap();
+        let id: i64 = db
+            .conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if fav {
+            db.toggle_favorite(id).unwrap();
+        }
+        id
+    }
+
+    fn play(track_id: i64, played_at: i64) -> ImportPlay {
+        ImportPlay {
+            track_id,
+            played_at,
+            window_secs: 200,
+        }
+    }
+
+    #[test]
+    fn import_is_idempotent() {
+        let db = LibraryDb::open_memory().unwrap();
+        let t = add(&db, "/m/a.flac", "Alpha", "Rock", 1990, false);
+        let plays = [play(t, 1_000), play(t, 5_000), play(t, 9_000)];
+        let snapshot = db.max_play_id().unwrap();
+        assert_eq!(db.import_plays(&plays, snapshot).unwrap(), 3);
+        assert_eq!(db.play_count(t).unwrap(), 3);
+
+        // Second run (fresh snapshot, as a real re-import would take).
+        let snapshot = db.max_play_id().unwrap();
+        assert_eq!(db.import_plays(&plays, snapshot).unwrap(), 0);
+        assert_eq!(db.play_count(t).unwrap(), 3);
+    }
+
+    #[test]
+    fn repeats_inside_one_import_are_kept() {
+        let db = LibraryDb::open_memory().unwrap();
+        let t = add(&db, "/m/a.flac", "Alpha", "", 0, false);
+        // Repeat-one: two listens 100 s apart, well inside the window.
+        let snapshot = db.max_play_id().unwrap();
+        let added = db
+            .import_plays(&[play(t, 1_000), play(t, 1_100)], snapshot)
+            .unwrap();
+        assert_eq!(added, 2);
+    }
+
+    #[test]
+    fn listens_already_recorded_locally_are_not_doubled() {
+        let db = LibraryDb::open_memory().unwrap();
+        let t = add(&db, "/m/a.flac", "Alpha", "", 0, false);
+        // Aulos recorded the play at the half-way mark...
+        db.record_play(t, 1_100).unwrap();
+        // ...the service reports the same listen stamped with its start.
+        let snapshot = db.max_play_id().unwrap();
+        let added = db
+            .import_plays(&[play(t, 1_000), play(t, 9_000)], snapshot)
+            .unwrap();
+        assert_eq!(added, 1, "only the unrelated later listen is new");
+        assert_eq!(db.play_count(t).unwrap(), 2);
+    }
+
+    #[test]
+    fn import_rejects_unknown_tracks() {
+        let db = LibraryDb::open_memory().unwrap();
+        assert!(db.import_plays(&[play(424_242, 1)], 0).is_err());
+        assert_eq!(db.total_plays().unwrap(), 0, "transaction rolled back");
+    }
+
+    #[test]
+    fn import_tracks_and_artist_queries() {
+        let db = LibraryDb::open_memory().unwrap();
+        add(&db, "/m/a1.flac", "Alpha", "Rock; Indie", 1990, true);
+        add(&db, "/m/a2.flac", "Alpha", "rock", 1994, false);
+        add(&db, "/m/b1.flac", "Beta", "Jazz", 0, false);
+        let tracks = db.import_tracks("local").unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].duration_secs, 200);
+        assert_eq!(db.favorite_artists("local", 10).unwrap(), ["Alpha"]);
+        assert_eq!(db.library_artists("local").unwrap(), ["Alpha", "Beta"]);
+        assert_eq!(db.random_artists("local", 10).unwrap().len(), 2);
+
+        let profiles = db.artist_profiles("local").unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].name, "Alpha");
+        assert_eq!(profiles[0].genres, ["rock", "indie"]);
+        assert_eq!(profiles[0].year, 1992);
+        assert_eq!(profiles[1].year, 0, "undated tracks leave the year unknown");
+    }
+
+    #[test]
+    fn genre_labels_split_and_dedupe() {
+        assert_eq!(
+            genre_labels("Rock; Alt/Indie, rock"),
+            ["rock", "alt", "indie"]
+        );
+        assert!(genre_labels("  ").is_empty());
     }
 }

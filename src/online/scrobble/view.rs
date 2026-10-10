@@ -7,6 +7,7 @@ use super::Service;
 use super::controller::{ScrobbleController, ScrobbleMessage, enabled_of, is_connected, user_of};
 use crate::config::Config;
 use crate::fl;
+use crate::views::settings::SearchQuery;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{self, settings::Section};
 
@@ -34,9 +35,59 @@ fn header<'a>(title: String, description: Option<String>) -> cosmic::Element<'a,
     col.into()
 }
 
-/// All scrobbling sections: general options, then one per service.
-pub fn view<'a>(ctrl: &'a ScrobbleController, config: &'a Config) -> cosmic::Element<'a, Msg> {
+/// Searchable strings of the general scrobbling section.
+fn general_keywords() -> Vec<String> {
+    vec![
+        fl!("scrobbling"),
+        fl!("scrobbling-description"),
+        fl!("scrobble-streams"),
+        fl!("scrobble-streams-description"),
+        fl!("scrobble-import-on-connect"),
+        fl!("scrobble-import-on-connect-description"),
+        fl!("online-suggestions"),
+        fl!("online-suggestions-description"),
+    ]
+}
+
+/// Searchable strings of one service's section.
+fn service_keywords(service: Service) -> Vec<String> {
+    let mut words = vec![
+        service.display_name().to_string(),
+        fl!("scrobbling"),
+        fl!("scrobble-connect"),
+        fl!("scrobble-disconnect"),
+        fl!("scrobble-import"),
+        fl!(
+            "scrobble-import-description",
+            service = service.display_name()
+        ),
+    ];
+    if service == Service::LastFm {
+        words.push(fl!("scrobble-love-sync"));
+        words.push(fl!("scrobble-love-sync-description"));
+        words.push(fl!("scrobble-sync-loved"));
+    }
+    words
+}
+
+/// Everything the Scrobbling block can be searched by.
+pub fn keywords() -> Vec<String> {
+    let mut words = general_keywords();
+    for service in Service::ALL {
+        words.extend(service_keywords(service));
+    }
+    words
+}
+
+/// All scrobbling sections: general options, then one per service. With a
+/// non-empty `search`, only the sections matching it are shown.
+pub fn view<'a>(
+    ctrl: &'a ScrobbleController,
+    config: &'a Config,
+    search: &str,
+) -> cosmic::Element<'a, Msg> {
     let sp = cosmic::theme::active().cosmic().spacing;
+    let query = SearchQuery::new(search);
 
     let general = widget::settings::section()
         .header(header(
@@ -47,16 +98,30 @@ pub fn view<'a>(ctrl: &'a ScrobbleController, config: &'a Config) -> cosmic::Ele
             widget::settings::item::builder(fl!("scrobble-streams"))
                 .description(fl!("scrobble-streams-description"))
                 .toggler(config.scrobble_streams, Msg::SetStreams),
+        )
+        .add(
+            widget::settings::item::builder(fl!("scrobble-import-on-connect"))
+                .description(fl!("scrobble-import-on-connect-description"))
+                .toggler(config.scrobble_import_on_connect, Msg::SetImportOnConnect),
+        )
+        .add(
+            widget::settings::item::builder(fl!("online-suggestions"))
+                .description(fl!("online-suggestions-description"))
+                .toggler(config.home_online_suggestions, Msg::SetOnlineSuggestions),
         );
 
-    widget::Column::new()
+    let mut col = widget::Column::new()
         .spacing(sp.space_l)
-        .width(Length::Fill)
-        .push(general)
-        .push(service_section(ctrl, config, Service::ListenBrainz))
-        .push(service_section(ctrl, config, Service::LastFm))
-        .push(service_section(ctrl, config, Service::LibreFm))
-        .into()
+        .width(Length::Fill);
+    if query.matches(&general_keywords()) {
+        col = col.push(general);
+    }
+    for service in Service::ALL {
+        if query.matches(&service_keywords(service)) {
+            col = col.push(service_section(ctrl, config, service));
+        }
+    }
+    col.into()
 }
 
 fn service_section<'a>(
@@ -111,6 +176,8 @@ fn connected_rows<'a>(
             }),
     );
 
+    section = section.add(import_row(ctrl, service));
+
     if service == Service::LastFm {
         section = section
             .add(
@@ -139,6 +206,50 @@ fn connected_rows<'a>(
         widget::button::destructive(fl!("scrobble-disconnect")).on_press(Msg::Disconnect(service)),
     );
     section.add(buttons)
+}
+
+/// "Import listening history": description, button, and — while running —
+/// progress and a cancel button.
+fn import_row<'a>(ctrl: &'a ScrobbleController, service: Service) -> cosmic::Element<'a, Msg> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let mut col = widget::Column::new()
+        .push(widget::text::body(fl!("scrobble-import")))
+        .push(caption(fl!(
+            "scrobble-import-description",
+            service = service.display_name()
+        )))
+        .spacing(sp.space_xxs)
+        .width(Length::Fill);
+
+    if let Some(p) = ctrl.import_progress(service) {
+        let text = match p.total {
+            Some(total) => fl!(
+                "scrobble-import-progress-total",
+                fetched = p.fetched.to_string(),
+                total = total.to_string(),
+                matched = p.matched.to_string()
+            ),
+            None => fl!(
+                "scrobble-import-progress",
+                fetched = p.fetched.to_string(),
+                matched = p.matched.to_string()
+            ),
+        };
+        col = col.push(caption(text));
+        if let Some(fraction) = p.fraction() {
+            col = col.push(widget::progress_bar::determinate_linear(fraction).width(Length::Fill));
+        }
+        col = col.push(
+            widget::button::standard(fl!("scrobble-import-cancel"))
+                .on_press(Msg::ImportCancel(service)),
+        );
+    } else {
+        col = col.push(
+            widget::button::standard(fl!("scrobble-import"))
+                .on_press_maybe((!ctrl.is_importing()).then_some(Msg::ImportStart(service))),
+        );
+    }
+    col.into()
 }
 
 fn connect_rows<'a>(

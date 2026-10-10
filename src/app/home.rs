@@ -9,11 +9,16 @@ use crate::library::history::{
     AlbumRef, DecadeCount, HomeData, LOCAL_PROVIDER, SHELF_LEN, exclude_albums,
 };
 use crate::library::{Album, LibraryDb, Track};
+use crate::online::scrobble::Service;
+use crate::online::scrobble::controller::is_connected;
+use crate::online::similar::{self, SuggestParams};
 use crate::player::PlaybackState;
 use crate::views::Route;
 use crate::views::home::{DecadeView, HomeMessage, album_route};
 use cosmic::Application;
 use cosmic::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl AppModel {
     /// Whether the active provider's library lives in the library database
@@ -105,6 +110,7 @@ impl AppModel {
                         }
                     }
                     self.home.data = Some(data);
+                    return self.load_similar();
                 }
             }
             HomeMessage::RandomLoaded { request, albums } => {
@@ -121,9 +127,60 @@ impl AppModel {
                     view.albums = Some(albums);
                 }
             }
+            HomeMessage::OpenUrl(url) => {
+                if url.starts_with("https://") {
+                    return self.update(Message::LaunchUrl(url));
+                }
+            }
+            HomeMessage::SimilarShelf { request, shelf } => {
+                if request == self.home.request {
+                    if self.home.similar_request != request {
+                        self.home.similar.clear();
+                        self.home.similar_request = request;
+                    }
+                    self.home.similar.push(*shelf);
+                }
+            }
+            HomeMessage::SimilarDone { request, count } => {
+                // Nothing came back (offline, no taste data): show no shelves
+                // rather than the previous visit's.
+                if request == self.home.request
+                    && count == 0
+                    && self.home.similar_request != request
+                {
+                    self.home.similar.clear();
+                    self.home.similar_request = request;
+                }
+            }
             HomeMessage::PlayRecorded => {}
         }
         Task::none()
+    }
+
+    /// Whether "Because you listened to …" shelves should be loaded: the
+    /// setting is on (default) and a scrobbling service is connected.
+    fn suggestions_enabled(&self) -> bool {
+        self.config.home_online_suggestions
+            && Service::ALL.iter().any(|s| is_connected(&self.config, *s))
+    }
+
+    /// (Re)load the similar-artist shelves in the background, one shelf at a
+    /// time as they become available. Cancels a lookup still in flight.
+    pub(super) fn load_similar(&mut self) -> Task<cosmic::Action<Message>> {
+        self.home.similar_cancel.store(true, Ordering::Relaxed);
+        if !self.suggestions_enabled() || !self.home_uses_database() {
+            self.home.similar.clear();
+            return Task::none();
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.home.similar_cancel = Arc::clone(&cancel);
+        let params = SuggestParams {
+            db_path: super::online_db_path(),
+            cache_path: similar::cache_path(),
+            lastfm_key: self.config.scrobble_lastfm_api_key.clone(),
+            now: super::now_epoch(),
+        };
+        cosmic::task::stream(similar_stream(params, self.home.request, cancel))
     }
 
     /// (Re)load every Home shelf. Library-database providers query the play
@@ -308,6 +365,50 @@ impl AppModel {
             cosmic::Action::App(Message::Home(HomeMessage::PlayRecorded))
         })
     }
+}
+
+/// Compute the similar-artist shelves on the blocking pool, streaming each
+/// shelf as a `HomeMessage` and finishing with `SimilarDone`.
+fn similar_stream(
+    params: SuggestParams,
+    request: u64,
+    cancel: Arc<AtomicBool>,
+) -> impl cosmic::iced::futures::Stream<Item = cosmic::Action<Message>> {
+    use cosmic::iced::futures::SinkExt;
+    cosmic::iced::stream::channel(
+        8,
+        move |mut out: cosmic::iced::futures::channel::mpsc::Sender<cosmic::Action<Message>>| async move {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HomeMessage>();
+            let worker = tokio::task::spawn_blocking(move || {
+                let count = {
+                    let mut on_shelf = |shelf| {
+                        let _ = tx.send(HomeMessage::SimilarShelf {
+                            request,
+                            shelf: Box::new(shelf),
+                        });
+                    };
+                    match similar::compute_shelves(&params, &cancel, &mut on_shelf) {
+                        Ok(count) => count,
+                        Err(e) => {
+                            tracing::warn!("similar-artist shelves failed: {e}");
+                            0
+                        }
+                    }
+                };
+                let _ = tx.send(HomeMessage::SimilarDone { request, count });
+            });
+            while let Some(msg) = rx.recv().await {
+                if out
+                    .send(cosmic::Action::App(Message::Home(msg)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = worker.await;
+        },
+    )
 }
 
 fn eq(a: &str, b: &str) -> bool {

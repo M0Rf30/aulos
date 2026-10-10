@@ -9,6 +9,8 @@
 //! artist), so the view never indexes into the album list; the app resolves
 //! an album by `(artist, name)` only when a card is clicked.
 
+mod similar;
+
 use crate::fl;
 use crate::library::CoverArt;
 use crate::library::history::{AlbumRef, ArtistRef, DecadeCount, HomeData, PlayTracker};
@@ -20,6 +22,8 @@ use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Messages emitted by (and for) the Home page.
 #[derive(Debug, Clone)]
@@ -52,6 +56,8 @@ pub enum HomeMessage {
     BrowseRadio,
     /// Welcome block: go to the Podcasts page.
     DiscoverPodcasts,
+    /// Open a web page (a "discover" card).
+    OpenUrl(String),
 
     // -- Async results (never emitted by the view) --
     /// Shelves loaded; `request` ties the result to the latest load. With
@@ -62,6 +68,15 @@ pub enum HomeMessage {
         keep_picks: bool,
         data: Box<HomeData>,
     },
+    /// A "Because you listened to …" shelf is ready; `request` ties it to
+    /// the Home load it was computed for.
+    SimilarShelf {
+        request: u64,
+        shelf: Box<crate::online::similar::SimilarShelf>,
+    },
+    /// All similar-artist shelves of `request` were delivered (`count` of
+    /// them) or the lookup gave up (offline).
+    SimilarDone { request: u64, count: usize },
     /// A play was written to the history (no-op acknowledgement).
     PlayRecorded,
     /// A re-rolled random shelf.
@@ -91,6 +106,12 @@ pub struct HomeState {
     pub tracker: PlayTracker,
     /// Track id `tracker` is currently following.
     pub tracked_track: Option<i64>,
+    /// "Because you listened to …" shelves, loaded after the rest.
+    pub similar: Vec<crate::online::similar::SimilarShelf>,
+    /// The Home load `similar` belongs to.
+    pub similar_request: u64,
+    /// Stops the in-flight similar-artist lookup when a new one starts.
+    pub similar_cancel: Arc<AtomicBool>,
 }
 
 /// Cheap, per-frame facts about the library the Home view needs.
@@ -470,7 +491,6 @@ const APP_ICON: &[u8] =
 /// Width and height of a "Get started" step card. Fixed so the fluid row
 /// wraps cleanly and every card has the same footprint.
 const STEP_WIDTH: f32 = 264.0;
-const STEP_HEIGHT: f32 = 236.0;
 
 /// Numbered accent badge of a step card; a green check once it is done.
 fn step_badge<'a>(number: u8, done: bool) -> cosmic::Element<'a, HomeMessage> {
@@ -548,22 +568,21 @@ fn step_card<'a>(
         .push(widget::text::body(body).class(dim_text()))
         .spacing(spacing.space_xxs);
 
+    // Height follows the content (a fixed height clipped the longer
+    // descriptions and the action buttons); the row aligns cards to the top.
     widget::container(
         widget::Column::new()
             .push(top)
             .push(text)
-            .push(widget::space::vertical())
             .push(
                 widget::flex_row(actions)
                     .row_spacing(spacing.space_xxs)
                     .column_spacing(spacing.space_xs),
             )
-            .spacing(spacing.space_s)
-            .height(Length::Fill),
+            .spacing(spacing.space_m),
     )
     .padding(spacing.space_m)
     .width(Length::Fixed(STEP_WIDTH))
-    .height(Length::Fixed(STEP_HEIGHT))
     .class(cosmic::theme::Container::Card)
     .into()
 }
@@ -823,6 +842,9 @@ pub fn home_view<'a>(
             .map(|a| artist_card(a, photos))
             .collect();
         shelves = shelves.push(shelf(fl!("home-top-artists-month"), None, None, cards));
+    }
+    for shelf in similar::similar_shelves(&state.similar, photos) {
+        shelves = shelves.push(shelf);
     }
     if !data.recently_added.is_empty() {
         shelves = shelves.push(album_shelf(

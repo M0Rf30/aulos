@@ -13,6 +13,7 @@
 //!   triggers);
 //! - [`worker`]: background thread owning the queue, backends and retry
 //!   backoff;
+//! - [`import`]: listening-history import (ListenBrainz / Last.fm → play history);
 //! - [`controller`] and [`view`]: settings state, async connect flows and
 //!   the settings UI section.
 //!
@@ -26,6 +27,7 @@
 
 pub mod audioscrobbler;
 pub mod controller;
+pub mod import;
 pub mod listenbrainz;
 pub mod queue;
 pub mod sign;

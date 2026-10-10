@@ -1019,6 +1019,7 @@ impl AppModel {
                 }
             }
 
+            Message::SettingsSearch(query) => self.settings_search = query,
             Message::Scrobble(msg) => return self.handle_scrobble_message(msg),
 
             Message::SetRating(track_id, rating) => {

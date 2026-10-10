@@ -82,9 +82,15 @@ fn play_pause_button<'a>(
     label: String,
     accent: Option<&Accent>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
-    let class = accent
-        .map(common::accent_button_class)
-        .unwrap_or(cosmic::theme::Button::Suggested);
+    // Nothing loaded: a plain icon button, so a disabled control doesn't
+    // draw the eye as the bar's focal point.
+    let class = if enabled {
+        accent
+            .map(common::accent_button_class)
+            .unwrap_or(cosmic::theme::Button::Suggested)
+    } else {
+        cosmic::theme::Button::Icon
+    };
     let button = widget::button::icon(widget::icon::from_name(icon_name).size(24))
         .class(class)
         .padding(cosmic::theme::active().cosmic().spacing.space_xs)

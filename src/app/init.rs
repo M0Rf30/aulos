@@ -468,6 +468,7 @@ impl AppModel {
             scrobble_now_playing_sent: false,
             scrobble_sent: false,
             scrobble,
+            settings_search: String::new(),
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,

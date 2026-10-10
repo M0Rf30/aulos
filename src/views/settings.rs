@@ -63,6 +63,8 @@ pub enum SettingsMessage {
     /// A message from the Startup block (start section / provider) — see
     /// `crate::app::startup`.
     Startup(crate::app::startup::StartupMessage),
+    /// The settings search box changed (empty = show everything).
+    Search(String),
 }
 
 /// All replay gain modes, in the order shown in the dropdown.
@@ -73,8 +75,170 @@ const REPLAY_GAIN_MODES: [ReplayGainMode; 4] = [
     ReplayGainMode::Auto,
 ];
 
+/// A settings search query: whitespace-separated tokens that must all occur
+/// (case, diacritics and punctuation ignored) somewhere in a section's text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    tokens: Vec<String>,
+}
+
+impl SearchQuery {
+    pub fn new(raw: &str) -> Self {
+        let tokens = crate::online::scrobble::import::normalize_text(raw)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        Self { tokens }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Whether a section whose searchable strings are `haystack` matches.
+    /// An empty query matches everything.
+    pub fn matches<S: AsRef<str>>(&self, haystack: &[S]) -> bool {
+        if self.tokens.is_empty() {
+            return true;
+        }
+        let joined: Vec<&str> = haystack.iter().map(AsRef::as_ref).collect();
+        let text = crate::online::scrobble::import::normalize_text(&joined.join(" "));
+        self.tokens.iter().all(|t| text.contains(t.as_str()))
+    }
+}
+
+/// Searchable strings (titles and descriptions) of each settings section.
+mod keywords {
+    use crate::fl;
+
+    pub fn library() -> Vec<String> {
+        vec![
+            fl!("settings-library"),
+            fl!("settings-library-description"),
+            fl!("add-music-folder"),
+        ]
+    }
+
+    pub fn artist_tags() -> Vec<String> {
+        vec![
+            fl!("settings-artist-tags"),
+            fl!("settings-artist-tags-description"),
+            fl!("split-artist-tags"),
+            fl!("split-artist-tags-description"),
+            fl!("artist-tag-delimiters"),
+            fl!("artist-tag-delimiters-description"),
+        ]
+    }
+
+    pub fn compilations() -> Vec<String> {
+        vec![
+            fl!("settings-compilations"),
+            fl!("settings-compilations-description"),
+            fl!("show-compilations-in-artists"),
+            fl!("show-compilations-in-artists-description"),
+        ]
+    }
+
+    pub fn playlists() -> Vec<String> {
+        vec![
+            fl!("settings-playlists"),
+            fl!("settings-playlists-description"),
+            fl!("m3u-relative-paths"),
+            fl!("m3u-relative-paths-description"),
+        ]
+    }
+
+    pub fn playback() -> Vec<String> {
+        vec![
+            fl!("settings-playback"),
+            fl!("settings-playback-description"),
+            fl!("crossfade-duration"),
+            fl!("crossfade-description"),
+            fl!("replay-gain"),
+            fl!("replay-gain-description"),
+            fl!("volume"),
+        ]
+    }
+
+    pub fn playback_extras() -> Vec<String> {
+        vec![
+            fl!("settings-playback-extras"),
+            fl!("settings-playback-extras-description"),
+            fl!("fade-duration"),
+            fl!("fade-description"),
+            fl!("auto-play"),
+            fl!("auto-play-description"),
+            fl!("party-mode"),
+            fl!("party-mode-description"),
+            fl!("party-genres"),
+            fl!("settings-desktop"),
+            fl!("settings-desktop-description"),
+            fl!("notify-track-change"),
+            fl!("notify-track-change-description"),
+            fl!("inhibit-suspend"),
+            fl!("inhibit-suspend-description"),
+            fl!("background-playback"),
+            fl!("background-playback-description"),
+        ]
+    }
+
+    pub fn startup() -> Vec<String> {
+        vec![
+            fl!("settings-startup"),
+            fl!("startup-page"),
+            fl!("startup-page-description"),
+            fl!("startup-provider"),
+            fl!("startup-provider-description"),
+        ]
+    }
+
+    pub fn appearance() -> Vec<String> {
+        vec![
+            fl!("settings-appearance"),
+            fl!("settings-appearance-description"),
+            fl!("grid-size"),
+            fl!("grid-size-description"),
+        ]
+    }
+
+    pub fn artist_info() -> Vec<String> {
+        vec![
+            fl!("settings-artist-info"),
+            fl!("fetch-artist-info"),
+            fl!("fetch-artist-info-description"),
+        ]
+    }
+
+    pub fn experimental() -> Vec<String> {
+        vec![
+            fl!("settings-experimental"),
+            fl!("experimental-converter"),
+            fl!("experimental-converter-description"),
+        ]
+    }
+
+    pub fn shortcuts() -> Vec<String> {
+        vec![
+            fl!("settings-shortcuts"),
+            fl!("equalizer"),
+            fl!("settings-equalizer-description"),
+            fl!("providers"),
+            fl!("settings-providers-description"),
+        ]
+    }
+
+    pub fn about() -> Vec<String> {
+        vec![
+            fl!("settings-about"),
+            fl!("about"),
+            fl!("settings-about-description"),
+        ]
+    }
+}
+
 /// Render the Settings page (shown in the context drawer, which already
-/// supplies the outer padding and the scrolling).
+/// supplies the outer padding and the scrolling). `search` filters the
+/// sections: only those whose text matches every word are shown.
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     music_dirs: &'a [PathBuf],
@@ -91,29 +255,71 @@ pub fn view<'a>(
     scrobbling: cosmic::Element<'a, SettingsMessage>,
     playback_extras: cosmic::Element<'a, SettingsMessage>,
     startup: cosmic::Element<'a, SettingsMessage>,
+    search: &'a str,
 ) -> cosmic::Element<'a, SettingsMessage> {
     let sp = cosmic::theme::active().cosmic().spacing;
+    let query = SearchQuery::new(search);
 
-    widget::Column::new()
+    let mut search_box = widget::search_input(fl!("settings-search-placeholder"), search)
+        .on_input(SettingsMessage::Search)
+        .width(Length::Fill);
+    if !search.is_empty() {
+        search_box = search_box.on_clear(SettingsMessage::Search(String::new()));
+    }
+
+    let sections: Vec<(Vec<String>, cosmic::Element<'a, SettingsMessage>)> = vec![
+        (keywords::library(), library_section(music_dirs)),
+        (
+            keywords::artist_tags(),
+            artist_tags_section(split_artist_tags, artist_tag_delimiters_input),
+        ),
+        (
+            keywords::compilations(),
+            compilations_section(show_compilations_in_artists),
+        ),
+        (keywords::playlists(), playlists_section(m3u_relative_paths)),
+        (
+            keywords::playback(),
+            playback_section(crossfade_secs, replay_gain_mode, volume),
+        ),
+        (keywords::playback_extras(), playback_extras),
+        (keywords::startup(), startup),
+        (keywords::appearance(), appearance_section(grid_scale)),
+        (
+            keywords::artist_info(),
+            artist_info_section(fetch_artist_info),
+        ),
+        (crate::online::scrobble::view::keywords(), scrobbling),
+        (
+            keywords::experimental(),
+            experimental_section(experimental_converter),
+        ),
+        (keywords::shortcuts(), shortcuts_section()),
+        (keywords::about(), about_section()),
+    ];
+
+    let mut page = widget::Column::new()
         .spacing(sp.space_l)
         .width(Length::Fill)
-        .push(library_section(music_dirs))
-        .push(artist_tags_section(
-            split_artist_tags,
-            artist_tag_delimiters_input,
-        ))
-        .push(compilations_section(show_compilations_in_artists))
-        .push(playlists_section(m3u_relative_paths))
-        .push(playback_section(crossfade_secs, replay_gain_mode, volume))
-        .push(playback_extras)
-        .push(startup)
-        .push(appearance_section(grid_scale))
-        .push(artist_info_section(fetch_artist_info))
-        .push(scrobbling)
-        .push(experimental_section(experimental_converter))
-        .push(shortcuts_section())
-        .push(about_section())
-        .into()
+        .push(search_box);
+    let mut shown = 0;
+    for (words, element) in sections {
+        if query.matches(&words) {
+            page = page.push(element);
+            shown += 1;
+        }
+    }
+    if shown == 0 {
+        page = page.push(
+            widget::container(widget::text::body(fl!(
+                "settings-search-empty",
+                query = search
+            )))
+            .padding(sp.space_m)
+            .width(Length::Fill),
+        );
+    }
+    page.into()
 }
 
 /// Section header: heading plus a dimmed one-line explanation.
@@ -480,4 +686,34 @@ fn drawer_link_row<'a>(
             .control(widget::icon::from_name("go-next-symbolic")),
     )
     .on_press(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_matches_everything() {
+        let q = SearchQuery::new("   ");
+        assert!(q.is_empty());
+        assert!(q.matches(&["anything"]));
+        assert!(q.matches::<&str>(&[]));
+    }
+
+    #[test]
+    fn query_words_must_all_match_ignoring_case_and_diacritics() {
+        let hay = ["Playback", "Crossfade duration", "Réplay gain"];
+        assert!(SearchQuery::new("cross").matches(&hay));
+        assert!(SearchQuery::new("CROSSFADE gain").matches(&hay));
+        assert!(SearchQuery::new("replay").matches(&hay));
+        assert!(!SearchQuery::new("crossfade scrobble").matches(&hay));
+        assert!(!SearchQuery::new("zzz").matches(&hay));
+    }
+
+    #[test]
+    fn punctuation_in_names_is_ignored() {
+        let hay = ["Last.fm", "Scrobble to Last.fm"];
+        assert!(SearchQuery::new("last.fm").matches(&hay));
+        assert!(SearchQuery::new("fm").matches(&hay));
+    }
 }
