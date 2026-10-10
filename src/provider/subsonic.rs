@@ -279,6 +279,7 @@ impl SubsonicProvider {
                 album.artist = artist.clone();
             }
             album.year = album_detail.year.unwrap_or(0) as u32;
+            album.refresh_derived();
             albums.push(album);
         }
 
@@ -422,15 +423,13 @@ impl MusicProvider for SubsonicProvider {
                             Album::from_tracks(album_detail.name.clone(), tracks, cover_source);
                         album.artist = artist_id3.name.clone();
                         album.year = album_detail.year.unwrap_or(0) as u32;
+                        album.refresh_derived();
                         artist_albums.push(album);
                     }
 
                     artist_albums.sort_by_key(|a| a.year);
 
-                    artists.push(Artist {
-                        name: artist_id3.name.clone(),
-                        albums: artist_albums,
-                    });
+                    artists.push(Artist::new(artist_id3.name.clone(), artist_albums));
                 }
             }
 

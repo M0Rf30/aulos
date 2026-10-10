@@ -392,6 +392,91 @@ impl Config {
     pub fn startup_provider_choice(&self) -> Option<&str> {
         startup_provider_preference(&self.startup_provider, self.active_provider.as_deref())
     }
+
+    /// Persist only the fields that differ from `previous` (what is known
+    /// to be on disk), in one transaction. Returns how many keys were
+    /// written. Each key is its own file in cosmic-config, so this turns a
+    /// ~50-file rewrite (with an fsync each) into one or two files.
+    ///
+    /// The destructuring below deliberately has no `..`: adding a field to
+    /// `Config` without listing it here is a compile error, so no setting
+    /// can silently stop being saved.
+    pub fn write_changed(
+        &self,
+        context: &cosmic_config::Config,
+        previous: &Config,
+    ) -> Result<usize, cosmic_config::Error> {
+        use cosmic_config::ConfigSet;
+        let tx = context.transaction();
+        let mut written = 0usize;
+        macro_rules! diff {
+            ($($field:ident),* $(,)?) => {{
+                let Config { $($field),* } = self;
+                $(
+                    if *$field != previous.$field {
+                        tx.set(stringify!($field), $field)?;
+                        written += 1;
+                    }
+                )*
+            }};
+        }
+        diff!(
+            music_dirs,
+            split_artist_tags,
+            artist_tag_delimiters,
+            volume,
+            shuffle,
+            repeat_mode,
+            equalizer_bands,
+            equalizer_enabled,
+            equalizer_preamp,
+            active_eq_preset_name,
+            last_view,
+            startup_page,
+            startup_provider,
+            mpd_servers,
+            subsonic_servers,
+            crossfade_duration_secs,
+            replay_gain_mode,
+            albums_view_mode,
+            artists_view_mode,
+            genres_view_mode,
+            convert_out_dir,
+            convert_format,
+            convert_sample_rate,
+            experimental_converter,
+            flac_options,
+            lossy_options,
+            active_provider,
+            fetch_artist_info,
+            grid_scale,
+            intro_played,
+            fade_duration_secs,
+            auto_play_mode,
+            party_mode,
+            party_genres,
+            notify_track_change,
+            inhibit_while_playing,
+            background_playback,
+            show_compilations_in_artists,
+            m3u_relative_paths,
+            scrobble_listenbrainz_enabled,
+            scrobble_lastfm_enabled,
+            scrobble_librefm_enabled,
+            scrobble_listenbrainz_user,
+            scrobble_lastfm_user,
+            scrobble_librefm_user,
+            scrobble_lastfm_api_key,
+            scrobble_streams,
+            scrobble_lastfm_love_sync,
+            scrobble_import_on_connect,
+            home_online_suggestions,
+        );
+        if written > 0 {
+            tx.commit()?;
+        }
+        Ok(written)
+    }
 }
 
 /// Choose which provider id should become active, given the persisted
@@ -519,5 +604,44 @@ mod startup_provider_tests {
             resolve_active_provider(choice, &without_local),
             Some("mpd-home".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod write_changed_tests {
+    use super::*;
+
+    fn context(tag: &str) -> (cosmic_config::Config, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("aulos-cfg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx =
+            cosmic_config::Config::with_custom_path("io.github.m0rf30.AulosTest", 2, dir.clone())
+                .unwrap();
+        (ctx, dir)
+    }
+
+    #[test]
+    fn unchanged_config_writes_nothing() {
+        let (ctx, dir) = context("same");
+        let cfg = Config::default();
+        assert_eq!(cfg.write_changed(&ctx, &cfg).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_changed_keys_are_written_and_read_back() {
+        let (ctx, dir) = context("diff");
+        let base = Config::default();
+        base.write_entry(&ctx).unwrap();
+
+        let mut next = base.clone();
+        next.last_view = "genres".into();
+        next.grid_scale = 1.25;
+        next.albums_view_mode = ViewMode::List;
+        assert_eq!(next.write_changed(&ctx, &base).unwrap(), 3);
+
+        let loaded = Config::get_entry(&ctx).unwrap_or_else(|(_, c)| c);
+        assert_eq!(loaded, next);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -363,13 +363,17 @@ fn fetch_wikipedia_bio(client: &reqwest::blocking::Client, artist_name: &str) ->
 /// A dedicated blocking client (distinct from `crate::app::HTTP_CLIENT`)
 /// so every request here carries an identifying User-Agent, as public
 /// APIs like Wikipedia's ask for.
-fn http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(8))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .user_agent(USER_AGENT)
+                .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(8))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new())
+        });
+    &CLIENT
 }
 
 fn download_image(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
@@ -397,9 +401,9 @@ pub fn resolve_via_agents(store: &ArtistInfoStore, name: &str, now: i64) -> Arti
     }
 
     let client = http_client();
-    let image_url = fetch_deezer_image_url(&client, name);
-    let bio = fetch_wikipedia_bio(&client, name);
-    let raw_image = image_url.and_then(|url| download_image(&client, &url));
+    let image_url = fetch_deezer_image_url(client, name);
+    let bio = fetch_wikipedia_bio(client, name);
+    let raw_image = image_url.and_then(|url| download_image(client, &url));
 
     let image = raw_image.as_deref().and_then(|bytes| {
         store.save_image(&key, bytes);

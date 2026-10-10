@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::helpers::clamp_display_position;
+use super::message::PlaylistOp;
 use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID, parse_delimiters_input};
 use crate::config::ReplayGainMode;
 use crate::fl;
@@ -37,7 +38,26 @@ impl AppModel {
             // -- Library search --
             Message::LibrarySearchChanged(query) => {
                 self.library_search = query;
-                self.refresh_search_filter();
+                self.search_debounce_gen += 1;
+                if self.library_search.trim().is_empty() {
+                    // Clearing is cheap and should feel instant.
+                    self.refresh_search_filter();
+                } else {
+                    let pending = self.search_debounce_gen;
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(Duration::from_millis(
+                            super::search_index::SEARCH_DEBOUNCE_MS,
+                        ))
+                        .await;
+                        cosmic::Action::App(Message::LibrarySearchDebounced(pending))
+                    });
+                }
+            }
+
+            Message::LibrarySearchDebounced(pending) => {
+                if super::search_index::is_latest_generation(pending, self.search_debounce_gen) {
+                    self.refresh_search_filter();
+                }
             }
 
             Message::ToggleLibrarySearch => {
@@ -124,8 +144,8 @@ impl AppModel {
                 tracks,
                 albums,
                 artists: _artists,
-                cover_images,
-                cover_art_bytes,
+                mut cover_images,
+                cover_fingerprints,
             } => {
                 if self.is_stale_reload(generation, &provider_id) {
                     return Task::none();
@@ -133,9 +153,14 @@ impl AppModel {
                 self.library_scanning = false;
                 self.all_tracks = tracks;
                 self.all_albums = albums;
+                // Keep the existing handle for covers whose content did not
+                // change so iced's raster cache never re-uploads them.
+                self.reuse_unchanged_cover_handles(&mut cover_images, &cover_fingerprints);
                 self.cover_images = cover_images;
+                self.cover_fingerprints = cover_fingerprints;
                 self.rebuild_all_artists();
-                self.cover_art_bytes = cover_art_bytes.into();
+                // Full-size bytes are loaded lazily; drop any stale ones.
+                self.cover_art_bytes.clear();
                 // Rebuild the folder tree only if it's already in use —
                 // never-opened Folders view pays nothing on reload.
                 if self.folder_state.is_populated()
@@ -143,6 +168,7 @@ impl AppModel {
                 {
                     self.folder_state
                         .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
+                    self.folder_tree_gen = Some(self.library_gen);
                 }
                 self.refresh_search_filter();
                 // Re-trigger blur now that cover art bytes are available
@@ -156,7 +182,7 @@ impl AppModel {
                 provider_id,
                 albums,
                 cover_images,
-                cover_art_bytes,
+                cover_fingerprints,
             } => {
                 if self.is_stale_reload(generation, &provider_id) {
                     return Task::none();
@@ -174,8 +200,8 @@ impl AppModel {
                     // for any album whose cover bytes are unchanged, so
                     // iced's wgpu raster cache keeps the same handle id
                     // and never re-uploads that cover.
-                    for (key, bytes) in cover_art_bytes {
-                        let reused = if self.cover_art_bytes.get(&key) == Some(&bytes) {
+                    for (key, fingerprint) in cover_fingerprints {
+                        let reused = if self.cover_fingerprints.get(&key) == Some(&fingerprint) {
                             self.cover_images.get(&key).cloned()
                         } else {
                             None
@@ -185,7 +211,7 @@ impl AppModel {
                             if let Some(handle) = handle {
                                 staging.cover_images.insert(key.clone(), handle);
                             }
-                            staging.cover_art_bytes.insert(key, bytes);
+                            staging.cover_fingerprints.insert(key, fingerprint);
                         }
                     }
                     if let Some(staging) = self.library_reload_staging.as_mut() {
@@ -210,9 +236,16 @@ impl AppModel {
                     self.all_albums.push(album.clone());
                 }
                 self.cover_images.extend(cover_images);
-                self.cover_art_bytes.extend(cover_art_bytes);
+                self.cover_fingerprints.extend(cover_fingerprints);
                 self.merge_artists_from_batch(&albums);
-                self.refresh_search_filter();
+                if !self.library_search.trim().is_empty()
+                    || (!self.config.show_compilations_in_artists
+                        && albums
+                            .iter()
+                            .any(|a| crate::library::compilations::is_various_artists(&a.artist)))
+                {
+                    self.refresh_search_filter();
+                }
 
                 // Re-trigger blur in case the current track's cover just arrived
                 let blur_task = self.maybe_update_blurred_cover();
@@ -237,7 +270,8 @@ impl AppModel {
                     self.all_tracks = staging.tracks;
                     self.all_albums = staging.albums;
                     self.cover_images = staging.cover_images;
-                    self.cover_art_bytes = staging.cover_art_bytes.into();
+                    self.cover_fingerprints = staging.cover_fingerprints;
+                    self.cover_art_bytes.clear();
                     self.rebuild_all_artists();
                 }
 
@@ -245,6 +279,7 @@ impl AppModel {
                 self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
                 self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
                 self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
+                self.library_gen += 1;
                 self.refresh_search_filter();
                 tracing::info!(
                     "Library load complete: {} albums, {} tracks, {} artists",
@@ -804,6 +839,15 @@ impl AppModel {
                 }
             }
 
+            Message::QueueFrom { source, next } => {
+                let tracks = self.queue_source_tracks(source);
+                return self.handle_message(if next {
+                    Message::PlayNext(tracks)
+                } else {
+                    Message::AddToQueue(tracks)
+                });
+            }
+
             // -- Track selection --
             Message::PlayTrackIndex(index) => {
                 return self.play_track_list(self.all_tracks.clone(), index);
@@ -931,6 +975,20 @@ impl AppModel {
                 self.selected_artist = None;
             }
 
+            Message::CredentialsChecked(updates) => {
+                if super::init::apply_credential_updates(&mut self.config, &updates) {
+                    self.save_config();
+                }
+            }
+
+            Message::CoverBytesLoaded(key, bytes) => {
+                self.cover_art_bytes.finish_load(key, bytes);
+                // Whoever asked for the bytes (blur / detail hero) retries
+                // now that they are cached; detail art is re-evaluated after
+                // every update anyway.
+                return self.maybe_update_blurred_cover();
+            }
+
             Message::DetailArtReady(key, blurred, accent) => {
                 self.apply_detail_art(key, blurred, accent);
             }
@@ -970,6 +1028,10 @@ impl AppModel {
                 self.songs_scroll_offset = offset;
             }
 
+            Message::GridScrolled(area, offset) => {
+                self.extras.grid_scroll.set(area, offset);
+            }
+
             Message::ToggleFavoritesFilter => {
                 self.favorites_filter = !self.favorites_filter;
                 // Clear genre filter when toggling favorites
@@ -979,94 +1041,57 @@ impl AppModel {
             }
 
             Message::ToggleFavorite(track_id) => {
-                if let Some(provider) = self.registry.active_shared() {
-                    match provider.toggle_favorite(&track_id) {
-                        Ok(new_state) => {
-                            // Update the track's is_favorite in our local data.
-                            for track in &mut self.all_tracks {
-                                if track.id.to_string() == track_id {
-                                    track.is_favorite = new_state;
-                                }
-                            }
-                            for album in &mut self.all_albums {
-                                for track in &mut album.tracks {
-                                    if track.id.to_string() == track_id {
-                                        track.is_favorite = new_state;
-                                    }
-                                }
-                            }
-                            for artist in &mut self.all_artists {
-                                for album in &mut artist.albums {
-                                    for track in &mut album.tracks {
-                                        if track.id.to_string() == track_id {
-                                            track.is_favorite = new_state;
-                                        }
-                                    }
-                                }
-                            }
-                            // Also update the current playing track if it matches.
-                            if let Some(ref mut ct) = self.current_track
-                                && ct.id.to_string() == track_id
-                            {
-                                ct.is_favorite = new_state;
-                            }
-                            self.scrobble_favorite_changed(&track_id, new_state);
-                        }
-                        Err(e) => {
-                            tracing::warn!("toggle_favorite failed: {e}");
-                        }
-                    }
-                }
+                return self.toggle_favorite_async(track_id);
             }
+
+            Message::FavoriteToggled {
+                track_id,
+                optimistic,
+                result,
+            } => match result {
+                Ok(new_state) => {
+                    if new_state != optimistic {
+                        self.set_favorite_local(&track_id, new_state);
+                    }
+                    self.scrobble_favorite_changed(&track_id, new_state);
+                }
+                Err(e) => {
+                    tracing::warn!("toggle_favorite failed: {e}");
+                    self.set_favorite_local(&track_id, !optimistic);
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-provider-action-failed",
+                        reason = e
+                    )));
+                }
+            },
 
             Message::SettingsSearch(query) => self.settings_search = query,
             Message::Scrobble(msg) => return self.handle_scrobble_message(msg),
 
             Message::SetRating(track_id, rating) => {
-                if let Some(provider) = self.registry.active_shared() {
-                    match provider.set_rating(&track_id, rating) {
-                        Ok(()) => {
-                            let new_rating = if rating == 0 { None } else { Some(rating) };
-                            for track in &mut self.all_tracks {
-                                if track.id.to_string() == track_id {
-                                    track.rating = new_rating;
-                                }
-                            }
-                            for album in &mut self.all_albums {
-                                for track in &mut album.tracks {
-                                    if track.id.to_string() == track_id {
-                                        track.rating = new_rating;
-                                    }
-                                }
-                            }
-                            for artist in &mut self.all_artists {
-                                for album in &mut artist.albums {
-                                    for track in &mut album.tracks {
-                                        if track.id.to_string() == track_id {
-                                            track.rating = new_rating;
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(ref mut ct) = self.current_track
-                                && ct.id.to_string() == track_id
-                            {
-                                ct.rating = new_rating;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("set_rating failed: {e}");
-                        }
-                    }
+                return self.set_rating_async(track_id, rating);
+            }
+
+            Message::RatingSet {
+                track_id,
+                previous,
+                result,
+            } => {
+                if let Err(e) = result {
+                    tracing::warn!("set_rating failed: {e}");
+                    self.set_rating_local(&track_id, previous);
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-provider-action-failed",
+                        reason = e
+                    )));
                 }
             }
 
             Message::AddToPlaylist(track_source_uri, playlist_id) => {
-                if let Some(provider) = self.registry.active_shared()
-                    && let Err(e) = provider.add_to_playlist(&playlist_id, &[track_source_uri])
-                {
-                    tracing::warn!("add_to_playlist failed: {e}");
-                }
+                return self.playlist_op_async(PlaylistOp::AddTrack, move |p| {
+                    p.add_to_playlist(&playlist_id, &[track_source_uri])
+                        .map_err(|e| e.to_string())
+                });
             }
 
             Message::FilterByGenre(genre) => {
@@ -1460,10 +1485,14 @@ impl AppModel {
                 }
             }
 
+            Message::UpdateConfig(config) if self.is_own_config_echo(&config) => {}
             Message::UpdateConfig(config) => {
                 let artist_split_changed = config.split_artist_tags
                     != self.config.split_artist_tags
                     || config.artist_tag_delimiters != self.config.artist_tag_delimiters;
+                if config.music_dirs != self.config.music_dirs {
+                    self.music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
+                }
                 self.config = config;
                 if artist_split_changed {
                     self.artist_tag_delimiters_input =
@@ -1537,6 +1566,8 @@ impl AppModel {
                     self.all_albums.clear();
                     self.all_artists.clear();
                     self.cover_images.clear();
+                    self.cover_fingerprints.clear();
+                    self.cover_art_bytes.clear();
                     self.artist_photos.clear();
                     self.artist_bios.clear();
                     self.artist_info_pending.clear();
@@ -2206,51 +2237,52 @@ impl AppModel {
             }
 
             Message::CreatePlaylist(name) => {
-                if let Some(provider) = self.registry.active_shared() {
-                    match provider.create_playlist(&name) {
-                        Ok(_) => {
-                            self.new_playlist_name.clear();
-                            return self.load_playlists();
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to create playlist: {e}");
-                        }
-                    }
-                }
+                return self.playlist_op_async(PlaylistOp::Create, move |p| {
+                    p.create_playlist(&name)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                });
             }
 
             Message::DeletePlaylist(idx) => {
                 if let Some(playlist) = self.playlists.get(idx) {
                     let id = playlist.id.clone();
-                    if let Some(provider) = self.registry.active_shared() {
-                        match provider.delete_playlist(&id) {
-                            Ok(()) => {
-                                self.selected_playlist = None;
-                                return self.load_playlists();
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to delete playlist: {e}");
-                            }
-                        }
-                    }
+                    return self.playlist_op_async(PlaylistOp::Delete, move |p| {
+                        p.delete_playlist(&id).map_err(|e| e.to_string())
+                    });
                 }
             }
 
             Message::RenamePlaylist(idx, new_name) => {
                 if let Some(playlist) = self.playlists.get(idx) {
                     let id = playlist.id.clone();
-                    if let Some(provider) = self.registry.active_shared() {
-                        match provider.rename_playlist(&id, &new_name) {
-                            Ok(()) => {
-                                return self.load_playlists();
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to rename playlist: {e}");
-                            }
-                        }
-                    }
+                    return self.playlist_op_async(PlaylistOp::Rename, move |p| {
+                        p.rename_playlist(&id, &new_name).map_err(|e| e.to_string())
+                    });
                 }
             }
+
+            Message::PlaylistOpDone { op, result } => match result {
+                Ok(()) => match op {
+                    PlaylistOp::AddTrack => {}
+                    PlaylistOp::Create => {
+                        self.new_playlist_name.clear();
+                        return self.load_playlists();
+                    }
+                    PlaylistOp::Delete => {
+                        self.selected_playlist = None;
+                        return self.load_playlists();
+                    }
+                    PlaylistOp::Rename => return self.load_playlists(),
+                },
+                Err(e) => {
+                    tracing::error!("Playlist operation {op:?} failed: {e}");
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-provider-action-failed",
+                        reason = e
+                    )));
+                }
+            },
 
             Message::PlayPlaylist(idx) => {
                 if let Some(playlist) = self.playlists.get(idx)
@@ -2557,25 +2589,7 @@ impl AppModel {
             }
 
             // -- Genres view --
-            Message::SelectGenre(idx) => {
-                self.selected_genre = Some(idx);
-                // Load tracks for the selected genre
-                if let Some(genre_name) = self.all_genres.get(idx) {
-                    let genre = genre_name.clone();
-                    if let Some(provider) = self.registry.active_shared() {
-                        let tracks = provider.get_tracks_by_genre(&genre).unwrap_or_default();
-                        self.genre_tracks = tracks;
-                    } else {
-                        // Fall back to filtering local tracks
-                        self.genre_tracks = self
-                            .all_tracks
-                            .iter()
-                            .filter(|t| t.genre.eq_ignore_ascii_case(&genre))
-                            .cloned()
-                            .collect();
-                    }
-                }
-            }
+            Message::SelectGenre(idx) => return self.select_genre(idx),
 
             Message::BackToGenreGrid => {
                 self.genre_tracks.clear();
@@ -2613,8 +2627,10 @@ impl AppModel {
                 self.refresh_search_filter();
             }
 
-            Message::GenreTracksLoaded(tracks) => {
-                self.genre_tracks = tracks;
+            Message::GenreTracksLoaded { idx, tracks } => {
+                if self.selected_genre == Some(idx) {
+                    self.genre_tracks = tracks;
+                }
             }
 
             // -- Podcasts --
@@ -2638,6 +2654,7 @@ impl AppModel {
             Message::Convert(msg) => return self.update_convert(msg),
             Message::ConvertEvent(event) => return self.update_convert_event(event),
             Message::Quit => {
+                self.flush_config();
                 return cosmic::iced::exit();
             }
             Message::Playback(msg) => return self.update_playback_extras(msg),
@@ -2946,8 +2963,13 @@ impl AppModel {
             Some(Page::Genres) => self.load_genres(),
             Some(Page::Artists) => self.load_artist_info_for_visible(),
             Some(Page::Folders) => {
-                self.folder_state
-                    .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
+                if !self.folder_state.is_populated()
+                    || self.folder_tree_gen != Some(self.library_gen)
+                {
+                    self.folder_state
+                        .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
+                    self.folder_tree_gen = Some(self.library_gen);
+                }
                 Task::none()
             }
             Some(Page::Podcasts) => self.load_podcasts(),

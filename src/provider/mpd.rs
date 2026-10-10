@@ -710,15 +710,13 @@ impl MusicProvider for MpdProvider {
 
                     let mut album = Album::from_tracks(album_name.clone(), tracks, cover_source);
                     album.artist = artist_name.clone();
+                    album.refresh_derived();
                     artist_albums.push(album);
                 }
 
                 artist_albums.sort_by_key(|a| a.year);
 
-                artists.push(Artist {
-                    name: artist_name.clone(),
-                    albums: artist_albums,
-                });
+                artists.push(Artist::new(artist_name.clone(), artist_albums));
             }
 
             artists.sort_by(|a, b| a.name.cmp(&b.name));

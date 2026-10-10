@@ -564,9 +564,13 @@ impl AppModel {
                     scanning: self.library_scanning,
                     // A configured folder that doesn't exist (e.g. the
                     // default XDG Music dir on a fresh system) isn't "done".
-                    has_music_dirs: self.config.music_dirs.iter().any(|d| d.is_dir()),
+                    has_music_dirs: self.music_dirs_present,
                     has_servers: !self.config.mpd_servers.is_empty()
                         || !self.config.subsonic_servers.is_empty(),
+                    decade_scroll: self
+                        .extras
+                        .grid_scroll
+                        .get(crate::views::common::ScrollArea::HomeDecade),
                 },
                 &self.cover_images,
                 &self.artist_photos,
@@ -581,10 +585,7 @@ impl AppModel {
                             &self.cover_images,
                             &self.playlists,
                             self.current_track.as_ref().map(|t| t.id),
-                            self.detail_hero(&crate::library::CoverArt::album_key(
-                                &album.artist,
-                                &album.name,
-                            )),
+                            self.detail_hero(&album.cover_key),
                         )
                         .map(Message::from)
                     } else {
@@ -604,7 +605,14 @@ impl AppModel {
                         albums_data,
                         &self.cover_images,
                         self.config.albums_view_mode,
-                        &self.extras.album_filter,
+                        crate::views::album_filters::FilterCtx {
+                            filter: &self.extras.album_filter,
+                            cache: &self.extras.album_cache,
+                            // The slice shown changes with the library
+                            // (`library_gen`) and with the search state.
+                            epoch: (self.library_gen << 1) | u64::from(search_query_active),
+                        },
+                        &self.extras.grid_scroll,
                     )
                     .map(move |msg| {
                         Message::from(match msg {
@@ -631,12 +639,10 @@ impl AppModel {
                             self.artist_bio_expanded,
                             &self.cover_images,
                             self.current_track.as_ref().map(|t| t.id),
-                            artist.albums.iter().find_map(|a| {
-                                self.detail_hero(&crate::library::CoverArt::album_key(
-                                    &artist.name,
-                                    &a.name,
-                                ))
-                            }),
+                            artist
+                                .albums
+                                .iter()
+                                .find_map(|a| self.detail_hero(&a.cover_key)),
                         )
                         .map(Message::from)
                     } else {
@@ -644,7 +650,7 @@ impl AppModel {
                     }
                 } else {
                     let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
-                        if search_query_active || !self.config.show_compilations_in_artists {
+                        if search_query_active || self.artists_filtered {
                             (
                                 &self.filtered_artists,
                                 Some(self.filtered_artist_map.as_slice()),
@@ -656,6 +662,7 @@ impl AppModel {
                         artists_data,
                         &self.artist_photos,
                         self.config.artists_view_mode,
+                        &self.extras.grid_scroll,
                     )
                     .map(move |msg| {
                         Message::from(match msg {
@@ -762,12 +769,20 @@ impl AppModel {
                             playlists::PlaylistMessage::RenameInputChanged(i, n) => {
                                 Message::RenamePlaylistInput(i, n)
                             }
-                            playlists::PlaylistMessage::PlayNext(tracks) => {
-                                Message::PlayNext(tracks)
-                            }
-                            playlists::PlaylistMessage::AddToQueue(tracks) => {
-                                Message::AddToQueue(tracks)
-                            }
+                            playlists::PlaylistMessage::PlayNext(pi, ti) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Playlist {
+                                    playlist: pi,
+                                    track: ti,
+                                },
+                                next: true,
+                            },
+                            playlists::PlaylistMessage::AddToQueue(pi, ti) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Playlist {
+                                    playlist: pi,
+                                    track: ti,
+                                },
+                                next: false,
+                            },
                             playlists::PlaylistMessage::Export(i) => {
                                 Message::PlaylistIo(super::playlist_io::PlaylistIo::Export(i))
                             }
@@ -821,12 +836,20 @@ impl AppModel {
                             playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
                                 Message::RemovePlaylistTrack(unfilter_index(playlist_map, pi), ti)
                             }
-                            playlists::PlaylistMessage::PlayNext(tracks) => {
-                                Message::PlayNext(tracks)
-                            }
-                            playlists::PlaylistMessage::AddToQueue(tracks) => {
-                                Message::AddToQueue(tracks)
-                            }
+                            playlists::PlaylistMessage::PlayNext(pi, ti) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Playlist {
+                                    playlist: unfilter_index(playlist_map, pi),
+                                    track: ti,
+                                },
+                                next: true,
+                            },
+                            playlists::PlaylistMessage::AddToQueue(pi, ti) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Playlist {
+                                    playlist: unfilter_index(playlist_map, pi),
+                                    track: ti,
+                                },
+                                next: false,
+                            },
                             playlists::PlaylistMessage::Export(i) => {
                                 Message::PlaylistIo(super::playlist_io::PlaylistIo::Export(
                                     unfilter_index(playlist_map, i),
@@ -874,8 +897,17 @@ impl AppModel {
                             genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                             genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                             genres::GenreMessage::Shuffle => Message::ShuffleGenre,
-                            genres::GenreMessage::PlayNext(t) => Message::PlayNext(t),
-                            genres::GenreMessage::AddToQueue(t) => Message::AddToQueue(t),
+                            genres::GenreMessage::PlayNext(t) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Genre { track: t },
+                                next: true,
+                            },
+                            genres::GenreMessage::AddToQueue(t) => Message::QueueFrom {
+                                source: super::queue_source::QueueSource::Genre { track: t },
+                                next: false,
+                            },
+                            genres::GenreMessage::Scrolled(area, y) => {
+                                Message::GridScrolled(area, y)
+                            }
                             genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
                             genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
                         })
@@ -892,19 +924,29 @@ impl AppModel {
                         } else {
                             (&self.all_genres, None)
                         };
-                    genres::genres_view(genres_data, self.config.genres_view_mode).map(move |msg| {
-                        match msg {
-                            genres::GenreMessage::Navigate(route) => Message::Navigate(route),
-                            genres::GenreMessage::SelectGenre(i) => {
-                                Message::SelectGenre(unfilter_index(genre_map, i))
-                            }
-                            genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
-                            genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
-                            genres::GenreMessage::Shuffle => Message::ShuffleGenre,
-                            genres::GenreMessage::PlayNext(t) => Message::PlayNext(t),
-                            genres::GenreMessage::AddToQueue(t) => Message::AddToQueue(t),
-                            genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
+                    genres::genres_view(
+                        genres_data,
+                        self.config.genres_view_mode,
+                        &self.extras.grid_scroll,
+                    )
+                    .map(move |msg| match msg {
+                        genres::GenreMessage::Navigate(route) => Message::Navigate(route),
+                        genres::GenreMessage::SelectGenre(i) => {
+                            Message::SelectGenre(unfilter_index(genre_map, i))
                         }
+                        genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                        genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                        genres::GenreMessage::Shuffle => Message::ShuffleGenre,
+                        genres::GenreMessage::PlayNext(t) => Message::QueueFrom {
+                            source: super::queue_source::QueueSource::Genre { track: t },
+                            next: true,
+                        },
+                        genres::GenreMessage::AddToQueue(t) => Message::QueueFrom {
+                            source: super::queue_source::QueueSource::Genre { track: t },
+                            next: false,
+                        },
+                        genres::GenreMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
+                        genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
                     })
                 }
             }

@@ -41,6 +41,27 @@ const SCHEMA_BASE: &str = "
     );
 ";
 
+/// Database files whose schema/migrations already ran in this process.
+fn ready_paths() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static READY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    READY.get_or_init(Default::default)
+}
+
+fn schema_is_ready(path: &Path) -> bool {
+    ready_paths()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(path)
+}
+
+fn mark_schema_ready(path: &Path) {
+    ready_paths()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_path_buf());
+}
+
 /// The music library database.
 pub struct LibraryDb {
     pub(super) conn: Connection,
@@ -48,14 +69,25 @@ pub struct LibraryDb {
 
 impl LibraryDb {
     /// Open or create the database at the given path.
+    ///
+    /// The schema script and migrations run only the first time a given
+    /// database file is opened in this process; later opens (every Home
+    /// load, smart-playlist switch, `record_play`, ...) just open the
+    /// connection and apply the per-connection PRAGMAs. If the file has
+    /// disappeared in the meantime it is initialised again.
     pub fn open(db_path: &Path) -> Result<Self, String> {
+        let already_initialised = db_path.exists() && schema_is_ready(db_path);
         let conn = Connection::open(db_path).map_err(|e| format!("DB open error: {e}"))?;
         Self::configure_connection(&conn)?;
+        if already_initialised {
+            return Ok(Self { conn });
+        }
         conn.execute_batch(SCHEMA_BASE)
             .map_err(|e| format!("DB init error: {e}"))?;
 
         let db = Self { conn };
         db.run_migration()?;
+        mark_schema_ready(db_path);
         Ok(db)
     }
 
@@ -529,14 +561,21 @@ impl LibraryDb {
             } else {
                 let idx = albums.len();
                 index.insert(key, idx);
-                albums.push(Album {
-                    name: track.album.clone(),
-                    artist: track.album_artist.clone(),
-                    year: track.year,
-                    cover_source: None,
-                    tracks: vec![track],
-                });
+                let mut album = Album::new(
+                    track.album.clone(),
+                    track.album_artist.clone(),
+                    track.year,
+                    Vec::new(),
+                    None,
+                );
+                album.tracks.push(track);
+                albums.push(album);
             }
+        }
+        // Tracks were appended after construction: compute the cached
+        // quality / duration / cover key once per album, not per frame.
+        for album in &mut albums {
+            album.refresh_derived();
         }
 
         albums.sort_unstable_by(|a, b| a.artist.cmp(&b.artist).then(a.year.cmp(&b.year)));
@@ -559,15 +598,12 @@ impl LibraryDb {
 
         for album in albums {
             if let Some(&idx) = index.get(&album.artist) {
-                artists[idx].albums.push(album);
+                artists[idx].push_album(album);
             } else {
                 let idx = artists.len();
                 let name = album.artist.clone();
                 index.insert(name.clone(), idx);
-                artists.push(Artist {
-                    name,
-                    albums: vec![album],
-                });
+                artists.push(Artist::new(name, vec![album]));
             }
         }
 
@@ -1454,5 +1490,43 @@ mod tests {
         let results = db.search_tracks("track_1", None).unwrap();
         assert_eq!(results.len(), 1, "unexpected matches: {results:?}");
         assert_eq!(results[0].title, "track_1");
+    }
+
+    #[test]
+    fn open_runs_schema_once_per_path_and_reinitialises_missing_files() {
+        let root = temp_root("open-once");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("lib.db");
+        assert!(!schema_is_ready(&path));
+
+        let db = LibraryDb::open(&path).unwrap();
+        assert!(schema_is_ready(&path));
+        // Drop a table: a second open must NOT re-run the schema script.
+        db.conn.execute_batch("DROP TABLE cover_cache;").unwrap();
+        drop(db);
+        let db = LibraryDb::open(&path).unwrap();
+        let has_cover_cache: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'cover_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_cover_cache, 0, "schema must be skipped on reopen");
+        drop(db);
+
+        // File removed: the next open initialises it from scratch.
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+        let db = LibraryDb::open(&path).unwrap();
+        let tracks: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tracks, 0);
+        drop(db);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -58,6 +58,8 @@ pub enum HomeMessage {
     DiscoverPodcasts,
     /// Open a web page (a "discover" card).
     OpenUrl(String),
+    /// The virtualized decade grid scrolled (area, absolute y offset).
+    Scrolled(common::ScrollArea, f32),
 
     // -- Async results (never emitted by the view) --
     /// Shelves loaded; `request` ties the result to the latest load. With
@@ -125,6 +127,8 @@ pub struct HomeContext {
     pub has_music_dirs: bool,
     /// Whether any MPD/Subsonic server is configured (marks step 2 done).
     pub has_servers: bool,
+    /// Scroll offset of the decade grid (virtualization).
+    pub decade_scroll: f32,
 }
 
 /// Cover/avatar size inside a shelf card.
@@ -791,7 +795,7 @@ pub fn home_view<'a>(
     photos: &'a HashMap<String, widget::image::Handle>,
 ) -> cosmic::Element<'a, HomeMessage> {
     if let Some(decade) = &state.decade {
-        return decade_view(decade, covers);
+        return decade_view(decade, covers, ctx.decade_scroll);
     }
 
     let spacing = cosmic::theme::active().cosmic().spacing;
@@ -906,6 +910,7 @@ pub fn home_view<'a>(
 fn decade_view<'a>(
     view: &'a DecadeView,
     covers: &'a HashMap<String, widget::icon::Handle>,
+    scroll_offset: f32,
 ) -> cosmic::Element<'a, HomeMessage> {
     let spacing = cosmic::theme::active().cosmic().spacing;
 
@@ -947,10 +952,16 @@ fn decade_view<'a>(
             fl!("no-albums"),
             fl!("home-decade-empty-hint"),
         ),
-        Some(albums) => common::fluid_card_grid(
+        Some(albums) => common::fluid_card_grid_virtual(
             albums.len(),
             CARD_ART + 2.0 * CARD_PADDING,
             220.0 + 2.0 * CARD_PADDING,
+            common::square_card_height(CARD_LABEL_HEIGHT),
+            common::Scroll {
+                area: common::ScrollArea::HomeDecade,
+                offset: scroll_offset,
+                on_scroll: HomeMessage::Scrolled,
+            },
             move |index, outer| album_card(&albums[index], outer, covers),
         ),
     };

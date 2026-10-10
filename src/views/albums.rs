@@ -5,7 +5,7 @@
 
 use crate::config::ViewMode;
 use crate::fl;
-use crate::library::{Album, CoverArt, Playlist, Track};
+use crate::library::{Album, Playlist};
 use crate::views::common;
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
@@ -35,12 +35,14 @@ pub enum AlbumMessage {
     AddToPlaylist(String, String),
     /// Toggle between grid and list layout.
     ToggleViewMode,
-    /// Insert these tracks right after the currently playing one. Carries
-    /// the already-resolved tracks (whole album, or a single row) so
-    /// `view.rs` needs no extra index lookup.
-    PlayNext(Vec<Track>),
-    /// Append these tracks to the end of the queue.
-    AddToQueue(Vec<Track>),
+    /// Insert tracks right after the currently playing one: track `.1` of
+    /// album `.0`, or the whole album when `None`. Carries indices only;
+    /// `update` resolves them, so `view()` never clones track lists.
+    PlayNext(usize, Option<usize>),
+    /// Append tracks (see `PlayNext`) to the end of the queue.
+    AddToQueue(usize, Option<usize>),
+    /// A virtualized grid/list scrolled (area, absolute y offset).
+    Scrolled(common::ScrollArea, f32),
     /// Jump to another view (artist page, genre…).
     Navigate(crate::views::Route),
     /// A filter chip (kind / decade) was clicked.
@@ -77,11 +79,16 @@ fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> 
 }
 
 /// Render the albums view: card grid or list, depending on `mode`.
+///
+/// Both layouts are virtualized (see [`common::fluid_card_grid`] /
+/// [`common::virtual_list`]): only the rows on screen are built, using the
+/// scroll offsets kept in `scroll`.
 pub fn albums_view<'a>(
     albums: &'a [Album],
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
     mode: ViewMode,
-    filter: &crate::views::album_filters::AlbumFilter,
+    filter: crate::views::album_filters::FilterCtx<'a>,
+    scroll: &common::ScrollOffsets,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
         return common::empty_state(
@@ -92,10 +99,12 @@ pub fn albums_view<'a>(
     }
 
     let header = common::view_mode_toggle_header(mode, AlbumMessage::ToggleViewMode);
-    let chips = crate::views::album_filters::filter_bar(filter, albums).map(AlbumMessage::Filter);
-    // Positions in `albums` that pass the chip filters; messages keep
-    // carrying positions in `albums`, so callers' index maps still apply.
-    let visible = filter.visible_indices(albums);
+    // Positions in `albums` that pass the chip filters (and the decades
+    // present), memoized across frames; messages keep carrying positions
+    // in `albums`, so callers' index maps still apply.
+    let (visible, decades) = filter.cache.get(filter.epoch, filter.filter, albums);
+    let chips =
+        crate::views::album_filters::filter_bar(filter.filter, &decades).map(AlbumMessage::Filter);
 
     let content: cosmic::Element<'a, AlbumMessage> = match mode {
         _ if visible.is_empty() => common::empty_state(
@@ -103,17 +112,22 @@ pub fn albums_view<'a>(
             fl!("no-albums-match-filter"),
             fl!("no-albums-match-filter-hint"),
         ),
-        ViewMode::Grid => common::fluid_card_grid(
+        ViewMode::Grid => common::fluid_card_grid_virtual(
             visible.len(),
             CARD_WIDTH + 2.0 * CARD_PADDING,
             CARD_MAX_WIDTH + 2.0 * CARD_PADDING,
+            common::square_card_height(CARD_LABEL_HEIGHT),
+            common::Scroll {
+                area: common::ScrollArea::AlbumsGrid,
+                offset: scroll.get(common::ScrollArea::AlbumsGrid),
+                on_scroll: AlbumMessage::Scrolled,
+            },
             move |index, outer| {
                 let album_index = visible[index];
                 let album = &albums[album_index];
                 let art_size = outer - 2.0 * CARD_PADDING;
-                let key = CoverArt::album_key(&album.artist, &album.name);
                 let art_widget = common::grid_art_tile(
-                    cover_images.get(&key),
+                    cover_images.get(&album.cover_key),
                     art_size as u16,
                     "media-optical-symbolic",
                 );
@@ -151,9 +165,7 @@ pub fn albums_view<'a>(
                         } else {
                             secondary_caption(artist_display).into()
                         }))
-                        .push(common::quality_badge(
-                            crate::library::quality::album_quality(&album.tracks),
-                        ))
+                        .push(common::quality_badge(album.quality))
                         .spacing(4)
                         .align_y(Alignment::Center)
                         .into(),
@@ -182,119 +194,19 @@ pub fn albums_view<'a>(
                 .into()
             },
         ),
-        ViewMode::List => {
-            let mut list = widget::Column::new().spacing(2);
-
-            for &index in &visible {
-                let album = &albums[index];
-                let key = CoverArt::album_key(&album.artist, &album.name);
-                let art_widget: cosmic::Element<'_, AlbumMessage> =
-                    common::list_art_icon(cover_images.get(&key), 52, "media-optical-symbolic");
-
-                let has_distinct_artist = !album.artist.trim().is_empty()
-                    && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
-
-                let title: cosmic::Element<'_, AlbumMessage> = if album.name.trim().is_empty() {
-                    secondary_caption(fl!("unknown-album")).into()
-                } else {
-                    common::cell_text(album.name.as_str())
-                        .font(cosmic::font::semibold())
-                        .into()
-                };
-                let subtitle: cosmic::Element<'_, AlbumMessage> = if has_distinct_artist {
-                    common::link(
-                        secondary_caption(album.artist.as_str()),
-                        true,
-                        AlbumMessage::Navigate(crate::views::Route::Artist(album.artist.clone())),
-                    )
-                } else {
-                    secondary_caption("\u{a0}").into()
-                };
-                let info = widget::Column::new()
-                    .push(common::clipped_cell(title))
-                    .push(common::clipped_cell(subtitle))
-                    .spacing(2);
-
-                let year: cosmic::Element<'_, AlbumMessage> = if album.year > 0 {
-                    secondary_caption(album.year.to_string()).into()
-                } else {
-                    widget::Space::new().into()
-                };
-                let track_count = album.track_count();
-                let tracks_label = format!(
-                    "{track_count} track{}",
-                    if track_count == 1 { "" } else { "s" }
-                );
-
-                let play_button = widget::tooltip(
-                    widget::button::icon(
-                        widget::icon::from_name("media-playback-start-symbolic").size(16),
-                    )
-                    .on_press(AlbumMessage::PlayAlbum(index)),
-                    widget::text::caption(fl!("play-album")),
-                    widget::tooltip::Position::Top,
-                );
-
-                let row = widget::button::custom(
-                    widget::Row::new()
-                        .push(art_widget)
-                        .push(
-                            widget::container(common::clipped_cell(info.into()))
-                                .width(Length::FillPortion(5)),
-                        )
-                        .push(
-                            widget::container(common::quality_badge(
-                                crate::library::quality::album_quality(&album.tracks),
-                            ))
-                            .width(LIST_BADGE_WIDTH)
-                            .align_x(Horizontal::Center),
-                        )
-                        .push(
-                            widget::container(year)
-                                .width(LIST_YEAR_WIDTH)
-                                .align_x(Horizontal::Right),
-                        )
-                        .push(
-                            widget::container(secondary_caption(tracks_label))
-                                .width(LIST_TRACKS_WIDTH)
-                                .align_x(Horizontal::Right),
-                        )
-                        .push(
-                            widget::container(secondary_caption(common::format_duration_coarse(
-                                album.total_duration().as_secs(),
-                            )))
-                            .width(LIST_DURATION_WIDTH)
-                            .align_x(Horizontal::Right),
-                        )
-                        .push(play_button)
-                        .spacing(16)
-                        .height(Length::Fill)
-                        .align_y(Alignment::Center)
-                        .padding([0, 12]),
-                )
-                .on_press(AlbumMessage::SelectAlbum(index))
-                .width(Length::Fill)
-                .height(Length::Fixed(LIST_ROW_HEIGHT))
-                .padding(0)
-                .class(list_row_button_class(false));
-
-                list = list.push(row);
-            }
-
-            let spacing = cosmic::theme::active().cosmic().spacing;
-            widget::scrollable(
-                widget::container(list)
-                    .padding([
-                        spacing.space_s,
-                        spacing.space_m + 16,
-                        spacing.space_m,
-                        spacing.space_m,
-                    ])
-                    .width(Length::Fill),
-            )
-            .height(Length::Fill)
-            .into()
-        }
+        ViewMode::List => common::virtual_list(
+            visible.len(),
+            LIST_ROW_HEIGHT,
+            common::Scroll {
+                area: common::ScrollArea::AlbumsList,
+                offset: scroll.get(common::ScrollArea::AlbumsList),
+                on_scroll: AlbumMessage::Scrolled,
+            },
+            move |position| {
+                let index = visible[position];
+                list_row(index, &albums[index], cover_images)
+            },
+        ),
     };
 
     widget::Column::new()
@@ -302,6 +214,103 @@ pub fn albums_view<'a>(
         .push(chips)
         .push(content)
         .into()
+}
+
+/// One fixed-height row of the albums list (`index` is the album's
+/// position in the slice handed to [`albums_view`]).
+fn list_row<'a>(
+    index: usize,
+    album: &'a Album,
+    cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
+) -> cosmic::Element<'a, AlbumMessage> {
+    let art_widget: cosmic::Element<'_, AlbumMessage> = common::list_art_icon(
+        cover_images.get(&album.cover_key),
+        52,
+        "media-optical-symbolic",
+    );
+
+    let has_distinct_artist = !album.artist.trim().is_empty()
+        && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+
+    let title: cosmic::Element<'_, AlbumMessage> = if album.name.trim().is_empty() {
+        secondary_caption(fl!("unknown-album")).into()
+    } else {
+        common::cell_text(album.name.as_str())
+            .font(cosmic::font::semibold())
+            .into()
+    };
+    let subtitle: cosmic::Element<'_, AlbumMessage> = if has_distinct_artist {
+        common::link(
+            secondary_caption(album.artist.as_str()),
+            true,
+            AlbumMessage::Navigate(crate::views::Route::Artist(album.artist.clone())),
+        )
+    } else {
+        secondary_caption("\u{a0}").into()
+    };
+    let info = widget::Column::new()
+        .push(common::clipped_cell(title))
+        .push(common::clipped_cell(subtitle))
+        .spacing(2);
+
+    let year: cosmic::Element<'_, AlbumMessage> = if album.year > 0 {
+        secondary_caption(album.year.to_string()).into()
+    } else {
+        widget::Space::new().into()
+    };
+    let track_count = album.track_count();
+    let tracks_label = format!(
+        "{track_count} track{}",
+        if track_count == 1 { "" } else { "s" }
+    );
+
+    let play_button = widget::tooltip(
+        widget::button::icon(widget::icon::from_name("media-playback-start-symbolic").size(16))
+            .on_press(AlbumMessage::PlayAlbum(index)),
+        widget::text::caption(fl!("play-album")),
+        widget::tooltip::Position::Top,
+    );
+
+    widget::button::custom(
+        widget::Row::new()
+            .push(art_widget)
+            .push(
+                widget::container(common::clipped_cell(info.into())).width(Length::FillPortion(5)),
+            )
+            .push(
+                widget::container(common::quality_badge(album.quality))
+                    .width(LIST_BADGE_WIDTH)
+                    .align_x(Horizontal::Center),
+            )
+            .push(
+                widget::container(year)
+                    .width(LIST_YEAR_WIDTH)
+                    .align_x(Horizontal::Right),
+            )
+            .push(
+                widget::container(secondary_caption(tracks_label))
+                    .width(LIST_TRACKS_WIDTH)
+                    .align_x(Horizontal::Right),
+            )
+            .push(
+                widget::container(secondary_caption(common::format_duration_coarse(
+                    album.total_secs,
+                )))
+                .width(LIST_DURATION_WIDTH)
+                .align_x(Horizontal::Right),
+            )
+            .push(play_button)
+            .spacing(16)
+            .height(Length::Fill)
+            .align_y(Alignment::Center)
+            .padding([0, 12]),
+    )
+    .on_press(AlbumMessage::SelectAlbum(index))
+    .width(Length::Fill)
+    .height(Length::Fixed(LIST_ROW_HEIGHT))
+    .padding(0)
+    .class(list_row_button_class(false))
+    .into()
 }
 
 /// List-mode row geometry: fixed height (uniform rhythm) and right-hand
@@ -323,16 +332,15 @@ pub fn album_detail_view<'a>(
         Option<&'a crate::library::palette::Accent>,
     )>,
 ) -> cosmic::Element<'a, AlbumMessage> {
-    let key = CoverArt::album_key(&album.artist, &album.name);
-    let art_widget: cosmic::Element<'_, AlbumMessage> = if let Some(handle) = cover_images.get(&key)
-    {
-        let radius = cosmic::theme::active().cosmic().corner_radii.radius_m[0];
-        common::cover_art(handle, 160.0, radius, true)
-    } else {
-        widget::icon::from_name("media-optical-symbolic")
-            .size(120)
-            .into()
-    };
+    let art_widget: cosmic::Element<'_, AlbumMessage> =
+        if let Some(handle) = cover_images.get(&album.cover_key) {
+            let radius = cosmic::theme::active().cosmic().corner_radii.radius_m[0];
+            common::cover_art(handle, 160.0, radius, true)
+        } else {
+            widget::icon::from_name("media-optical-symbolic")
+                .size(120)
+                .into()
+        };
 
     // Task 103: Collect distinct genres from album tracks for header chips
     let genres: Vec<String> = {
@@ -355,7 +363,7 @@ pub fn album_detail_view<'a>(
         "{track_count} track{}",
         if track_count == 1 { "" } else { "s" }
     );
-    let duration_label = common::format_duration_coarse(album.total_duration().as_secs());
+    let duration_label = common::format_duration_coarse(album.total_secs);
     let spacing = cosmic::theme::active().cosmic().spacing;
 
     let title_line = widget::container(common::clipped_cell(
@@ -391,11 +399,11 @@ pub fn album_detail_view<'a>(
             widget::Row::new()
                 .push(
                     widget::button::standard(fl!("queue-play-next"))
-                        .on_press(AlbumMessage::PlayNext(album.tracks.clone())),
+                        .on_press(AlbumMessage::PlayNext(album_index, None)),
                 )
                 .push(
                     widget::button::standard(fl!("queue-add"))
-                        .on_press(AlbumMessage::AddToQueue(album.tracks.clone())),
+                        .on_press(AlbumMessage::AddToQueue(album_index, None)),
                 )
                 .spacing(8),
         )
@@ -466,8 +474,8 @@ pub fn album_detail_view<'a>(
                 .with_favorite(AlbumMessage::ToggleFavorite(track_id))
                 .with_rating(move |r| AlbumMessage::SetRating(rating_track_id.clone(), r))
                 .with_queue_actions(
-                    AlbumMessage::PlayNext(vec![track.clone()]),
-                    AlbumMessage::AddToQueue(vec![track.clone()]),
+                    AlbumMessage::PlayNext(album_index, Some(track_idx)),
+                    AlbumMessage::AddToQueue(album_index, Some(track_idx)),
                 )
                 .with_add_to_playlist(playlists, AlbumMessage::AddToPlaylist)
                 .with_artist_subtitle(artist_differs && !columns.artist)

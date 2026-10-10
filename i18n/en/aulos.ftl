@@ -658,6 +658,7 @@ toast-playlist-exported =
 toast-playlist-exported-partial = Exported { $count } tracks to { $file } ({ $skipped } non-local tracks skipped)
 toast-playlist-export-failed = Could not export the playlist: { $reason }
 toast-playlist-import-failed = Could not import the playlist: { $reason }
+toast-provider-action-failed = The server could not complete the request: { $reason }
 toast-playlist-imported =
     { $count ->
         [one] Imported “{ $name }” with 1 track

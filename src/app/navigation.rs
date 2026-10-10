@@ -31,11 +31,30 @@ impl AppModel {
                     .iter()
                     .map(|a| crate::library::CoverArt::album_key(&artist.name, &a.name))
                     .collect();
-                keys.into_iter()
-                    .find(|k| self.cover_art_bytes.get(k).is_some())
+                // `cover_images` holds a handle exactly for the albums that
+                // have art, so it identifies the first one with a cover
+                // without loading any full-size bytes.
+                keys.into_iter().find(|k| self.cover_images.contains_key(k))
             }
             _ => None,
         }
+    }
+
+    /// Lightweight album for the detail page's cover `key` (the selected
+    /// album, or the artist's album whose key matches).
+    fn detail_cover_hint(&self, key: &str) -> Option<crate::library::Album> {
+        match self.nav.active_data::<Page>()? {
+            Page::Albums => self.all_albums.get(self.selected_album?),
+            Page::Artists => {
+                let artist = self.all_artists.get(self.selected_artist?)?;
+                artist
+                    .albums
+                    .iter()
+                    .find(|a| crate::library::CoverArt::album_key(&artist.name, &a.name) == key)
+            }
+            _ => None,
+        }
+        .map(crate::library::Album::cover_hint)
     }
 
     /// Kick off (once per album) the blur + accent extraction for the
@@ -50,8 +69,14 @@ impl AppModel {
         {
             return Task::none();
         }
-        let Some(bytes) = self.cover_art_bytes.get(&key).cloned() else {
-            return Task::none();
+        let Some(bytes) = self.cover_art_bytes.get(&key) else {
+            // Not cached: load the full-size bytes lazily. `CoverBytesLoaded`
+            // re-runs this (it is evaluated after every update).
+            if !self.cover_art_bytes.should_load(&key) {
+                return Task::none();
+            }
+            let hint = self.detail_cover_hint(&key);
+            return self.request_cover_bytes(key, |_| hint);
         };
         self.detail_art_pending = Some(key.clone());
         cosmic::task::future(async move {
@@ -97,6 +122,48 @@ impl AppModel {
             .as_ref()
             .filter(|d| d.key == key)
             .map(|d| (d.blurred.as_ref(), d.accent.as_ref()))
+    }
+}
+
+impl AppModel {
+    /// What is on screen, for detecting that a page/detail/layout change
+    /// remounted the scrollables (see [`Self::restore_scroll_positions`]).
+    pub(super) fn view_signature(&self) -> (Location, [crate::config::ViewMode; 3], bool) {
+        (
+            self.current_location(),
+            [
+                self.config.albums_view_mode,
+                self.config.artists_view_mode,
+                self.config.genres_view_mode,
+            ],
+            self.home.decade.is_some(),
+        )
+    }
+
+    /// Scroll every virtualized list back to its remembered offset.
+    ///
+    /// The virtual grids/lists build only the rows around the stored
+    /// offset, but a freshly mounted scrollable starts at the top: without
+    /// this, returning to a page you had scrolled would show blank space
+    /// until the next scroll event. Targets that aren't on screen are
+    /// simply not found, so it's safe to send all of them.
+    pub(super) fn restore_scroll_positions(&self) -> Task<cosmic::Action<Message>> {
+        use cosmic::iced::widget::scrollable::{AbsoluteOffset, scroll_to};
+        let to = |y: f32| AbsoluteOffset {
+            x: None,
+            y: Some(y),
+        };
+        let mut tasks: Vec<Task<cosmic::Action<Message>>> = self
+            .extras
+            .grid_scroll
+            .iter()
+            .map(|(area, y)| scroll_to(area.id(), to(y)))
+            .collect();
+        tasks.push(scroll_to(
+            crate::views::common::songs_scroll_id(),
+            to(self.songs_scroll_offset),
+        ));
+        Task::batch(tasks)
     }
 }
 

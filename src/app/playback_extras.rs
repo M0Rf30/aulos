@@ -389,13 +389,31 @@ impl AppModel {
             &track.album_artist
         };
         let cover_key = CoverArt::album_key(artist, &track.album);
-        let cover_bytes = self.cover_art_bytes.get(&cover_key).cloned();
+        let cover_bytes = self.cover_art_bytes.get(&cover_key);
+        // Not cached: load the bytes inside the blocking job below instead of
+        // keeping every album's cover in memory.
+        let lazy_cover = if cover_bytes.is_none() {
+            self.registry
+                .active_shared()
+                .zip(self.cover_hint_for(artist, &track.album))
+        } else {
+            None
+        };
         let replaces_id = self.playback_extras.notification_id;
 
         cosmic::task::future(async move {
             let for_cover = track.clone();
             let image = tokio::task::spawn_blocking(move || {
-                notify::prepare_cover(&for_cover, cover_bytes.as_deref())
+                let loaded;
+                let bytes: Option<&[u8]> = match (&cover_bytes, &lazy_cover) {
+                    (Some(b), _) => Some(b.as_slice()),
+                    (None, Some((provider, hint))) => {
+                        loaded = provider.get_cover_art(hint).ok().flatten();
+                        loaded.as_deref()
+                    }
+                    (None, None) => None,
+                };
+                notify::prepare_cover(&for_cover, bytes)
             })
             .await
             .ok()
@@ -429,6 +447,7 @@ impl AppModel {
         {
             return cosmic::iced::window::minimize(id, true);
         }
+        self.flush_config();
         cosmic::iced::exit()
     }
 

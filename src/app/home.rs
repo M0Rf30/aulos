@@ -20,6 +20,56 @@ use cosmic::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How long loaded Home shelves are reused before a Home visit reloads them
+/// anyway (the "this month" windows are relative to the wall clock).
+const HOME_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// What the currently loaded `HomeData` was computed for. A Home visit only
+/// reloads when this no longer matches (a play was recorded, the provider or
+/// the suggestions toggle changed) or the data aged out; library changes and
+/// explicit refreshes always reload via `load_home` directly.
+#[derive(Debug, Default)]
+pub(super) struct HomeCache {
+    /// Bumped whenever a play is written to the history.
+    play_gen: u64,
+    loaded: Option<HomeCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomeCacheKey {
+    provider: String,
+    suggestions: bool,
+    play_gen: u64,
+    loaded_at: std::time::Instant,
+}
+
+impl HomeCache {
+    /// A play was recorded: loaded shelves are out of date.
+    fn invalidate(&mut self) {
+        self.play_gen += 1;
+    }
+
+    /// Record that shelves for `provider` were just loaded.
+    fn mark_loaded(&mut self, provider: &str, suggestions: bool, now: std::time::Instant) {
+        self.loaded = Some(HomeCacheKey {
+            provider: provider.to_string(),
+            suggestions,
+            play_gen: self.play_gen,
+            loaded_at: now,
+        });
+    }
+
+    /// Whether the loaded shelves can be shown again as they are.
+    fn is_fresh(&self, provider: &str, suggestions: bool, now: std::time::Instant) -> bool {
+        self.loaded.as_ref().is_some_and(|k| {
+            k.provider == provider
+                && k.suggestions == suggestions
+                && k.play_gen == self.play_gen
+                && now.saturating_duration_since(k.loaded_at) < HOME_CACHE_TTL
+        })
+    }
+}
+
 impl AppModel {
     /// Whether the active provider's library lives in the library database
     /// (and therefore has play history).
@@ -110,6 +160,11 @@ impl AppModel {
                         }
                     }
                     self.home.data = Some(data);
+                    self.home_cache.mark_loaded(
+                        self.registry.active_id(),
+                        self.suggestions_enabled(),
+                        std::time::Instant::now(),
+                    );
                     return self.load_similar();
                 }
             }
@@ -152,7 +207,8 @@ impl AppModel {
                     self.home.similar_request = request;
                 }
             }
-            HomeMessage::PlayRecorded => {}
+            HomeMessage::PlayRecorded => self.home_cache.invalidate(),
+            HomeMessage::Scrolled(area, offset) => self.extras.grid_scroll.set(area, offset),
         }
         Task::none()
     }
@@ -226,6 +282,20 @@ impl AppModel {
     /// random picks stable.
     pub(super) fn enter_home(&mut self) -> Task<cosmic::Action<Message>> {
         self.home.decade = None;
+        // Database-backed shelves are reused while nothing they depend on
+        // changed (no play recorded, same provider, within the TTL): the
+        // library-load and import paths call `load_home` directly, so those
+        // still refresh.
+        if self.home_uses_database()
+            && self.home.data.is_some()
+            && self.home_cache.is_fresh(
+                self.registry.active_id(),
+                self.suggestions_enabled(),
+                std::time::Instant::now(),
+            )
+        {
+            return Task::none();
+        }
         self.load_home(true)
     }
 
@@ -542,13 +612,13 @@ mod tests {
     }
 
     fn album(name: &str, artist: &str, year: u32, tracks: u32) -> Album {
-        Album {
-            name: name.into(),
-            artist: artist.into(),
+        Album::new(
+            name.into(),
+            artist.into(),
             year,
-            tracks: (1..=tracks).map(|n| track(name, artist, n)).collect(),
-            cover_source: None,
-        }
+            (1..=tracks).map(|n| track(name, artist, n)).collect(),
+            None,
+        )
     }
 
     fn library() -> Vec<Album> {
@@ -623,5 +693,27 @@ mod tests {
             ]
         );
         assert!(home.recently_played.is_empty() && home.recently_added.is_empty());
+    }
+
+    #[test]
+    fn home_cache_is_fresh_until_play_provider_toggle_or_ttl() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut cache = HomeCache::default();
+        assert!(!cache.is_fresh("local", true, t0), "nothing loaded yet");
+
+        cache.mark_loaded("local", true, t0);
+        assert!(cache.is_fresh("local", true, t0 + Duration::from_secs(60)));
+        assert!(!cache.is_fresh("mpd", true, t0), "other provider");
+        assert!(!cache.is_fresh("local", false, t0), "suggestions toggled");
+        assert!(
+            !cache.is_fresh("local", true, t0 + HOME_CACHE_TTL + Duration::from_secs(1)),
+            "aged out"
+        );
+
+        cache.invalidate();
+        assert!(!cache.is_fresh("local", true, t0), "play recorded");
+        cache.mark_loaded("local", true, t0);
+        assert!(cache.is_fresh("local", true, t0));
     }
 }

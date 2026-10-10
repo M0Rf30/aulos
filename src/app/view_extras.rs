@@ -51,6 +51,11 @@ pub struct ViewExtras {
     restore: Option<Restore>,
     /// Chip selection on the Albums page.
     pub album_filter: AlbumFilter,
+    /// Memoized visible-album positions / decades for the Albums page
+    /// (recomputed only when albums or the chip selection change).
+    pub album_cache: crate::views::album_filters::AlbumFilterCache,
+    /// Scroll offsets of the virtualized album/artist/genre grids and lists.
+    pub grid_scroll: crate::views::common::ScrollOffsets,
 }
 
 impl AppModel {

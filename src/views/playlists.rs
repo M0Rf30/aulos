@@ -5,7 +5,7 @@
 //! and a detail view showing tracks in a selected playlist.
 
 use crate::fl;
-use crate::library::{Playlist, Track};
+use crate::library::Playlist;
 use crate::views::common;
 use crate::views::list_row_button_class;
 use crate::views::track_row;
@@ -37,11 +37,12 @@ pub enum PlaylistMessage {
     NewPlaylistNameChanged(String),
     /// The rename input changed (playlist index, new text).
     RenameInputChanged(usize, String),
-    /// Insert every track in this playlist right after the currently
-    /// playing one.
-    PlayNext(Vec<Track>),
-    /// Append every track in this playlist to the end of the queue.
-    AddToQueue(Vec<Track>),
+    /// Insert tracks right after the currently playing one: track `.1` of
+    /// playlist `.0`, or every track when `None`. Indices only; `update`
+    /// resolves them, so `view()` never clones track lists.
+    PlayNext(usize, Option<usize>),
+    /// Append tracks (see `PlayNext`) to the end of the queue.
+    AddToQueue(usize, Option<usize>),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
     /// Export the playlist at this index as an M3U file.
@@ -283,11 +284,11 @@ pub fn playlist_detail_view<'a>(
                     widget::Row::new()
                         .push(
                             widget::button::standard(fl!("queue-play-next"))
-                                .on_press(PlaylistMessage::PlayNext(playlist.tracks.clone())),
+                                .on_press(PlaylistMessage::PlayNext(playlist_index, None)),
                         )
                         .push(
                             widget::button::standard(fl!("queue-add"))
-                                .on_press(PlaylistMessage::AddToQueue(playlist.tracks.clone())),
+                                .on_press(PlaylistMessage::AddToQueue(playlist_index, None)),
                         )
                         .spacing(8),
                 )
@@ -336,8 +337,8 @@ pub fn playlist_detail_view<'a>(
                         )
                         .with_navigate(PlaylistMessage::Navigate)
                         .with_queue_actions(
-                            PlaylistMessage::PlayNext(vec![track.clone()]),
-                            PlaylistMessage::AddToQueue(vec![track.clone()]),
+                            PlaylistMessage::PlayNext(playlist_index, Some(track_idx)),
+                            PlaylistMessage::AddToQueue(playlist_index, Some(track_idx)),
                         )
                         .with_trailing_action(
                             "list-remove-symbolic",

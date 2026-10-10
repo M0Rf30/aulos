@@ -3,6 +3,7 @@
 
 use super::tasks::resolve_mpris_art_task;
 use super::{AppModel, HTTP_CLIENT, Message, reload_result_is_stale};
+use crate::config::Config;
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Track};
 use crate::player::mpd_backend::MpdBackend;
@@ -12,7 +13,6 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::views::{providers, songs};
-use cosmic::cosmic_config::CosmicConfigEntry;
 use cosmic::prelude::*;
 use cosmic::widget;
 use futures_util::SinkExt;
@@ -25,7 +25,7 @@ use std::time::Duration;
 /// while the previously loaded library stays fully visible on screen, so
 /// switching pages, opening a menu, etc. never sees an empty view mid
 /// reload. `Message::LibraryLoadComplete` swaps this into
-/// `all_tracks`/`all_albums`/`cover_images`/`cover_art_bytes` atomically
+/// `all_tracks`/`all_albums`/`cover_images`/`cover_fingerprints` atomically
 /// once the whole reload finishes -- see `AppModel::reload_library` and
 /// the `Message::LibraryBatch`/`LibraryLoadComplete` handlers.
 pub(super) struct LibraryReloadStaging {
@@ -33,7 +33,7 @@ pub(super) struct LibraryReloadStaging {
     pub(super) tracks: Vec<Track>,
     pub(super) albums: Vec<Album>,
     pub(super) cover_images: HashMap<String, widget::icon::Handle>,
-    pub(super) cover_art_bytes: HashMap<String, Vec<u8>>,
+    pub(super) cover_fingerprints: HashMap<String, u64>,
 }
 
 /// Build a `widget::icon::Handle` for a cover-art byte blob, preferring a
@@ -51,6 +51,17 @@ fn cover_thumbnail_handle(bytes: &[u8]) -> widget::icon::Handle {
         Some((w, h, pixels)) => widget::icon::from_raster_pixels(w, h, pixels),
         None => widget::icon::from_raster_bytes(bytes.to_vec()),
     }
+}
+
+/// Cheap content fingerprint of an encoded cover blob. Only compared within
+/// one process run (never persisted), so the std hasher is fine. Lets a
+/// library refresh recognise an unchanged cover and keep its existing handle
+/// without the loader having to ship (and the app keep) the full-size bytes.
+pub(super) fn cover_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Clamp a live-updating playback position display value to a track's
@@ -260,6 +271,8 @@ impl AppModel {
                     self.library_reload_staging = None;
                     self.all_artists.clear();
                     self.cover_images.clear();
+                    self.cover_fingerprints.clear();
+                    self.cover_art_bytes.clear();
                 } else {
                     // A library is already showing: keep it fully visible
                     // and accumulate the refreshed data off to the side.
@@ -271,7 +284,7 @@ impl AppModel {
                         tracks: Vec::new(),
                         albums: Vec::new(),
                         cover_images: HashMap::new(),
-                        cover_art_bytes: HashMap::new(),
+                        cover_fingerprints: HashMap::new(),
                     });
                 }
                 self.reload_library_incremental(provider, provider_type, generation)
@@ -315,25 +328,28 @@ impl AppModel {
                 })
                 .map(|(key, path)| {
                     tokio::task::spawn_blocking(
-                        move || -> Option<(String, widget::icon::Handle, Vec<u8>)> {
+                        move || -> Option<(String, widget::icon::Handle, u64)> {
                             let bytes = crate::library::CoverArt::get_cover_art(&path)?;
                             // Decode + downscale here too -- this is CPU-bound
                             // work and must stay off the async task (which
                             // runs on a tokio worker thread shared with other
                             // futures, not a dedicated blocking thread).
+                            // The full-size bytes are dropped right here;
+                            // they are re-read lazily for whichever album
+                            // actually needs them (blur, hero, notification).
                             let handle = cover_thumbnail_handle(&bytes);
-                            Some((key, handle, bytes))
+                            Some((key, handle, cover_fingerprint(&bytes)))
                         },
                     )
                 })
                 .collect();
 
             let mut cover_images = HashMap::new();
-            let mut cover_art_bytes = HashMap::new();
+            let mut cover_fingerprints = HashMap::new();
             for task in cover_tasks {
-                if let Ok(Some((key, handle, bytes))) = task.await {
+                if let Ok(Some((key, handle, fingerprint))) = task.await {
                     cover_images.insert(key.clone(), handle);
-                    cover_art_bytes.insert(key, bytes);
+                    cover_fingerprints.insert(key, fingerprint);
                 }
             }
 
@@ -344,7 +360,7 @@ impl AppModel {
                 albums,
                 artists,
                 cover_images,
-                cover_art_bytes,
+                cover_fingerprints,
             })
         })
     }
@@ -441,7 +457,7 @@ impl AppModel {
                                         let result = prov2.get_cover_art(&hint).map(|opt| {
                                             opt.map(|bytes| {
                                                 let handle = cover_thumbnail_handle(&bytes);
-                                                (handle, bytes)
+                                                (handle, cover_fingerprint(&bytes))
                                             })
                                         });
                                         (key, result)
@@ -450,11 +466,11 @@ impl AppModel {
                                 .collect();
 
                             let mut cover_images = HashMap::new();
-                            let mut cover_art_bytes = HashMap::new();
+                            let mut cover_fingerprints = HashMap::new();
                             for task in cover_tasks {
-                                if let Ok((key, Ok(Some((handle, bytes))))) = task.await {
+                                if let Ok((key, Ok(Some((handle, fingerprint))))) = task.await {
                                     cover_images.insert(key.clone(), handle);
-                                    cover_art_bytes.insert(key, bytes);
+                                    cover_fingerprints.insert(key, fingerprint);
                                 }
                             }
 
@@ -464,7 +480,7 @@ impl AppModel {
                                     provider_id: active_id.clone(),
                                     albums,
                                     cover_images,
-                                    cover_art_bytes,
+                                    cover_fingerprints,
                                 }))
                                 .await;
                         }
@@ -525,7 +541,7 @@ impl AppModel {
                                         let result = prov2.get_cover_art(&hint).map(|opt| {
                                             opt.map(|bytes| {
                                                 let handle = cover_thumbnail_handle(&bytes);
-                                                (handle, bytes)
+                                                (handle, cover_fingerprint(&bytes))
                                             })
                                         });
                                         (key, result)
@@ -534,11 +550,11 @@ impl AppModel {
                                 .collect();
 
                             let mut cover_images = HashMap::new();
-                            let mut cover_art_bytes = HashMap::new();
+                            let mut cover_fingerprints = HashMap::new();
                             for task in cover_tasks {
-                                if let Ok((key, Ok(Some((handle, bytes))))) = task.await {
+                                if let Ok((key, Ok(Some((handle, fingerprint))))) = task.await {
                                     cover_images.insert(key.clone(), handle);
-                                    cover_art_bytes.insert(key, bytes);
+                                    cover_fingerprints.insert(key, fingerprint);
                                 }
                             }
 
@@ -552,7 +568,7 @@ impl AppModel {
                                     provider_id: active_id.clone(),
                                     albums,
                                     cover_images,
-                                    cover_art_bytes,
+                                    cover_fingerprints,
                                 }))
                                 .await;
 
@@ -581,12 +597,32 @@ impl AppModel {
         cosmic::task::stream(stream)
     }
 
-    /// Persist the current config via cosmic-config.
+    /// Persist the current config. Non-blocking: the write happens on the
+    /// config writer thread, coalesced and limited to changed keys.
     pub(super) fn save_config(&self) {
-        if let Some(ref context) = self.config_context
-            && let Err(e) = self.config.write_entry(context)
-        {
-            tracing::error!("Failed to save config: {e:?}");
+        if let Some(writer) = &self.config_writer {
+            let mut recent = self.recent_saves.borrow_mut();
+            if recent.back() == Some(&self.config) {
+                return; // unchanged since the last save request
+            }
+            if recent.len() == 8 {
+                recent.pop_front();
+            }
+            recent.push_back(self.config.clone());
+            writer.save(&self.config);
+        }
+    }
+
+    /// Whether `config` is one of our own recent saves coming back through
+    /// the config watcher (so it must not overwrite newer in-memory state).
+    pub(super) fn is_own_config_echo(&self, config: &Config) -> bool {
+        self.recent_saves.borrow().iter().any(|c| c == config)
+    }
+
+    /// Wait for queued config writes to reach disk (before exiting).
+    pub(super) fn flush_config(&self) {
+        if let Some(writer) = &self.config_writer {
+            writer.flush();
         }
     }
 
@@ -703,6 +739,7 @@ impl AppModel {
     /// Removes the old Local provider from the registry, creates a new one
     /// with the updated scan directories, and rebuilds the provider list.
     pub(super) fn reinit_local_provider(&mut self) {
+        self.music_dirs_present = self.config.music_dirs.iter().any(|d| d.is_dir());
         self.registry
             .remove_by_type(crate::provider::ProviderType::Local);
 
@@ -838,6 +875,7 @@ impl AppModel {
     /// lazily by `load_artist_info_for_visible` when the Artists page is
     /// opened or an artist is selected.
     pub(super) fn merge_artists_from_batch(&mut self, new_albums: &[Album]) {
+        self.library_gen += 1;
         // Build an index over the current artists list for O(1) lookup.
         let mut index: HashMap<String, usize> = self
             .all_artists
@@ -861,14 +899,12 @@ impl AppModel {
 
             for name in names {
                 if let Some(&idx) = index.get(&name) {
-                    self.all_artists[idx].albums.push(album.clone());
+                    self.all_artists[idx].push_album(album.clone());
                 } else {
                     let idx = self.all_artists.len();
                     index.insert(name.clone(), idx);
-                    self.all_artists.push(Artist {
-                        name: name.clone(),
-                        albums: vec![album.clone()],
-                    });
+                    self.all_artists
+                        .push(Artist::new(name.clone(), vec![album.clone()]));
                 }
             }
         }
@@ -1010,6 +1046,7 @@ impl AppModel {
     }
 
     pub(super) fn sort_tracks(&mut self, field: songs::SortField) {
+        self.library_gen += 1;
         match field {
             songs::SortField::Title => self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title)),
             songs::SortField::Artist => self.all_tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
@@ -1027,6 +1064,8 @@ impl AppModel {
     /// empty the caches are cleared; `view()` then reads directly from the
     /// unfiltered vectors.
     pub(super) fn refresh_search_filter(&mut self) {
+        // The albums slice the Albums page shows may change: drop its memo.
+        self.extras.album_cache.invalidate();
         let query = self.library_search.trim().to_lowercase();
 
         self.filtered_albums.clear();
@@ -1045,7 +1084,16 @@ impl AppModel {
         let hide_compilations = !self.config.show_compilations_in_artists;
 
         if query.is_empty() {
-            if hide_compilations {
+            // Only materialise a filtered artist copy when something is
+            // actually hidden; otherwise the view reads `all_artists`.
+            self.artists_filtered = false;
+            if hide_compilations
+                && self
+                    .all_artists
+                    .iter()
+                    .any(|a| crate::library::compilations::is_various_artists(&a.name))
+            {
+                self.artists_filtered = true;
                 for (i, artist) in self.all_artists.iter().enumerate() {
                     if !crate::library::compilations::is_various_artists(&artist.name) {
                         self.filtered_artists.push(artist.clone());
@@ -1055,18 +1103,24 @@ impl AppModel {
             }
             return;
         }
+        self.artists_filtered = true;
+
+        self.search_index.ensure(
+            self.library_gen,
+            &self.all_albums,
+            &self.all_artists,
+            &self.all_tracks,
+        );
 
         for (i, album) in self.all_albums.iter().enumerate() {
-            if album.name.to_lowercase().contains(&query)
-                || album.artist.to_lowercase().contains(&query)
-            {
+            if self.search_index.album_matches(i, &query) {
                 self.filtered_albums.push(album.clone());
                 self.filtered_album_map.push(i);
             }
         }
 
         for (i, artist) in self.all_artists.iter().enumerate() {
-            if artist.name.to_lowercase().contains(&query)
+            if self.search_index.artist_matches(i, &query)
                 && !(hide_compilations
                     && crate::library::compilations::is_various_artists(&artist.name))
             {
@@ -1076,10 +1130,7 @@ impl AppModel {
         }
 
         for (i, track) in self.all_tracks.iter().enumerate() {
-            if track.title.to_lowercase().contains(&query)
-                || track.artist.to_lowercase().contains(&query)
-                || track.album.to_lowercase().contains(&query)
-            {
+            if self.search_index.track_matches(i, &query) {
                 self.filtered_tracks.push(track.clone());
                 self.filtered_track_map.push(i);
             }
@@ -1139,6 +1190,76 @@ impl AppModel {
         Task::none()
     }
 
+    /// Keep the already-displayed handle for every cover whose content
+    /// fingerprint is unchanged, so iced's raster cache never re-uploads it
+    /// after a reload.
+    pub(super) fn reuse_unchanged_cover_handles(
+        &self,
+        new_images: &mut HashMap<String, widget::icon::Handle>,
+        new_fingerprints: &HashMap<String, u64>,
+    ) {
+        for (key, fingerprint) in new_fingerprints {
+            if self.cover_fingerprints.get(key) == Some(fingerprint)
+                && let Some(handle) = self.cover_images.get(key)
+            {
+                new_images.insert(key.clone(), handle.clone());
+            }
+        }
+    }
+
+    /// Lightweight album clone (cover source + first track) for the album
+    /// whose cover key is built from `artist` and `album_name`.
+    pub(super) fn cover_hint_for(&self, artist: &str, album_name: &str) -> Option<Album> {
+        self.all_albums
+            .iter()
+            .find(|a| a.artist == artist && a.name == album_name)
+            .map(Album::cover_hint)
+    }
+
+    /// Load full-size cover bytes for an album key into the LRU on a
+    /// blocking thread, unless they are cached / in flight / known absent.
+    /// Replies with `Message::CoverBytesLoaded`. `hint` is only evaluated
+    /// when a load is actually going to start.
+    pub(super) fn request_cover_bytes(
+        &mut self,
+        key: String,
+        hint: impl FnOnce(&Self) -> Option<Album>,
+    ) -> Task<cosmic::Action<Message>> {
+        if !self.cover_art_bytes.should_load(&key) {
+            return Task::none();
+        }
+        let Some(provider) = self.registry.active_shared() else {
+            return Task::none();
+        };
+        let Some(hint) = hint(self) else {
+            // Album not (yet) in the library -- e.g. mid incremental load.
+            // Don't mark it missing; the next library event retries.
+            return Task::none();
+        };
+        if !self.cover_art_bytes.begin_load(&key) {
+            return Task::none();
+        }
+        cosmic::task::future(async move {
+            let bytes =
+                tokio::task::spawn_blocking(move || provider.get_cover_art(&hint).ok().flatten())
+                    .await
+                    .ok()
+                    .flatten();
+            cosmic::Action::App(Message::CoverBytesLoaded(key, bytes))
+        })
+    }
+
+    /// [`Self::request_cover_bytes`] for the album identified by its
+    /// `(artist, album)` pair (how the current track maps to a cover key).
+    pub(super) fn request_cover_bytes_for(
+        &mut self,
+        artist: &str,
+        album_name: &str,
+    ) -> Task<cosmic::Action<Message>> {
+        let key = crate::library::CoverArt::album_key(artist, album_name);
+        self.request_cover_bytes(key, |m| m.cover_hint_for(artist, album_name))
+    }
+
     /// Trigger blur + accent-colour computation for the current track if
     /// the album changed.
     ///
@@ -1184,17 +1305,19 @@ impl AppModel {
             return Task::none();
         }
 
-        // Look up raw bytes. If they are not available yet (still loading),
-        // reset the key so we retry when bytes arrive, but keep the current
-        // blurred_cover showing (previous track's blur) rather than blanking
-        // the background immediately. The blur will update as soon as bytes
-        // are ready and maybe_update_blurred_cover is called again.
+        // Look up raw bytes. If they are not cached yet, load them lazily
+        // (the library load no longer carries full-size covers), reset the
+        // key so we retry when `CoverBytesLoaded` arrives, but keep the
+        // current blurred_cover showing (previous track's blur) rather than
+        // blanking the background immediately.
         let bytes = match self.cover_art_bytes.get(&key) {
-            Some(b) => b.clone(),
+            Some(b) => b,
             None => {
                 self.blurred_cover_key = None; // ensure retry on next bytes-ready event
                 // Do NOT clear blurred_cover — keep the old blur visible.
-                return Task::none();
+                let artist = artist.to_string();
+                let album = track.album.clone();
+                return self.request_cover_bytes_for(&artist, &album);
             }
         };
 

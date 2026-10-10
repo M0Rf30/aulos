@@ -108,8 +108,10 @@ impl AppModel {
         if !config.intro_played {
             crate::player::intro::play();
             config.intro_played = true;
+            // Single key (one small file), not a full `write_entry`: a
+            // full rewrite costs ~0.4 s before the first frame.
             if let Some(context) = &config_context
-                && let Err(e) = config.write_entry(context)
+                && let Err(e) = config.set_intro_played(context, true)
             {
                 tracing::error!("Failed to save config after intro: {e:?}");
             }
@@ -132,116 +134,23 @@ impl AppModel {
             nav.activate(id);
         }
 
-        // Tasks 83-84: Migrate plaintext passwords to system keyring.
-        // For each provider config entry that has a password but hasn't been
-        // migrated yet, attempt to store it in the keyring. On failure, keep
-        // the plaintext password and log a warning.
-        {
-            let keyring_ok = crate::credentials::is_keyring_available();
-            let mut config_changed = false;
-
-            if keyring_ok {
-                for entry in &mut config.mpd_servers {
-                    if entry.password_in_keyring {
-                        // Verify the keyring entry still exists; reset if lost.
-                        match crate::credentials::retrieve_password(&entry.id) {
-                            Ok(None) => {
-                                tracing::warn!(
-                                    "MPD password for '{}' was marked as stored in keyring \
-                                     but the entry is missing; resetting so user can re-enter.",
-                                    entry.id
-                                );
-                                entry.password_in_keyring = false;
-                                config_changed = true;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to verify keyring entry for MPD '{}': {e}",
-                                    entry.id
-                                );
-                            }
-                            Ok(Some(_)) => {}
-                        }
-                    } else if entry.password.is_some() {
-                        let pw = entry.password.as_deref().unwrap_or_default();
-                        match crate::credentials::store_password(&entry.id, pw) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "Migrated MPD password for '{}' to system keyring",
-                                    entry.id
-                                );
-                                entry.password_in_keyring = true;
-                                entry.password = None;
-                                config_changed = true;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to migrate MPD password for '{}' to keyring, \
-                                     keeping plaintext in config: {e}",
-                                    entry.id
-                                );
-                            }
-                        }
-                    }
-                }
-
-                for entry in &mut config.subsonic_servers {
-                    if entry.password_in_keyring {
-                        // Verify the keyring entry still exists; reset if lost.
-                        match crate::credentials::retrieve_password(&entry.id) {
-                            Ok(None) => {
-                                tracing::warn!(
-                                    "Subsonic password for '{}' was marked as stored in keyring \
-                                     but the entry is missing; resetting so user can re-enter.",
-                                    entry.id
-                                );
-                                entry.password_in_keyring = false;
-                                config_changed = true;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to verify keyring entry for Subsonic '{}': {e}",
-                                    entry.id
-                                );
-                            }
-                            Ok(Some(_)) => {}
-                        }
-                    } else if entry.password.is_some() {
-                        let pw = entry.password.as_deref().unwrap_or_default();
-                        match crate::credentials::store_password(&entry.id, pw) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "Migrated Subsonic password for '{}' to system keyring",
-                                    entry.id
-                                );
-                                entry.password_in_keyring = true;
-                                entry.password = None;
-                                config_changed = true;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to migrate Subsonic password for '{}' to keyring, \
-                                     keeping plaintext in config: {e}",
-                                    entry.id
-                                );
-                            }
-                        }
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "System keyring is not available; passwords will remain in plaintext config"
-                );
-            }
-
-            // Persist config if any passwords were migrated.
-            if config_changed
-                && let Some(ref context) = config_context
-                && let Err(e) = config.write_entry(context)
-            {
-                tracing::error!("Failed to save config after keyring migration: {e:?}");
-            }
-        }
+        // Keyring work (availability probe, verifying that stored passwords
+        // still exist, migrating plaintext passwords) costs secret-service
+        // D-Bus round trips -- 50-500 ms, or an unlock prompt -- so it runs
+        // as a startup background task (`Message::CredentialsChecked`)
+        // instead of before the first frame. Providers are still constructed
+        // below with whatever password they can get right now: entries
+        // already in the keyring are read by `MpdConfig::from` /
+        // `SubsonicConfig::from` (unavoidable, the connection needs the
+        // password), plaintext ones use the config value, which stays valid
+        // for this session even after the background migration moved it.
+        let credential_check = needs_credential_check(&config)
+            .then(|| (config.mpd_servers.clone(), config.subsonic_servers.clone()));
+        // Saves from here on go through the background writer; `config`
+        // is exactly what is on disk now (baseline for change detection).
+        let config_writer = config_context
+            .clone()
+            .and_then(|ctx| super::config_writer::ConfigWriter::spawn(ctx, config.clone()));
 
         // Open library database and initialize provider registry
         let db_path = dirs::data_dir()
@@ -381,6 +290,7 @@ impl AppModel {
         let viz_current_preset_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let artist_tag_delimiters_input = config.artist_tag_delimiters.join(" | ");
+        let music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
         let scrobble = crate::online::scrobble::ScrobbleController::new(&config);
 
         let mut app = AppModel {
@@ -390,6 +300,8 @@ impl AppModel {
             about,
             config,
             config_context: config_context.clone(),
+            config_writer,
+            recent_saves: Default::default(),
             context_page: ContextPage::default(),
             playback_extras: Default::default(),
             toasts: widget::toaster::Toasts::new(Message::CloseToast),
@@ -404,6 +316,12 @@ impl AppModel {
             library_scanning: false,
             reload_generation: 0,
             library_reload_staging: None,
+            library_gen: 0,
+            search_index: Default::default(),
+            search_debounce_gen: 0,
+            folder_tree_gen: None,
+            music_dirs_present,
+            artists_filtered: false,
 
             library_search: String::new(),
             search_active: false,
@@ -490,6 +408,7 @@ impl AppModel {
             genre_tracks: Vec::new(),
             folder_state: crate::views::folders::FolderState::default(),
             home: crate::views::home::HomeState::default(),
+            home_cache: Default::default(),
             cover_images: HashMap::new(),
             artist_photos: HashMap::new(),
             artist_bios: HashMap::new(),
@@ -529,6 +448,7 @@ impl AppModel {
             subsonic_connection_status,
             subsonic_providers,
             cover_art_bytes: crate::library::palette::CoverByteCache::new(),
+            cover_fingerprints: HashMap::new(),
             blurred_cover: None,
             blurred_cover_key: None,
             blur_pending_key: None,
@@ -613,6 +533,22 @@ impl AppModel {
                 init_tasks.push(app.select_nav(id));
             }
         }
+        if let Some((mpd_servers, subsonic_servers)) = credential_check {
+            init_tasks.push(cosmic::task::future(async move {
+                let updates = tokio::task::spawn_blocking(move || {
+                    run_credential_check(
+                        &mpd_servers,
+                        &subsonic_servers,
+                        crate::credentials::is_keyring_available,
+                        crate::credentials::retrieve_password,
+                        crate::credentials::store_password,
+                    )
+                })
+                .await
+                .unwrap_or_default();
+                cosmic::Action::App(Message::CredentialsChecked(updates))
+            }));
+        }
         for (name, reason) in subsonic_init_errors {
             init_tasks.push(app.push_toast(widget::toaster::Toast::new(fl!(
                 "toast-provider-connect-failed",
@@ -664,6 +600,174 @@ impl AppModel {
     }
 }
 
+/// Which kind of provider entry a [`CredentialUpdate`] refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    Mpd,
+    Subsonic,
+}
+
+/// A change the background keyring check wants applied to the config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialUpdate {
+    /// The plaintext password was moved into the keyring.
+    Migrated(CredentialKind, String),
+    /// The entry claimed a keyring password that no longer exists.
+    Lost(CredentialKind, String),
+}
+
+/// Whether any configured server has a password the keyring check would have
+/// to look at (stored in the keyring, or still plaintext). With none, the
+/// keyring is not touched at startup at all.
+fn needs_credential_check(config: &Config) -> bool {
+    config
+        .mpd_servers
+        .iter()
+        .any(|e| e.password_in_keyring || e.password.is_some())
+        || config
+            .subsonic_servers
+            .iter()
+            .any(|e| e.password_in_keyring || e.password.is_some())
+}
+
+/// Verify/migrate one entry's password; returns the config change, if any.
+fn check_credential(
+    kind: CredentialKind,
+    id: &str,
+    in_keyring: bool,
+    plaintext: Option<&str>,
+    retrieve: &impl Fn(&str) -> Result<Option<String>, String>,
+    store: &impl Fn(&str, &str) -> Result<(), String>,
+) -> Option<CredentialUpdate> {
+    if in_keyring {
+        // Verify the keyring entry still exists; reset if lost.
+        match retrieve(id) {
+            Ok(None) => {
+                tracing::warn!(
+                    "{kind:?} password for '{id}' was marked as stored in keyring \
+                     but the entry is missing; resetting so user can re-enter."
+                );
+                Some(CredentialUpdate::Lost(kind, id.to_string()))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to verify keyring entry for {kind:?} '{id}': {e}");
+                None
+            }
+            Ok(Some(_)) => None,
+        }
+    } else if let Some(pw) = plaintext {
+        match store(id, pw) {
+            Ok(()) => {
+                tracing::info!("Migrated {kind:?} password for '{id}' to system keyring");
+                Some(CredentialUpdate::Migrated(kind, id.to_string()))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to migrate {kind:?} password for '{id}' to keyring, \
+                     keeping plaintext in config: {e}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Blocking: probe the keyring, then verify/migrate every server password.
+/// Run from `spawn_blocking`; the keyring operations are injected so the
+/// logic is testable without a secret service.
+pub(super) fn run_credential_check(
+    mpd_servers: &[crate::config::MpdConfigEntry],
+    subsonic_servers: &[crate::config::SubsonicConfigEntry],
+    keyring_available: impl Fn() -> bool,
+    retrieve: impl Fn(&str) -> Result<Option<String>, String>,
+    store: impl Fn(&str, &str) -> Result<(), String>,
+) -> Vec<CredentialUpdate> {
+    if !keyring_available() {
+        tracing::warn!(
+            "System keyring is not available; passwords will remain in plaintext config"
+        );
+        return Vec::new();
+    }
+    let mpd = mpd_servers.iter().filter_map(|e| {
+        check_credential(
+            CredentialKind::Mpd,
+            &e.id,
+            e.password_in_keyring,
+            e.password.as_deref(),
+            &retrieve,
+            &store,
+        )
+    });
+    let subsonic = subsonic_servers.iter().filter_map(|e| {
+        check_credential(
+            CredentialKind::Subsonic,
+            &e.id,
+            e.password_in_keyring,
+            e.password.as_deref(),
+            &retrieve,
+            &store,
+        )
+    });
+    mpd.chain(subsonic).collect()
+}
+
+/// Apply the background check's results to `config`; `true` if anything
+/// changed (the caller then persists). Each update is only applied if the
+/// entry is still in the state the check saw, so a server the user edited
+/// meanwhile is left alone.
+pub(super) fn apply_credential_updates(config: &mut Config, updates: &[CredentialUpdate]) -> bool {
+    let mut changed = false;
+    for update in updates {
+        match update {
+            CredentialUpdate::Migrated(CredentialKind::Mpd, id) => {
+                if let Some(e) = config
+                    .mpd_servers
+                    .iter_mut()
+                    .find(|e| &e.id == id && !e.password_in_keyring && e.password.is_some())
+                {
+                    e.password_in_keyring = true;
+                    e.password = None;
+                    changed = true;
+                }
+            }
+            CredentialUpdate::Migrated(CredentialKind::Subsonic, id) => {
+                if let Some(e) = config
+                    .subsonic_servers
+                    .iter_mut()
+                    .find(|e| &e.id == id && !e.password_in_keyring && e.password.is_some())
+                {
+                    e.password_in_keyring = true;
+                    e.password = None;
+                    changed = true;
+                }
+            }
+            CredentialUpdate::Lost(CredentialKind::Mpd, id) => {
+                if let Some(e) = config
+                    .mpd_servers
+                    .iter_mut()
+                    .find(|e| &e.id == id && e.password_in_keyring)
+                {
+                    e.password_in_keyring = false;
+                    changed = true;
+                }
+            }
+            CredentialUpdate::Lost(CredentialKind::Subsonic, id) => {
+                if let Some(e) = config
+                    .subsonic_servers
+                    .iter_mut()
+                    .find(|e| &e.id == id && e.password_in_keyring)
+                {
+                    e.password_in_keyring = false;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
 /// Appends the Convert nav entry at the end of `nav`'s display order —
 /// shared between the initial (config-gated) build in `init_model` and
 /// `AppModel::set_convert_nav_entry`'s live re-enable path.
@@ -673,4 +777,106 @@ fn insert_convert_nav_entry(nav: &mut nav_bar::Model) {
         .data::<Page>(Page::Convert)
         .icon(icon::from_name("document-save-as-symbolic"))
         .divider_above(true);
+}
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use crate::config::{MpdConfigEntry, SubsonicConfigEntry};
+    use std::cell::RefCell;
+
+    fn mpd(id: &str, in_keyring: bool, password: Option<&str>) -> MpdConfigEntry {
+        MpdConfigEntry {
+            id: id.into(),
+            password_in_keyring: in_keyring,
+            password: password.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    fn subsonic(id: &str, in_keyring: bool, password: Option<&str>) -> SubsonicConfigEntry {
+        SubsonicConfigEntry {
+            id: id.into(),
+            password_in_keyring: in_keyring,
+            password: password.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_passwords_means_no_keyring_access() {
+        let mut config = Config::default();
+        assert!(!needs_credential_check(&config));
+        config.mpd_servers.push(mpd("a", false, None));
+        assert!(!needs_credential_check(&config));
+        config
+            .subsonic_servers
+            .push(subsonic("b", false, Some("pw")));
+        assert!(needs_credential_check(&config));
+    }
+
+    #[test]
+    fn unavailable_keyring_changes_nothing() {
+        let stored = RefCell::new(Vec::new());
+        let updates = run_credential_check(
+            &[mpd("a", false, Some("pw"))],
+            &[],
+            || false,
+            |_| Ok(None),
+            |id, _| {
+                stored.borrow_mut().push(id.to_string());
+                Ok(())
+            },
+        );
+        assert!(updates.is_empty());
+        assert!(stored.borrow().is_empty());
+    }
+
+    #[test]
+    fn migrates_plaintext_and_flags_lost_entries() {
+        let updates = run_credential_check(
+            &[mpd("plain", false, Some("pw")), mpd("ok", true, None)],
+            &[
+                subsonic("gone", true, None),
+                subsonic("fail", false, Some("x")),
+            ],
+            || true,
+            |id| Ok((id != "gone").then(|| "secret".to_string())),
+            |id, _| {
+                if id == "fail" {
+                    Err("locked".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            updates,
+            vec![
+                CredentialUpdate::Migrated(CredentialKind::Mpd, "plain".into()),
+                CredentialUpdate::Lost(CredentialKind::Subsonic, "gone".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn updates_apply_only_to_entries_still_in_the_checked_state() {
+        let mut config = Config::default();
+        config.mpd_servers.push(mpd("plain", false, Some("pw")));
+        config.mpd_servers.push(mpd("edited", true, None));
+        config.subsonic_servers.push(subsonic("gone", true, None));
+        let updates = [
+            CredentialUpdate::Migrated(CredentialKind::Mpd, "plain".into()),
+            // User re-saved this one into the keyring meanwhile: no plaintext
+            // left, so a stale "migrated" result must not be applied.
+            CredentialUpdate::Migrated(CredentialKind::Mpd, "edited".into()),
+            CredentialUpdate::Lost(CredentialKind::Subsonic, "gone".into()),
+            CredentialUpdate::Lost(CredentialKind::Subsonic, "unknown".into()),
+        ];
+        assert!(apply_credential_updates(&mut config, &updates));
+        assert!(config.mpd_servers[0].password_in_keyring);
+        assert!(config.mpd_servers[0].password.is_none());
+        assert!(config.mpd_servers[1].password_in_keyring);
+        assert!(!config.subsonic_servers[0].password_in_keyring);
+        assert!(!apply_credential_updates(&mut config, &updates));
+    }
 }

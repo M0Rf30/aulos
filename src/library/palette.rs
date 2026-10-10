@@ -13,7 +13,8 @@
 //! histogram, which is more than adequate at the fixed 32x32 working
 //! resolution used here.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// An accent colour derived from cover art, plus a pre-computed
 /// black/white pairing that stays legible drawn on top of it.
@@ -69,19 +70,33 @@ const SATURATION_FLOOR: f32 = 0.55;
 /// just means re-reading from disk (or re-fetching from the provider) the
 /// next time that album's art is needed, not data loss.
 ///
-/// Capacity mirrors the `HashMap` + `VecDeque` LRU pattern already used by
-/// `autoeq::manager::AutoEQManager` instead of adding the `lru` crate for
-/// one call site.
+/// Entries are stamped with a monotonically increasing generation counter
+/// instead of being kept in a recency list: a hit is an O(1) stamp update (no
+/// list scan/reshuffle) and only an eviction -- bounded by the tiny capacity --
+/// has to look for the smallest stamp.
+///
+/// Besides the bytes themselves the cache tracks which keys have a load in
+/// flight and which are known to have no art at all, so callers can request
+/// bytes lazily (`begin_load`/`finish_load`) without spawning duplicate or
+/// endlessly retried loads. The loaded bytes are `Arc`-shared so handing them
+/// to a background job does not copy the (possibly multi-MB) buffer.
 pub struct CoverByteCache {
-    entries: HashMap<String, Vec<u8>>,
-    lru_order: VecDeque<String>,
+    entries: HashMap<String, CoverEntry>,
+    generation: u64,
+    pending: HashSet<String>,
+    missing: HashSet<String>,
+}
+
+struct CoverEntry {
+    bytes: Arc<Vec<u8>>,
+    stamp: u64,
 }
 
 /// 64 albums comfortably covers "everything played this session" for
 /// typical listening while bounding worst-case memory: full-size embedded
 /// covers are commonly tens to a few hundred KB, so 64 of them tops out in
 /// the tens-of-MB range regardless of how many thousands of albums the
-/// library actually has — unlike the unbounded `HashMap` this replaces,
+/// library actually has -- unlike the unbounded `HashMap` this replaces,
 /// which grew with the whole library.
 const COVER_BYTE_CACHE_CAPACITY: usize = 64;
 
@@ -89,32 +104,93 @@ impl CoverByteCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            lru_order: VecDeque::new(),
+            generation: 0,
+            pending: HashSet::new(),
+            missing: HashSet::new(),
         }
+    }
+
+    fn next_stamp(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
     }
 
     /// Insert or update `key`, evicting the least-recently-used entry first
     /// if the cache is already at capacity.
     pub fn insert(&mut self, key: String, bytes: Vec<u8>) {
-        if self.entries.len() >= COVER_BYTE_CACHE_CAPACITY
-            && !self.entries.contains_key(&key)
-            && let Some(lru_key) = self.lru_order.pop_front()
-        {
-            self.entries.remove(&lru_key);
+        if self.entries.len() >= COVER_BYTE_CACHE_CAPACITY && !self.entries.contains_key(&key) {
+            let lru_key = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.stamp)
+                .map(|(k, _)| k.clone());
+            if let Some(lru_key) = lru_key {
+                self.entries.remove(&lru_key);
+            }
         }
-        self.entries.insert(key.clone(), bytes);
-        self.lru_order.retain(|k| k != &key);
-        self.lru_order.push_back(key);
+        self.missing.remove(&key);
+        let stamp = self.next_stamp();
+        self.entries.insert(
+            key,
+            CoverEntry {
+                bytes: Arc::new(bytes),
+                stamp,
+            },
+        );
     }
 
     /// Look up `key`, marking it most-recently-used on a hit so it survives
     /// future evictions longer than entries that are not being played.
-    pub fn get(&mut self, key: &str) -> Option<&Vec<u8>> {
-        if self.entries.contains_key(key) {
-            self.lru_order.retain(|k| k != key);
-            self.lru_order.push_back(key.to_string());
+    pub fn get(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
+        let stamp = self.next_stamp();
+        let entry = self.entries.get_mut(key)?;
+        entry.stamp = stamp;
+        Some(Arc::clone(&entry.bytes))
+    }
+
+    /// Whether `key` is cached; does not touch the recency order.
+    pub fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Claim the right to load `key`'s bytes. Returns `false` when they are
+    /// already cached, already being loaded, or a previous load found no
+    /// art; the caller must then call [`Self::finish_load`] when its load
+    /// ends.
+    pub fn begin_load(&mut self, key: &str) -> bool {
+        if !self.should_load(key) {
+            return false;
         }
-        self.entries.get(key)
+        self.pending.insert(key.to_string());
+        true
+    }
+
+    /// Non-mutating pre-check for [`Self::begin_load`]: `true` when `key`
+    /// is neither cached, in flight, nor known to have no art.
+    pub fn should_load(&self, key: &str) -> bool {
+        !(self.entries.contains_key(key)
+            || self.pending.contains(key)
+            || self.missing.contains(key))
+    }
+
+    /// Record the outcome of a load started via [`Self::begin_load`]: cache
+    /// the bytes, or remember that `key` has no art so it is not re-requested.
+    pub fn finish_load(&mut self, key: String, bytes: Option<Vec<u8>>) {
+        self.pending.remove(&key);
+        match bytes {
+            Some(bytes) => self.insert(key, bytes),
+            None => {
+                self.missing.insert(key);
+            }
+        }
+    }
+
+    /// Drop everything (cached bytes, in-flight and "no art" markers), e.g.
+    /// after a library reload when the underlying art may have changed.
+    /// Loads still in flight will simply re-populate their key when they end.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.missing.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -129,22 +205,6 @@ impl CoverByteCache {
 impl Default for CoverByteCache {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Extend<(String, Vec<u8>)> for CoverByteCache {
-    fn extend<I: IntoIterator<Item = (String, Vec<u8>)>>(&mut self, iter: I) {
-        for (key, bytes) in iter {
-            self.insert(key, bytes);
-        }
-    }
-}
-
-impl From<HashMap<String, Vec<u8>>> for CoverByteCache {
-    fn from(map: HashMap<String, Vec<u8>>) -> Self {
-        let mut cache = Self::new();
-        cache.extend(map);
-        cache
     }
 }
 
@@ -396,5 +456,60 @@ mod tests {
     fn on_color_is_white_for_dark_and_black_for_light() {
         assert_eq!(on_color_for([0.05, 0.05, 0.1]), [1.0, 1.0, 1.0]);
         assert_eq!(on_color_for([0.95, 0.95, 0.9]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn cover_cache_evicts_least_recently_used() {
+        let mut c = CoverByteCache::new();
+        for i in 0..COVER_BYTE_CACHE_CAPACITY {
+            c.insert(format!("k{i}"), vec![i as u8]);
+        }
+        // Touch k0 so k1 becomes the LRU entry.
+        assert!(c.get("k0").is_some());
+        c.insert("new".into(), vec![9]);
+        assert_eq!(c.len(), COVER_BYTE_CACHE_CAPACITY);
+        assert!(c.contains("k0"));
+        assert!(!c.contains("k1"));
+        assert!(c.contains("new"));
+    }
+
+    #[test]
+    fn cover_cache_reinsert_does_not_evict() {
+        let mut c = CoverByteCache::new();
+        for i in 0..COVER_BYTE_CACHE_CAPACITY {
+            c.insert(format!("k{i}"), vec![0]);
+        }
+        c.insert("k5".into(), vec![7]);
+        assert_eq!(c.len(), COVER_BYTE_CACHE_CAPACITY);
+        assert_eq!(c.get("k5").as_deref(), Some(&vec![7]));
+        assert!(c.contains("k0"));
+    }
+
+    #[test]
+    fn cover_cache_contains_does_not_refresh_recency() {
+        let mut c = CoverByteCache::new();
+        for i in 0..COVER_BYTE_CACHE_CAPACITY {
+            c.insert(format!("k{i}"), vec![0]);
+        }
+        assert!(c.contains("k0"));
+        c.insert("new".into(), vec![1]);
+        assert!(!c.contains("k0"), "contains must not mark k0 as recent");
+    }
+
+    #[test]
+    fn cover_cache_lazy_load_lifecycle() {
+        let mut c = CoverByteCache::new();
+        assert!(c.begin_load("a"));
+        assert!(!c.begin_load("a"), "second request while in flight");
+        c.finish_load("a".into(), Some(vec![1, 2]));
+        assert!(!c.begin_load("a"), "already cached");
+        assert_eq!(c.get("a").as_deref(), Some(&vec![1, 2]));
+
+        assert!(c.begin_load("b"));
+        c.finish_load("b".into(), None);
+        assert!(!c.begin_load("b"), "known to have no art");
+        c.clear();
+        assert!(c.is_empty());
+        assert!(c.begin_load("b"), "clear forgets the no-art marker");
     }
 }

@@ -185,6 +185,7 @@ pub fn songs_list_view<'a>(
                 .push(header)
                 .push(
                     widget::scrollable(widget::container(track_list).width(Length::Fill))
+                        .id(crate::views::common::songs_scroll_id())
                         .on_scroll(|viewport| SongMessage::Scrolled(viewport.absolute_offset().y))
                         .height(Length::Fill),
                 )

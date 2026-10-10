@@ -23,6 +23,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod application;
+mod config_writer;
 mod convert_page;
 mod helpers;
 mod home;
@@ -32,8 +33,11 @@ mod navigation;
 pub mod playback_extras;
 mod playlist_io;
 mod podcast_page;
+mod provider_ops;
+mod queue_source;
 mod radio_page;
 mod scrobble_glue;
+mod search_index;
 pub mod startup;
 mod subscriptions;
 mod tasks;
@@ -84,6 +88,11 @@ pub struct AppModel {
     config: Config,
     /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
     config_context: Option<cosmic_config::Config>,
+    /// Background, coalescing config persistence (see `config_writer`).
+    config_writer: Option<config_writer::ConfigWriter>,
+    /// Last few configs handed to the writer, to recognise the watcher's
+    /// echo of our own (debounced) writes in `UpdateConfig`.
+    recent_saves: std::cell::RefCell<std::collections::VecDeque<Config>>,
     context_page: ContextPage,
     /// Runtime state of the playback/desktop extras (auto-play RNG,
     /// inhibit lock, notification bookkeeping).
@@ -122,6 +131,20 @@ pub struct AppModel {
     /// or the running reload is a first/empty-library load that instead
     /// populates `all_tracks`/`all_albums`/etc. progressively.
     library_reload_staging: Option<helpers::LibraryReloadStaging>,
+    /// Bumped whenever `all_tracks`/`all_albums`/`all_artists` change
+    /// (load, batch, sort, artist rebuild); invalidates derived caches.
+    library_gen: u64,
+    /// Pre-lowercased search keys (rebuilt per `library_gen`).
+    search_index: search_index::SearchIndex,
+    /// Latest debounce generation for `LibrarySearchChanged`.
+    search_debounce_gen: u64,
+    /// `library_gen` the folder tree was last built for.
+    folder_tree_gen: Option<u64>,
+    /// Whether any configured music dir exists (cached; avoids `stat` per frame).
+    music_dirs_present: bool,
+    /// Whether the Artists view must read `filtered_artists` (query active,
+    /// or compilations hidden and at least one such artist exists).
+    artists_filtered: bool,
 
     // Library search (header search bar)
     /// Current search query (case-insensitive substring match against the
@@ -319,6 +342,8 @@ pub struct AppModel {
     folder_state: crate::views::folders::FolderState,
     /// Home page shelves, decade grid and play-history tracker.
     home: crate::views::home::HomeState,
+    /// What the loaded Home shelves are valid for (see `home::HomeCache`).
+    home_cache: home::HomeCache,
     cover_images: HashMap<String, widget::icon::Handle>,
     /// Cached real artist photos (from Subsonic's own artist data or, in
     /// Local/MPD mode, Deezer via `crate::library::artist_info` when
@@ -394,8 +419,12 @@ pub struct AppModel {
     subsonic_providers: Vec<Arc<SubsonicProvider>>,
 
     // Expanded now-playing view
-    /// Raw cover art bytes keyed by album_key, for blur processing.
+    /// Raw cover art bytes keyed by album_key, loaded lazily (blur, detail
+    /// hero, notifications) into a small LRU -- never for the whole library.
     cover_art_bytes: crate::library::palette::CoverByteCache,
+    /// Content fingerprint per album key of the cover behind the matching
+    /// `cover_images` handle; lets a reload keep unchanged handles.
+    cover_fingerprints: HashMap<String, u64>,
     /// Cached blurred cover art for the current album.
     blurred_cover: Option<widget::icon::Handle>,
     /// Album key for the cached blurred cover.

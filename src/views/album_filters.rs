@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Filter chips for the Albums page: kind (All / Albums / Compilations) and
-//! release decade. The state is tiny and the predicate pure, so the albums
-//! view recomputes the visible index list each frame instead of caching
-//! cloned album data in the model.
+//! release decade. The state is tiny and the predicate pure; the derived
+//! data (visible album positions, decades present) is memoized in
+//! [`AlbumFilterCache`] and recomputed only when the albums or the chip
+//! selection change, not on every `view()`.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use crate::fl;
 use crate::library::Album;
@@ -77,6 +81,63 @@ pub fn decades_present(albums: &[Album]) -> Vec<u32> {
     decades
 }
 
+/// Memoized derived data of the Albums page: positions of the albums that
+/// pass the chip filters and the decades present.
+///
+/// `view()` only has `&self`, hence the interior mutability. The entry is
+/// recomputed when the caller's `epoch` (bumped whenever the albums slice
+/// handed to the view may have changed), the filter or the slice length
+/// differ from the cached ones, or after [`AlbumFilterCache::invalidate`].
+#[derive(Debug, Default)]
+pub struct AlbumFilterCache {
+    stale: Cell<bool>,
+    inner: RefCell<CacheEntry>,
+}
+
+#[derive(Debug, Default)]
+struct CacheEntry {
+    key: Option<(u64, AlbumFilter, usize)>,
+    visible: Rc<Vec<usize>>,
+    decades: Rc<Vec<u32>>,
+    /// Number of recomputations (for tests).
+    computed: usize,
+}
+
+impl AlbumFilterCache {
+    /// Force the next [`AlbumFilterCache::get`] to recompute.
+    pub fn invalidate(&self) {
+        self.stale.set(true);
+    }
+
+    /// `(visible positions, decades present)` for `albums` under `filter`.
+    pub fn get(
+        &self,
+        epoch: u64,
+        filter: &AlbumFilter,
+        albums: &[Album],
+    ) -> (Rc<Vec<usize>>, Rc<Vec<u32>>) {
+        let key = (epoch, *filter, albums.len());
+        let mut entry = self.inner.borrow_mut();
+        if self.stale.replace(false) || entry.key != Some(key) {
+            entry.visible = Rc::new(filter.visible_indices(albums));
+            entry.decades = Rc::new(decades_present(albums));
+            entry.key = Some(key);
+            entry.computed += 1;
+        }
+        (Rc::clone(&entry.visible), Rc::clone(&entry.decades))
+    }
+}
+
+/// What the albums view needs to apply the chip filters: the selection,
+/// the memo cache, and the epoch identifying the albums slice it is shown.
+pub struct FilterCtx<'a> {
+    pub filter: &'a AlbumFilter,
+    pub cache: &'a AlbumFilterCache,
+    /// Changes whenever the albums slice handed to the view may differ
+    /// (library reload/batch, search filter refresh, source switch).
+    pub epoch: u64,
+}
+
 fn chip<'a>(label: String, selected: bool, on_press: FilterMsg) -> cosmic::Element<'a, FilterMsg> {
     let button = widget::button::text(label).on_press(on_press);
     if selected {
@@ -89,7 +150,7 @@ fn chip<'a>(label: String, selected: bool, on_press: FilterMsg) -> cosmic::Eleme
 /// The chip rows: kind chips, then one chip per decade present (hidden when
 /// no album has a year). The selected decade stays visible even if a search
 /// currently excludes it, so it can always be cleared.
-pub fn filter_bar<'a>(filter: &AlbumFilter, albums: &[Album]) -> cosmic::Element<'a, FilterMsg> {
+pub fn filter_bar<'a>(filter: &AlbumFilter, decades: &[u32]) -> cosmic::Element<'a, FilterMsg> {
     let spacing = cosmic::theme::active().cosmic().spacing;
 
     let mut chips: Vec<cosmic::Element<'a, FilterMsg>> = vec![
@@ -110,7 +171,7 @@ pub fn filter_bar<'a>(filter: &AlbumFilter, albums: &[Album]) -> cosmic::Element
         ),
     ];
 
-    let mut decades = decades_present(albums);
+    let mut decades = decades.to_vec();
     if let Some(selected) = filter.decade
         && !decades.contains(&selected)
     {
@@ -147,13 +208,7 @@ mod tests {
     use super::*;
 
     fn album(artist: &str, year: u32) -> Album {
-        Album {
-            name: "A".into(),
-            artist: artist.into(),
-            year,
-            tracks: Vec::new(),
-            cover_source: None,
-        }
+        Album::new("A".into(), artist.into(), year, Vec::new(), None)
     }
 
     #[test]
@@ -183,5 +238,42 @@ mod tests {
         assert_eq!(f.visible_indices(&albums), vec![0, 3]);
         f.update(FilterMsg::Decade(None));
         assert_eq!(f.visible_indices(&albums).len(), 4);
+    }
+
+    #[test]
+    fn cache_recomputes_only_on_epoch_filter_len_or_invalidate() {
+        let albums = vec![album("A", 1994), album("B", 1989)];
+        let cache = AlbumFilterCache::default();
+        let mut f = AlbumFilter::default();
+
+        let (visible, decades) = cache.get(1, &f, &albums);
+        assert_eq!(*visible, vec![0, 1]);
+        assert_eq!(*decades, vec![1980, 1990]);
+        assert_eq!(cache.inner.borrow().computed, 1);
+
+        // Same inputs: served from the cache.
+        cache.get(1, &f, &albums);
+        assert_eq!(cache.inner.borrow().computed, 1);
+
+        // Filter change.
+        f.update(FilterMsg::Decade(Some(1990)));
+        let (visible, _) = cache.get(1, &f, &albums);
+        assert_eq!(*visible, vec![0]);
+        assert_eq!(cache.inner.borrow().computed, 2);
+
+        // New epoch (library/search changed).
+        cache.get(2, &f, &albums);
+        assert_eq!(cache.inner.borrow().computed, 3);
+
+        // Different slice length.
+        cache.get(2, &f, &albums[..1]);
+        assert_eq!(cache.inner.borrow().computed, 4);
+
+        // Explicit invalidation.
+        cache.invalidate();
+        cache.get(2, &f, &albums[..1]);
+        assert_eq!(cache.inner.borrow().computed, 5);
+        cache.get(2, &f, &albums[..1]);
+        assert_eq!(cache.inner.borrow().computed, 5);
     }
 }

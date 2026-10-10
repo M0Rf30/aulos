@@ -27,10 +27,14 @@ pub enum GenreMessage {
     PlayTrack(usize),
     /// Play the whole genre in shuffled order.
     Shuffle,
-    /// Insert tracks right after the current one.
-    PlayNext(Vec<Track>),
-    /// Append tracks to the end of the queue.
-    AddToQueue(Vec<Track>),
+    /// Insert tracks right after the current one: the genre's track `.0`,
+    /// or all of them when `None`. Indices only; `update` resolves them,
+    /// so `view()` never clones track lists.
+    PlayNext(Option<usize>),
+    /// Append tracks (see `PlayNext`) to the end of the queue.
+    AddToQueue(Option<usize>),
+    /// A virtualized grid/list scrolled (area, absolute y offset).
+    Scrolled(common::ScrollArea, f32),
     /// Toggle between grid and list layout.
     ToggleViewMode,
     /// Jump to another view (artist / album page).
@@ -154,10 +158,11 @@ fn genre_card_tile<'a>(genre: &'a str, width: f32) -> cosmic::Element<'a, GenreM
 }
 
 /// Render the genres view: tile grid or list, depending on `mode`.
-pub fn genres_view(
-    genres: &[String],
+pub fn genres_view<'a>(
+    genres: &'a [String],
     mode: crate::config::ViewMode,
-) -> cosmic::Element<'_, GenreMessage> {
+    scroll: &common::ScrollOffsets,
+) -> cosmic::Element<'a, GenreMessage> {
     if genres.is_empty() {
         return common::empty_state(
             "folder-music-symbolic",
@@ -171,10 +176,17 @@ pub fn genres_view(
     let header = common::view_mode_toggle_header(mode, GenreMessage::ToggleViewMode);
 
     let content: cosmic::Element<'_, GenreMessage> = match mode {
-        ViewMode::Grid => common::fluid_card_grid(
+        ViewMode::Grid => common::fluid_card_grid_virtual(
             genres.len(),
             CARD_WIDTH + 2.0 * CARD_PADDING,
             CARD_MAX_WIDTH + 2.0 * CARD_PADDING,
+            // Tile height follows its width (see `genre_card_tile`).
+            |outer| ((outer - 2.0 * CARD_PADDING) * TILE_ASPECT).round() + 2.0 * CARD_PADDING,
+            common::Scroll {
+                area: common::ScrollArea::GenresGrid,
+                offset: scroll.get(common::ScrollArea::GenresGrid),
+                on_scroll: GenreMessage::Scrolled,
+            },
             move |index, outer| {
                 let genre = genres[index].as_str();
                 let tile = genre_card_tile(genre, outer - 2.0 * CARD_PADDING);
@@ -189,45 +201,51 @@ pub fn genres_view(
                 .into()
             },
         ),
-        ViewMode::List => {
-            let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
-            let mut list = widget::Column::new().spacing(2);
-
-            for (index, genre) in genres.iter().enumerate() {
-                let swatch_icon: cosmic::Element<'_, GenreMessage> =
-                    widget::container(widget::icon::from_name(genre_icon_name(genre)).size(24))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(Horizontal::Center)
-                        .align_y(Vertical::Center)
-                        .into();
-                let swatch = genre_tile(genre, 48.0, 48.0, radius, false, swatch_icon);
-
-                let row = widget::button::custom(
-                    widget::Row::new()
-                        .push(swatch)
-                        .push(common::clipped_cell(
-                            common::cell_text(genre.as_str()).into(),
-                        ))
-                        .push(widget::icon::from_name("go-next-symbolic").size(16))
-                        .spacing(14)
-                        .align_y(Alignment::Center)
-                        .padding([8, 8]),
-                )
-                .on_press(GenreMessage::SelectGenre(index))
-                .width(Length::Fill)
-                .class(list_row_button_class(false));
-
-                list = list.push(row);
-            }
-
-            widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
-                .height(Length::Fill)
-                .into()
-        }
+        ViewMode::List => common::virtual_list(
+            genres.len(),
+            LIST_ROW_HEIGHT,
+            common::Scroll {
+                area: common::ScrollArea::GenresList,
+                offset: scroll.get(common::ScrollArea::GenresList),
+                on_scroll: GenreMessage::Scrolled,
+            },
+            move |index| list_row(index, genres[index].as_str()),
+        ),
     };
 
     widget::Column::new().push(header).push(content).into()
+}
+
+/// Fixed height of a genres-list row: 48px swatch + 8px row padding on
+/// each side + the button's default 5px padding on each side.
+const LIST_ROW_HEIGHT: f32 = 74.0;
+
+/// One fixed-height row of the genres list.
+fn list_row(index: usize, genre: &str) -> cosmic::Element<'_, GenreMessage> {
+    let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
+    let swatch_icon: cosmic::Element<'_, GenreMessage> =
+        widget::container(widget::icon::from_name(genre_icon_name(genre)).size(24))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center)
+            .into();
+    let swatch = genre_tile(genre, 48.0, 48.0, radius, false, swatch_icon);
+
+    widget::button::custom(
+        widget::Row::new()
+            .push(swatch)
+            .push(common::clipped_cell(common::cell_text(genre).into()))
+            .push(widget::icon::from_name("go-next-symbolic").size(16))
+            .spacing(14)
+            .align_y(Alignment::Center)
+            .padding([8, 8]),
+    )
+    .on_press(GenreMessage::SelectGenre(index))
+    .width(Length::Fill)
+    .height(Length::Fixed(LIST_ROW_HEIGHT))
+    .class(list_row_button_class(false))
+    .into()
 }
 
 /// Render the detail view for a selected genre, showing filtered tracks.
@@ -266,38 +284,37 @@ pub fn genre_detail_view<'a>(
     };
     let has_tracks = !tracks.is_empty();
 
-    let meta =
-        widget::Column::new()
-            .push(common::cell_caption(fl!("genre-label")))
-            .push(widget::container(common::clipped_cell(
-                widget::text::title1(genre_name)
-                    .wrapping(Wrapping::None)
-                    .into(),
-            )))
-            .push(common::cell_caption(summary))
-            .push(
-                widget::Row::new()
-                    .push(
-                        widget::button::suggested(fl!("play-all"))
-                            .on_press_maybe(has_tracks.then_some(GenreMessage::PlayTrack(0)))
-                            .class(common::accent_button_class(&accent)),
-                    )
-                    .push(
-                        widget::button::standard(fl!("shuffle"))
-                            .on_press_maybe(has_tracks.then_some(GenreMessage::Shuffle)),
-                    )
-                    .push(
-                        widget::button::standard(fl!("queue-play-next")).on_press_maybe(
-                            has_tracks.then(|| GenreMessage::PlayNext(tracks.to_vec())),
-                        ),
-                    )
-                    .push(widget::button::standard(fl!("queue-add")).on_press_maybe(
-                        has_tracks.then(|| GenreMessage::AddToQueue(tracks.to_vec())),
-                    ))
-                    .spacing(spacing.space_xs),
-            )
-            .width(Length::Fill)
-            .spacing(spacing.space_xxs);
+    let meta = widget::Column::new()
+        .push(common::cell_caption(fl!("genre-label")))
+        .push(widget::container(common::clipped_cell(
+            widget::text::title1(genre_name)
+                .wrapping(Wrapping::None)
+                .into(),
+        )))
+        .push(common::cell_caption(summary))
+        .push(
+            widget::Row::new()
+                .push(
+                    widget::button::suggested(fl!("play-all"))
+                        .on_press_maybe(has_tracks.then_some(GenreMessage::PlayTrack(0)))
+                        .class(common::accent_button_class(&accent)),
+                )
+                .push(
+                    widget::button::standard(fl!("shuffle"))
+                        .on_press_maybe(has_tracks.then_some(GenreMessage::Shuffle)),
+                )
+                .push(
+                    widget::button::standard(fl!("queue-play-next"))
+                        .on_press_maybe(has_tracks.then_some(GenreMessage::PlayNext(None))),
+                )
+                .push(
+                    widget::button::standard(fl!("queue-add"))
+                        .on_press_maybe(has_tracks.then_some(GenreMessage::AddToQueue(None))),
+                )
+                .spacing(spacing.space_xs),
+        )
+        .width(Length::Fill)
+        .spacing(spacing.space_xxs);
 
     let header = widget::Row::new()
         .push(tile)
@@ -325,8 +342,8 @@ pub fn genre_detail_view<'a>(
                 )
                 .with_navigate(GenreMessage::Navigate)
                 .with_queue_actions(
-                    GenreMessage::PlayNext(vec![track.clone()]),
-                    GenreMessage::AddToQueue(vec![track.clone()]),
+                    GenreMessage::PlayNext(Some(index)),
+                    GenreMessage::AddToQueue(Some(index)),
                 )
                 .with_artist_subtitle(!columns.artist)
                 .view()

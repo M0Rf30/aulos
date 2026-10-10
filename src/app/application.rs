@@ -62,7 +62,15 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         let label = message_label(&message);
         let start = std::time::Instant::now();
+        let before = self.view_signature();
         let task = self.handle_message(message);
+        // A page/detail/layout change remounts the virtual lists at the
+        // top; put them back where the user left them.
+        let task = if self.view_signature() != before {
+            Task::batch([task, self.restore_scroll_positions()])
+        } else {
+            task
+        };
         // Detail pages can be entered from many messages (selection,
         // links, back history, library reloads); checking here once keeps
         // their hero artwork in sync without touching each handler.
@@ -72,7 +80,15 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
-        self.select_nav(id)
+        let start = std::time::Instant::now();
+        let task = self.select_nav(id);
+        let task = Task::batch([
+            task,
+            self.restore_scroll_positions(),
+            self.maybe_update_detail_art(),
+        ]);
+        log_elapsed("update", "NavSelect", start.elapsed());
+        task
     }
 
     /// Closing the window (header close button) goes through

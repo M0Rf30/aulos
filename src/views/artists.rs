@@ -4,7 +4,7 @@
 //! Artists view - list of artists with album sub-views.
 
 use crate::fl;
-use crate::library::{Album, Artist, CoverArt, Track};
+use crate::library::{Album, Artist};
 use crate::views::common;
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
@@ -28,10 +28,15 @@ pub enum ArtistMessage {
     FilterByGenre(String),
     /// Toggle between grid and list layout.
     ToggleViewMode,
-    /// Insert this album's tracks right after the currently playing one.
-    PlayNext(Vec<Track>),
-    /// Append this album's tracks to the end of the queue.
-    AddToQueue(Vec<Track>),
+    /// Insert tracks right after the currently playing one: track `.2` of
+    /// album `.1` of artist `.0`, or the whole album when `None`. Carries
+    /// indices only; `update` resolves them, so `view()` never clones
+    /// track lists.
+    PlayNext(usize, usize, Option<usize>),
+    /// Append tracks (see `PlayNext`) to the end of the queue.
+    AddToQueue(usize, usize, Option<usize>),
+    /// A virtualized grid/list scrolled (area, absolute y offset).
+    Scrolled(common::ScrollArea, f32),
     /// Expand/collapse the clipped biography preview in the detail view.
     ToggleBioExpanded,
     /// Jump to another view (album page, genre…).
@@ -55,6 +60,7 @@ pub fn artists_view<'a>(
     artists: &'a [Artist],
     artist_photos: &'a std::collections::HashMap<String, widget::image::Handle>,
     mode: crate::config::ViewMode,
+    scroll: &common::ScrollOffsets,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
         return common::empty_state(
@@ -69,92 +75,26 @@ pub fn artists_view<'a>(
     let header = common::view_mode_toggle_header(mode, ArtistMessage::ToggleViewMode);
 
     let content: cosmic::Element<'_, ArtistMessage> = match mode {
-        ViewMode::List => {
-            let mut list = widget::Column::new().spacing(2);
-            let dim = |s: String| {
-                common::cell_caption(s).class(cosmic::theme::Text::Custom(|theme| {
-                    cosmic::iced::widget::text::Style {
-                        color: Some(theme.cosmic().palette.neutral_7.into()),
-                        ..Default::default()
-                    }
-                }))
-            };
-
-            for (index, artist) in artists.iter().enumerate() {
-                let avatar =
-                    common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 52.0);
-
-                let albums = artist.album_count();
-                let tracks = artist.track_count();
-                let duration: u64 = artist
-                    .albums
-                    .iter()
-                    .map(|a| a.total_duration().as_secs())
-                    .sum();
-
-                let info = common::cell_text(artist.name.as_str()).font(cosmic::font::semibold());
-
-                let row = widget::button::custom(
-                    widget::Row::new()
-                        .push(avatar)
-                        .push(
-                            widget::container(common::clipped_cell(info.into()))
-                                .width(Length::FillPortion(5)),
-                        )
-                        .push(
-                            widget::container(dim(format!(
-                                "{albums} album{}",
-                                if albums == 1 { "" } else { "s" }
-                            )))
-                            .width(80)
-                            .align_x(Horizontal::Right),
-                        )
-                        .push(
-                            widget::container(dim(format!(
-                                "{tracks} track{}",
-                                if tracks == 1 { "" } else { "s" }
-                            )))
-                            .width(80)
-                            .align_x(Horizontal::Right),
-                        )
-                        .push(
-                            widget::container(dim(common::format_duration_coarse(duration)))
-                                .width(64)
-                                .align_x(Horizontal::Right),
-                        )
-                        .push(widget::icon::from_name("go-next-symbolic").size(16))
-                        .spacing(16)
-                        .height(Length::Fill)
-                        .align_y(Alignment::Center)
-                        .padding([0, 12]),
-                )
-                .on_press(ArtistMessage::SelectArtist(index))
-                .width(Length::Fill)
-                .height(Length::Fixed(68.0))
-                .padding(0)
-                .class(list_row_button_class(false));
-
-                list = list.push(row);
-            }
-
-            let spacing = cosmic::theme::active().cosmic().spacing;
-            widget::scrollable(
-                widget::container(list)
-                    .padding([
-                        spacing.space_s,
-                        spacing.space_m + 16,
-                        spacing.space_m,
-                        spacing.space_m,
-                    ])
-                    .width(Length::Fill),
-            )
-            .height(Length::Fill)
-            .into()
-        }
-        ViewMode::Grid => common::fluid_card_grid(
+        ViewMode::List => common::virtual_list(
+            artists.len(),
+            LIST_ROW_HEIGHT,
+            common::Scroll {
+                area: common::ScrollArea::ArtistsList,
+                offset: scroll.get(common::ScrollArea::ArtistsList),
+                on_scroll: ArtistMessage::Scrolled,
+            },
+            move |index| list_row(index, &artists[index], artist_photos),
+        ),
+        ViewMode::Grid => common::fluid_card_grid_virtual(
             artists.len(),
             CARD_WIDTH + 2.0 * CARD_PADDING,
             CARD_MAX_WIDTH + 2.0 * CARD_PADDING,
+            common::square_card_height(CARD_LABEL_HEIGHT),
+            common::Scroll {
+                area: common::ScrollArea::ArtistsGrid,
+                offset: scroll.get(common::ScrollArea::ArtistsGrid),
+                on_scroll: ArtistMessage::Scrolled,
+            },
             move |index, outer| {
                 let artist = &artists[index];
                 let art_size = outer - 2.0 * CARD_PADDING;
@@ -183,6 +123,74 @@ pub fn artists_view<'a>(
     };
 
     widget::Column::new().push(header).push(content).into()
+}
+
+/// Fixed height of an artists-list row.
+const LIST_ROW_HEIGHT: f32 = 68.0;
+
+/// One fixed-height row of the artists list (`index` is the artist's
+/// position in the slice handed to [`artists_view`]).
+fn list_row<'a>(
+    index: usize,
+    artist: &'a Artist,
+    artist_photos: &'a std::collections::HashMap<String, widget::image::Handle>,
+) -> cosmic::Element<'a, ArtistMessage> {
+    let dim = |s: String| {
+        common::cell_caption(s).class(cosmic::theme::Text::Custom(|theme| {
+            cosmic::iced::widget::text::Style {
+                color: Some(theme.cosmic().palette.neutral_7.into()),
+                ..Default::default()
+            }
+        }))
+    };
+
+    let avatar = common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 52.0);
+
+    let albums = artist.album_count();
+    let tracks = artist.track_count();
+    let duration = artist.total_secs;
+
+    let info = common::cell_text(artist.name.as_str()).font(cosmic::font::semibold());
+
+    widget::button::custom(
+        widget::Row::new()
+            .push(avatar)
+            .push(
+                widget::container(common::clipped_cell(info.into())).width(Length::FillPortion(5)),
+            )
+            .push(
+                widget::container(dim(format!(
+                    "{albums} album{}",
+                    if albums == 1 { "" } else { "s" }
+                )))
+                .width(80)
+                .align_x(Horizontal::Right),
+            )
+            .push(
+                widget::container(dim(format!(
+                    "{tracks} track{}",
+                    if tracks == 1 { "" } else { "s" }
+                )))
+                .width(80)
+                .align_x(Horizontal::Right),
+            )
+            .push(
+                widget::container(dim(common::format_duration_coarse(duration)))
+                    .width(64)
+                    .align_x(Horizontal::Right),
+            )
+            .push(widget::icon::from_name("go-next-symbolic").size(16))
+            .spacing(16)
+            .height(Length::Fill)
+            .align_y(Alignment::Center)
+            .padding([0, 12]),
+    )
+    .on_press(ArtistMessage::SelectArtist(index))
+    .width(Length::Fill)
+    .height(Length::Fixed(LIST_ROW_HEIGHT))
+    .padding(0)
+    .class(list_row_button_class(false))
+    .into()
 }
 
 /// Render the detail view for a selected artist.
@@ -228,13 +236,12 @@ pub fn artist_detail_view<'a>(
         content = content.push(bio_block(bio, bio_expanded));
     }
     for (album_idx, album) in artist.albums.iter().enumerate() {
-        let key = CoverArt::album_key(&artist.name, &album.name);
         let open_album = ArtistMessage::Navigate(crate::views::Route::Album {
             artist: artist.name.clone(),
             album: album.name.clone(),
         });
         let album_art: cosmic::Element<'_, ArtistMessage> =
-            if let Some(handle) = cover_images.get(&key) {
+            if let Some(handle) = cover_images.get(&album.cover_key) {
                 let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
                 widget::button::custom(common::cover_art(handle, 64.0, radius, true))
                     .padding(0)
@@ -270,7 +277,7 @@ pub fn artist_detail_view<'a>(
             )
             .push(widget::tooltip(
                 widget::button::icon(widget::icon::from_name("go-next-symbolic").size(16))
-                    .on_press(ArtistMessage::PlayNext(album.tracks.clone())),
+                    .on_press(ArtistMessage::PlayNext(artist_index, album_idx, None)),
                 widget::text::caption(fl!("queue-play-next")),
                 widget::tooltip::Position::Top,
             ))
@@ -278,7 +285,7 @@ pub fn artist_detail_view<'a>(
                 widget::button::icon(
                     widget::icon::from_name("view-list-ordered-symbolic").size(16),
                 )
-                .on_press(ArtistMessage::AddToQueue(album.tracks.clone())),
+                .on_press(ArtistMessage::AddToQueue(artist_index, album_idx, None)),
                 widget::text::caption(fl!("queue-add")),
                 widget::tooltip::Position::Top,
             ))
@@ -317,8 +324,8 @@ pub fn artist_detail_view<'a>(
                     .with_favorite(ArtistMessage::ToggleFavorite(track_id))
                     .with_rating(move |r| ArtistMessage::SetRating(rating_track_id.clone(), r))
                     .with_queue_actions(
-                        ArtistMessage::PlayNext(vec![track.clone()]),
-                        ArtistMessage::AddToQueue(vec![track.clone()]),
+                        ArtistMessage::PlayNext(artist_index, album_idx, Some(track_idx)),
+                        ArtistMessage::AddToQueue(artist_index, album_idx, Some(track_idx)),
                     )
                     // Show the artist under the title only for guest /
                     // compilation tracks, where it differs from this page.

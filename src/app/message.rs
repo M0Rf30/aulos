@@ -39,6 +39,27 @@ pub enum Message {
     // Library search
     /// The library search query changed (live filter as you type).
     LibrarySearchChanged(String),
+    /// Debounce timer for `LibrarySearchChanged`; carries the generation
+    /// it was scheduled for (ignored if a newer keystroke arrived).
+    LibrarySearchDebounced(u64),
+    /// Result of a favourite toggle dispatched off the UI thread.
+    /// `optimistic` is the state already applied locally.
+    FavoriteToggled {
+        track_id: String,
+        optimistic: bool,
+        result: Result<bool, String>,
+    },
+    /// Result of a rating change; `previous` is restored on error.
+    RatingSet {
+        track_id: String,
+        previous: Option<u8>,
+        result: Result<(), String>,
+    },
+    /// Result of a provider playlist mutation (add/create/delete/rename).
+    PlaylistOpDone {
+        op: PlaylistOp,
+        result: Result<(), String>,
+    },
     /// Toggle the header search input on/off.
     ToggleLibrarySearch,
     /// Clear the search query and deactivate the search input (Esc / clear icon).
@@ -61,8 +82,11 @@ pub enum Message {
         albums: Vec<Album>,
         artists: Vec<Artist>,
         cover_images: HashMap<String, widget::icon::Handle>,
-        /// Raw cover art bytes for blur processing.
-        cover_art_bytes: HashMap<String, Vec<u8>>,
+        /// Content fingerprint of each album's cover (see
+        /// `helpers::cover_fingerprint`), used to keep an unchanged cover's
+        /// existing handle on refresh. The full-size bytes are deliberately
+        /// not carried: they are loaded lazily for the album that needs them.
+        cover_fingerprints: HashMap<String, u64>,
     },
     /// Filesystem watcher detected changes in music directories.
     /// Contains the deduplicated list of changed paths after debounce.
@@ -75,14 +99,22 @@ pub enum Message {
         provider_id: String,
         albums: Vec<Album>,
         cover_images: HashMap<String, widget::icon::Handle>,
-        /// Raw cover art bytes for blur processing.
-        cover_art_bytes: HashMap<String, Vec<u8>>,
+        /// Content fingerprint of each album's cover (see
+        /// `helpers::cover_fingerprint`), used to keep an unchanged cover's
+        /// existing handle on refresh. The full-size bytes are deliberately
+        /// not carried: they are loaded lazily for the album that needs them.
+        cover_fingerprints: HashMap<String, u64>,
     },
     /// Signals that incremental loading is complete.
     LibraryLoadComplete {
         generation: u64,
         provider_id: String,
     },
+    /// Full-size cover bytes for `key` were loaded on demand (blur, detail
+    /// hero, notification); `None` when the album has no art.
+    CoverBytesLoaded(String, Option<Vec<u8>>),
+    /// Startup keyring check finished; the config changes it wants applied.
+    CredentialsChecked(Vec<super::init::CredentialUpdate>),
 
     // Player transport
     TogglePlayback,
@@ -123,6 +155,14 @@ pub enum Message {
     PlayNext(Vec<Track>),
     /// Append tracks to the end of the queue.
     AddToQueue(Vec<Track>),
+    /// "Play next" (`next`) or "Add to queue" for tracks named by index;
+    /// resolved in `update` so views never clone track lists.
+    QueueFrom {
+        source: super::queue_source::QueueSource,
+        next: bool,
+    },
+    /// A virtualized album/artist/genre grid or list scrolled.
+    GridScrolled(crate::views::common::ScrollArea, f32),
 
     // Track selection
     PlayTrackIndex(usize),
@@ -214,7 +254,11 @@ pub enum Message {
     /// Genres have been loaded from the provider.
     GenresLoaded(Vec<String>),
     /// Genre tracks have been loaded.
-    GenreTracksLoaded(Vec<Track>),
+    GenreTracksLoaded {
+        /// Genre index the load was issued for; stale results are dropped.
+        idx: usize,
+        tracks: Vec<Track>,
+    },
 
     // Folders view
     /// Messages from the folder browse view (navigation, playback,
@@ -480,8 +524,15 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::Navigate(route) => Message::Navigate(route),
             albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
             albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
-            albums::AlbumMessage::PlayNext(tracks) => Message::PlayNext(tracks),
-            albums::AlbumMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
+            albums::AlbumMessage::PlayNext(album, track) => Message::QueueFrom {
+                source: super::queue_source::QueueSource::Album { album, track },
+                next: true,
+            },
+            albums::AlbumMessage::AddToQueue(album, track) => Message::QueueFrom {
+                source: super::queue_source::QueueSource::Album { album, track },
+                next: false,
+            },
+            albums::AlbumMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
             albums::AlbumMessage::Filter(f) => Message::AlbumFilter(f),
         }
     }
@@ -499,9 +550,33 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
             artists::ArtistMessage::Navigate(route) => Message::Navigate(route),
             artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
-            artists::ArtistMessage::PlayNext(tracks) => Message::PlayNext(tracks),
-            artists::ArtistMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
+            artists::ArtistMessage::PlayNext(artist, album, track) => Message::QueueFrom {
+                source: super::queue_source::QueueSource::ArtistAlbum {
+                    artist,
+                    album,
+                    track,
+                },
+                next: true,
+            },
+            artists::ArtistMessage::AddToQueue(artist, album, track) => Message::QueueFrom {
+                source: super::queue_source::QueueSource::ArtistAlbum {
+                    artist,
+                    album,
+                    track,
+                },
+                next: false,
+            },
+            artists::ArtistMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
             artists::ArtistMessage::ToggleBioExpanded => Message::ToggleArtistBioExpanded,
         }
     }
+}
+
+/// Which provider playlist mutation a `Message::PlaylistOpDone` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistOp {
+    AddTrack,
+    Create,
+    Delete,
+    Rename,
 }

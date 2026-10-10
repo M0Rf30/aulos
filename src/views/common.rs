@@ -735,6 +735,123 @@ pub fn grid_scale() -> f32 {
     f32::from_bits(GRID_SCALE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Identifies one virtualized card grid / list so each keeps its own scroll
+/// offset (see [`ScrollOffsets`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScrollArea {
+    AlbumsGrid,
+    AlbumsList,
+    ArtistsGrid,
+    ArtistsList,
+    GenresGrid,
+    GenresList,
+    HomeDecade,
+}
+
+impl ScrollArea {
+    /// Stable widget id of this area's scrollable, so the app can restore
+    /// its position with `scrollable::scroll_to` after the page remounts.
+    pub fn id(self) -> widget::Id {
+        widget::Id::new(match self {
+            ScrollArea::AlbumsGrid => "aulos-scroll-albums-grid",
+            ScrollArea::AlbumsList => "aulos-scroll-albums-list",
+            ScrollArea::ArtistsGrid => "aulos-scroll-artists-grid",
+            ScrollArea::ArtistsList => "aulos-scroll-artists-list",
+            ScrollArea::GenresGrid => "aulos-scroll-genres-grid",
+            ScrollArea::GenresList => "aulos-scroll-genres-list",
+            ScrollArea::HomeDecade => "aulos-scroll-home-decade",
+        })
+    }
+}
+
+/// Widget id of the (virtualized) Songs list scrollable.
+pub fn songs_scroll_id() -> widget::Id {
+    widget::Id::new("aulos-scroll-songs")
+}
+
+/// Last reported vertical scroll offset of every virtualized grid/list,
+/// kept in app state so `view()` can build only the rows on screen.
+#[derive(Debug, Default, Clone)]
+pub struct ScrollOffsets(std::collections::HashMap<ScrollArea, f32>);
+
+impl ScrollOffsets {
+    pub fn get(&self, area: ScrollArea) -> f32 {
+        self.0.get(&area).copied().unwrap_or(0.0)
+    }
+
+    pub fn set(&mut self, area: ScrollArea, offset: f32) {
+        self.0.insert(area, offset.max(0.0));
+    }
+
+    /// Every area with its remembered offset.
+    pub fn iter(&self) -> impl Iterator<Item = (ScrollArea, f32)> + '_ {
+        self.0.iter().map(|(a, o)| (*a, *o))
+    }
+}
+
+/// Scroll tracking handed to a virtualized grid/list: which area it is, the
+/// stored offset, and the message constructor reporting new offsets.
+pub struct Scroll<M> {
+    pub area: ScrollArea,
+    pub offset: f32,
+    pub on_scroll: fn(ScrollArea, f32) -> M,
+}
+
+impl<M> Clone for Scroll<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for Scroll<M> {}
+
+/// Extra rows built above and below the viewport so fast scrolling never
+/// reveals a blank edge before the next view rebuild.
+const VIRTUAL_OVERSCAN_ROWS: usize = 2;
+
+/// Vertical gap between rows of a [`virtual_list`].
+const LIST_ROW_SPACING: f32 = 2.0;
+
+/// Gap between the art tile and label block of a [`grid_card`].
+const GRID_CARD_SPACING: f32 = 8.0;
+
+/// Half-open range of row indices to build for a `viewport_height`-tall
+/// area scrolled to `offset`, out of `rows` uniform rows of `stride` px.
+/// `lead` is the fixed space above the first row (container padding); a
+/// stale `offset` (left over from a longer list) is clamped.
+pub fn visible_range(
+    offset: f32,
+    lead: f32,
+    viewport_height: f32,
+    rows: usize,
+    stride: f32,
+    overscan: usize,
+) -> std::ops::Range<usize> {
+    if rows == 0 || stride <= 0.0 {
+        return 0..0;
+    }
+    let max_offset = (rows as f32 * stride - viewport_height).max(0.0);
+    let top = (offset - lead).clamp(0.0, max_offset);
+    let first = ((top / stride).floor() as usize).saturating_sub(overscan);
+    let last = (((top + viewport_height) / stride).ceil() as usize + overscan).min(rows);
+    first.min(last)..last
+}
+
+/// Fixed-height blank block standing in for `rows` unbuilt rows.
+fn row_spacer<'a, M: 'a>(rows: usize, stride: f32) -> cosmic::Element<'a, M> {
+    widget::Space::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(rows as f32 * stride))
+        .into()
+}
+
+/// Card-height function for [`fluid_card_grid`] of a [`grid_card`]: a
+/// square art tile (the card's outer width, since the card button's
+/// padding stays inside it) above a `label_height` label block.
+pub fn square_card_height(label_height: f32) -> impl Fn(f32) -> f32 + Copy + 'static {
+    move |outer_width| outer_width + GRID_CARD_SPACING + label_height
+}
+
 /// Scrollable card grid that fills the available width exactly.
 ///
 /// Fits as many columns as possible at `min_card` (outer card width,
@@ -744,11 +861,56 @@ pub fn grid_scale() -> f32 {
 /// window resizes. The last row stays left-aligned with the rows above it.
 ///
 /// `make_card(index, card_width)` builds card `index` at the given outer
-/// width.
+/// width. Every card is built; for large collections use
+/// [`fluid_card_grid_virtual`].
 pub fn fluid_card_grid<'a, M: 'a>(
     count: usize,
     min_card: f32,
     max_card: f32,
+    make_card: impl Fn(usize, f32) -> cosmic::Element<'a, M> + 'a,
+) -> cosmic::Element<'a, M> {
+    card_grid(
+        count,
+        min_card,
+        max_card,
+        None::<fn(f32) -> f32>,
+        None,
+        make_card,
+    )
+}
+
+/// [`fluid_card_grid`] that only builds the rows on screen.
+///
+/// Every card must be exactly `card_height(card_width)` tall; that fixed
+/// row height lets the grid compute the visible rows arithmetically from
+/// the scroll offset in `scroll` (reported through `scroll.on_scroll` and
+/// kept in app state). Only the rows intersecting the viewport (plus
+/// overscan) are built, with fixed-height spacers for the rest, so a
+/// rebuild costs the screen, not the library.
+pub fn fluid_card_grid_virtual<'a, M: 'a>(
+    count: usize,
+    min_card: f32,
+    max_card: f32,
+    card_height: impl Fn(f32) -> f32 + 'a,
+    scroll: Scroll<M>,
+    make_card: impl Fn(usize, f32) -> cosmic::Element<'a, M> + 'a,
+) -> cosmic::Element<'a, M> {
+    card_grid(
+        count,
+        min_card,
+        max_card,
+        Some(card_height),
+        Some(scroll),
+        make_card,
+    )
+}
+
+fn card_grid<'a, M: 'a>(
+    count: usize,
+    min_card: f32,
+    max_card: f32,
+    card_height: Option<impl Fn(f32) -> f32 + 'a>,
+    scroll: Option<Scroll<M>>,
     make_card: impl Fn(usize, f32) -> cosmic::Element<'a, M> + 'a,
 ) -> cosmic::Element<'a, M> {
     // User-chosen card size (Settings / header zoom slider).
@@ -761,9 +923,10 @@ pub fn fluid_card_grid<'a, M: 'a>(
         let avail = (size.width - 2.0 * pad - GRID_SCROLLBAR_CLEARANCE).max(min_card);
         let columns = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
         let card = ((avail - gap * (columns - 1) as f32) / columns as f32).min(max_card);
+        let rows = count.div_ceil(columns);
 
-        let mut grid = widget::Column::new().spacing(gap);
-        for start in (0..count).step_by(columns) {
+        let build_row = |row_index: usize| {
+            let start = row_index * columns;
             let mut row = widget::Row::new().spacing(gap);
             for index in start..(start + columns).min(count) {
                 row = row.push(
@@ -772,19 +935,114 @@ pub fn fluid_card_grid<'a, M: 'a>(
                         .align_x(Horizontal::Center),
                 );
             }
-            grid = grid.push(row);
+            row
+        };
+
+        let mut grid = widget::Column::new();
+        let mut bottom = pad;
+        match (&card_height, scroll) {
+            (Some(card_height), Some(scroll)) => {
+                // Row stride = card height + the gap below it; the gap is
+                // baked into each row's fixed height so spacer math is exact.
+                let stride = card_height(card) + gap;
+                let range = visible_range(
+                    scroll.offset,
+                    pad,
+                    size.height,
+                    rows,
+                    stride,
+                    VIRTUAL_OVERSCAN_ROWS,
+                );
+                if range.start > 0 {
+                    grid = grid.push(row_spacer(range.start, stride));
+                }
+                for row_index in range.clone() {
+                    grid = grid.push(
+                        widget::container(build_row(row_index)).height(Length::Fixed(stride)),
+                    );
+                }
+                if range.end < rows {
+                    grid = grid.push(row_spacer(rows - range.end, stride));
+                }
+                // The last row's own gap already adds `gap` below.
+                bottom = (pad - gap).max(0.0);
+            }
+            _ => {
+                grid = grid.spacing(gap);
+                for row_index in 0..rows {
+                    grid = grid.push(build_row(row_index));
+                }
+            }
         }
 
-        widget::scrollable(
+        let mut scrollable = widget::scrollable(
             widget::container(grid)
                 .padding(cosmic::iced::Padding {
                     top: pad,
                     right: pad + GRID_SCROLLBAR_CLEARANCE,
-                    bottom: pad,
+                    bottom,
                     left: pad,
                 })
                 .width(Length::Fill),
         )
+        .height(Length::Fill);
+        if let (Some(_), Some(s)) = (&card_height, scroll) {
+            scrollable = scrollable
+                .id(s.area.id())
+                .on_scroll(move |viewport| (s.on_scroll)(s.area, viewport.absolute_offset().y));
+        }
+        scrollable.into()
+    })
+    .into()
+}
+
+/// Scrollable list of uniform rows (`row_height` tall, 2 px apart) that
+/// builds only the rows intersecting the viewport (plus overscan), with
+/// fixed-height spacers for the rest — the list counterpart of
+/// [`fluid_card_grid`]. `make_row(index)` must produce a row exactly
+/// `row_height` tall.
+pub fn virtual_list<'a, M: 'a>(
+    count: usize,
+    row_height: f32,
+    scroll: Scroll<M>,
+    make_row: impl Fn(usize) -> cosmic::Element<'a, M> + 'a,
+) -> cosmic::Element<'a, M> {
+    widget::responsive(move |size| {
+        let spacing = cosmic::theme::active().cosmic().spacing;
+        let top = f32::from(spacing.space_s);
+        let stride = row_height + LIST_ROW_SPACING;
+        let range = visible_range(
+            scroll.offset,
+            top,
+            size.height,
+            count,
+            stride,
+            VIRTUAL_OVERSCAN_ROWS,
+        );
+
+        let mut list = widget::Column::new();
+        if range.start > 0 {
+            list = list.push(row_spacer(range.start, stride));
+        }
+        for index in range.clone() {
+            list = list.push(widget::container(make_row(index)).height(Length::Fixed(stride)));
+        }
+        if range.end < count {
+            list = list.push(row_spacer(count - range.end, stride));
+        }
+
+        widget::scrollable(
+            widget::container(list)
+                .padding(cosmic::iced::Padding {
+                    top,
+                    right: f32::from(spacing.space_m) + 16.0,
+                    bottom: (f32::from(spacing.space_m) - LIST_ROW_SPACING).max(0.0),
+                    left: f32::from(spacing.space_m),
+                })
+                .width(Length::Fill),
+        )
+        .id(scroll.area.id())
+        .on_scroll(move |viewport| (scroll.on_scroll)(scroll.area, viewport.absolute_offset().y))
         .height(Length::Fill)
         .into()
     })
@@ -885,7 +1143,7 @@ pub fn grid_card<'a, M: 'a>(
                 .align_y(Vertical::Center),
         )
         .push(label_block)
-        .spacing(8)
+        .spacing(GRID_CARD_SPACING)
         .into()
 }
 
@@ -918,7 +1176,10 @@ pub fn add_to_playlist_button<'a, M: 'static + Clone>(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, format_duration_coarse, truncate_str};
+    use super::{
+        ScrollArea, ScrollOffsets, format_duration, format_duration_coarse, truncate_str,
+        visible_range,
+    };
 
     #[test]
     fn format_duration_sub_minute() {
@@ -1002,5 +1263,53 @@ mod tests {
         let result = truncate_str(accented, 5);
         assert!(result.ends_with('…'));
         assert!(result.chars().count() <= 5);
+    }
+
+    #[test]
+    fn visible_range_at_top_covers_viewport_plus_overscan() {
+        // 10 rows of 100px fit in 1000px; +2 overscan below, none above.
+        assert_eq!(visible_range(0.0, 0.0, 1000.0, 500, 100.0, 2), 0..12);
+    }
+
+    #[test]
+    fn visible_range_mid_list_and_lead_padding() {
+        assert_eq!(visible_range(5000.0, 0.0, 1000.0, 500, 100.0, 2), 48..62);
+        // 16px of top padding shifts the window up by less than a row.
+        assert_eq!(visible_range(5016.0, 16.0, 1000.0, 500, 100.0, 2), 48..62);
+        // Scrolled within the lead padding: same as the top.
+        assert_eq!(visible_range(10.0, 16.0, 1000.0, 500, 100.0, 2), 0..12);
+    }
+
+    #[test]
+    fn visible_range_partial_rows_are_included() {
+        // Viewport 250..1250 touches rows 2..=12 (13 rows end exclusive).
+        assert_eq!(visible_range(250.0, 0.0, 1000.0, 500, 100.0, 0), 2..13);
+    }
+
+    #[test]
+    fn visible_range_clamps_stale_offset_after_list_shrinks() {
+        // Offset left over from a long list, now only 5 rows.
+        assert_eq!(visible_range(50_000.0, 0.0, 1000.0, 5, 100.0, 2), 0..5);
+        // Shrunk to 30 rows: pinned to the end, never past it.
+        let r = visible_range(50_000.0, 0.0, 1000.0, 30, 100.0, 2);
+        assert_eq!(r.end, 30);
+        assert!(r.start <= 20 && r.start >= 16);
+    }
+
+    #[test]
+    fn visible_range_empty_and_degenerate() {
+        assert_eq!(visible_range(0.0, 0.0, 500.0, 0, 100.0, 2), 0..0);
+        assert_eq!(visible_range(0.0, 0.0, 500.0, 10, 0.0, 2), 0..0);
+    }
+
+    #[test]
+    fn scroll_offsets_default_to_zero_and_are_per_area() {
+        let mut offsets = ScrollOffsets::default();
+        assert_eq!(offsets.get(ScrollArea::AlbumsGrid), 0.0);
+        offsets.set(ScrollArea::AlbumsGrid, 120.0);
+        offsets.set(ScrollArea::ArtistsList, -5.0);
+        assert_eq!(offsets.get(ScrollArea::AlbumsGrid), 120.0);
+        assert_eq!(offsets.get(ScrollArea::AlbumsList), 0.0);
+        assert_eq!(offsets.get(ScrollArea::ArtistsList), 0.0);
     }
 }
