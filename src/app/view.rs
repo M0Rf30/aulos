@@ -1149,6 +1149,10 @@ impl AppModel {
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::LoadVizPreset(path) => Message::LoadVizPreset(path),
             #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::PresetListScrolled(offset) => {
+                Message::PresetListScrolled(offset)
+            }
+            #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::SetVizLocked(locked) => Message::SetVizLocked(locked),
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::SetVizBeatSensitivity(v) => {
@@ -1283,13 +1287,17 @@ impl AppModel {
                 #[cfg(feature = "visualizer")]
                 &self.viz_preset_entries,
                 #[cfg(feature = "visualizer")]
+                self.viz_presets_scanned,
+                #[cfg(feature = "visualizer")]
                 &self.viz_preset_search,
+                #[cfg(feature = "visualizer")]
+                self.viz_preset_scroll,
                 #[cfg(feature = "visualizer")]
                 self.viz_locked,
                 #[cfg(feature = "visualizer")]
                 self.viz_beat_sensitivity,
                 #[cfg(feature = "visualizer")]
-                self.viz_current_preset_name.as_deref(),
+                self.viz_current_preset.as_deref(),
             )
             .map(map_now_playing_msg);
 

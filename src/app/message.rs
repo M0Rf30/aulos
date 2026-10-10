@@ -435,10 +435,13 @@ pub enum Message {
     /// Preset browser search query changed.
     #[cfg(feature = "visualizer")]
     PresetSearchInput(String),
-    /// Load a specific preset file, bypassing the playlist, with a smooth
-    /// transition.
+    /// Load a specific preset file outside the shuffled rotation, with a
+    /// smooth transition.
     #[cfg(feature = "visualizer")]
     LoadVizPreset(PathBuf),
+    /// The preset browser list scrolled to this vertical offset (px).
+    #[cfg(feature = "visualizer")]
+    PresetListScrolled(f32),
     /// Lock/unlock automatic preset transitions.
     #[cfg(feature = "visualizer")]
     SetVizLocked(bool),

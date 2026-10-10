@@ -696,10 +696,12 @@ pub fn expanded_now_playing<'a>(
     #[cfg(feature = "visualizer")] viz_hud_visible: bool,
     #[cfg(feature = "visualizer")] viz_browser_open: bool,
     #[cfg(feature = "visualizer")] viz_preset_entries: &'a [super::visualizer::PresetEntry],
+    #[cfg(feature = "visualizer")] viz_presets_scanned: bool,
     #[cfg(feature = "visualizer")] viz_preset_search: &'a str,
+    #[cfg(feature = "visualizer")] viz_preset_scroll: f32,
     #[cfg(feature = "visualizer")] viz_locked: bool,
     #[cfg(feature = "visualizer")] viz_beat_sensitivity: f32,
-    #[cfg(feature = "visualizer")] viz_current_preset_name: Option<&'a str>,
+    #[cfg(feature = "visualizer")] viz_current_preset: Option<&'a std::path::Path>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let _ = expand_progress;
 
@@ -1278,8 +1280,10 @@ pub fn expanded_now_playing<'a>(
         if visualizer_active && viz_browser_open {
             stack_widget = stack_widget.push(super::preset_browser::preset_browser_overlay(
                 viz_preset_entries,
+                viz_presets_scanned,
                 viz_preset_search,
-                viz_current_preset_name,
+                viz_preset_scroll,
+                viz_current_preset,
                 viz_locked,
                 viz_beat_sensitivity,
             ));

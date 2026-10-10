@@ -2089,14 +2089,13 @@ impl AppModel {
                 // This message just triggers a view redraw so the Shader
                 // widget picks them up in its next prepare() call.
 
-                // Resync the UI-local current-preset name from whatever
-                // the render thread most recently set (see
-                // `viz_current_preset_shared`'s doc comment). Overwrites
-                // any optimistic value `LoadVizPreset` already set with
-                // the render thread's own value — they converge within a
-                // frame either way.
-                if let Ok(name) = self.viz_current_preset_shared.lock() {
-                    self.viz_current_preset_name = name.clone();
+                // Resync the UI-local current-preset path from whatever
+                // the render thread most recently put on screen (see
+                // `viz_current_preset_shared`'s doc comment).
+                if let Ok(current) = self.viz_current_preset_shared.lock()
+                    && *current != self.viz_current_preset
+                {
+                    self.viz_current_preset = current.clone();
                 }
 
                 // Decay metadata overlay (~4 seconds at 30 fps = 120 frames).
@@ -2164,35 +2163,44 @@ impl AppModel {
                 self.viz_browser_open = !self.viz_browser_open;
                 if self.viz_browser_open {
                     self.viz_hud_idle_frames = 0;
-                    if !self.viz_presets_scan_started {
-                        self.viz_presets_scan_started = true;
-                        return cosmic::task::future(async move {
-                            let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
-                                dirs::data_dir().map(|d| d.join("projectm").join("presets")),
-                            );
-                            let entries = tokio::task::spawn_blocking(move || {
-                                crate::views::now_playing::visualizer::scan_presets(&dirs)
-                            })
-                            .await
-                            .unwrap_or_default();
-                            cosmic::Action::App(Message::VizPresetsScanned(entries))
-                        });
-                    }
+                    // Rescan on every open: cheap, and picks up presets
+                    // installed since the last one. The list on screen stays
+                    // as is until the result lands.
+                    let scan = cosmic::task::future(async move {
+                        let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
+                            dirs::data_dir().map(|d| d.join("projectm").join("presets")),
+                        );
+                        let entries = tokio::task::spawn_blocking(move || {
+                            crate::views::now_playing::visualizer::scan_presets(&dirs)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        cosmic::Action::App(Message::VizPresetsScanned(entries))
+                    });
+                    return Task::batch([scan, self.scroll_preset_list_to_current()]);
                 }
             }
 
             #[cfg(feature = "visualizer")]
             Message::PresetSearchInput(query) => {
                 self.viz_preset_search = query;
+                // The result list is a different length: show it from the top.
+                self.viz_preset_scroll = 0.0;
+                return cosmic::iced::widget::scrollable::scroll_to(
+                    crate::views::now_playing::preset_browser::list_scroll_id(),
+                    cosmic::iced::widget::scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(0.0),
+                    },
+                );
             }
 
             #[cfg(feature = "visualizer")]
             Message::LoadVizPreset(path) => {
-                // Optimistic: reflect the load immediately so the browser
-                // highlights the new row without waiting on the render
-                // thread's next frame — see `VisualizerFrameReady`.
-                self.viz_current_preset_name =
-                    path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                // Not mirrored into `viz_current_preset` here: the render
+                // thread is the authority and reports the preset only once
+                // it is really on screen, so a failed load never leaves the
+                // browser highlighting something that isn't playing.
                 let _ = self
                     .viz_cmd_tx
                     .send(crate::views::now_playing::visualizer::VizCommand::LoadPreset(path));
@@ -2218,7 +2226,20 @@ impl AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::VizPresetsScanned(entries) => {
+                let first_delivery = self.viz_preset_entries.is_empty();
                 self.viz_preset_entries = entries;
+                self.viz_presets_scanned = true;
+                // The browser may have opened before the list existed, so
+                // there was nothing to scroll to; do it now. Later rescans
+                // leave the user's scroll position alone.
+                if first_delivery && self.viz_browser_open {
+                    return self.scroll_preset_list_to_current();
+                }
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::PresetListScrolled(offset) => {
+                self.viz_preset_scroll = offset.max(0.0);
             }
 
             // -- Playlists view --
@@ -2993,5 +3014,29 @@ impl AppModel {
             tokio::time::sleep(crate::views::now_playing::sheet::DURATION).await;
             cosmic::Action::App(Message::ExpandAnimTick)
         })
+    }
+
+    /// Scrolls the preset browser list so the playing preset (matched by
+    /// path) is centered, or to the top when it isn't in the filtered list.
+    /// `viz_preset_scroll` is set immediately so the first rebuild already
+    /// builds the right window, before the scroll operation lands.
+    #[cfg(feature = "visualizer")]
+    fn scroll_preset_list_to_current(&mut self) -> Task<cosmic::Action<Message>> {
+        use crate::views::now_playing::preset_browser as browser;
+        let rows = browser::build_rows(&self.viz_preset_entries, &self.viz_preset_search);
+        let y = browser::current_row(
+            &rows,
+            &self.viz_preset_entries,
+            self.viz_current_preset.as_deref(),
+        )
+        .map_or(0.0, browser::scroll_offset_for_row);
+        self.viz_preset_scroll = y;
+        cosmic::iced::widget::scrollable::scroll_to(
+            browser::list_scroll_id(),
+            cosmic::iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 }

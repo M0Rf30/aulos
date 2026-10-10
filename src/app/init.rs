@@ -283,11 +283,12 @@ impl AppModel {
             std::sync::mpsc::channel::<crate::views::now_playing::visualizer::VizCommand>();
         #[cfg(feature = "visualizer")]
         let viz_cmd_rx_slot = Arc::new(Mutex::new(Some(viz_cmd_rx)));
-        // Preset name the render thread most recently loaded/switched to;
-        // written there, mirrored into `AppModel::viz_current_preset_name`
+        // Preset file the render thread most recently put on screen;
+        // written there, mirrored into `AppModel::viz_current_preset`
         // on every `VisualizerFrameReady`.
         #[cfg(feature = "visualizer")]
-        let viz_current_preset_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let viz_current_preset_shared: Arc<Mutex<Option<std::path::PathBuf>>> =
+            Arc::new(Mutex::new(None));
 
         let artist_tag_delimiters_input = config.artist_tag_delimiters.join(" | ");
         let music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
@@ -497,15 +498,17 @@ impl AppModel {
             #[cfg(feature = "visualizer")]
             viz_preset_entries: Vec::new(),
             #[cfg(feature = "visualizer")]
-            viz_presets_scan_started: false,
-            #[cfg(feature = "visualizer")]
             viz_preset_search: String::new(),
             #[cfg(feature = "visualizer")]
             viz_locked: false,
             #[cfg(feature = "visualizer")]
             viz_beat_sensitivity: 1.0,
             #[cfg(feature = "visualizer")]
-            viz_current_preset_name: None,
+            viz_current_preset: None,
+            #[cfg(feature = "visualizer")]
+            viz_presets_scanned: false,
+            #[cfg(feature = "visualizer")]
+            viz_preset_scroll: 0.0,
         };
 
         app.rebuild_provider_list();

@@ -135,6 +135,10 @@ console-subscriber = { version = "0.5", optional = true }
 
 # Optional: ProjectM visualizer (behind `visualizer` feature flag)
 projectm = { version = "3.1", optional = true, default-features = false, features = ["static"] }
+# Raw bindings for the one callback `projectm` wraps unsafely: its
+# switch-failed trampoline `unwrap()`s a UTF-8 conversion inside `extern "C"`,
+# which aborts the process on a non-UTF-8 filename or error message.
+projectm-sys = { version = "1", optional = true }
 glutin = { version = "0.32", optional = true }
 gl = { version = "0.14", optional = true }
 # MPD visualizer audio: capture MPD's own PipeWire playback stream (aulos only
@@ -144,7 +148,7 @@ pipewire = { version = "0.10", optional = true }
 [features]
 default = []
 tokio-console = ["dep:console-subscriber"]
-visualizer = ["dep:projectm", "dep:glutin", "dep:gl", "dep:pipewire"]
+visualizer = ["dep:projectm", "dep:projectm-sys", "dep:glutin", "dep:gl", "dep:pipewire"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

@@ -504,12 +504,11 @@ pub struct AppModel {
     viz_cmd_rx_slot: Arc<
         Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
     >,
-    /// Preset name the render thread most recently loaded/switched to.
-    /// `None` after a playlist-driven `NextPreset` switch, since the
-    /// playlist API exposes no way to read back which preset it landed
-    /// on; set again on the next explicit `LoadPreset`.
+    /// Preset file the render thread most recently put on screen — set
+    /// after manual loads, "next", and automatic timer/beat switches alike.
+    /// `None` until the first preset of a render thread is up.
     #[cfg(feature = "visualizer")]
-    viz_current_preset_shared: Arc<Mutex<Option<String>>>,
+    viz_current_preset_shared: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// Opacity of the visualizer metadata overlay (0.0 = hidden, 1.0 = fully visible).
     /// Decays to 0 over ~4 seconds after a track change.
     #[cfg(feature = "visualizer")]
@@ -540,13 +539,10 @@ pub struct AppModel {
     /// Whether the preset browser overlay is currently open.
     #[cfg(feature = "visualizer")]
     viz_browser_open: bool,
-    /// Discovered `.milk` presets, populated lazily on first browser open.
+    /// Discovered `.milk` presets, refreshed by a background scan every time
+    /// the browser opens (so presets installed meanwhile show up).
     #[cfg(feature = "visualizer")]
     viz_preset_entries: Vec<crate::views::now_playing::visualizer::PresetEntry>,
-    /// Set once the background preset scan has been kicked off, so
-    /// reopening the browser doesn't rescan every time.
-    #[cfg(feature = "visualizer")]
-    viz_presets_scan_started: bool,
     /// Live search filter text for the preset browser.
     #[cfg(feature = "visualizer")]
     viz_preset_search: String,
@@ -557,11 +553,20 @@ pub struct AppModel {
     /// Beat-reactivity sensitivity (see `VizCommand::SetBeatSensitivity`).
     #[cfg(feature = "visualizer")]
     viz_beat_sensitivity: f32,
-    /// UI-local mirror of `viz_current_preset_shared`, updated
-    /// optimistically on `LoadVizPreset` and resynced from the render
-    /// thread on every `VisualizerFrameReady`.
+    /// UI-local mirror of `viz_current_preset_shared`, resynced from the
+    /// render thread on every `VisualizerFrameReady`. Never written
+    /// optimistically: the render thread is the only authority on what is
+    /// really playing (a load can fail, and automatic switches replace it).
     #[cfg(feature = "visualizer")]
-    viz_current_preset_name: Option<String>,
+    viz_current_preset: Option<std::path::PathBuf>,
+    /// Whether the background preset scan has delivered its result (an
+    /// empty `viz_preset_entries` before that means "scanning", not "none").
+    #[cfg(feature = "visualizer")]
+    viz_presets_scanned: bool,
+    /// Vertical scroll offset of the preset browser list, driving which
+    /// rows are built (the list is virtualized: thousands of presets).
+    #[cfg(feature = "visualizer")]
+    viz_preset_scroll: f32,
 }
 
 /// Navigation pages.

@@ -131,6 +131,7 @@ impl AppModel {
                     cmd_rx,
                     frame_buf,
                     current_preset,
+                    locked: self.viz_locked,
                 },
                 projectm_render_stream,
             ));
@@ -704,7 +705,10 @@ struct VizRenderKey {
         Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
     >,
     frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
-    current_preset: Arc<Mutex<Option<String>>>,
+    current_preset: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Lock state the UI shows when the subscription starts; a fresh
+    /// renderer is always unlocked, so it is re-applied on startup.
+    locked: bool,
 }
 
 #[cfg(feature = "visualizer")]
@@ -724,6 +728,7 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
     let cmd_rx_slot = Arc::clone(&key.cmd_rx);
     let frame_buf = Arc::clone(&key.frame_buf);
     let current_preset = Arc::clone(&key.current_preset);
+    let initial_locked = key.locked;
     cosmic::iced::stream::channel(
         2,
         move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -749,12 +754,33 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                             }
                         };
 
+                    // A fresh renderer starts unlocked, but the UI may still
+                    // show the lock toggle on from before the visualizer was
+                    // collapsed/re-opened: re-apply it. Also forget the
+                    // previous renderer's preset until this one reports its own.
+                    renderer.set_locked(initial_locked);
+                    if let Ok(mut shared) = current_preset.lock() {
+                        *shared = None;
+                    }
+
                     // Check out the command receiver for this thread's
                     // lifetime; handed back below so a future activation
                     // (visualizer toggled off then on again) can check it
                     // out in turn — the channel itself is only ever
                     // created once, in `AppModel::init`.
-                    let mut cmd_rx = cmd_rx_slot.lock().ok().and_then(|mut slot| slot.take());
+                    // Quick collapse/re-expand can start this thread before
+                    // the previous one has handed the receiver back (it only
+                    // notices its frame channel closed on its next frame), so
+                    // wait briefly rather than running with no command
+                    // channel at all.
+                    let mut cmd_rx = None;
+                    for _ in 0..50 {
+                        cmd_rx = cmd_rx_slot.lock().ok().and_then(|mut slot| slot.take());
+                        if cmd_rx.is_some() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
 
                     // Cursor into the shared PCM ring buffer (see
                     // `PcmBuffer::read_since`). Starting at 0 is safe even
@@ -781,10 +807,14 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                     // it decays toward an idle visualization instead of
                     // replaying the last real window forever.
                     const SILENCE_FRAME_SAMPLES: usize = (44_100 / 30) * 2;
-                    // projectM's own cap on samples per feed — computed
-                    // once (it never changes for a given instance) rather
-                    // than re-querying every frame.
-                    let max_pcm_samples = projectm::core::ProjectM::pcm_get_max_samples() as usize;
+                    // Most PCM worth reading per frame: one whole projectM
+                    // ring window (576 stereo frames). NOT
+                    // `ProjectM::pcm_get_max_samples()` (480 interleaved
+                    // samples = 240 frames): reading only that few made
+                    // projectM analyse a mosaic of 5ms fragments ~33ms
+                    // apart and flatten beat detection. `render_frame`
+                    // splits the window into calls projectm-rs accepts.
+                    let max_pcm_samples = crate::views::now_playing::visualizer::PCM_FEED_SAMPLES;
 
                     loop {
                         // ~30 fps
@@ -796,23 +826,9 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                             use crate::views::now_playing::visualizer::VizCommand;
                             while let Ok(cmd) = rx.try_recv() {
                                 match cmd {
-                                    VizCommand::NextPreset => {
-                                        renderer.next_preset();
-                                        // The playlist API exposes no way to
-                                        // read back which preset it landed
-                                        // on — clear the tracked name.
-                                        if let Ok(mut name) = current_preset.lock() {
-                                            *name = None;
-                                        }
-                                    }
+                                    VizCommand::NextPreset => renderer.next_preset(),
                                     VizCommand::LoadPreset(path) => {
                                         renderer.load_preset(&path);
-                                        let display_name = path
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().into_owned());
-                                        if let Ok(mut name) = current_preset.lock() {
-                                            *name = display_name;
-                                        }
                                     }
                                     VizCommand::SetLocked(locked) => renderer.set_locked(locked),
                                     VizCommand::SetBeatSensitivity(sensitivity) => {
@@ -823,7 +839,7 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                         }
 
                         // Read whatever new PCM has arrived since the last
-                        // frame, capped to what projectM will accept.
+                        // frame, newest `max_pcm_samples` at most.
                         // Empty is normal between callback periods (see
                         // the `last_pcm_at` docs above) — only sustained
                         // silence falls back to explicit zeros below.
@@ -849,6 +865,15 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
 
                         // Render a frame (GL calls, ~3-5ms)
                         let rgba = renderer.render_frame(&pcm_data);
+                        // Publish the preset that is now on screen — covers
+                        // manual loads, "next", and automatic timer/beat
+                        // switches alike (the renderer owns the rotation, so
+                        // it always knows the exact file).
+                        if let Some(path) = renderer.take_current_preset_change()
+                            && let Ok(mut shared) = current_preset.lock()
+                        {
+                            *shared = Some(path);
+                        }
 
                         // Write pixels into the shared frame buffer
                         if let Ok(mut buf) = frame_buf.lock() {

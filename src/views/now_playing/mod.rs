@@ -12,6 +12,8 @@ pub mod compact_bar;
 pub mod expanded_view;
 #[cfg(feature = "visualizer")]
 pub mod preset_browser;
+#[cfg(feature = "visualizer")]
+pub mod preset_playlist;
 pub mod seek_bar;
 pub mod sheet;
 #[cfg(feature = "visualizer")]
@@ -74,10 +76,13 @@ pub enum NowPlayingMessage {
     /// Preset browser search query changed.
     #[cfg(feature = "visualizer")]
     PresetSearchInput(String),
-    /// Load a specific preset file (browser row click), bypassing the
-    /// playlist, with a smooth transition.
+    /// Load a specific preset file (browser row click), outside the
+    /// shuffled rotation, with a smooth transition.
     #[cfg(feature = "visualizer")]
     LoadVizPreset(std::path::PathBuf),
+    /// The preset browser list scrolled to this vertical offset (px).
+    #[cfg(feature = "visualizer")]
+    PresetListScrolled(f32),
     /// Lock/unlock automatic preset transitions.
     #[cfg(feature = "visualizer")]
     SetVizLocked(bool),
