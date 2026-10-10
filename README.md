@@ -6,6 +6,8 @@
 
 **A music player for the COSMIC desktop**
 
+*Aulos: it really pipes the satyr's ass.*
+
 [![CI](https://github.com/M0Rf30/aulos/actions/workflows/ci.yml/badge.svg)](https://github.com/M0Rf30/aulos/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/M0Rf30/aulos)](https://github.com/M0Rf30/aulos/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -131,6 +133,8 @@ The `tokio-console` feature is for debugging the async runtime. It replaces the 
 ## Usage
 
 Start Aulos from your application menu, or from a terminal with `aulos [FILE…]`. Add MPD and Subsonic servers from the provider menu, and change the music folders and everything else in Settings.
+
+On the very first launch Aulos greets you with its intro jingle — a 4-second, 128 kbps MP3 in honour of Winamp's llama — and never again after that.
 
 ### Keyboard shortcuts
 
