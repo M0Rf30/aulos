@@ -12,10 +12,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Correlated subquery: recorded plays of the current `tracks` row.
+const PLAY_COUNT_EXPR: &str = "(SELECT COUNT(*) FROM play_history WHERE track_id = tracks.id)";
+
+/// Unix time of the current track's latest play, `0` if never played.
+const LAST_PLAYED_EXPR: &str =
+    "COALESCE((SELECT MAX(played_at) FROM play_history WHERE track_id = tracks.id), 0)";
+
+/// Whole days since the latest play (never played → time since the epoch).
+const DAYS_SINCE_PLAYED_EXPR: &str = "((CAST(strftime('%s', 'now') AS INTEGER) - \
+     COALESCE((SELECT MAX(played_at) FROM play_history WHERE track_id = tracks.id), 0)) / 86400)";
+
 /// A `tracks` column a rule can filter on, or a synthetic order-by target.
 ///
-/// Every variant maps to a real column (see [`RuleField::column`]) — there
-/// is no `PlayCount`, since `tracks` has no play-count column.
+/// Every variant maps to a real column or a fixed SQL expression (see
+/// [`RuleField::column`]); play-count fields are correlated subqueries over
+/// `play_history`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuleField {
     Title,
@@ -29,11 +41,16 @@ pub enum RuleField {
     DurationSecs,
     Bitrate,
     SampleRate,
+    /// Number of recorded plays (`play_history`).
+    PlayCount,
+    /// Whole days since the last play; a never-played track reads as
+    /// "very many" days, so `> 90` also matches tracks never played.
+    DaysSincePlayed,
 }
 
 impl RuleField {
     /// Every field, in the order dropdowns should list them.
-    pub const ALL: [RuleField; 11] = [
+    pub const ALL: [RuleField; 13] = [
         Self::Title,
         Self::Artist,
         Self::AlbumArtist,
@@ -45,6 +62,8 @@ impl RuleField {
         Self::DurationSecs,
         Self::Bitrate,
         Self::SampleRate,
+        Self::PlayCount,
+        Self::DaysSincePlayed,
     ];
 
     /// The literal `tracks` column (or column expression) this field reads.
@@ -64,6 +83,8 @@ impl RuleField {
             Self::DurationSecs => "(duration_ms / 1000)",
             Self::Bitrate => "bitrate",
             Self::SampleRate => "sample_rate",
+            Self::PlayCount => PLAY_COUNT_EXPR,
+            Self::DaysSincePlayed => DAYS_SINCE_PLAYED_EXPR,
         }
     }
 
@@ -106,11 +127,15 @@ pub enum OrderField {
     DurationSecs,
     Random,
     RecentlyAdded,
+    /// Number of recorded plays (`play_history`).
+    PlayCount,
+    /// Unix time of the most recent play; never-played sorts as `0`.
+    LastPlayed,
 }
 
 impl OrderField {
     /// Every order-by target, in the order dropdowns should list them.
-    pub const ALL: [OrderField; 8] = [
+    pub const ALL: [OrderField; 10] = [
         Self::Title,
         Self::Artist,
         Self::Album,
@@ -119,6 +144,8 @@ impl OrderField {
         Self::DurationSecs,
         Self::Random,
         Self::RecentlyAdded,
+        Self::PlayCount,
+        Self::LastPlayed,
     ];
 
     /// The literal SQL ordering expression for this target — a fixed
@@ -133,6 +160,8 @@ impl OrderField {
             Self::DurationSecs => "duration_ms",
             Self::Random => "RANDOM()",
             Self::RecentlyAdded => "mtime",
+            Self::PlayCount => PLAY_COUNT_EXPR,
+            Self::LastPlayed => LAST_PLAYED_EXPR,
         }
     }
 }
@@ -659,5 +688,98 @@ mod tests {
             .expect("query executes");
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].artist, "Metallica");
+    }
+
+    /// `PlayCount` / `DaysSincePlayed` rules and orderings resolve against
+    /// real `play_history` rows (including never-played tracks).
+    #[test]
+    fn play_count_rules_and_orderings_query_play_history() {
+        fn track(path: &str) -> crate::library::Track {
+            crate::library::Track {
+                id: 0,
+                path: std::path::PathBuf::from(path),
+                title: path.to_string(),
+                artist: "X".into(),
+                album_artist: "X".into(),
+                album: "Y".into(),
+                genre: String::new(),
+                track_number: 0,
+                disc_number: 0,
+                year: 0,
+                duration: std::time::Duration::from_secs(100),
+                bitrate: 0,
+                sample_rate: 0,
+                provider_id: std::sync::Arc::from("local"),
+                source_uri: path.to_string(),
+                is_favorite: false,
+                rating: None,
+                rg_track_gain: None,
+                rg_album_gain: None,
+            }
+        }
+
+        let db = crate::library::LibraryDb::open_memory().expect("open in-memory db");
+        for p in ["/a", "/b", "/c"] {
+            db.upsert_track(&track(p), 0).unwrap();
+        }
+        let id_of = |p: &str| -> i64 {
+            db.smart_playlist_tracks(&base(), None)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.title == p)
+                .unwrap()
+                .id
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // /a: 3 plays, last one just now. /b: 1 play, 200 days ago. /c: never.
+        for _ in 0..3 {
+            db.record_play(id_of("/a"), now).unwrap();
+        }
+        db.record_play(id_of("/b"), now - 200 * 86_400).unwrap();
+
+        let titles = |playlist: &SmartPlaylist| -> Vec<String> {
+            db.smart_playlist_tracks(playlist, None)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.title)
+                .collect()
+        };
+
+        let mut playlist = base();
+        playlist.rules.push(Rule {
+            field: RuleField::PlayCount,
+            op: RuleOp::GreaterThan,
+            value: "1".into(),
+            value2: String::new(),
+        });
+        assert_eq!(titles(&playlist), ["/a"]);
+        assert!(playlist.validate().is_ok());
+
+        playlist.rules[0] = Rule {
+            field: RuleField::PlayCount,
+            op: RuleOp::Is,
+            value: "0".into(),
+            value2: String::new(),
+        };
+        assert_eq!(titles(&playlist), ["/c"]);
+
+        // Not played for > 90 days: the stale track and the never-played one.
+        playlist.rules[0] = Rule {
+            field: RuleField::DaysSincePlayed,
+            op: RuleOp::GreaterThan,
+            value: "90".into(),
+            value2: String::new(),
+        };
+        assert_eq!(titles(&playlist), ["/b", "/c"]);
+
+        playlist.rules.clear();
+        playlist.order_by = OrderField::PlayCount;
+        playlist.order_desc = true;
+        assert_eq!(titles(&playlist), ["/a", "/b", "/c"]);
+        playlist.order_by = OrderField::LastPlayed;
+        assert_eq!(titles(&playlist), ["/a", "/b", "/c"]);
     }
 }

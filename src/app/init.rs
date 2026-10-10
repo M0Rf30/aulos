@@ -33,10 +33,15 @@ impl AppModel {
         let mut nav = nav_bar::Model::default();
 
         nav.insert()
+            .text(fl!("home"))
+            .data::<Page>(Page::Home)
+            .icon(icon::from_name("user-home-symbolic"))
+            .activate();
+
+        nav.insert()
             .text(fl!("albums"))
             .data::<Page>(Page::Albums)
-            .icon(icon::from_name("media-optical-symbolic"))
-            .activate();
+            .icon(icon::from_name("media-optical-symbolic"));
 
         nav.insert()
             .text(fl!("artists"))
@@ -112,6 +117,19 @@ impl AppModel {
 
         if config.experimental_converter {
             insert_convert_nav_entry(&mut nav);
+        }
+
+        // Open on the configured section (Home by default); unknown or
+        // unavailable choices fall back to Home.
+        let start_page =
+            super::startup::resolve_startup_page(&config.startup_page, &config.last_view, |page| {
+                nav.iter().any(|id| nav.data::<Page>(id) == Some(page))
+            });
+        let start_id = nav
+            .iter()
+            .find(|&id| nav.data::<Page>(id) == Some(&start_page));
+        if let Some(id) = start_id {
+            nav.activate(id);
         }
 
         // Tasks 83-84: Migrate plaintext passwords to system keyring.
@@ -283,7 +301,7 @@ impl AppModel {
         let registered_ids: Vec<String> =
             registry.list().into_iter().map(|(id, _, _)| id).collect();
         if let Some(target) = crate::config::resolve_active_provider(
-            config.active_provider.as_deref(),
+            config.startup_provider_choice(),
             &registered_ids,
         ) {
             registry.set_active(&target);
@@ -363,6 +381,7 @@ impl AppModel {
         let viz_current_preset_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let artist_tag_delimiters_input = config.artist_tag_delimiters.join(" | ");
+        let scrobble = crate::online::scrobble::ScrobbleController::new(&config);
 
         let mut app = AppModel {
             core,
@@ -372,6 +391,7 @@ impl AppModel {
             config,
             config_context: config_context.clone(),
             context_page: ContextPage::default(),
+            playback_extras: Default::default(),
             toasts: widget::toaster::Toasts::new(Message::CloseToast),
             registry,
             mpd_providers,
@@ -397,6 +417,7 @@ impl AppModel {
             filtered_playlist_map: Vec::new(),
             filtered_genres: Vec::new(),
             filtered_genre_map: Vec::new(),
+            extras: Default::default(),
             podcasts: Vec::new(),
             podcast_tab: podcasts::PodcastTab::default(),
             podcast_add_open: false,
@@ -446,6 +467,7 @@ impl AppModel {
             pre_mute_volume: None,
             scrobble_now_playing_sent: false,
             scrobble_sent: false,
+            scrobble,
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
@@ -466,6 +488,7 @@ impl AppModel {
             selected_genre: None,
             genre_tracks: Vec::new(),
             folder_state: crate::views::folders::FolderState::default(),
+            home: crate::views::home::HomeState::default(),
             cover_images: HashMap::new(),
             artist_photos: HashMap::new(),
             artist_bios: HashMap::new(),
@@ -565,6 +588,7 @@ impl AppModel {
         };
 
         app.rebuild_provider_list();
+        app.apply_playback_extras_config();
         app.all_presets = app.preset_manager.load_all();
         // Restore active preset name from config
         if !app.config.active_eq_preset_name.is_empty() {
@@ -577,6 +601,17 @@ impl AppModel {
 
         // Surface any provider construction failures collected above as toasts.
         let mut init_tasks = vec![title_cmd, scan_cmd];
+        // A non-Home start page may lazy-load its data (playlists, radio…)
+        // exactly like a sidebar selection would.
+        if start_page != Page::Home {
+            let target = app
+                .nav
+                .iter()
+                .find(|&id| app.nav.data::<Page>(id) == Some(&start_page));
+            if let Some(id) = target {
+                init_tasks.push(app.select_nav(id));
+            }
+        }
         for (name, reason) in subsonic_init_errors {
             init_tasks.push(app.push_toast(widget::toaster::Toast::new(fl!(
                 "toast-provider-connect-failed",

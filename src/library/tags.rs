@@ -68,6 +68,9 @@ pub struct AudioTags {
     pub lyrics: Option<String>,
     pub rg_track_gain: Option<f32>,
     pub rg_album_gain: Option<f32>,
+    /// `true` when the file's compilation flag is set (ID3 `TCMP`, MP4
+    /// `cpil`, Vorbis `COMPILATION=1`).
+    pub compilation: bool,
     pub pictures: Vec<Picture>,
 }
 
@@ -351,6 +354,12 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
             }
             StandardTag::RecordingYear(y) => {
                 recording_year.get_or_insert(*y);
+                continue;
+            }
+            StandardTag::CompilationFlag(flag) => {
+                if *flag {
+                    out.compilation = true;
+                }
                 continue;
             }
             StandardTag::ReplayGainTrackGain(v) => {

@@ -33,8 +33,10 @@ pub enum Shortcut {
     ToggleExpanded,
     /// Toggle the "Up Next" queue drawer.
     ToggleQueue,
+    /// Enter/leave mini-player mode (`Ctrl+M`).
+    ToggleMiniPlayer,
     FocusSearch,
-    /// 1-based page number, matching the digit key pressed (`1`-`8`).
+    /// 1-based page number, matching the digit key pressed (`1`-`9`).
     NavPage(u8),
     Escape,
 }
@@ -58,6 +60,14 @@ pub fn resolve(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
         && matches!(key, Key::Character(c) if c.as_str().eq_ignore_ascii_case("f"));
     if is_ctrl_f {
         return Some(Shortcut::FocusSearch);
+    }
+
+    let is_ctrl_m = modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(key, Key::Character(c) if c.as_str().eq_ignore_ascii_case("m"));
+    if is_ctrl_m {
+        return Some(Shortcut::ToggleMiniPlayer);
     }
 
     // Every other binding is a bare key: reject if any modifier besides
@@ -95,6 +105,7 @@ pub fn resolve(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
             "6" => Some(Shortcut::NavPage(6)),
             "7" => Some(Shortcut::NavPage(7)),
             "8" => Some(Shortcut::NavPage(8)),
+            "9" => Some(Shortcut::NavPage(9)),
             _ => None,
         },
         _ => None,
@@ -123,6 +134,19 @@ mod tests {
         assert_eq!(
             resolve(&Key::Character("f".into()), Modifiers::CTRL),
             Some(Shortcut::FocusSearch)
+        );
+    }
+
+    #[test]
+    fn ctrl_m_toggles_the_mini_player() {
+        assert_eq!(
+            resolve(&Key::Character("m".into()), Modifiers::CTRL),
+            Some(Shortcut::ToggleMiniPlayer)
+        );
+        // Bare `m` stays mute.
+        assert_eq!(
+            resolve(&Key::Character("m".into()), Modifiers::empty()),
+            Some(Shortcut::Mute)
         );
     }
 

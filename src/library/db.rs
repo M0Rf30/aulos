@@ -43,7 +43,7 @@ const SCHEMA_BASE: &str = "
 
 /// The music library database.
 pub struct LibraryDb {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 impl LibraryDb {
@@ -295,6 +295,29 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v7 commit error: {e}"))?;
         }
 
+        if version < 8 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v8 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS play_history (
+                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                     track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                     played_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_play_history_played_at
+                     ON play_history(played_at);
+                 CREATE INDEX IF NOT EXISTS idx_play_history_track
+                     ON play_history(track_id);
+                 PRAGMA user_version=8;",
+            )
+            .map_err(|e| format!("Migration v8 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v8 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -474,11 +497,13 @@ impl LibraryDb {
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             param.iter().map(|p| p.as_ref()).collect();
 
-        let tracks = stmt
+        let mut tracks: Vec<Track> = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("Query error: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
+
+        super::compilations::group_compilations(&mut tracks);
 
         Ok(tracks)
     }
@@ -1159,7 +1184,7 @@ impl LibraryDb {
     }
 
     /// Map a database row to a Track struct.
-    fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+    pub(super) fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         let path_str: String = row.get(1)?;
         Ok(Track {
             id: row.get(0)?,
@@ -1296,8 +1321,44 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='play_history'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn history_migration_upgrades_a_v7_database_without_data_loss() {
+        let conn = Connection::open_in_memory().unwrap();
+        LibraryDb::configure_connection(&conn).unwrap();
+        conn.execute_batch(SCHEMA_BASE).unwrap();
+        let db = LibraryDb { conn };
+        db.run_migration().unwrap();
+        // Rewind to a pre-history (v7) database that already holds a track.
+        db.conn
+            .execute_batch("DROP TABLE play_history; PRAGMA user_version=7;")
+            .unwrap();
+        let track_id = insert_local(&db, Path::new("/tmp/aulos-v7.mp3"));
+
+        db.run_migration().unwrap();
+        db.run_migration().unwrap();
+
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(db.track_count(None), 1);
+        db.record_play(track_id, 1_700_000_000).unwrap();
+        assert_eq!(db.play_count(track_id).unwrap(), 1);
     }
 
     #[test]

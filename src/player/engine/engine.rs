@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::{BitOrder, ChannelDataLayout};
@@ -47,6 +47,7 @@ use super::crossfade;
 use super::decoder::{AudioFormat as DecoderFormat, SymphoniaDecoder};
 use super::dop::DopEncoder;
 use super::dop_output::DopOutput;
+use super::fade::{FadeControl, MAX_FADE_SECS};
 use super::filter::{AudioFilter, VolumeFilter};
 use super::output::{AudioFormat as OutputFormat, CpalOutput};
 use super::resampler::ResamplerQuality;
@@ -424,6 +425,11 @@ struct ThreadContext {
     crossfade_bits: Arc<AtomicU32>,
     next_track: Arc<Mutex<Option<PendingTrack>>>,
     status: Arc<SharedStatus>,
+    /// Fade in/out ramp control shared with the output's device callback.
+    fade: Arc<FadeControl>,
+    /// Set (together with `stop_flag`) when this thread should fade out
+    /// before closing its stream — see `PlaybackEngine::retire_gracefully`.
+    graceful_stop: Arc<AtomicBool>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Arc<Mutex<Option<Arc<std::sync::Mutex<PcmBuffer>>>>>,
 }
@@ -442,6 +448,12 @@ pub struct PlaybackEngine {
     crossfade_bits: Arc<AtomicU32>,
     next_track: Arc<Mutex<Option<PendingTrack>>>,
     status: Arc<SharedStatus>,
+    fade: Arc<FadeControl>,
+    graceful_stop: Arc<AtomicBool>,
+    /// Threads told to fade out and exit that may still be running; joined
+    /// by the next playback thread (or on drop) so `stop()`/`play()` never
+    /// block the UI thread for the duration of a fade.
+    retiring: Vec<thread::JoinHandle<()>>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Arc<Mutex<Option<Arc<std::sync::Mutex<PcmBuffer>>>>>,
 }
@@ -466,6 +478,9 @@ impl PlaybackEngine {
             crossfade_bits: Arc::new(AtomicU32::new(0f32.to_bits())),
             next_track: Arc::new(Mutex::new(None)),
             status: Arc::new(SharedStatus::default()),
+            fade: FadeControl::new(),
+            graceful_stop: Arc::new(AtomicBool::new(false)),
+            retiring: Vec::new(),
             #[cfg(feature = "visualizer")]
             pcm_buffer: Arc::new(Mutex::new(None)),
         }
@@ -481,12 +496,15 @@ impl PlaybackEngine {
             crossfade_bits: self.crossfade_bits.clone(),
             next_track: self.next_track.clone(),
             status: self.status.clone(),
+            fade: self.fade.clone(),
+            graceful_stop: self.graceful_stop.clone(),
             #[cfg(feature = "visualizer")]
             pcm_buffer: self.pcm_buffer.clone(),
         }
     }
 
-    /// Signal the current playback thread to stop and join it. Leaves
+    /// Signal the current playback thread to stop and join it (together
+    /// with any thread still fading out behind it). Leaves
     /// `run_state`/`status` untouched — callers decide what those should
     /// become afterward (a fresh `play()` vs. a real `stop()`).
     fn join_thread(&mut self) {
@@ -495,14 +513,60 @@ impl PlaybackEngine {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+        for handle in self.retiring.drain(..) {
+            let _ = handle.join();
+        }
+    }
+
+    /// Whether a fade-out is worth doing right now: fades are enabled and
+    /// audio is audibly running (not paused/stopped/still opening).
+    fn can_fade_out(&self) -> bool {
+        self.fade.enabled()
+            && self.run_state.load(Ordering::Acquire) == RUN_PLAYING
+            && !self.status.probing.load(Ordering::Acquire)
+            && self.thread.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
+    /// Ask the current thread to fade out and exit WITHOUT waiting for it.
+    /// Returns every handle the caller is now responsible for joining
+    /// (this thread plus earlier retirees).
+    fn retire_gracefully(&mut self) -> Vec<thread::JoinHandle<()>> {
+        self.graceful_stop.store(true, Ordering::Release);
+        self.stop_flag.store(true, Ordering::Release);
+        self.command_tx = None;
+        let mut handles = std::mem::take(&mut self.retiring);
+        if let Some(handle) = self.thread.take() {
+            handles.push(handle);
+        }
+        handles
     }
 
     /// Start playing `source` on a fresh dedicated playback thread,
-    /// replacing (and joining) any previously running one. `replay_gain_db`
-    /// is a precomputed dB adjustment, converted to a linear multiplier
-    /// once here.
+    /// replacing any previously running one. `replay_gain_db` is a
+    /// precomputed dB adjustment, converted to a linear multiplier once
+    /// here.
+    ///
+    /// With fades enabled and audio running, the old thread fades out on
+    /// its own and the new thread waits for it before opening its output,
+    /// so a manual skip is "fade out, then fade in" without blocking the
+    /// caller. Otherwise the old thread is stopped and joined immediately.
     pub fn play(&mut self, source: PlaySource, replay_gain_db: Option<f32>) -> Result<()> {
-        self.join_thread();
+        let prev = if self.can_fade_out() {
+            self.retire_gracefully()
+        } else {
+            self.stop_flag.store(true, Ordering::Release);
+            self.command_tx = None;
+            if let Some(handle) = self.thread.take() {
+                let _ = handle.join();
+            }
+            // Predecessors that are already fading out are not waited for
+            // here; the new thread joins them before it opens its output.
+            std::mem::take(&mut self.retiring)
+        };
+        // Each thread owns its own stop flags: the retired one keeps
+        // seeing `true` while the new one starts from `false`.
+        self.stop_flag = Arc::new(AtomicBool::new(false));
+        self.graceful_stop = Arc::new(AtomicBool::new(false));
 
         *self.next_track.lock() = None;
         self.status.reset_for_play();
@@ -514,23 +578,29 @@ impl PlaybackEngine {
         // network round trip), so it happens on the dedicated playback
         // thread instead — see `PlaySource::open_decoder` / `ThreadStart::Pending`.
         let start = match source {
-            PlaySource::LocalFile(path) => {
-                let decoder = SymphoniaDecoder::open(&path)?;
-                self.status
-                    .duration_nanos
-                    .store(secs_to_nanos(decoder.duration()), Ordering::Release);
-                ThreadStart::Ready(decoder)
-            }
+            PlaySource::LocalFile(path) => match SymphoniaDecoder::open(&path) {
+                Ok(decoder) => {
+                    self.status
+                        .duration_nanos
+                        .store(secs_to_nanos(decoder.duration()), Ordering::Release);
+                    ThreadStart::Ready(decoder)
+                }
+                Err(e) => {
+                    // Keep tracking the threads that are still fading out.
+                    self.retiring = prev;
+                    return Err(e);
+                }
+            },
             pending_source => ThreadStart::Pending(pending_source),
         };
 
-        self.stop_flag.store(false, Ordering::Release);
         let (tx, rx) = mpsc::channel();
         self.command_tx = Some(tx);
         let ctx = self.context();
+        self.fade.request_fade_in();
 
         self.thread = Some(thread::spawn(move || {
-            playback_thread_main(start, replay_gain_db, rx, ctx);
+            playback_thread_main(start, replay_gain_db, rx, ctx, prev);
         }));
         self.run_state.store(RUN_PLAYING, Ordering::Release);
         Ok(())
@@ -547,9 +617,15 @@ impl PlaybackEngine {
         self.run_state.store(RUN_PLAYING, Ordering::Release);
     }
 
-    /// Stop playback entirely and tear down the playback thread.
+    /// Stop playback entirely. With fades enabled and audio running, the
+    /// thread fades out and exits in the background (joined later); the
+    /// caller is never blocked for the fade's duration.
     pub fn stop(&mut self) {
-        self.join_thread();
+        if self.can_fade_out() {
+            self.retiring = self.retire_gracefully();
+        } else {
+            self.join_thread();
+        }
         self.run_state.store(RUN_STOPPED, Ordering::Release);
         *self.next_track.lock() = None;
         self.status.reset_for_stop();
@@ -578,6 +654,11 @@ impl PlaybackEngine {
     pub fn set_crossfade(&self, seconds: f32) {
         self.crossfade_bits
             .store(seconds.max(0.0).to_bits(), Ordering::Release);
+    }
+
+    /// Set the fade in/out duration in seconds (`0.0` = fades disabled).
+    pub fn set_fade_secs(&self, seconds: f32) {
+        self.fade.set_secs(seconds);
     }
 
     /// Pre-queue `source` for a gapless (claimed at end-of-stream) or
@@ -643,6 +724,9 @@ impl Drop for PlaybackEngine {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+        for handle in self.retiring.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -658,6 +742,7 @@ fn playback_thread_main(
     replay_gain_db: Option<f32>,
     command_rx: Receiver<EngineCommand>,
     ctx: ThreadContext,
+    prev: Vec<thread::JoinHandle<()>>,
 ) {
     // Captured before `resolve_start` consumes `start`: lets a network
     // hiccup on a live radio stream reconnect instead of the track being
@@ -667,12 +752,28 @@ fn playback_thread_main(
     // that don't require leaving this function at all.
     let mut live_retry = live_retry_from_start(&start);
 
-    let mut decoder = match resolve_start(start) {
+    let opened = resolve_start(start);
+
+    // Wait for the predecessor(s) that are fading out; only after they have
+    // closed their stream is it safe to open ours and to reset the shared
+    // status they may have touched while winding down.
+    if !prev.is_empty() {
+        for handle in prev {
+            let _ = handle.join();
+        }
+        ctx.status.track_finished.store(false, Ordering::Release);
+        ctx.status.queue_exhausted.store(false, Ordering::Release);
+        ctx.status.position_nanos.store(0, Ordering::Release);
+    }
+
+    let mut decoder = match opened {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("failed to open audio source: {e}");
-            ctx.status.probing.store(false, Ordering::Release);
-            ctx.status.queue_exhausted.store(true, Ordering::Release);
+            if !ctx.stop_flag.load(Ordering::Acquire) {
+                ctx.status.probing.store(false, Ordering::Release);
+                ctx.status.queue_exhausted.store(true, Ordering::Release);
+            }
             return;
         }
     };
@@ -734,7 +835,11 @@ fn playback_thread_main(
         }
     }
 
-    ctx.status.queue_exhausted.store(true, Ordering::Release);
+    // A thread that was told to stop must not flag "queue exhausted" for
+    // whatever `play()`/`stop()` set the shared status up for since.
+    if !ctx.stop_flag.load(Ordering::Acquire) {
+        ctx.status.queue_exhausted.store(true, Ordering::Release);
+    }
 }
 
 fn resolve_start(start: ThreadStart) -> Result<SymphoniaDecoder> {
@@ -808,6 +913,9 @@ fn run_dsd(
     command_rx: &Receiver<EngineCommand>,
     ctx: &ThreadContext,
 ) -> DsdOutcome {
+    // DoP can't be gain-scaled: swallow any pending fade-in request so a
+    // later PCM stream doesn't inherit it.
+    let _ = ctx.fade.take_fade_in_pending();
     let dsd_sample_rate = decoder.sample_rate();
     let channels = decoder.channels();
     let bytes_per_second = (dsd_sample_rate / 8) as u64 * channels.max(1) as u64;
@@ -913,6 +1021,12 @@ struct PcmSink {
     volume: VolumeFilter,
     output: CpalOutput,
     paused: bool,
+    fade: Arc<FadeControl>,
+    stop_flag: Arc<AtomicBool>,
+    graceful_stop: Arc<AtomicBool>,
+    /// While a fade-out ahead of a pause is running: when the stream is
+    /// really paused (the fade has reached silence).
+    pause_fade_until: Option<Instant>,
 }
 
 impl PcmSink {
@@ -944,6 +1058,13 @@ impl PcmSink {
         // time, so it must be set first.
         #[cfg(feature = "visualizer")]
         output.set_viz_tap(ctx.pcm_buffer.clone());
+        // Fade ramp: runs in the device callback (see `fade.rs`). Armed
+        // here, before `start()` captures it. A pending request from
+        // `play()` makes THIS stream start silent and fade in; format-
+        // change rebuilds during gapless advances start at unity.
+        let fade_in = ctx.fade.take_fade_in_pending();
+        ctx.fade.arm_stream_start(fade_in);
+        output.set_fade(ctx.fade.clone());
         output.start()?;
 
         let channels =
@@ -953,6 +1074,10 @@ impl PcmSink {
             volume: VolumeFilter::new(ctx.volume.clone()),
             output,
             paused: false,
+            fade: ctx.fade.clone(),
+            stop_flag: ctx.stop_flag.clone(),
+            graceful_stop: ctx.graceful_stop.clone(),
+            pause_fade_until: None,
         })
     }
 
@@ -980,25 +1105,66 @@ impl PcmSink {
     /// Poll the shared run state; pauses/resumes the hardware stream on a
     /// transition. Returns `true` when the caller should skip decoding this
     /// iteration (currently paused).
+    ///
+    /// With fades enabled a pause first ramps the gain to silence (in the
+    /// device callback, so it is audible at once) while decoding carries
+    /// on; only when the ramp has finished is the stream really paused.
     fn poll_pause(&mut self, ctx: &ThreadContext) -> bool {
         let is_paused = ctx.run_state.load(Ordering::Acquire) == RUN_PAUSED;
         if is_paused {
             if !self.paused {
+                if self.fade.enabled() {
+                    match self.pause_fade_until {
+                        None => {
+                            self.fade.fade_out();
+                            self.pause_fade_until =
+                                Some(Instant::now() + Duration::from_secs_f32(self.fade.secs()));
+                            return false;
+                        }
+                        Some(deadline) if Instant::now() < deadline => return false,
+                        Some(_) => {}
+                    }
+                }
                 let _ = self.output.pause();
                 self.paused = true;
+                self.pause_fade_until = None;
             }
             thread::sleep(Duration::from_millis(100));
             true
         } else {
+            let was_fading = self.pause_fade_until.take().is_some();
             if self.paused {
                 let _ = self.output.resume();
                 self.paused = false;
+                // The gain is at silence after a faded pause; ramp back up
+                // (an instant jump when fades have since been disabled).
+                self.fade.fade_in();
+            } else if was_fading {
+                // Resumed before the pause-fade finished.
+                self.fade.fade_in();
             }
             false
         }
     }
 
+    /// Close the output. When this thread was retired gracefully (see
+    /// `PlaybackEngine::retire_gracefully`) the buffered audio is faded to
+    /// silence first. Capped below the output's buffer depth since nothing
+    /// is decoded during this wait.
     fn stop(&mut self) {
+        if self.fade.enabled()
+            && !self.paused
+            && self.stop_flag.load(Ordering::Acquire)
+            && self.graceful_stop.load(Ordering::Acquire)
+        {
+            let secs = self
+                .fade
+                .secs()
+                .min(MAX_FADE_SECS)
+                .min(DEFAULT_BUFFER_TIME_MS as f32 / 1000.0 * 0.9);
+            self.fade.ramp_to(0.0, secs);
+            thread::sleep(Duration::from_secs_f32(secs));
+        }
         let _ = self.output.stop();
     }
 }

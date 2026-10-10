@@ -114,10 +114,22 @@ impl AppModel {
         if let Some(provider) = self.registry.active_shared() {
             cosmic::task::future(async move {
                 let playlists = tokio::task::spawn_blocking(move || {
-                    provider.list_playlists().unwrap_or_else(|e| {
+                    let mut playlists = provider.list_playlists().unwrap_or_else(|e| {
                         tracing::warn!("list_playlists failed: {e}");
                         Vec::new()
-                    })
+                    });
+                    // `list_playlists` returns summaries only (no tracks) for
+                    // the local provider; fetch each playlist's tracks so the
+                    // detail view, "play all" and M3U export have them.
+                    for playlist in playlists.iter_mut() {
+                        if playlist.tracks.is_empty()
+                            && playlist.track_count > 0
+                            && let Ok(full) = provider.get_playlist(&playlist.id)
+                        {
+                            playlist.tracks = full.tracks;
+                        }
+                    }
+                    playlists
                 })
                 .await
                 .unwrap_or_default();
@@ -756,6 +768,7 @@ impl AppModel {
                 }
 
                 self.player = Some(p);
+                self.apply_playback_extras_config();
             }
             Err(e) => {
                 tracing::error!("Failed to recreate player: {e}");
@@ -770,6 +783,15 @@ impl AppModel {
     /// scrobbles when playback reaches 50% of duration or 4 minutes
     /// (whichever comes first). Only applies to Subsonic tracks.
     pub(super) fn handle_scrobble(&mut self, track: Track) {
+        // ListenBrainz / Last.fm / Libre.fm (independent of the Subsonic
+        // server-side scrobble below).
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|p| p.state() == crate::player::PlaybackState::Playing)
+        {
+            self.scrobble.on_playback(&track, self.playback_position);
+        }
         // Only scrobble Subsonic tracks.
         let provider = match self
             .subsonic_providers
@@ -918,7 +940,8 @@ impl AppModel {
         let mpd_task = self.dispatch_mpd_after_play();
         let blur_task = self.maybe_update_blurred_cover();
         let mpris_task = self.publish_mpris();
-        Task::batch([mpd_task, blur_task, mpris_task])
+        let notify_task = self.notify_track_changed();
+        Task::batch([mpd_task, blur_task, mpris_task, notify_task])
     }
 
     /// Builds an `MprisSnapshot` from current player/config state and
@@ -1017,7 +1040,19 @@ impl AppModel {
         self.filtered_genres.clear();
         self.filtered_genre_map.clear();
 
+        // "Various Artists" can be hidden from the Artists view; that is
+        // implemented through the same filtered cache the search uses.
+        let hide_compilations = !self.config.show_compilations_in_artists;
+
         if query.is_empty() {
+            if hide_compilations {
+                for (i, artist) in self.all_artists.iter().enumerate() {
+                    if !crate::library::compilations::is_various_artists(&artist.name) {
+                        self.filtered_artists.push(artist.clone());
+                        self.filtered_artist_map.push(i);
+                    }
+                }
+            }
             return;
         }
 
@@ -1031,7 +1066,10 @@ impl AppModel {
         }
 
         for (i, artist) in self.all_artists.iter().enumerate() {
-            if artist.name.to_lowercase().contains(&query) {
+            if artist.name.to_lowercase().contains(&query)
+                && !(hide_compilations
+                    && crate::library::compilations::is_various_artists(&artist.name))
+            {
                 self.filtered_artists.push(artist.clone());
                 self.filtered_artist_map.push(i);
             }
@@ -1262,7 +1300,16 @@ impl AppModel {
     /// library directory, matching how every other desktop media player
     /// treats "open with".
     pub(super) fn open_files(&mut self, paths: Vec<PathBuf>) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
+        // Playlist files (.m3u/.m3u8/.pls) are imported as new playlists
+        // instead of being played as audio.
+        let (playlist_files, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
+            .into_iter()
+            .partition(|p| crate::library::m3u::is_playlist_path(p));
+        let import_task = self.import_playlist_files(playlist_files);
+        if paths.is_empty() {
+            return import_task;
+        }
+        let play_task = cosmic::task::future(async move {
             let tracks = tokio::task::spawn_blocking(move || {
                 paths
                     .into_iter()
@@ -1278,7 +1325,8 @@ impl AppModel {
             .await
             .unwrap_or_default();
             cosmic::Action::App(Message::OpenFilesScanned(tracks))
-        })
+        });
+        Task::batch([import_task, play_task])
     }
 
     /// Lazily fetches artist bio/image for the Artists page — called

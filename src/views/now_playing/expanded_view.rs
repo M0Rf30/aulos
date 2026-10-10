@@ -579,6 +579,13 @@ fn utility_buttons<'a>(
             Some(NowPlayingMessage::ShowLyrics),
         ))
         .push(transport_button(
+            "go-last-symbolic",
+            24,
+            crate::player::party::stop_after_flag(),
+            fl!("stop-after-track"),
+            Some(NowPlayingMessage::ToggleStopAfter),
+        ))
+        .push(transport_button(
             "media-playlist-consecutive-symbolic",
             24,
             is_queue_open,

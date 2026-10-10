@@ -78,6 +78,13 @@ settings-library = Library
 settings-playback = Playback
 settings-shortcuts = Shortcuts
 settings-about = About
+settings-startup = Startup
+startup-page = Start on
+startup-page-description = The section shown when Aulos opens
+startup-last-used = Last used
+startup-provider = Provider at startup
+startup-provider-description = The music source selected when Aulos opens
+startup-provider-local = Local library
 
 # RowFoundation
 favorite-add = Add to favorites
@@ -271,6 +278,8 @@ smart-playlist-field-favorite = Favorite
 smart-playlist-field-duration = Duration (seconds)
 smart-playlist-field-bitrate = Bitrate
 smart-playlist-field-sample-rate = Sample Rate
+smart-playlist-field-play-count = Play Count
+smart-playlist-field-days-since-played = Days Since Last Played
 smart-playlist-op-is = is
 smart-playlist-op-is-not = is not
 smart-playlist-op-contains = contains
@@ -288,6 +297,8 @@ smart-playlist-order-rating = Rating
 smart-playlist-order-duration = Duration
 smart-playlist-order-random = Random
 smart-playlist-order-recently-added = Recently Added
+smart-playlist-order-play-count = Play Count
+smart-playlist-order-last-played = Last Played
 
 ## Converter
 convert-add-files = Add Files
@@ -486,6 +497,65 @@ fetch-artist-info-description = Look up artist photos (via Deezer) and biography
 artist-bio-more = Show more
 artist-bio-less = Show less
 
+## Home
+home = Home
+home-greeting-morning = Good morning
+home-greeting-afternoon = Good afternoon
+home-greeting-evening = Good evening
+home-subtitle =
+    { $count ->
+        [one] 1 album in your library
+       *[other] { $count } albums in your library
+    }
+home-refresh = Refresh suggestions
+home-welcome-title = Welcome to Aulos
+home-welcome-intro = Let's get your music playing — it only takes a minute.
+home-guide-title = Get started
+home-step-folder-title = Add your music folder
+home-step-folder-body = Aulos scans it automatically and keeps watching for changes. Supports FLAC, MP3, Ogg, Opus, AAC, ALAC, WAV and DSD.
+home-step-server-title = Or connect a server
+home-step-server-body = Stream from an MPD server or a Subsonic / Navidrome library — no local files needed.
+home-step-customize-title = Make it yours
+home-step-customize-body = Tune the equalizer, ReplayGain, crossfade and card size, and manage your library in Settings.
+home-step-wait-title = While you wait
+home-step-wait-body = Internet radio and podcasts work without any library — start listening right away.
+home-open-settings = Open settings
+home-tips-title = Tips
+home-tip-search = Search your whole library
+home-tip-mini-player = Switch to the mini player
+home-tip-links = Click any artist or album name to jump to it
+home-connect-server = Connect a server
+home-browse-radio = Browse radio
+home-discover-podcasts = Discover podcasts
+home-scanning-title = Scanning your library…
+home-scanning-hint = Suggestions will appear as soon as your music is indexed
+home-loading = Loading suggestions…
+home-no-history-hint = Start listening and this page fills up with what you played recently, your favorites of the month and albums to rediscover.
+home-continue-listening = Continue listening
+home-most-played-month = Most played this month
+home-top-artists-month = Top artists this month
+home-recently-added = Recently added
+home-rediscover = Rediscover
+home-rediscover-hint = Albums you haven't played in a while
+home-random-picks = Random picks
+home-shuffle-picks = Shuffle picks
+home-browse-decades = Browse by decade
+home-plays =
+    { $count ->
+        [one] 1 play
+       *[other] { $count } plays
+    }
+home-play-artist = Play artist
+home-decade-title = The { $decade }s
+home-decade-albums =
+    { $count ->
+        [one] 1 album
+       *[other] { $count } albums
+    }
+home-decade-play = Shuffle play
+home-decade-empty-hint = No albums from this decade in your library
+home-back = Back
+
 # Header chrome
 zoom-grid-tooltip = Card size
 viz-toggle = Visualizer
@@ -517,3 +587,103 @@ equalizer-autoeq-description = Apply a correction profile tuned for your headpho
 equalizer-autoeq-refresh = Refresh profiles
 lyrics-unavailable-hint = Search online sources for lyrics for this track.
 queue-history-label = Recently played
+
+## Scrobbling
+scrobbling = Scrobbling
+scrobbling-description = Send what you play to ListenBrainz, Last.fm and Libre.fm. Tracks are queued while you are offline.
+scrobble-streams = Scrobble radio and podcasts
+scrobble-streams-description = Off by default. Streams count as a listen after one minute of playback.
+scrobble-enabled = Scrobble to { $service }
+scrobble-connected-as = Connected as { $user }
+scrobble-queued = { $count } listens waiting to be sent
+scrobble-not-connected = Not connected
+scrobble-connect = Connect
+scrobble-complete = Complete connection
+scrobble-disconnect = Disconnect
+scrobble-working = Working…
+scrobble-retry-now = Retry now
+scrobble-save = Save
+scrobble-lb-token-hint = Copy your user token from listenbrainz.org/settings and paste it below.
+scrobble-lb-token-placeholder = ListenBrainz user token
+scrobble-lastfm-keys-hint = Last.fm requires your own API account: create one at last.fm/api/account/create, then enter its key and shared secret. The secret is stored in the system keyring.
+scrobble-lastfm-key-placeholder = Last.fm API key
+scrobble-lastfm-secret-placeholder = Last.fm API secret
+scrobble-auth-hint = Approve Aulos in the browser window that just opened, then come back and press "Complete connection".
+scrobble-love-sync = Sync favorites with Last.fm
+scrobble-love-sync-description = Loving or unloving a track in Aulos does the same on Last.fm.
+scrobble-sync-loved = Sync loved tracks now
+scrobble-sync-done = Synced: { $added } new favorites in Aulos, { $pushed } sent to Last.fm
+scrobble-error = Error: { $message }
+scrobble-error-no-keys = Enter your Last.fm API key and secret first.
+scrobble-error-no-token = Press "Connect" first.
+
+## Playlist import / export (M3U)
+import-m3u = Import playlist
+export-m3u = Export M3U
+export-m3u-tooltip = Export as M3U playlist
+export-playlist-dialog-title = Export playlist
+import-playlist-dialog-title = Import playlists
+settings-playlists = Playlists
+settings-playlists-description = How playlists are exported to M3U files.
+m3u-relative-paths = Use relative paths in exported playlists
+m3u-relative-paths-description = Write track paths relative to the playlist file so the playlist keeps working if you move the folder. Turn off to write absolute paths.
+toast-playlist-export-empty = This playlist has no tracks to export
+toast-playlist-exported =
+    { $count ->
+        [one] Exported 1 track to { $file }
+       *[other] Exported { $count } tracks to { $file }
+    }
+toast-playlist-exported-partial = Exported { $count } tracks to { $file } ({ $skipped } non-local tracks skipped)
+toast-playlist-export-failed = Could not export the playlist: { $reason }
+toast-playlist-import-failed = Could not import the playlist: { $reason }
+toast-playlist-imported =
+    { $count ->
+        [one] Imported “{ $name }” with 1 track
+       *[other] Imported “{ $name }” with { $count } tracks
+    }
+toast-playlist-imported-partial = Imported “{ $name }” with { $count } tracks; { $missing } not found in your library
+toast-playlists-imported = Imported { $playlists } playlists with { $count } tracks
+toast-playlists-imported-partial = Imported { $playlists } playlists with { $count } tracks; { $missing } not found in your library
+
+## Mini player
+mini-player = Mini player
+mini-player-exit = Leave mini player
+
+## Compilations and album filters
+settings-compilations = Compilations
+settings-compilations-description = Albums by various artists are grouped under “Various Artists”.
+show-compilations-in-artists = Show compilations in artist view
+show-compilations-in-artists-description = List “Various Artists” in the Artists page. Compilations always stay available from the Albums page.
+filter-all = All
+filter-albums = Albums
+filter-compilations = Compilations
+filter-decade = { $decade }s
+no-albums-match-filter = No albums match these filters
+no-albums-match-filter-hint = Pick “All” to see every album again
+
+## Playback extras: stop after track, fades, party mode, auto-play, desktop integration
+stop-after-track = Stop after this track
+party-mode = Party mode
+party-mode-description = Endless random playback from the genres below (the whole library when none is selected).
+party-genres = Party genres
+party-genres-none = No genres in the library yet
+auto-play = Auto-play
+auto-play-description = What to play when the queue runs out.
+auto-play-off = Off
+auto-play-random = Random
+auto-play-similar = Similar
+auto-play-menu = Auto-play
+fade-duration = Fade in and out
+fade-disabled = Off
+fade-seconds = { $secs } s
+fade-description = Smoothly fade the sound when playing, pausing, stopping or skipping tracks.
+settings-playback-extras = Fades and continuous playback
+settings-playback-extras-description = Fade transitions and what plays when the queue ends.
+settings-desktop = Desktop
+settings-desktop-description = Notifications, power management and window behaviour.
+notify-track-change = Track change notifications
+notify-track-change-description = Show the cover art and track details when the window is in the background.
+inhibit-suspend = Prevent sleep while playing
+inhibit-suspend-description = Keep the computer awake and the screen from idling while music plays.
+background-playback = Keep playing when the window is closed
+background-playback-description = Closing the window minimizes Aulos while music plays instead of quitting.

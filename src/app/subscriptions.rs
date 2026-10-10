@@ -31,6 +31,10 @@ impl AppModel {
         // `mpris_stream` function, so it starts once and never restarts.
         subs.push(Subscription::run(crate::mpris::mpris_stream).map(Message::Mpris));
 
+        // Window-close requests (background playback) and the slow
+        // playback-extras housekeeping tick.
+        subs.push(self.playback_extras_subscription());
+
         // Playback position ticker.
         let is_playing = self
             .player

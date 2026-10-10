@@ -80,8 +80,8 @@ notify = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# XDG Desktop Portal (directory picker)
-ashpd = { version = "0.13", features = ["file_chooser"] }
+# XDG Desktop Portal (directory picker, suspend/idle inhibit)
+ashpd = { version = "0.13", features = ["file_chooser", "inhibit"] }
 
 # Credential storage (system keyring)
 # keyring 4 is a thin facade re-exporting keyring-core; on Linux it only wires up

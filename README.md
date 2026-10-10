@@ -46,6 +46,8 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 - **Formats**: FLAC, MP3, Ogg Vorbis, Opus (including multichannel family 3), AAC/M4A (including AAC-LD/ELD and raw ADIF), ALAC, WAV, AIFF, APE, WavPack (including hybrid lossless with a `.wvc` correction file), Musepack, CAF and DSF/DFF, plus the audio in MP4, WebM, MKA, FLV, MPEG-TS and MPEG-PS files. Seeking is sample-accurate and chained Ogg streams report their full duration.
 - **DSD**: sent bit-exact as DoP (DSD over PCM) to DACs that support it, otherwise converted to PCM.
 - **Gapless** playback and **crossfade** with an adjustable length.
+- **Fade in/out** on play, pause, stop and skip, with an adjustable length (off by default). Not applied to DSD played as DoP, which stays bit-exact.
+- **Stop after this track**, **party mode** (endless random playback, optionally limited to chosen genres) and **auto-play** when the queue ends: random albums, or albums by the same artist, genre and era from your library.
 - **ReplayGain**: Off, Track, Album or Auto mode, read from file tags.
 - **10-band equalizer** with a preamp, built-in and user presets, and headphone correction profiles from [AutoEq](https://github.com/jaakkopasanen/AutoEq).
 - Automatic **resampling** when the output device doesn't support a file's sample rate.
@@ -67,6 +69,9 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 ### Desktop integration
 
 - **MPRIS**: works with media keys and the COSMIC panel, including cover art and seeking.
+- **Notifications** with cover art on track change, only while the window isn't focused.
+- **Sleep inhibit** while music plays, through the desktop portal (falling back to systemd-logind).
+- **Background playback**: with the setting on, closing the window while music plays minimizes Aulos instead of quitting. libcosmic can't re-create a closed window, so the window stays in the task list; opening Aulos again (or MPRIS `Raise`) restores it.
 - **Opening files**: double-clicking a file, or opening it from a file manager, passes it to the window that's already open instead of starting a second copy of Aulos.
 
 ### Visualizer
@@ -153,6 +158,7 @@ On the very first launch Aulos greets you with its intro jingle — a 4-second, 
 | `l` | Lyrics |
 | `u` | Queue |
 | `/` or `Ctrl+F` | Search |
+| `Ctrl+M` | Toggle the mini player (`Esc` leaves it) |
 | `Tab` | Expanded now-playing view |
 | `1`–`8` | Jump to a page |
 | `Esc` | Close overlays |

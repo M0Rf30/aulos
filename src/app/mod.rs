@@ -25,15 +25,21 @@ use std::time::Duration;
 mod application;
 mod convert_page;
 mod helpers;
+mod home;
 mod init;
 mod message;
 mod navigation;
+pub mod playback_extras;
+mod playlist_io;
 mod podcast_page;
 mod radio_page;
+mod scrobble_glue;
+pub mod startup;
 mod subscriptions;
 mod tasks;
 mod update;
 mod view;
+mod view_extras;
 
 pub use message::Message;
 
@@ -79,6 +85,9 @@ pub struct AppModel {
     /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
     config_context: Option<cosmic_config::Config>,
     context_page: ContextPage,
+    /// Runtime state of the playback/desktop extras (auto-play RNG,
+    /// inhibit lock, notification bookkeeping).
+    playback_extras: playback_extras::PlaybackExtrasState,
 
     // Notifications
     /// Toast notifications (e.g. provider connection failures).
@@ -137,6 +146,8 @@ pub struct AppModel {
     filtered_playlist_map: Vec<usize>,
     filtered_genres: Vec<String>,
     filtered_genre_map: Vec<usize>,
+    /// Mini-player mode and album-filter chip state (see `view_extras`).
+    extras: view_extras::ViewExtras,
 
     // Podcasts
     podcasts: Vec<Podcast>,
@@ -257,6 +268,8 @@ pub struct AppModel {
     scrobble_now_playing_sent: bool,
     /// Whether the current track has been scrobbled (to avoid duplicates).
     scrobble_sent: bool,
+    /// Multi-service scrobbling (ListenBrainz / Last.fm / Libre.fm) state.
+    scrobble: crate::online::scrobble::ScrobbleController,
 
     // View state
     selected_album: Option<usize>,
@@ -302,6 +315,8 @@ pub struct AppModel {
     /// rebuilt from `all_tracks` whenever the page is opened or the
     /// library reloads (see `FolderTree::build`).
     folder_state: crate::views::folders::FolderState,
+    /// Home page shelves, decade grid and play-history tracker.
+    home: crate::views::home::HomeState,
     cover_images: HashMap<String, widget::icon::Handle>,
     /// Cached real artist photos (from Subsonic's own artist data or, in
     /// Local/MPD mode, Deezer via `crate::library::artist_info` when
@@ -521,6 +536,8 @@ pub struct AppModel {
 /// Navigation pages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
+    /// Suggestions landing page (first sidebar entry).
+    Home,
     Albums,
     Artists,
     Songs,
@@ -574,6 +591,13 @@ pub enum MenuAction {
     ScanLibrary,
     AddMusicDir,
     Search,
+    MiniPlayer,
+    /// Toggle "stop after the current track".
+    StopAfterTrack,
+    /// Toggle party mode.
+    PartyMode,
+    /// Pick the auto-play mode (what plays when the queue runs out).
+    AutoPlay(crate::config::AutoPlayMode),
     Quit,
 }
 
@@ -590,6 +614,16 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Search => Message::ToggleLibrarySearch,
+            MenuAction::MiniPlayer => Message::Mini(view_extras::MiniPlayerMsg::Toggle),
+            MenuAction::StopAfterTrack => {
+                Message::Playback(playback_extras::PlaybackExtrasMessage::ToggleStopAfter)
+            }
+            MenuAction::PartyMode => {
+                Message::Playback(playback_extras::PlaybackExtrasMessage::TogglePartyMode)
+            }
+            MenuAction::AutoPlay(mode) => Message::Playback(
+                playback_extras::PlaybackExtrasMessage::SetAutoPlayMode(*mode),
+            ),
             MenuAction::Quit => Message::Quit,
         }
     }
@@ -612,6 +646,13 @@ fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
             key: cosmic::iced::keyboard::Key::Character("f".into()),
         },
         MenuAction::Search,
+    );
+    key_binds.insert(
+        menu::KeyBind {
+            modifiers: vec![menu::key_bind::Modifier::Ctrl],
+            key: cosmic::iced::keyboard::Key::Character("m".into()),
+        },
+        MenuAction::MiniPlayer,
     );
     key_binds
 }

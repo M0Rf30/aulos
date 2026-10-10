@@ -44,6 +44,10 @@ pub enum PlaylistMessage {
     AddToQueue(Vec<Track>),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
+    /// Export the playlist at this index as an M3U file.
+    Export(usize),
+    /// Pick M3U/M3U8/PLS files to import as new playlists.
+    ImportFiles,
 }
 
 /// Render the playlist list view.
@@ -86,6 +90,11 @@ pub fn playlist_list_view<'a>(
                 },
             ),
         )
+        .push(
+            widget::button::standard(fl!("import-m3u"))
+                .leading_icon(widget::icon::from_name("document-open-symbolic").size(16))
+                .on_press(PlaylistMessage::ImportFiles),
+        )
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -124,6 +133,12 @@ pub fn playlist_list_view<'a>(
             widget::text::caption(fl!("play-all")),
             widget::tooltip::Position::Top,
         );
+        let export_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("document-save-symbolic").size(16))
+                .on_press_maybe((track_count > 0).then_some(PlaylistMessage::Export(index))),
+            widget::text::caption(fl!("export-m3u-tooltip")),
+            widget::tooltip::Position::Top,
+        );
         let delete_btn = widget::tooltip(
             widget::button::icon(widget::icon::from_name("edit-delete-symbolic").size(16))
                 .on_press(PlaylistMessage::DeletePlaylist(index)),
@@ -151,6 +166,7 @@ pub fn playlist_list_view<'a>(
                     .align_x(Horizontal::Right),
                 )
                 .push(play_btn)
+                .push(export_btn)
                 .push(delete_btn)
                 .spacing(16)
                 .height(Length::Fill)
@@ -274,6 +290,13 @@ pub fn playlist_detail_view<'a>(
                                 .on_press(PlaylistMessage::AddToQueue(playlist.tracks.clone())),
                         )
                         .spacing(8),
+                )
+                .push(
+                    widget::button::standard(fl!("export-m3u"))
+                        .leading_icon(widget::icon::from_name("document-save-symbolic").size(16))
+                        .on_press_maybe(
+                            (track_count > 0).then_some(PlaylistMessage::Export(playlist_index)),
+                        ),
                 )
                 .spacing(8)
                 .width(Length::Fill),

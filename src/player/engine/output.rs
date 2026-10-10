@@ -22,12 +22,12 @@
 use crate::player::backend::PlayerError;
 use crate::player::engine::conversion::{self, SampleBuffer};
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
+use crate::player::engine::fade::{FadeControl, FadeRamp};
 use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 #[cfg(feature = "visualizer")]
 use crate::views::now_playing::visualizer::PcmBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
-#[cfg(feature = "visualizer")]
 use std::sync::Arc;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
@@ -129,6 +129,8 @@ pub struct CpalOutput {
     /// (visualizer feature/tap not wired, or DoP/test callers).
     #[cfg(feature = "visualizer")]
     viz_tap: Option<VizTapSlot>,
+    /// Fade ramp control shared with the engine (see [`Self::set_fade`]).
+    fade: Option<Arc<FadeControl>>,
 }
 
 impl CpalOutput {
@@ -202,6 +204,7 @@ impl CpalOutput {
             buffer_time_ms,
             #[cfg(feature = "visualizer")]
             viz_tap: None,
+            fade: None,
         })
     }
 
@@ -215,6 +218,26 @@ impl CpalOutput {
     #[cfg(feature = "visualizer")]
     pub fn set_viz_tap(&mut self, tap: VizTapSlot) {
         self.viz_tap = Some(tap);
+    }
+
+    /// Wire the shared fade control. Must be called before [`Self::start`]
+    /// (the callback closures capture it at stream-build time). The ramp
+    /// runs in the realtime device callback so a fade is audible
+    /// immediately instead of ~500 ms later (the depth of the sample
+    /// channel between the decode thread and the device).
+    pub fn set_fade(&mut self, fade: Arc<FadeControl>) {
+        self.fade = Some(fade);
+    }
+
+    /// Build the per-stream fade ramp for the callback closures. With no
+    /// control wired this is a unity-gain no-op ramp.
+    fn new_fade_ramp(&self) -> FadeRamp {
+        let control = self.fade.clone().unwrap_or_default();
+        FadeRamp::new(
+            control,
+            self.config.sample_rate,
+            self.config.channels as usize,
+        )
     }
 
     /// Whether the default output device natively supports `rate`. Lets callers
@@ -282,6 +305,7 @@ impl CpalOutput {
         let stream = match sample_format {
             SampleFormat::F32 => {
                 let mut buf = SampleBuffer::new(rx);
+                let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
                 #[cfg(feature = "visualizer")]
@@ -290,8 +314,9 @@ impl CpalOutput {
                     .build_output_stream(
                         self.config,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                            ramp.begin();
                             for sample in data.iter_mut() {
-                                *sample = buf.next_sample();
+                                *sample = buf.next_sample() * ramp.next_gain();
                             }
                             // Tap AFTER filling `data`: this is exactly
                             // what was just handed to the device this
@@ -310,6 +335,7 @@ impl CpalOutput {
             }
             SampleFormat::I16 => {
                 let mut buf = SampleBuffer::new(rx);
+                let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
                 #[cfg(feature = "visualizer")]
@@ -325,6 +351,7 @@ impl CpalOutput {
                     .build_output_stream(
                         self.config,
                         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                            ramp.begin();
                             #[cfg(feature = "visualizer")]
                             if viz_scratch.len() < data.len() {
                                 viz_scratch.resize(data.len(), 0.0);
@@ -332,7 +359,7 @@ impl CpalOutput {
                             #[cfg(feature = "visualizer")]
                             let mut viz_iter = viz_scratch.iter_mut();
                             for sample in data.iter_mut() {
-                                let s = buf.next_sample();
+                                let s = buf.next_sample() * ramp.next_gain();
                                 #[cfg(feature = "visualizer")]
                                 if let Some(slot) = viz_iter.next() {
                                     *slot = s;
@@ -351,6 +378,7 @@ impl CpalOutput {
             }
             SampleFormat::I32 => {
                 let mut buf = SampleBuffer::new(rx);
+                let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
                 #[cfg(feature = "visualizer")]
@@ -363,6 +391,7 @@ impl CpalOutput {
                     .build_output_stream(
                         self.config,
                         move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                            ramp.begin();
                             #[cfg(feature = "visualizer")]
                             if viz_scratch.len() < data.len() {
                                 viz_scratch.resize(data.len(), 0.0);
@@ -370,7 +399,7 @@ impl CpalOutput {
                             #[cfg(feature = "visualizer")]
                             let mut viz_iter = viz_scratch.iter_mut();
                             for sample in data.iter_mut() {
-                                let s = buf.next_sample();
+                                let s = buf.next_sample() * ramp.next_gain();
                                 #[cfg(feature = "visualizer")]
                                 if let Some(slot) = viz_iter.next() {
                                     *slot = s;

@@ -5,9 +5,12 @@
 
 pub mod artist_info;
 pub mod artist_tags;
+pub mod compilations;
 mod cover_art;
 mod db;
+pub mod history;
 mod lyrics;
+pub mod m3u;
 pub mod palette;
 pub mod quality;
 mod scanner;
@@ -160,6 +163,12 @@ impl Album {
 
     pub fn track_count(&self) -> usize {
         self.tracks.len()
+    }
+
+    /// Whether this is a compilation ("Various Artists" album artist; see
+    /// [`compilations`]).
+    pub fn is_compilation(&self) -> bool {
+        compilations::is_various_artists(&self.artist)
     }
 }
 

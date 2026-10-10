@@ -430,6 +430,14 @@ pub fn playback_bar<'a>(
             NowPlayingMessage::ShowLyrics,
         ))
         .push(toggle_icon_button(
+            "go-last-symbolic",
+            20,
+            crate::player::party::stop_after_flag(),
+            has_track && !is_live,
+            fl!("stop-after-track"),
+            NowPlayingMessage::ToggleStopAfter,
+        ))
+        .push(toggle_icon_button(
             "media-playlist-consecutive-symbolic",
             20,
             is_queue_open,

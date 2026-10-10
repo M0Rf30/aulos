@@ -13,6 +13,7 @@ mod icy_reader;
 pub mod intro;
 pub mod local_backend;
 pub mod mpd_backend;
+pub mod party;
 #[cfg(feature = "visualizer")]
 pub mod pw_capture;
 pub mod queue;
@@ -120,6 +121,9 @@ pub struct Player {
     next_pre_queued: bool,
     /// Replay gain mode for volume normalization.
     replay_gain_mode: ReplayGainMode,
+    /// Stop (and park the queue on the next track) once the current track
+    /// finishes on its own. Cleared by any explicit track change.
+    stop_after_current: bool,
 }
 
 impl Player {
@@ -138,6 +142,7 @@ impl Player {
             queue: PlayQueue::new(),
             next_pre_queued: false,
             replay_gain_mode: ReplayGainMode::Off,
+            stop_after_current: false,
         })
     }
 
@@ -175,6 +180,8 @@ impl Player {
     /// Play a track by resolving its source.
     #[tracing::instrument(skip(self, track, source), level = "debug")]
     pub fn play_track(&mut self, track: &Track, source: TrackSource) -> Result<(), String> {
+        // Any explicit start of a track supersedes a pending "stop after".
+        self.set_stop_after_flag(false);
         // Select the appropriate backend based on the track source.
         match &source {
             TrackSource::LocalFile(_) | TrackSource::HttpStream(_) | TrackSource::LiveStream(_) => {
@@ -496,6 +503,23 @@ impl Player {
             return Ok(None);
         }
 
+        // "Stop after this track": the current one just ended on its own.
+        // Park the queue on whatever would have played next, but stop
+        // instead of starting it (the gapless look-ahead was suppressed in
+        // `pre_queue_next` while the flag was set).
+        if auto && self.stop_after_current {
+            self.set_stop_after_flag(false);
+            self.invalidate_pre_queue();
+            let _ = self.queue.advance(true);
+            self.active_mut().stop().map_err(|e| e.to_string())?;
+            let kept = self.queue.current().cloned();
+            self.current_track = kept.clone().map(|t| NowPlaying {
+                duration: t.duration,
+                track: t,
+            });
+            return Ok(kept);
+        }
+
         // Gapless fast path: the engine already has the predicted next
         // track loaded in its look-ahead slot (see `pre_queue_next`, which
         // always follows `peek_next_auto`) — on a natural end this is
@@ -599,6 +623,9 @@ impl Player {
         if self.active_backend != ActiveBackend::Local {
             return;
         }
+        if self.stop_after_current {
+            return;
+        }
         let Some(next_track) = self.queue.peek_next_auto().cloned() else {
             return;
         };
@@ -667,5 +694,106 @@ impl Player {
     /// Set the replay gain mode.
     pub fn set_replay_gain_mode(&mut self, mode: ReplayGainMode) {
         self.replay_gain_mode = mode;
+    }
+
+    /// Set the fade in/out duration (seconds, `0` = off) on the local
+    /// backend.
+    pub fn set_fade_secs(&mut self, secs: f32) {
+        self.local_backend.set_fade_secs(secs);
+    }
+
+    /// Whether playback will stop after the current track finishes.
+    pub fn stop_after_current(&self) -> bool {
+        self.stop_after_current
+    }
+
+    /// Arm/disarm "stop after the current track". Armed, the gapless
+    /// look-ahead is dropped so the engine really ends with this track.
+    pub fn set_stop_after_current(&mut self, on: bool) {
+        if self.stop_after_current == on {
+            return;
+        }
+        self.set_stop_after_flag(on);
+        self.refresh_pre_queue();
+    }
+
+    fn set_stop_after_flag(&mut self, on: bool) {
+        self.stop_after_current = on;
+        party::publish_stop_after(on);
+    }
+
+    /// Number of queued tracks after the current one (play order).
+    pub fn upcoming_len(&self) -> usize {
+        self.queue.len().saturating_sub(self.queue.index() + 1)
+    }
+}
+
+#[cfg(test)]
+mod stop_after_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn track(id: i64) -> Track {
+        Track {
+            id,
+            path: PathBuf::from(format!("/nonexistent/{id}.flac")),
+            title: format!("t{id}"),
+            artist: "A".into(),
+            album_artist: "A".into(),
+            album: "X".into(),
+            genre: String::new(),
+            track_number: id as u32,
+            disc_number: 1,
+            year: 0,
+            duration: Duration::from_secs(10),
+            bitrate: 0,
+            sample_rate: 44_100,
+            provider_id: "local".into(),
+            source_uri: String::new(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        }
+    }
+
+    /// One test (the flag mirror is process-global) covering arming,
+    /// disarming and the natural-end behaviour — no audio device involved:
+    /// nothing is ever actually played.
+    #[test]
+    fn stop_after_parks_the_queue_on_the_next_track_and_clears_itself() {
+        let mut p = Player::new(None).expect("player");
+        assert!(!p.stop_after_current());
+        assert_eq!(p.upcoming_len(), 0);
+
+        p.set_stop_after_current(true);
+        assert!(p.stop_after_current());
+        assert!(party::stop_after_flag());
+        p.set_stop_after_current(false);
+        assert!(!party::stop_after_flag());
+
+        // Queue of three, "playing" the first (set directly: no engine).
+        p.queue.set(vec![track(1), track(2), track(3)], 0);
+        p.current_track = Some(NowPlaying {
+            track: track(1),
+            duration: Duration::from_secs(10),
+        });
+        assert_eq!(p.upcoming_len(), 2);
+
+        p.set_stop_after_current(true);
+        let parked = p
+            .advance_on_finish()
+            .expect("advance ok")
+            .expect("a track is returned");
+        assert_eq!(
+            parked.id, 2,
+            "queue is parked on what would have played next"
+        );
+        assert_eq!(p.queue_index(), 1);
+        assert_eq!(p.state(), PlaybackState::Stopped);
+        assert!(!p.stop_after_current(), "the request is one-shot");
+        assert!(!party::stop_after_flag());
+        assert_eq!(p.now_playing().map(|n| n.track.id), Some(2));
+        assert_eq!(p.upcoming_len(), 1);
     }
 }

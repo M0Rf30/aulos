@@ -43,6 +43,8 @@ pub enum AlbumMessage {
     AddToQueue(Vec<Track>),
     /// Jump to another view (artist page, genre…).
     Navigate(crate::views::Route),
+    /// A filter chip (kind / decade) was clicked.
+    Filter(crate::views::album_filters::FilterMsg),
 }
 
 /// Minimum cover/label width of a grid card; the fluid grid stretches
@@ -79,6 +81,7 @@ pub fn albums_view<'a>(
     albums: &'a [Album],
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
     mode: ViewMode,
+    filter: &crate::views::album_filters::AlbumFilter,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
         return common::empty_state(
@@ -89,14 +92,24 @@ pub fn albums_view<'a>(
     }
 
     let header = common::view_mode_toggle_header(mode, AlbumMessage::ToggleViewMode);
+    let chips = crate::views::album_filters::filter_bar(filter, albums).map(AlbumMessage::Filter);
+    // Positions in `albums` that pass the chip filters; messages keep
+    // carrying positions in `albums`, so callers' index maps still apply.
+    let visible = filter.visible_indices(albums);
 
     let content: cosmic::Element<'a, AlbumMessage> = match mode {
+        _ if visible.is_empty() => common::empty_state(
+            "folder-music-symbolic",
+            fl!("no-albums-match-filter"),
+            fl!("no-albums-match-filter-hint"),
+        ),
         ViewMode::Grid => common::fluid_card_grid(
-            albums.len(),
+            visible.len(),
             CARD_WIDTH + 2.0 * CARD_PADDING,
             CARD_MAX_WIDTH + 2.0 * CARD_PADDING,
             move |index, outer| {
-                let album = &albums[index];
+                let album_index = visible[index];
+                let album = &albums[album_index];
                 let art_size = outer - 2.0 * CARD_PADDING;
                 let key = CoverArt::album_key(&album.artist, &album.name);
                 let art_widget = common::grid_art_tile(
@@ -160,7 +173,7 @@ pub fn albums_view<'a>(
 
                 widget::tooltip(
                     widget::button::custom(album_card)
-                        .on_press(AlbumMessage::SelectAlbum(index))
+                        .on_press(AlbumMessage::SelectAlbum(album_index))
                         .padding(CARD_PADDING as u16)
                         .class(card_button_class()),
                     widget::text::caption(tooltip_label),
@@ -172,7 +185,8 @@ pub fn albums_view<'a>(
         ViewMode::List => {
             let mut list = widget::Column::new().spacing(2);
 
-            for (index, album) in albums.iter().enumerate() {
+            for &index in &visible {
+                let album = &albums[index];
                 let key = CoverArt::album_key(&album.artist, &album.name);
                 let art_widget: cosmic::Element<'_, AlbumMessage> =
                     common::list_art_icon(cover_images.get(&key), 52, "media-optical-symbolic");
@@ -283,7 +297,11 @@ pub fn albums_view<'a>(
         }
     };
 
-    widget::Column::new().push(header).push(content).into()
+    widget::Column::new()
+        .push(header)
+        .push(chips)
+        .push(content)
+        .into()
 }
 
 /// List-mode row geometry: fixed height (uniform rhythm) and right-hand

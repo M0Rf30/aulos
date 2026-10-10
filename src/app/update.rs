@@ -147,7 +147,8 @@ impl AppModel {
                 self.refresh_search_filter();
                 // Re-trigger blur now that cover art bytes are available
                 let blur_task = self.maybe_update_blurred_cover();
-                return blur_task;
+                let home_task = self.load_home(true);
+                return Task::batch([blur_task, home_task]);
             }
 
             Message::LibraryBatch {
@@ -254,7 +255,8 @@ impl AppModel {
                 // Re-trigger blur in case the current track's cover
                 // changed as part of a staged refresh swap.
                 let blur_task = self.maybe_update_blurred_cover();
-                return blur_task;
+                let home_task = self.load_home(true);
+                return Task::batch([blur_task, home_task]);
             }
 
             // -- Filesystem watcher --
@@ -679,7 +681,15 @@ impl AppModel {
                     self.handle_scrobble(track);
                 }
                 let mpris_task = self.publish_mpris();
-                return Task::batch([position_save_task, track_changed_task, mpris_task]);
+                let history_task = self.track_play_history();
+                let extras_task = self.playback_extras_tick();
+                return Task::batch([
+                    position_save_task,
+                    track_changed_task,
+                    mpris_task,
+                    history_task,
+                    extras_task,
+                ]);
             }
 
             Message::Stop => {
@@ -1000,6 +1010,7 @@ impl AppModel {
                             {
                                 ct.is_favorite = new_state;
                             }
+                            self.scrobble_favorite_changed(&track_id, new_state);
                         }
                         Err(e) => {
                             tracing::warn!("toggle_favorite failed: {e}");
@@ -1007,6 +1018,8 @@ impl AppModel {
                     }
                 }
             }
+
+            Message::Scrobble(msg) => return self.handle_scrobble_message(msg),
 
             Message::SetRating(track_id, rating) => {
                 if let Some(provider) = self.registry.active_shared() {
@@ -1669,7 +1682,7 @@ impl AppModel {
                 // manually — a manual choice always wins over the saved
                 // one, even across a later reconnect of this server.
                 if !self.provider_manually_switched
-                    && self.config.active_provider.as_deref() == Some(provider_id.as_str())
+                    && self.config.startup_provider_choice() == Some(provider_id.as_str())
                     && self.registry.active_id() != provider_id
                     && self.registry.set_active(&provider_id)
                 {
@@ -2272,6 +2285,20 @@ impl AppModel {
                 self.refresh_search_filter();
             }
 
+            // -- Playlist import/export, mini player, compilations, album filters --
+            Message::PlaylistIo(msg) => return self.update_playlist_io(msg),
+            Message::Mini(msg) => return self.update_mini_player(msg),
+            Message::AlbumFilter(msg) => self.extras.album_filter.update(msg),
+            Message::SetShowCompilationsInArtists(show) => {
+                self.config.show_compilations_in_artists = show;
+                self.save_config();
+                self.refresh_search_filter();
+            }
+            Message::SetM3uRelativePaths(relative) => {
+                self.config.m3u_relative_paths = relative;
+                self.save_config();
+            }
+
             // -- Smart playlists view --
             Message::SmartPlaylists(msg) => {
                 use crate::views::smart_playlists::SmartPlaylistMessage;
@@ -2431,6 +2458,10 @@ impl AppModel {
                             return self.play_track_list(tracks, 0);
                         }
                     }
+                    SmartPlaylistMessage::Export(idx) => {
+                        return self
+                            .update_playlist_io(super::playlist_io::PlaylistIo::ExportSmart(idx));
+                    }
                     SmartPlaylistMessage::PlayTrack(idx) => {
                         if !self.smart_playlist_tracks.is_empty() {
                             return self.play_track_list(self.smart_playlist_tracks.clone(), idx);
@@ -2586,6 +2617,8 @@ impl AppModel {
             }
 
             // -- Podcasts --
+            Message::Home(msg) => return self.update_home(msg),
+            Message::Startup(msg) => return self.update_startup(msg),
             Message::Podcast(msg) => return self.update_podcast(msg),
             Message::PodcastEvent(event) => return self.handle_podcast_event(event),
 
@@ -2606,6 +2639,7 @@ impl AppModel {
             Message::Quit => {
                 return cosmic::iced::exit();
             }
+            Message::Playback(msg) => return self.update_playback_extras(msg),
             Message::Mpris(event) => match event {
                 crate::mpris::MprisEvent::Ready(handle) => {
                     self.mpris = Some(handle);
@@ -2698,12 +2732,7 @@ impl AppModel {
                             }
                             Task::batch(tasks)
                         }
-                        MprisCommand::Raise => {
-                            tracing::debug!(
-                                "MPRIS: Raise requested (no-op, Aulos has no window-raise hook)"
-                            );
-                            Task::none()
-                        }
+                        MprisCommand::Raise => self.raise_window(),
                         MprisCommand::Quit => self.update(Message::Quit),
                         MprisCommand::OpenUri(uri) => match crate::file_uri_to_path(&uri) {
                             Some(path) => self.update(Message::OpenFiles(vec![path])),
@@ -2830,6 +2859,10 @@ impl AppModel {
                             self.update(Message::ExpandNowPlaying)
                         };
                     }
+                    Shortcut::ToggleMiniPlayer => {
+                        return self
+                            .update(Message::Mini(super::view_extras::MiniPlayerMsg::Toggle));
+                    }
                     Shortcut::FocusSearch => return self.update(Message::ToggleLibrarySearch),
                     Shortcut::NavPage(n) => {
                         // Bind the entity first: `nav.iter()` borrows `self`
@@ -2840,6 +2873,10 @@ impl AppModel {
                         }
                     }
                     Shortcut::Escape => {
+                        if self.extras.mini_player {
+                            return self
+                                .update(Message::Mini(super::view_extras::MiniPlayerMsg::Toggle));
+                        }
                         if self.core.window.show_context {
                             self.core.window.show_context = false;
                         } else if self.expand_progress > 0.0 || self.expand_target.is_some() {
@@ -2857,6 +2894,7 @@ impl AppModel {
 
     pub(super) fn select_nav(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Message>> {
         self.nav.activate(id);
+        self.remember_page();
         self.clear_nav_history();
         // Reset sub-view selections when switching pages
         self.selected_album = None;
@@ -2903,6 +2941,7 @@ impl AppModel {
                     ))
                 })
             }
+            Some(Page::Home) => self.enter_home(),
             Some(Page::Genres) => self.load_genres(),
             Some(Page::Artists) => self.load_artist_info_for_visible(),
             Some(Page::Folders) => {

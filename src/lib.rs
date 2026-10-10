@@ -8,6 +8,7 @@ pub mod autoeq;
 pub mod config;
 pub mod convert;
 pub mod credentials;
+pub mod desktop;
 pub mod i18n;
 pub mod keybinds;
 pub mod library;

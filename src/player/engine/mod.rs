@@ -22,6 +22,7 @@ pub mod dop_output;
 // churn every `use` path across the crate (including app.rs).
 #[allow(clippy::module_inception)]
 pub mod engine;
+pub mod fade;
 pub mod filter;
 pub mod output;
 pub mod resampler;

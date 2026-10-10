@@ -143,6 +143,26 @@ pub enum ReplayGainMode {
     Auto,
 }
 
+/// What Aulos does when the play queue runs out of tracks (Lollypop's
+/// `auto_random` / `auto_similar` repeat modes). Only applies to the local
+/// playback engine, and only while `RepeatMode` isn't looping the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoPlayMode {
+    /// Playback stops at the end of the queue.
+    #[default]
+    Off,
+    /// Keep playing random albums from the library.
+    Random,
+    /// Keep playing albums by the same artist / in the same genre / era.
+    Similar,
+}
+
+impl AutoPlayMode {
+    /// All modes, in the order shown in menus and dropdowns.
+    pub const ALL: [AutoPlayMode; 3] = [Self::Off, Self::Random, Self::Similar];
+}
+
 /// Persistent configuration stored via cosmic-config.
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
 #[version = 2]
@@ -173,6 +193,14 @@ pub struct Config {
     pub active_eq_preset_name: String,
     /// Last active view ("albums", "artists", "songs", "playlists").
     pub last_view: String,
+    /// Section shown at startup: `"home"` (default), `"last"` (restore
+    /// `last_view`) or a page key such as `"albums"` — see
+    /// `crate::app::startup`. Unknown/unavailable values fall back to Home.
+    pub startup_page: String,
+    /// Provider active at startup: `"last"` (default — the provider that
+    /// was active when the app last exited) or a provider id (`"local"`,
+    /// an MPD/Subsonic server id). Falls back via `resolve_active_provider`.
+    pub startup_provider: String,
     /// Configured MPD server connections.
     pub mpd_servers: Vec<MpdConfigEntry>,
     /// Configured OpenSubsonic/Navidrome server connections.
@@ -225,6 +253,49 @@ pub struct Config {
     /// Whether the first-run intro jingle ("it really pipes the satyr's
     /// ass") has already been played.
     pub intro_played: bool,
+    /// Fade in/out duration (seconds) applied on play, pause, stop and
+    /// manual track skips. `0.0` disables the fade.
+    pub fade_duration_secs: f32,
+    /// Continue with random / similar music when the queue runs out.
+    pub auto_play_mode: AutoPlayMode,
+    /// Party mode: endless random playback restricted to `party_genres`.
+    pub party_mode: bool,
+    /// Genres party mode draws from (empty = the whole library).
+    pub party_genres: Vec<String>,
+    /// Show a desktop notification (with cover art) on track change while
+    /// the window isn't focused.
+    pub notify_track_change: bool,
+    /// Inhibit suspend/idle while music is playing.
+    pub inhibit_while_playing: bool,
+    /// Keep playing (window minimized) instead of quitting when the
+    /// window is closed during playback.
+    pub background_playback: bool,
+    /// Show the "Various Artists" compilations entry in the Artists view.
+    /// When off, compilations are only reachable from the Albums page.
+    pub show_compilations_in_artists: bool,
+    /// Write playlist file paths relative to the exported M3U file's
+    /// directory (instead of absolute paths).
+    pub m3u_relative_paths: bool,
+    /// Scrobble to ListenBrainz (needs a stored user token).
+    pub scrobble_listenbrainz_enabled: bool,
+    /// Scrobble to Last.fm (needs a session key and API key/secret).
+    pub scrobble_lastfm_enabled: bool,
+    /// Scrobble to Libre.fm (needs a session key).
+    pub scrobble_librefm_enabled: bool,
+    /// ListenBrainz user name; non-empty once a token was validated.
+    pub scrobble_listenbrainz_user: String,
+    /// Last.fm user name; non-empty once connected.
+    pub scrobble_lastfm_user: String,
+    /// Libre.fm user name; non-empty once connected.
+    pub scrobble_librefm_user: String,
+    /// The user's own Last.fm API key (Last.fm requires every app to use
+    /// a registered key; empty by default). The matching shared secret is
+    /// kept in the system keyring, never here.
+    pub scrobble_lastfm_api_key: String,
+    /// Also scrobble radio streams and podcasts (off by default).
+    pub scrobble_streams: bool,
+    /// Love/unlove on Last.fm when a track is (un)favorited in Aulos.
+    pub scrobble_lastfm_love_sync: bool,
 }
 
 impl Default for Config {
@@ -252,6 +323,8 @@ impl Default for Config {
             equalizer_preamp: 0.0,
             active_eq_preset_name: String::new(),
             last_view: "albums".to_string(),
+            startup_page: "home".to_string(),
+            startup_provider: "last".to_string(),
             mpd_servers: Vec::new(),
             subsonic_servers: Vec::new(),
             crossfade_duration_secs: 0.0,
@@ -269,7 +342,47 @@ impl Default for Config {
             fetch_artist_info: false,
             grid_scale: 1.0,
             intro_played: false,
+            fade_duration_secs: 0.0,
+            auto_play_mode: AutoPlayMode::Off,
+            party_mode: false,
+            party_genres: Vec::new(),
+            notify_track_change: true,
+            inhibit_while_playing: true,
+            background_playback: false,
+            show_compilations_in_artists: true,
+            m3u_relative_paths: true,
+            scrobble_listenbrainz_enabled: false,
+            scrobble_lastfm_enabled: false,
+            scrobble_librefm_enabled: false,
+            scrobble_listenbrainz_user: String::new(),
+            scrobble_lastfm_user: String::new(),
+            scrobble_librefm_user: String::new(),
+            scrobble_lastfm_api_key: String::new(),
+            scrobble_streams: false,
+            scrobble_lastfm_love_sync: true,
         }
+    }
+}
+
+/// The provider id the user wants active at startup: the explicit
+/// `startup_provider` choice, or — for `"last"` (the default, also used
+/// for an empty value) — the provider that was active when the app last
+/// exited. Feed the result to [`resolve_active_provider`], which still
+/// falls back to local / the first registered provider when it is gone.
+pub fn startup_provider_preference<'a>(
+    startup_provider: &'a str,
+    last_active: Option<&'a str>,
+) -> Option<&'a str> {
+    match startup_provider.trim() {
+        "" | "last" => last_active,
+        explicit => Some(explicit),
+    }
+}
+
+impl Config {
+    /// See [`startup_provider_preference`].
+    pub fn startup_provider_choice(&self) -> Option<&str> {
+        startup_provider_preference(&self.startup_provider, self.active_provider.as_deref())
     }
 }
 
@@ -341,5 +454,62 @@ mod resolve_active_provider_tests {
     fn none_when_nothing_registered() {
         let registered: Vec<String> = Vec::new();
         assert_eq!(resolve_active_provider(Some("local"), &registered), None);
+    }
+}
+
+#[cfg(test)]
+mod startup_provider_tests {
+    use super::{Config, resolve_active_provider, startup_provider_preference};
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn last_uses_the_saved_active_provider() {
+        assert_eq!(
+            startup_provider_preference("last", Some("mpd-home")),
+            Some("mpd-home")
+        );
+        assert_eq!(
+            startup_provider_preference("", Some("mpd-home")),
+            Some("mpd-home")
+        );
+        assert_eq!(startup_provider_preference("last", None), None);
+    }
+
+    #[test]
+    fn explicit_choice_overrides_the_saved_one() {
+        assert_eq!(
+            startup_provider_preference("local", Some("mpd-home")),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn config_defaults_keep_existing_behaviour() {
+        let mut config = Config::default();
+        assert_eq!(config.startup_page, "home");
+        assert_eq!(config.startup_provider, "last");
+        assert_eq!(config.startup_provider_choice(), None);
+        config.active_provider = Some("nav".into());
+        assert_eq!(config.startup_provider_choice(), Some("nav"));
+        config.startup_provider = "local".into();
+        assert_eq!(config.startup_provider_choice(), Some("local"));
+    }
+
+    #[test]
+    fn missing_explicit_provider_falls_back_to_local_then_first() {
+        let with_local = ids(&["mpd-home", "local"]);
+        let choice = startup_provider_preference("nav-gone", Some("mpd-home"));
+        assert_eq!(
+            resolve_active_provider(choice, &with_local),
+            Some("local".to_string())
+        );
+        let without_local = ids(&["mpd-home"]);
+        assert_eq!(
+            resolve_active_provider(choice, &without_local),
+            Some("mpd-home".to_string())
+        );
     }
 }

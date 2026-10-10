@@ -38,6 +38,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
+        if self.extras.mini_player {
+            return None;
+        }
         Some(&self.nav)
     }
 
@@ -70,6 +73,15 @@ impl cosmic::Application for AppModel {
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
         self.select_nav(id)
+    }
+
+    /// Closing the window (header close button) goes through
+    /// `PlaybackExtrasMessage::CloseRequested`: quit, or keep playing in the
+    /// background when that is enabled.
+    fn on_app_exit(&mut self) -> Option<Self::Message> {
+        Some(Message::Playback(
+            super::playback_extras::PlaybackExtrasMessage::CloseRequested,
+        ))
     }
 }
 

@@ -195,10 +195,13 @@ impl LibraryScanner {
         let artist = t.artist.unwrap_or_default();
 
         // Fall back album_artist -> artist.
-        let album_artist = t
-            .album_artist
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| artist.clone());
+        let album_artist = t.album_artist.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            if t.compilation {
+                super::compilations::VARIOUS_ARTISTS.to_string()
+            } else {
+                artist.clone()
+            }
+        });
 
         let source_uri = path.to_string_lossy().to_string();
         Ok(Track {

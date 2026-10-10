@@ -23,6 +23,8 @@ pub enum SmartPlaylistMessage {
     // -- List view --
     /// Resolve and play a saved smart playlist's tracks, by list index.
     Play(usize),
+    /// Export a saved smart playlist's current tracks as M3U, by list index.
+    Export(usize),
     /// Open the rules editor for an existing smart playlist, by list index.
     Edit(usize),
     /// Delete a saved smart playlist, by list index.
@@ -264,6 +266,8 @@ fn field_label(field: RuleField) -> String {
         RuleField::DurationSecs => fl!("smart-playlist-field-duration"),
         RuleField::Bitrate => fl!("smart-playlist-field-bitrate"),
         RuleField::SampleRate => fl!("smart-playlist-field-sample-rate"),
+        RuleField::PlayCount => fl!("smart-playlist-field-play-count"),
+        RuleField::DaysSincePlayed => fl!("smart-playlist-field-days-since-played"),
     }
 }
 
@@ -291,6 +295,8 @@ fn order_label(field: OrderField) -> String {
         OrderField::DurationSecs => fl!("smart-playlist-order-duration"),
         OrderField::Random => fl!("smart-playlist-order-random"),
         OrderField::RecentlyAdded => fl!("smart-playlist-order-recently-added"),
+        OrderField::PlayCount => fl!("smart-playlist-order-play-count"),
+        OrderField::LastPlayed => fl!("smart-playlist-order-last-played"),
     }
 }
 
@@ -340,6 +346,12 @@ pub fn smart_playlists_view(
             widget::text::caption(fl!("play-smart-playlist-tooltip")),
             widget::tooltip::Position::Top,
         );
+        let export_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("document-save-symbolic").size(16))
+                .on_press(SmartPlaylistMessage::Export(index)),
+            widget::text::caption(fl!("export-m3u-tooltip")),
+            widget::tooltip::Position::Top,
+        );
         let edit_btn = widget::tooltip(
             widget::button::icon(widget::icon::from_name("document-edit-symbolic").size(16))
                 .on_press(SmartPlaylistMessage::Edit(index)),
@@ -371,6 +383,7 @@ pub fn smart_playlists_view(
                     .align_x(Horizontal::Right),
                 )
                 .push(play_btn)
+                .push(export_btn)
                 .push(edit_btn)
                 .push(delete_btn)
                 .spacing(16)
@@ -465,6 +478,10 @@ pub fn smart_playlist_detail_view<'a>(
                 .push(
                     widget::button::suggested(fl!("play-all"))
                         .on_press(SmartPlaylistMessage::Play(playlist_index)),
+                )
+                .push(
+                    widget::button::standard(fl!("export-m3u"))
+                        .on_press(SmartPlaylistMessage::Export(playlist_index)),
                 )
                 .spacing(8)
                 .width(Length::Fill),

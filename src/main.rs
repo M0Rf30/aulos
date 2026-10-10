@@ -42,11 +42,16 @@ fn main() -> cosmic::iced::Result {
     aulos::i18n::init(&requested_languages);
 
     // Settings for configuring the application window and iced runtime.
-    let settings = cosmic::app::Settings::default().size_limits(
-        cosmic::iced::Limits::NONE
-            .min_width(900.0)
-            .min_height(600.0),
-    );
+    // `exit_on_close(false)`: the window is not destroyed on a close request;
+    // instead `app::playback_extras` decides (quit, or minimize and keep
+    // playing when background playback is enabled).
+    let settings = cosmic::app::Settings::default()
+        .size_limits(
+            cosmic::iced::Limits::NONE
+                .min_width(900.0)
+                .min_height(600.0),
+        )
+        .exit_on_close(false);
 
     let flags = aulos::app::AppFlags { open_paths };
 

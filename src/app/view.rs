@@ -39,6 +39,9 @@ fn map_queue_message(msg: queue::QueueMessage) -> Message {
         queue::QueueMessage::MoveDown(i) => Message::QueueMove { from: i, to: i + 1 },
         queue::QueueMessage::Remove(i) => Message::QueueRemove(i),
         queue::QueueMessage::Clear => Message::QueueClear,
+        queue::QueueMessage::ToggleStopAfter => {
+            Message::Playback(super::playback_extras::PlaybackExtrasMessage::ToggleStopAfter)
+        }
         queue::QueueMessage::Navigate(route) => Message::Navigate(route),
     }
 }
@@ -88,6 +91,11 @@ impl AppModel {
                             MenuAction::Search,
                         ),
                         menu::Item::Button(
+                            fl!("mini-player"),
+                            glyph("window-restore-symbolic"),
+                            MenuAction::MiniPlayer,
+                        ),
+                        menu::Item::Button(
                             fl!("equalizer"),
                             glyph("multimedia-equalizer-symbolic"),
                             MenuAction::Equalizer,
@@ -106,6 +114,39 @@ impl AppModel {
                             fl!("queue"),
                             glyph("media-playlist-consecutive-symbolic"),
                             MenuAction::Queue,
+                        ),
+                        menu::Item::CheckBox(
+                            fl!("stop-after-track"),
+                            glyph("go-last-symbolic"),
+                            crate::player::party::stop_after_flag(),
+                            MenuAction::StopAfterTrack,
+                        ),
+                        menu::Item::CheckBox(
+                            fl!("party-mode"),
+                            glyph("media-playlist-shuffle-symbolic"),
+                            self.config.party_mode,
+                            MenuAction::PartyMode,
+                        ),
+                        menu::Item::Folder(
+                            fl!("auto-play-menu"),
+                            [
+                                (fl!("auto-play-off"), crate::config::AutoPlayMode::Off),
+                                (fl!("auto-play-random"), crate::config::AutoPlayMode::Random),
+                                (
+                                    fl!("auto-play-similar"),
+                                    crate::config::AutoPlayMode::Similar,
+                                ),
+                            ]
+                            .into_iter()
+                            .map(|(label, mode)| {
+                                menu::Item::CheckBox(
+                                    label,
+                                    None,
+                                    self.config.auto_play_mode == mode,
+                                    MenuAction::AutoPlay(mode),
+                                )
+                            })
+                            .collect(),
                         ),
                         menu::Item::Button(
                             fl!("about"),
@@ -227,6 +268,9 @@ impl AppModel {
     }
 
     pub(super) fn context_drawer_page(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
+        if self.extras.mini_player {
+            return None;
+        }
         if !self.core.window.show_context {
             return None;
         }
@@ -358,6 +402,14 @@ impl AppModel {
                     self.config.fetch_artist_info,
                     &self.artist_tag_delimiters_input,
                     self.config.grid_scale,
+                    self.config.show_compilations_in_artists,
+                    self.config.m3u_relative_paths,
+                    crate::online::scrobble::view::view(&self.scrobble, &self.config)
+                        .map(settings::SettingsMessage::Scrobble),
+                    self.playback_extras_settings()
+                        .map(settings::SettingsMessage::PlaybackExtras),
+                    self.startup_settings()
+                        .map(settings::SettingsMessage::Startup),
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -395,6 +447,15 @@ impl AppModel {
                     settings::SettingsMessage::SetExperimentalConverter(v) => {
                         Message::SetExperimentalConverter(v)
                     }
+                    settings::SettingsMessage::SetShowCompilationsInArtists(v) => {
+                        Message::SetShowCompilationsInArtists(v)
+                    }
+                    settings::SettingsMessage::SetM3uRelativePaths(v) => {
+                        Message::SetM3uRelativePaths(v)
+                    }
+                    settings::SettingsMessage::Scrobble(m) => Message::Scrobble(m),
+                    settings::SettingsMessage::PlaybackExtras(m) => Message::Playback(m),
+                    settings::SettingsMessage::Startup(m) => Message::Startup(m),
                 });
 
                 context_drawer::context_drawer(
@@ -469,6 +530,9 @@ impl AppModel {
     }
 
     pub(super) fn view_page(&self) -> Element<'_, Message> {
+        if self.extras.mini_player {
+            return self.mini_player_view();
+        }
         let page = self
             .nav
             .active_data::<Page>()
@@ -487,6 +551,19 @@ impl AppModel {
         let search_query_active = self.search_active && !self.library_search.trim().is_empty();
 
         let content: Element<'_, Message> = match page {
+            Page::Home => crate::views::home::home_view(
+                &self.home,
+                crate::views::home::HomeContext {
+                    library_albums: self.all_albums.len(),
+                    scanning: self.library_scanning,
+                    has_music_dirs: !self.config.music_dirs.is_empty(),
+                    has_servers: !self.config.mpd_servers.is_empty()
+                        || !self.config.subsonic_servers.is_empty(),
+                },
+                &self.cover_images,
+                &self.artist_photos,
+            )
+            .map(Message::Home),
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
@@ -519,6 +596,7 @@ impl AppModel {
                         albums_data,
                         &self.cover_images,
                         self.config.albums_view_mode,
+                        &self.extras.album_filter,
                     )
                     .map(move |msg| {
                         Message::from(match msg {
@@ -558,7 +636,7 @@ impl AppModel {
                     }
                 } else {
                     let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
-                        if search_query_active {
+                        if search_query_active || !self.config.show_compilations_in_artists {
                             (
                                 &self.filtered_artists,
                                 Some(self.filtered_artist_map.as_slice()),
@@ -682,6 +760,12 @@ impl AppModel {
                             playlists::PlaylistMessage::AddToQueue(tracks) => {
                                 Message::AddToQueue(tracks)
                             }
+                            playlists::PlaylistMessage::Export(i) => {
+                                Message::PlaylistIo(super::playlist_io::PlaylistIo::Export(i))
+                            }
+                            playlists::PlaylistMessage::ImportFiles => {
+                                Message::PlaylistIo(super::playlist_io::PlaylistIo::PickFiles)
+                            }
                         })
                     } else {
                         widget::text("Playlist not found").into()
@@ -734,6 +818,14 @@ impl AppModel {
                             }
                             playlists::PlaylistMessage::AddToQueue(tracks) => {
                                 Message::AddToQueue(tracks)
+                            }
+                            playlists::PlaylistMessage::Export(i) => {
+                                Message::PlaylistIo(super::playlist_io::PlaylistIo::Export(
+                                    unfilter_index(playlist_map, i),
+                                ))
+                            }
+                            playlists::PlaylistMessage::ImportFiles => {
+                                Message::PlaylistIo(super::playlist_io::PlaylistIo::PickFiles)
                             }
                         },
                     )
@@ -973,6 +1065,9 @@ impl AppModel {
             now_playing::NowPlayingMessage::Stop => Message::Stop,
             now_playing::NowPlayingMessage::ToggleQueue => {
                 Message::ToggleContextPage(ContextPage::Queue)
+            }
+            now_playing::NowPlayingMessage::ToggleStopAfter => {
+                Message::Playback(super::playback_extras::PlaybackExtrasMessage::ToggleStopAfter)
             }
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::ToggleVisualizer => Message::ToggleVisualizer,

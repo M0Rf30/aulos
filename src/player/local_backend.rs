@@ -86,6 +86,13 @@ impl LocalBackend {
         self.engine.set_crossfade(secs.max(0.0));
     }
 
+    /// Set the fade in/out duration in seconds (`0` = fades disabled).
+    /// Applies to play, pause, stop and manual skips; see
+    /// [`super::engine::fade`].
+    pub fn set_fade_secs(&mut self, secs: f32) {
+        self.engine.set_fade_secs(secs.max(0.0));
+    }
+
     /// Clear the engine's gapless/crossfade look-ahead slot without
     /// touching current playback. Call whenever the upcoming track might
     /// have changed (queue edit, shuffle/repeat toggle, jump) so a stale

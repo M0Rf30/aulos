@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
+pub mod album_filters;
 pub mod albums;
 pub mod artists;
 pub mod common;
@@ -8,8 +9,10 @@ pub mod convert;
 pub mod equalizer;
 pub mod folders;
 pub mod genres;
+pub mod home;
 pub mod lyrics;
 pub mod lyrics_follow;
+pub mod mini_player;
 pub mod now_playing;
 pub mod playlists;
 pub mod podcasts;

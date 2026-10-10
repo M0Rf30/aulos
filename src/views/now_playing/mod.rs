@@ -42,6 +42,8 @@ pub enum NowPlayingMessage {
     Stop,
     /// Toggle the "Up Next" queue drawer (`ContextPage::Queue`).
     ToggleQueue,
+    /// Toggle "stop after this track" (`PlaybackExtrasMessage::ToggleStopAfter`).
+    ToggleStopAfter,
     ShowLyrics,
     /// Click on bar background — expand to full view.
     ExpandToggle,

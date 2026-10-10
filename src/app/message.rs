@@ -192,6 +192,12 @@ pub enum Message {
     // full message vocabulary (list/detail/editor) out of the top-level enum.
     SmartPlaylists(crate::views::smart_playlists::SmartPlaylistMessage),
 
+    // Home page (suggested music, play history)
+    Home(crate::views::home::HomeMessage),
+
+    // Startup preferences (Settings drawer)
+    Startup(super::startup::StartupMessage),
+
     // Genre filtering
     /// Filter tracks by genre name.
     FilterByGenre(String),
@@ -252,6 +258,8 @@ pub enum Message {
 
     // Settings
     AddMusicDir,
+    /// Scrobbling settings / connect-flow message.
+    Scrobble(crate::online::scrobble::ScrobbleMessage),
     /// Result from the XDG Desktop Portal directory picker.
     DirPickerResult(Result<PathBuf, String>),
     RemoveMusicDir(usize),
@@ -426,6 +434,9 @@ pub enum Message {
 
     // Application lifecycle
     Quit,
+    /// Playback extras (stop-after, fade, party/auto-play, notifications,
+    /// inhibit, background playback) — see `app::playback_extras`.
+    Playback(super::playback_extras::PlaybackExtrasMessage),
     /// An MPRIS2 D-Bus event: either the server handle becoming available,
     /// or a command relayed from a media-key/shell-applet D-Bus call.
     Mpris(crate::mpris::MprisEvent),
@@ -440,6 +451,18 @@ pub enum Message {
     /// Result of a background cover-art resolve kicked off by
     /// `publish_mpris` for a track not yet in the MPRIS art cache.
     MprisArtResolved(i64, Option<String>),
+
+    // Playlist import/export, mini player, compilations and album filters
+    /// M3U/M3U8/PLS playlist import and M3U export (see `app::playlist_io`).
+    PlaylistIo(super::playlist_io::PlaylistIo),
+    /// Mini-player mode (see `app::view_extras`).
+    Mini(super::view_extras::MiniPlayerMsg),
+    /// A filter chip on the Albums page was clicked.
+    AlbumFilter(crate::views::album_filters::FilterMsg),
+    /// Toggle the "Various Artists" entry in the Artists view.
+    SetShowCompilationsInArtists(bool),
+    /// Toggle relative paths in exported M3U playlists.
+    SetM3uRelativePaths(bool),
 }
 
 impl From<albums::AlbumMessage> for Message {
@@ -457,6 +480,7 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
             albums::AlbumMessage::PlayNext(tracks) => Message::PlayNext(tracks),
             albums::AlbumMessage::AddToQueue(tracks) => Message::AddToQueue(tracks),
+            albums::AlbumMessage::Filter(f) => Message::AlbumFilter(f),
         }
     }
 }

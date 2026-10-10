@@ -34,6 +34,8 @@ pub enum QueueMessage {
     Remove(usize),
     /// Drop every entry except the one currently playing.
     Clear,
+    /// Toggle "stop after the current track".
+    ToggleStopAfter,
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
 }
@@ -280,6 +282,23 @@ pub fn queue_header_view<'a>(
             .spacing(sp.space_xs)
             .align_y(Alignment::Center),
     );
+
+    if current_track.is_some() {
+        col = col.push(
+            widget::Row::new()
+                .push(
+                    widget::text::body(fl!("stop-after-track"))
+                        .class(dim_text())
+                        .width(Length::Fill),
+                )
+                .push(
+                    widget::toggler(crate::player::party::stop_after_flag())
+                        .on_toggle(|_| QueueMessage::ToggleStopAfter),
+                )
+                .spacing(sp.space_xs)
+                .align_y(Alignment::Center),
+        );
+    }
 
     Some(col.into())
 }

@@ -50,6 +50,19 @@ pub enum SettingsMessage {
     SetFetchArtistInfo(bool),
     /// Grid card size multiplier changed (`common::GRID_SCALE_RANGE`).
     SetGridScale(f32),
+    /// Toggle showing the "Various Artists" compilations entry in the
+    /// Artists view.
+    SetShowCompilationsInArtists(bool),
+    /// Toggle relative paths in exported M3U playlists.
+    SetM3uRelativePaths(bool),
+    /// A message from the Scrobbling block (see `crate::online::scrobble`).
+    Scrobble(crate::online::scrobble::ScrobbleMessage),
+    /// A message from the playback extras sections (fades, auto-play,
+    /// party mode, desktop integration) — see `crate::app::playback_extras`.
+    PlaybackExtras(crate::app::playback_extras::PlaybackExtrasMessage),
+    /// A message from the Startup block (start section / provider) — see
+    /// `crate::app::startup`.
+    Startup(crate::app::startup::StartupMessage),
 }
 
 /// All replay gain modes, in the order shown in the dropdown.
@@ -73,6 +86,11 @@ pub fn view<'a>(
     fetch_artist_info: bool,
     artist_tag_delimiters_input: &'a str,
     grid_scale: f32,
+    show_compilations_in_artists: bool,
+    m3u_relative_paths: bool,
+    scrobbling: cosmic::Element<'a, SettingsMessage>,
+    playback_extras: cosmic::Element<'a, SettingsMessage>,
+    startup: cosmic::Element<'a, SettingsMessage>,
 ) -> cosmic::Element<'a, SettingsMessage> {
     let sp = cosmic::theme::active().cosmic().spacing;
 
@@ -84,9 +102,14 @@ pub fn view<'a>(
             split_artist_tags,
             artist_tag_delimiters_input,
         ))
+        .push(compilations_section(show_compilations_in_artists))
+        .push(playlists_section(m3u_relative_paths))
         .push(playback_section(crossfade_secs, replay_gain_mode, volume))
+        .push(playback_extras)
+        .push(startup)
         .push(appearance_section(grid_scale))
         .push(artist_info_section(fetch_artist_info))
+        .push(scrobbling)
         .push(experimental_section(experimental_converter))
         .push(shortcuts_section())
         .push(about_section())
@@ -235,6 +258,40 @@ fn artist_tags_section<'a>(
         ))
         .add(split_item)
         .add(delimiters_item)
+        .into()
+}
+
+/// Compilations section: whether "Various Artists" appears in the Artists
+/// view (compilations always remain browsable from the Albums page).
+fn compilations_section<'a>(show_in_artists: bool) -> cosmic::Element<'a, SettingsMessage> {
+    widget::settings::section()
+        .header(section_header(
+            fl!("settings-compilations"),
+            fl!("settings-compilations-description"),
+        ))
+        .add(
+            widget::settings::item::builder(fl!("show-compilations-in-artists"))
+                .description(fl!("show-compilations-in-artists-description"))
+                .toggler(
+                    show_in_artists,
+                    SettingsMessage::SetShowCompilationsInArtists,
+                ),
+        )
+        .into()
+}
+
+/// Playlists section: M3U export path style.
+fn playlists_section<'a>(relative_paths: bool) -> cosmic::Element<'a, SettingsMessage> {
+    widget::settings::section()
+        .header(section_header(
+            fl!("settings-playlists"),
+            fl!("settings-playlists-description"),
+        ))
+        .add(
+            widget::settings::item::builder(fl!("m3u-relative-paths"))
+                .description(fl!("m3u-relative-paths-description"))
+                .toggler(relative_paths, SettingsMessage::SetM3uRelativePaths),
+        )
         .into()
 }
 
