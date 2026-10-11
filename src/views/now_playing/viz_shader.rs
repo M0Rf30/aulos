@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Custom wgpu shader widget for the projectM visualizer.
+//! Custom wgpu shader widget for the lactea visualizer.
 //!
 //! Uses iced's `shader::Program` / `shader::Primitive` API to maintain a
 //! **single persistent GPU texture** that is updated in-place every frame

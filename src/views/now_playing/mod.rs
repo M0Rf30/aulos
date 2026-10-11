@@ -53,7 +53,7 @@ pub enum NowPlayingMessage {
     Collapse,
     /// Toggle favorite for the currently playing track (track ID as string).
     ToggleFavorite(String),
-    /// Toggle the ProjectM visualizer on/off.
+    /// Toggle the lactea visualizer on/off.
     #[cfg(feature = "visualizer")]
     ToggleVisualizer,
     /// Cycle to the next visualizer preset.

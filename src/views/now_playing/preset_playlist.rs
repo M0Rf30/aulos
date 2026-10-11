@@ -1,15 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Path-identified, shuffled preset rotation for the projectM visualizer
+//! Path-identified, shuffled preset rotation for the lactea visualizer
 //! (behind the `visualizer` feature flag).
 //!
-//! Replaces libprojectM's own playlist. The playlist API can neither report
-//! which preset it landed on after an automatic (timer/beat) switch, nor
-//! stays out of the way of a direct `projectm_load_preset_file`: a failing
-//! direct load triggers the playlist's retry logic, which silently loads a
-//! *different* random preset. Owning the rotation means the renderer always
-//! knows the exact file on screen, so the preset browser can highlight it.
+//! Owning the rotation (rather than using lactea's `Playlist`) means the
+//! renderer always knows the exact file on screen — including after an
+//! automatic (timer/beat) switch or a failed load — so the preset browser can
+//! highlight it.
 
 use std::path::{Path, PathBuf};
 

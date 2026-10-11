@@ -133,14 +133,12 @@ hound = "3.5"
 # Optional: tokio-console support for runtime introspection
 console-subscriber = { version = "0.5", optional = true }
 
-# Optional: ProjectM visualizer (behind `visualizer` feature flag)
-projectm = { version = "3.1", optional = true, default-features = false, features = ["static"] }
-# Raw bindings for the one callback `projectm` wraps unsafely: its
-# switch-failed trampoline `unwrap()`s a UTF-8 conversion inside `extern "C"`,
-# which aborts the process on a non-UTF-8 filename or error message.
-projectm-sys = { version = "1", optional = true }
-glutin = { version = "0.32", optional = true }
-gl = { version = "0.14", optional = true }
+# Optional: lactea MilkDrop visualizer (behind `visualizer` feature flag). It
+# renders on its own wgpu 30 device (iced/libcosmic is on a different wgpu
+# major), so frames are read back and uploaded into the UI's texture.
+lactea = { git = "ssh://git@github.com/M0Rf30/lactea.git", rev = "1f10b4f", optional = true }
+wgpu = { version = "30", optional = true }
+pollster = { version = "0.4", optional = true }
 # MPD visualizer audio: capture MPD's own PipeWire playback stream (aulos only
 # remote-controls MPD, so no PCM passes through the in-app engine tap).
 pipewire = { version = "0.10", optional = true }
@@ -148,7 +146,7 @@ pipewire = { version = "0.10", optional = true }
 [features]
 default = []
 tokio-console = ["dep:console-subscriber"]
-visualizer = ["dep:projectm", "dep:projectm-sys", "dep:glutin", "dep:gl", "dep:pipewire"]
+visualizer = ["dep:lactea", "dep:wgpu", "dep:pollster", "dep:pipewire"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -165,12 +163,6 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = false
-
-# projectm 3.1.2 casts C strings to `*const i8`, which does not compile where
-# `c_char` is `u8` (aarch64 Linux). Fork with the fix, pending upstream
-# https://github.com/projectM-visualizer/projectm-rs/pull/22 — drop once released.
-[patch.crates-io]
-projectm = { git = "https://github.com/M0Rf30/projectm-rs.git", rev = "d31e0389d388eff8557132958d1e9ba57d8671ea" }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']

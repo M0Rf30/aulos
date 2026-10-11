@@ -76,7 +76,7 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 
 ### Visualizer
 
-The [projectM](https://github.com/projectM-visualizer/projectm) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets are loaded from `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`.
+The [lactea](https://github.com/M0Rf30/lactea) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets (`.milk`) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
 
 ### File converter (experimental)
 
@@ -110,9 +110,9 @@ The archive contains the `aulos` binary, the `justfile` and `resources/` (deskto
 **Runtime requirements:**
 - A Wayland desktop. Aulos is built for COSMIC but runs on other desktops too.
 - ALSA (`alsa-lib`).
-- `libpipewire-0.3` and OpenGL/EGL drivers, for the visualizer.
+- `libpipewire-0.3` and a Vulkan or GL driver, for the visualizer.
 - Optional: `ffmpeg`, for lossy formats in the converter.
-- Optional: projectM presets.
+- Optional: MilkDrop (`.milk`) presets.
 
 ### From source
 
@@ -127,7 +127,7 @@ just build-release
 sudo just install
 ```
 
-To build with the visualizer, as the release binaries are, also install `libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev cmake libgl-dev libegl-dev libx11-dev`, then run:
+To build with the visualizer, as the release binaries are, also install `libpipewire-0.3-dev libspa-0.2-dev`, then run:
 
 ```bash
 just build-release --features visualizer
@@ -176,7 +176,7 @@ On the very first launch Aulos greets you with its intro jingle — a 4-second, 
 
 ## Building blocks
 
-[libcosmic](https://github.com/pop-os/libcosmic) (UI) · [Symphonia](https://github.com/M0Rf30/Symphonia) and [cpal](https://github.com/RustAudio/cpal) (audio) · [rubato](https://github.com/HEnquist/rubato) (resampling) · [rusqlite](https://github.com/rusqlite/rusqlite) (library) · [mpd_client](https://github.com/elomatreb/mpd_client) (MPD) · [opensubsonic](https://github.com/M0Rf30/opensubsonic-rs) (Subsonic) · [mpris-server](https://github.com/SeaDve/mpris-server) and [zbus](https://github.com/dbus2/zbus) (D-Bus) · [projectM](https://github.com/projectM-visualizer/projectm-rs) (visualizer) · [tokio](https://tokio.rs) (async)
+[libcosmic](https://github.com/pop-os/libcosmic) (UI) · [Symphonia](https://github.com/M0Rf30/Symphonia) and [cpal](https://github.com/RustAudio/cpal) (audio) · [rubato](https://github.com/HEnquist/rubato) (resampling) · [rusqlite](https://github.com/rusqlite/rusqlite) (library) · [mpd_client](https://github.com/elomatreb/mpd_client) (MPD) · [opensubsonic](https://github.com/M0Rf30/opensubsonic-rs) (Subsonic) · [mpris-server](https://github.com/SeaDve/mpris-server) and [zbus](https://github.com/dbus2/zbus) (D-Bus) · [lactea](https://github.com/M0Rf30/lactea) (visualizer) · [tokio](https://tokio.rs) (async)
 
 ## Support
 

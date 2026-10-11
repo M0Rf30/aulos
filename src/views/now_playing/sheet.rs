@@ -230,7 +230,7 @@ impl<Message> Widget<Message, cosmic::Theme, cosmic::Renderer> for Sheet<'_, Mes
                 let dy = self.offset(state, bounds, now);
                 // Once settled, draw directly: wrapping in a layer +
                 // translation breaks custom `shader` primitives (the
-                // projectM visualizer would render nothing).
+                // lactea visualizer would render nothing).
                 if dy.abs() < 0.5 {
                     self.content.as_widget().draw(
                         &tree.children[0],

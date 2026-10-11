@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Preset browser overlay for the ProjectM visualizer (behind the
+//! Preset browser overlay for the lactea visualizer (behind the
 //! `visualizer` feature flag). Lists every discovered `.milk` preset,
 //! grouped by category, with a live search filter, click-to-load, and
 //! playback controls (next/lock/beat sensitivity). Stacked as the topmost
@@ -191,7 +191,7 @@ fn row_spacer<'a>(rows: usize) -> cosmic::Element<'a, NowPlayingMessage> {
 /// row.
 ///
 /// The list is virtualized — only the rows intersecting the viewport (at
-/// `scroll_offset`) are built — because the stock projectM install has
+/// `scroll_offset`) are built — because the stock MilkDrop preset pack has
 /// ~4000 presets and `view()` re-runs at the visualizer's 30 fps.
 pub fn preset_browser_overlay<'a>(
     entries: &'a [PresetEntry],
@@ -408,7 +408,7 @@ mod tests {
         )))
     }
 
-    /// Same stem in three categories, like the stock projectM install.
+    /// Same stem in three categories, like the stock MilkDrop preset pack.
     fn sample() -> Vec<PresetEntry> {
         vec![
             entry("milkdrop", "Geiss - Eddies 2"),

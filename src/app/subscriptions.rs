@@ -107,15 +107,11 @@ impl AppModel {
 
         // Visualizer render subscription (~30fps, only when active and expanded)
         //
-        // IMPORTANT: The projectM renderer requires a current EGL/GL context
-        // which is thread-local. Tokio's multi-threaded runtime migrates
-        // futures between OS threads across `.await` points, which would
-        // lose the GL context and produce black/garbage frames (flickering)
-        // and prevent PCM audio data from reaching projectM (no beat
-        // reactivity). To avoid this, the actual render loop runs on a
-        // dedicated `std::thread::spawn` OS thread. The iced subscription
-        // channel only relays "frame ready" notifications from that thread
-        // back to the UI.
+        // The lactea `Engine` is not `Send`, and its readback blocks on the
+        // GPU, so the actual render loop runs on a dedicated
+        // `std::thread::spawn` OS thread instead of a tokio worker. The iced
+        // subscription channel only relays "frame ready" notifications from
+        // that thread back to the UI.
         #[cfg(feature = "visualizer")]
         if self.visualizer_active
             && self.expand_progress > 0.0
@@ -133,7 +129,7 @@ impl AppModel {
                     current_preset,
                     locked: self.viz_locked,
                 },
-                projectm_render_stream,
+                lactea_render_stream,
             ));
         }
 
@@ -695,7 +691,7 @@ fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> +
     )
 }
 
-/// Identity key for the projectM visualizer render subscription. Hashes to
+/// Identity key for the lactea visualizer render subscription. Hashes to
 /// a constant so there's only ever one active instance regardless of the
 /// captured Arc contents (mirrors `MpdPollKey`/`MpdIdleKey`).
 #[cfg(feature = "visualizer")]
@@ -714,16 +710,16 @@ struct VizRenderKey {
 #[cfg(feature = "visualizer")]
 impl Hash for VizRenderKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        "projectm-render".hash(state);
+        "lactea-render".hash(state);
     }
 }
 
-/// Runs the projectM render loop on a dedicated OS thread and relays
+/// Runs the lactea render loop on a dedicated OS thread and relays
 /// "frame ready" notifications back to the UI through an iced subscription
 /// stream. See the call site for why the render loop needs its own thread
 /// (thread-local EGL/GL context).
 #[cfg(feature = "visualizer")]
-fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use<> {
+fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use<> {
     let pcm = Arc::clone(&key.pcm);
     let cmd_rx_slot = Arc::clone(&key.cmd_rx);
     let frame_buf = Arc::clone(&key.frame_buf);
@@ -736,20 +732,17 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
             // has produced a new frame so we can notify the UI.
             let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(2);
 
-            // Spawn a dedicated OS thread for the GL render loop.
-            // The EGL context created inside `ProjectMRenderer::new`
-            // stays current for the lifetime of this thread.
+            // Spawn a dedicated OS thread for the render loop. The engine
+            // created inside `VizRenderer::new` lives on this thread.
             std::thread::Builder::new()
-                .name("projectm-render".into())
+                .name("lactea-render".into())
                 .spawn(move || {
-                    let preset_dir = dirs::data_dir().map(|d| d.join("projectm").join("presets"));
+                    let preset_dir = dirs::data_dir().map(|d| d.join("lactea").join("presets"));
                     let mut renderer =
-                        match crate::views::now_playing::visualizer::ProjectMRenderer::new(
-                            preset_dir,
-                        ) {
+                        match crate::views::now_playing::visualizer::VizRenderer::new(preset_dir) {
                             Ok(r) => r,
                             Err(e) => {
-                                tracing::error!("Failed to create projectM renderer: {e}");
+                                tracing::error!("Failed to create lactea renderer: {e}");
                                 return;
                             }
                         };
@@ -797,23 +790,19 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                     // periods too, so only a *sustained* gap past
                     // `PCM_STALE_TIMEOUT` triggers the silence fallback;
                     // a merely-empty-this-frame read just feeds nothing
-                    // and lets projectM's own internal smoothing carry on.
+                    // and lets lactea's own internal smoothing carry on.
                     let mut last_pcm_at = std::time::Instant::now();
                     // How long PCM may go quiet before we push explicit
                     // silence rather than just skipping this frame's feed.
                     const PCM_STALE_TIMEOUT: Duration = Duration::from_millis(100);
                     // One render period's worth of stereo silence
-                    // (44.1kHz / ~30fps), fed to projectM while stale so
+                    // (44.1kHz / ~30fps), fed to lactea while stale so
                     // it decays toward an idle visualization instead of
                     // replaying the last real window forever.
                     const SILENCE_FRAME_SAMPLES: usize = (44_100 / 30) * 2;
-                    // Most PCM worth reading per frame: one whole projectM
-                    // ring window (576 stereo frames). NOT
-                    // `ProjectM::pcm_get_max_samples()` (480 interleaved
-                    // samples = 240 frames): reading only that few made
-                    // projectM analyse a mosaic of 5ms fragments ~33ms
-                    // apart and flatten beat detection. `render_frame`
-                    // splits the window into calls projectm-rs accepts.
+                    // Most PCM worth reading per frame: one contiguous window
+                    // (576 stereo frames) so the analyser sees real audio
+                    // rather than 5ms fragments ~33ms apart.
                     let max_pcm_samples = crate::views::now_playing::visualizer::PCM_FEED_SAMPLES;
 
                     loop {
@@ -854,7 +843,7 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                                 fresh
                             } else if last_pcm_at.elapsed() >= PCM_STALE_TIMEOUT {
                                 // Sustained silence: push explicit zeros so
-                                // projectM's beat detection decays to idle
+                                // lactea's beat detection decays to idle
                                 // instead of replaying the last real audio
                                 // window forever.
                                 vec![0.0f32; SILENCE_FRAME_SAMPLES]
@@ -898,7 +887,7 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                         *slot = cmd_rx.take();
                     }
                 })
-                .expect("failed to spawn projectm-render thread");
+                .expect("failed to spawn lactea-render thread");
 
             // Relay frame-ready signals from the render thread to iced.
             while frame_rx.recv().await.is_some() {
@@ -927,7 +916,7 @@ impl Hash for MpdCaptureKey {
 }
 
 /// Captures MPD's own PipeWire playback stream into the shared PCM ring
-/// buffer, so the projectM visualizer reacts to audio while MPD (not the
+/// buffer, so the lactea visualizer reacts to audio while MPD (not the
 /// in-process local engine) is the active backend — see
 /// `player::pw_capture` for the capture itself, its node-matching rules,
 /// and the default-sink-monitor fallback.

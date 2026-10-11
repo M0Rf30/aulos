@@ -2168,7 +2168,7 @@ impl AppModel {
                     // as is until the result lands.
                     let scan = cosmic::task::future(async move {
                         let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
-                            dirs::data_dir().map(|d| d.join("projectm").join("presets")),
+                            dirs::data_dir().map(|d| d.join("lactea").join("presets")),
                         );
                         let entries = tokio::task::spawn_blocking(move || {
                             crate::views::now_playing::visualizer::scan_presets(&dirs)

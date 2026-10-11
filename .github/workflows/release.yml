@@ -12,9 +12,9 @@ name: Release
 # cannot be statically linked with musl).
 #
 # Features: release binaries are built with `--features visualizer`, so the
-# ProjectM visualizer ships enabled. It builds ProjectM statically from source
-# (hence cmake/clang/libclang and the GL headers) and captures MPD audio through
-# PipeWire, so the binary links libpipewire-0.3 and needs GL/EGL at runtime.
+# lactea visualizer ships enabled. lactea is pure Rust on wgpu (needs a Vulkan
+# or GL driver at runtime) and MPD audio is captured through PipeWire, so the
+# binary links libpipewire-0.3.
 # `tokio-console` is deliberately left out: it replaces normal logging with a
 # debug server on port 6669 and is only meant for local debugging.
 on:
@@ -28,8 +28,8 @@ env:
   FEATURES: visualizer
   # Native libraries needed by libcosmic
   # (wayland/xkbcommon/fontconfig/freetype/expat), cpal (ALSA) and the
-  # `visualizer` feature (ProjectM build: cmake/clang/libclang/GL/EGL/X11;
-  # MPD capture: PipeWire/SPA). Verified on Ubuntu 24.04.
+  # `visualizer` feature (MPD capture: PipeWire/SPA; the lactea engine
+  # is pure Rust on wgpu and needs no extra dev packages). Verified on Ubuntu 24.04.
   APT_DEPS: >-
     pkg-config
     libxkbcommon-dev
@@ -40,12 +40,6 @@ env:
     libasound2-dev
     libpipewire-0.3-dev
     libspa-0.2-dev
-    clang
-    libclang-dev
-    cmake
-    libgl-dev
-    libegl-dev
-    libx11-dev
 
 # Two concurrent releases would race onto the same GitHub Release's asset list.
 concurrency:
