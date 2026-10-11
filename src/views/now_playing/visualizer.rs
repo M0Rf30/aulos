@@ -984,11 +984,16 @@ mod tests {
             last = r.render_frame(&pcm);
             std::thread::sleep(std::time::Duration::from_millis(33));
         }
-        let img = image::RgbaImage::from_raw(RENDER_WIDTH as u32, RENDER_HEIGHT as u32, (*last).clone())
-            .expect("frame size");
-        img.save(std::env::temp_dir().join("aulos-viz-comp.png")).unwrap();
+        let img =
+            image::RgbaImage::from_raw(RENDER_WIDTH as u32, RENDER_HEIGHT as u32, (*last).clone())
+                .expect("frame size");
+        img.save(std::env::temp_dir().join("aulos-viz-comp.png"))
+            .unwrap();
         // A blank/garbage frame would be (near) uniform; a composited one is not.
-        let lum: Vec<u32> = last.chunks(4).map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32).collect();
+        let lum: Vec<u32> = last
+            .chunks(4)
+            .map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32)
+            .collect();
         let mean = lum.iter().sum::<u32>() as f64 / lum.len() as f64;
         assert!(mean > 5.0, "frame is black (mean {mean})");
     }
