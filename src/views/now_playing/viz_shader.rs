@@ -112,6 +112,10 @@ pub struct VizPipeline {
     pipeline: wgpu::RenderPipeline,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    /// Uniform buffer holding the cover-fit UV scale.
+    params: wgpu::Buffer,
+    /// Widget rectangle in physical pixels, set in `prepare()`.
+    bounds: Rectangle,
     tex_width: u32,
     tex_height: u32,
     /// Last generation that was uploaded, to skip redundant uploads.
@@ -124,6 +128,7 @@ impl VizPipeline {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
+        params: &wgpu::Buffer,
         width: u32,
         height: u32,
     ) -> (wgpu::Texture, wgpu::BindGroup) {
@@ -156,6 +161,10 @@ impl VizPipeline {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
 
@@ -169,6 +178,7 @@ impl VizPipeline {
             device,
             &self.bind_group_layout,
             &self.sampler,
+            &self.params,
             width,
             height,
         );
@@ -238,12 +248,29 @@ impl shader::Pipeline for VizPipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
+        });
+
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viz_params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         // --- Placeholder 1x1 texture (resized to the real size on first `prepare()`) ---
         let (texture, bind_group) =
-            Self::create_texture(device, &bind_group_layout, &sampler, 1, 1);
+            Self::create_texture(device, &bind_group_layout, &sampler, &params, 1, 1);
 
         // --- Pipeline layout + render pipeline ---
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -287,6 +314,11 @@ impl shader::Pipeline for VizPipeline {
             pipeline,
             texture,
             bind_group,
+            params,
+            bounds: Rectangle::new(
+                cosmic::iced::Point::ORIGIN,
+                cosmic::iced::Size::new(0.0, 0.0),
+            ),
             tex_width: 1,
             tex_height: 1,
             last_generation: u64::MAX, // force first upload
@@ -302,8 +334,8 @@ impl shader::Primitive for VizPrimitive {
         pipeline: &mut Self::Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &shader::Viewport,
+        bounds: &Rectangle,
+        viewport: &shader::Viewport,
     ) {
         if self.width > 0
             && self.height > 0
@@ -311,6 +343,26 @@ impl shader::Primitive for VizPrimitive {
         {
             pipeline.resize(device, self.width, self.height);
         }
+
+        // Widget rectangle in physical pixels, plus the cover-fit UV scale.
+        let scale = viewport.scale_factor() as f32;
+        pipeline.bounds = Rectangle {
+            x: bounds.x * scale,
+            y: bounds.y * scale,
+            width: bounds.width * scale,
+            height: bounds.height * scale,
+        };
+        let widget_aspect = bounds.width.max(1.0) / bounds.height.max(1.0);
+        let tex_aspect = pipeline.tex_width as f32 / pipeline.tex_height as f32;
+        let uv_scale = if widget_aspect > tex_aspect {
+            [1.0, tex_aspect / widget_aspect]
+        } else {
+            [widget_aspect / tex_aspect, 1.0]
+        };
+        let mut raw = [0u8; 16];
+        raw[0..4].copy_from_slice(&uv_scale[0].to_ne_bytes());
+        raw[4..8].copy_from_slice(&uv_scale[1].to_ne_bytes());
+        queue.write_buffer(&pipeline.params, 0, &raw);
 
         // Only re-upload if the generation changed
         if pipeline.last_generation != self.generation && !self.pixels.is_empty() {
@@ -344,6 +396,12 @@ impl shader::Primitive for VizPrimitive {
             multiview_mask: None,
         });
 
+        // The default viewport is the whole render target; map the quad to
+        // the widget's own rectangle (the scissor only trims the visible part).
+        let b = pipeline.bounds;
+        if b.width >= 1.0 && b.height >= 1.0 {
+            pass.set_viewport(b.x, b.y, b.width, b.height, 0.0, 1.0);
+        }
         pass.set_scissor_rect(
             clip_bounds.x,
             clip_bounds.y,
@@ -385,9 +443,17 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 @group(0) @binding(0) var viz_texture: texture_2d<f32>;
 @group(0) @binding(1) var viz_sampler: sampler;
 
+struct Params {
+    uv_scale: vec2<f32>,
+    _pad: vec2<f32>,
+};
+@group(0) @binding(2) var<uniform> params: Params;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(viz_texture, viz_sampler, in.uv);
+    // Cover-fit: crop the texture so it fills the widget without distortion.
+    let uv = (in.uv - vec2<f32>(0.5)) * params.uv_scale + vec2<f32>(0.5);
+    return textureSample(viz_texture, viz_sampler, uv);
 }
 "#;
 
