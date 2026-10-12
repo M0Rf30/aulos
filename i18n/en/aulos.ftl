@@ -215,6 +215,7 @@ viz-close-presets = Close
 viz-next-preset = Next preset
 viz-lock = Lock preset
 viz-beat-sensitivity = Beat sensitivity
+viz-init-failed = Visualizer unavailable: { $reason }
 
 # --- folders ---
 folders = Folders

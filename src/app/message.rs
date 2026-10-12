@@ -416,6 +416,10 @@ pub enum Message {
     /// This message carries no data — it just triggers a view redraw.
     #[cfg(feature = "visualizer")]
     VisualizerFrameReady,
+    /// The visualizer render thread could not start (no usable GPU adapter,
+    /// device creation failed, ...); carries the reason for the user.
+    #[cfg(feature = "visualizer")]
+    VisualizerFailed(String),
     /// Toggle fullscreen for the visualizer window (on → off, off → on).
     #[cfg(feature = "visualizer")]
     ToggleVisualizerFullscreen,

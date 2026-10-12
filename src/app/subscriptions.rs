@@ -717,7 +717,7 @@ impl Hash for VizRenderKey {
 /// Runs the lactea render loop on a dedicated OS thread and relays
 /// "frame ready" notifications back to the UI through an iced subscription
 /// stream. See the call site for why the render loop needs its own thread
-/// (thread-local EGL/GL context).
+/// (the engine is not `Send` and its readback blocks on the GPU).
 #[cfg(feature = "visualizer")]
 fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use<> {
     let pcm = Arc::clone(&key.pcm);
@@ -730,7 +730,7 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
         move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
             // Use a one-shot channel to know when the render thread
             // has produced a new frame so we can notify the UI.
-            let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(2);
+            let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<(), String>>(2);
 
             // Spawn a dedicated OS thread for the render loop. The engine
             // created inside `VizRenderer::new` lives on this thread.
@@ -743,6 +743,7 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                             Ok(r) => r,
                             Err(e) => {
                                 tracing::error!("Failed to create lactea renderer: {e}");
+                                let _ = frame_tx.blocking_send(Err(e));
                                 return;
                             }
                         };
@@ -805,9 +806,21 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                     // rather than 5ms fragments ~33ms apart.
                     let max_pcm_samples = crate::views::now_playing::visualizer::PCM_FEED_SAMPLES;
 
+                    // Fixed-deadline pacing: sleeping a flat 33 ms *after*
+                    // rendering would run below 30 fps by the render time.
+                    const FRAME_PERIOD: Duration = Duration::from_millis(33);
+                    let mut next_frame = std::time::Instant::now() + FRAME_PERIOD;
+
                     loop {
                         // ~30 fps
-                        std::thread::sleep(Duration::from_millis(33));
+                        let now = std::time::Instant::now();
+                        if let Some(wait) = next_frame.checked_duration_since(now) {
+                            std::thread::sleep(wait);
+                            next_frame += FRAME_PERIOD;
+                        } else {
+                            // Fell behind (slow frame): resync instead of bursting.
+                            next_frame = now + FRAME_PERIOD;
+                        }
 
                         // Drain every pending command before rendering
                         // this frame.
@@ -852,7 +865,7 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                             }
                         };
 
-                        // Render a frame (GL calls, ~3-5ms)
+                        // Render a frame (GPU render + readback)
                         let rgba = renderer.render_frame(&pcm_data);
                         // Publish the preset that is now on screen — covers
                         // manual loads, "next", and automatic timer/beat
@@ -872,12 +885,10 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                         // Notify the async side that a frame is ready.
                         // If the channel is full or closed, the render
                         // thread is ahead of the UI — just skip.
-                        if frame_tx.try_send(()).is_err() {
+                        if frame_tx.try_send(Ok(())).is_err() && frame_tx.is_closed() {
                             // Channel closed → subscription was dropped
                             // (visualizer deactivated or view collapsed).
-                            if frame_tx.is_closed() {
-                                break;
-                            }
+                            break;
                         }
                     }
 
@@ -890,8 +901,14 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                 .expect("failed to spawn lactea-render thread");
 
             // Relay frame-ready signals from the render thread to iced.
-            while frame_rx.recv().await.is_some() {
-                _ = emitter.send(Message::VisualizerFrameReady).await;
+            while let Some(event) = frame_rx.recv().await {
+                match event {
+                    Ok(()) => _ = emitter.send(Message::VisualizerFrameReady).await,
+                    Err(reason) => {
+                        _ = emitter.send(Message::VisualizerFailed(reason)).await;
+                        break;
+                    }
+                }
             }
         },
     )
