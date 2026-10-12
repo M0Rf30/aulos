@@ -1,25 +1,23 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! ProjectM visualizer integration (behind `visualizer` feature flag).
+//! lactea visualizer integration (behind `visualizer` feature flag).
 //!
-//! Provides an offscreen-rendered music visualizer using the projectM library.
-//! Renders to an FBO via a headless EGL context, reads pixels back, and hands
-//! the raw RGBA bytes to `viz_shader::VizFrameBuffer`, which the shader
-//! widget in `viz_shader.rs` uploads into a single persistent GPU texture
-//! every frame — no per-frame `image::Handle` churn.
+//! Provides an offscreen-rendered MilkDrop-style music visualizer using the
+//! lactea engine on a private wgpu device. Each frame is rendered to an
+//! `Rgba8Unorm` texture, read back into a reusable buffer, and handed as raw
+//! RGBA bytes to `viz_shader::VizFrameBuffer`, which the shader widget in
+//! `viz_shader.rs` uploads into a single persistent GPU texture every frame —
+//! no per-frame `image::Handle` churn.
 
 use super::preset_playlist::PresetPlaylist;
-use projectm::core::ProjectM;
-use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
-/// Commands sent from the UI thread to the dedicated projectM render
-/// thread (see `projectm_render_stream` in `app.rs`). Drained via
+/// Commands sent from the UI thread to the dedicated lactea render
+/// thread (see `lactea_render_stream` in `app.rs`). Drained via
 /// `try_recv()` once per frame, before rendering.
 #[derive(Debug, Clone)]
 pub enum VizCommand {
@@ -32,7 +30,7 @@ pub enum VizCommand {
     /// Lock/unlock automatic preset transitions (hard/soft cuts driven by
     /// preset duration or beat detection). Manual switches — `NextPreset`
     /// and `LoadPreset` — are always executed regardless of lock state
-    /// (per libprojectM's `projectm_set_preset_locked` semantics).
+    /// (per lactea's `PresetControl::set_preset_locked` semantics).
     SetLocked(bool),
     /// Adjust beat-reactivity sensitivity (typical range 0.0-2.0).
     SetBeatSensitivity(f32),
@@ -41,14 +39,14 @@ pub enum VizCommand {
 /// One `.milk` preset file discovered by `scan_presets`.
 ///
 /// The same stem routinely exists in several category directories (the
-/// stock projectM install ships ~940 duplicated names), so an entry is
+/// stock MilkDrop pack ships ~940 duplicated names), so an entry is
 /// identified by its full `path`, never by `name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresetEntry {
     /// File stem (filename without the `.milk` extension) — display only.
     pub name: String,
     /// The preset's immediate parent directory name, prettified by
-    /// stripping the projectM convention `presets_` prefix (e.g.
+    /// stripping the MilkDrop pack convention `presets_` prefix (e.g.
     /// `presets_milkdrop` -> `milkdrop`).
     pub category: String,
     /// Full path: the preset's identity. Passed to `VizCommand::LoadPreset`
@@ -82,9 +80,9 @@ impl PresetEntry {
 }
 
 /// Returns the full ordered list of preset search directories: the
-/// caller-supplied `user_dir` (if any) first, then projectM's common
-/// system-wide install locations, then the Flatpak location under
-/// `dirs::data_dir()`. Shared by `ProjectMRenderer::new` and the UI-side
+/// caller-supplied `user_dir` (if any) first, then the common
+/// system-wide MilkDrop preset install locations, then the Flatpak location under
+/// `dirs::data_dir()`. Shared by `VizRenderer::new` and the UI-side
 /// `scan_presets` so both always agree on where presets live.
 pub fn preset_search_dirs(user_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -92,17 +90,19 @@ pub fn preset_search_dirs(user_dir: Option<PathBuf>) -> Vec<PathBuf> {
         dirs.push(dir);
     }
     dirs.extend([
+        PathBuf::from("/usr/share/lactea/presets"),
         PathBuf::from("/usr/share/projectM/presets"),
         PathBuf::from("/usr/local/share/projectM/presets"),
         PathBuf::from("/usr/share/projectm/presets"),
     ]);
     if let Some(data) = dirs::data_dir() {
+        dirs.push(data.join("lactea").join("presets"));
         dirs.push(data.join("projectM").join("presets"));
     }
     dirs
 }
 
-/// Strips the projectM convention `presets_` prefix from a category
+/// Strips the MilkDrop pack convention `presets_` prefix from a category
 /// directory name (e.g. `presets_milkdrop` -> `milkdrop`); other names are
 /// left untouched.
 fn prettify_category(raw: &str) -> String {
@@ -110,7 +110,7 @@ fn prettify_category(raw: &str) -> String {
 }
 
 /// Recursively scans `dirs` for `.milk` preset files (case-insensitive
-/// extension) off the render thread — no `ProjectM`/GL context needed.
+/// extension) off the render thread — no GPU needed.
 /// Returns one entry per file, sorted by `(category, name)` and
 /// deduplicated by path (in case two search dirs alias the same tree).
 pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
@@ -130,8 +130,8 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"));
-            // A non-UTF-8 path can't be handed to projectM (its binding takes
-            // `&str`), so listing it would only offer a row that never loads.
+            // Non-UTF-8 paths are skipped: preset identity and display
+            // names are UTF-8 throughout the UI.
             if !is_milk || path.to_str().is_none() {
                 continue;
             }
@@ -161,94 +161,132 @@ const RENDER_WIDTH: usize = 960;
 const RENDER_HEIGHT: usize = 540;
 
 /// How many broken preset files in a row an automatic/"next" switch skips
-/// over before giving up (matches libprojectM's playlist retry count).
+/// over before giving up.
 const MAX_SWITCH_ATTEMPTS: usize = 5;
 
-/// Stereo frames in libprojectM's internal PCM ring (`AudioBufferSamples`
-/// in `Audio/AudioConstants.hpp`; the C API exposes no getter for it —
-/// `projectm_pcm_get_max_samples()` returns the *waveform* length, 480).
-/// On every `render_frame` projectM FFTs and beat-detects exactly the most
-/// recent ring-full of audio, so that is all that is worth feeding it.
-const PROJECTM_PCM_RING_FRAMES: usize = 576;
+/// Length of a soft cut between two presets, in seconds.
+const SOFT_CUT_SECONDS: f64 = 3.0;
 
-/// Interleaved stereo f32 samples to hand projectM per render frame: one
-/// whole ring window (see [`PROJECTM_PCM_RING_FRAMES`]). The render loop
-/// reads at most this many from [`PcmBuffer::read_since`].
-///
-/// Previously the loop read only `pcm_get_max_samples()` = 480 interleaved
-/// samples (240 stereo frames, ~5ms) per ~33ms frame, so projectM analysed
-/// a stitched mosaic of 5ms fragments (240 fresh frames + 336 stale ones
-/// from the previous frames) instead of a contiguous window — which
-/// blurred the spectrum and flattened beat detection.
-pub const PCM_FEED_SAMPLES: usize = PROJECTM_PCM_RING_FRAMES * 2;
+/// Seconds a preset is shown before the rotation asks for the next one.
+const PRESET_DURATION_SECONDS: f64 = 30.0;
 
-/// Split one frame's interleaved stereo `pcm` into the pieces to pass to
-/// `ProjectM::pcm_add_float`, oldest first.
-///
-/// projectm-rs asserts every call carries at most
-/// `pcm_get_max_samples()` (480) interleaved samples, so a ring-sized
-/// window needs several calls. Keeps only the newest [`PCM_FEED_SAMPLES`]
-/// (older audio would be overwritten in projectM's ring anyway), drops a
-/// dangling half-frame, and rounds the chunk size down to a whole number
-/// of stereo frames so L/R never get swapped across a call boundary.
-fn pcm_feed_chunks(pcm: &[f32], max_per_call: usize) -> std::slice::Chunks<'_, f32> {
-    let whole = &pcm[..pcm.len() & !1];
-    let newest = &whole[whole.len().saturating_sub(PCM_FEED_SAMPLES)..];
-    newest.chunks((max_per_call & !1).max(2))
+/// Frame rate the render loop targets (reported to presets as `fps`).
+const RENDER_FPS: u32 = 30;
+
+/// Sample rate PCM is assumed to have for the analyser.
+const PCM_SAMPLE_RATE: u32 = 44_100;
+
+/// Interleaved stereo f32 samples read from the PCM ring per render frame:
+/// 1152 samples = 576 stereo frames. `Engine::push_pcm_f32` accepts any
+/// length, so this is only the read window the render loop asks
+/// [`PcmBuffer::read_since`] for.
+pub const PCM_FEED_SAMPLES: usize = 576 * 2;
+
+/// Image extensions a preset `sampler_*` texture may use.
+const TEXTURE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "tga", "bmp", "dib"];
+
+/// Directory-backed [`lactea::TextureProvider`]: user textures found under
+/// the preset search directories (and their sibling `textures` dirs). Keyed
+/// by lowercase file stem; built-in noise textures come from lactea itself.
+struct DirTextures {
+    /// `(lowercase stem, path)`, sorted.
+    files: Vec<(String, PathBuf)>,
 }
 
-/// The offscreen projectM renderer.
+impl DirTextures {
+    fn scan(roots: &[PathBuf]) -> Self {
+        let mut files = Vec::new();
+        for root in roots {
+            if !root.is_dir() {
+                continue;
+            }
+            for entry in WalkDir::new(root).follow_links(true).into_iter().flatten() {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase);
+                if let (Some(ext), Some(stem)) = (ext, path.file_stem().and_then(|s| s.to_str()))
+                    && TEXTURE_EXTENSIONS.contains(&ext.as_str())
+                {
+                    files.push((stem.to_ascii_lowercase(), path.to_path_buf()));
+                }
+            }
+        }
+        files.sort();
+        files.dedup();
+        Self { files }
+    }
+}
+
+impl lactea::TextureProvider for DirTextures {
+    fn load(&mut self, name: &str) -> Option<lactea::Image> {
+        let lower = name.to_ascii_lowercase();
+        self.files
+            .iter()
+            .filter(|(stem, _)| *stem == lower)
+            .find_map(|(_, path)| {
+                let rgba = image::open(path).ok()?.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                Some(lactea::Image {
+                    width,
+                    height,
+                    rgba8: rgba.into_raw(),
+                })
+            })
+    }
+
+    fn random_pool(&self) -> Vec<String> {
+        self.files.iter().map(|(stem, _)| stem.clone()).collect()
+    }
+}
+
+/// The offscreen lactea renderer.
 ///
-/// Owns a headless EGL/GL context backed by a pbuffer surface and a
-/// projectM instance. All rendering happens on a dedicated thread. Frames
-/// are read back as RGBA pixels and sent to the UI.
-///
-/// A pbuffer (not a surfaceless context + FBO) is required: libprojectM 4.1
-/// always draws its final, composite-shader output into framebuffer 0
-/// (`ProjectM.cpp`: "ToDo: Allow external apps to provide a custom target
-/// framebuffer"). Without a default framebuffer that draw is discarded and
-/// the readback only sees projectM's pre-composite main texture, so every
-/// MilkDrop 2 comp shader appears skipped.
-pub struct ProjectMRenderer {
-    projectm: ProjectM,
-    /// Shuffled, path-identified preset rotation (replaces libprojectM's
-    /// playlist — see `preset_playlist`).
+/// Owns its own wgpu device (a separate wgpu major from the one iced/libcosmic
+/// uses, so objects cannot be shared) and a [`lactea::Engine`]. Each frame is
+/// rendered to an `Rgba8Unorm` texture, copied to a reusable mapped buffer and
+/// handed to the UI as tightly packed RGBA bytes. The engine is not `Send`:
+/// construct and use the renderer on the render thread only.
+pub struct VizRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    engine: lactea::Engine,
+    /// lactea's preset-switch timer (display time, beat-driven hard cuts,
+    /// lock, beat sensitivity).
+    control: lactea::PresetControl,
+    /// Shuffled, path-identified preset rotation (see `preset_playlist`).
     presets: PresetPlaylist,
     /// Preset file currently on screen; see `take_current_preset_change`.
     current_preset: Option<PathBuf>,
     /// `current_preset` changed since `take_current_preset_change` last ran.
     current_changed: bool,
-    /// Set by projectM's switch-requested callback (payload: hard cut?),
-    /// serviced after the frame in `service_switch_request`.
-    switch_request: Rc<Cell<Option<bool>>>,
-    /// `(file, message)` pairs reported by projectM's switch-failed callback
-    /// since the current load attempt began.
-    load_failures: Rc<LoadFailures>,
-    /// Pbuffer surface providing framebuffer 0; must outlive rendering.
-    _surface: glutin::api::egl::surface::Surface<glutin::surface::PbufferSurface>,
-    /// The current GL context; kept alive alongside the surface.
-    _context: glutin::api::egl::context::PossiblyCurrentContext,
-    /// Whether we successfully set up the GL context.
-    _gl_ready: bool,
-    /// Reusable double-buffered pixel storage for `render_frame`'s GL
-    /// readback, shared with downstream readers via `Arc`. A slot is only
-    /// mutated in place once `Arc::get_mut` proves it is uniquely owned
-    /// (no reader still holds it); otherwise a fresh buffer is allocated
-    /// for that frame instead of racing a reader.
+    target: wgpu::Texture,
+    target_view: wgpu::TextureView,
+    /// Reused GPU→CPU copy destination (rows padded to 256 bytes).
+    readback: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+    started: std::time::Instant,
+    frame: u32,
+    /// Reusable double-buffered pixel storage, shared with downstream readers
+    /// via `Arc`. A slot is only mutated in place once `Arc::get_mut` proves
+    /// it is uniquely owned (no reader still holds it); otherwise a fresh
+    /// buffer is allocated for that frame instead of racing a reader.
     pixel_pool: [Arc<Vec<u8>>; 2],
     /// Index of the next pool slot to render into.
     pool_next: usize,
 }
 
-/// Selects pool slot `idx` for a fresh GL readback of `len` bytes.
+/// Selects pool slot `idx` for a fresh readback of `len` bytes.
 ///
 /// Reuses the slot's existing allocation in place when `Arc::get_mut`
 /// proves it is uniquely owned (no reader — e.g. a `VizPrimitive`
 /// mid-upload — still holds a clone); otherwise a slow downstream
 /// consumer still has it, so a brand-new buffer takes its place rather
-/// than mutating memory a reader might be reading from. This is the
-/// double-buffering safety net that lets `render_frame` avoid a fresh
-/// allocation on the common path without ever racing a reader.
+/// than mutating memory a reader might be reading from.
 fn ensure_unique_pool_slot(pool: &mut [Arc<Vec<u8>>; 2], idx: usize, len: usize) -> &mut Vec<u8> {
     if Arc::get_mut(&mut pool[idx]).is_none() {
         pool[idx] = Arc::new(vec![0u8; len]);
@@ -257,192 +295,144 @@ fn ensure_unique_pool_slot(pool: &mut [Arc<Vec<u8>>; 2], idx: usize, len: usize)
         .expect("uniquely owned immediately after the check/replacement above")
 }
 
-type LoadFailures = RefCell<Vec<(String, String)>>;
-
-/// projectM's switch-failed callback: records `(filename, message)` in the
-/// `LoadFailures` that `user_data` points at. Registered through the raw
-/// bindings because `projectm`'s own wrapper `unwrap()`s a UTF-8 conversion
-/// of both strings inside `extern "C"` — a panic there aborts the process —
-/// whereas a preset path or shader log may well not be valid UTF-8.
-unsafe extern "C" fn on_preset_switch_failed(
-    filename: *const std::os::raw::c_char,
-    message: *const std::os::raw::c_char,
-    user_data: *mut std::os::raw::c_void,
-) {
-    let text = |p: *const std::os::raw::c_char| {
-        if p.is_null() {
-            String::new()
-        } else {
-            // SAFETY: projectM passes NUL-terminated strings valid for the call.
-            unsafe { std::ffi::CStr::from_ptr(p) }
-                .to_string_lossy()
-                .into_owned()
-        }
-    };
-    // SAFETY: `user_data` is the pointer `register_load_failure_sink` leaked
-    // an `Rc` strong count for, so it outlives every callback invocation;
-    // callbacks only run on the render thread that owns the renderer.
-    let sink = unsafe { &*user_data.cast::<LoadFailures>() };
-    sink.borrow_mut().push((text(filename), text(message)));
-}
-
-/// Routes projectM's switch-failed events into `sink`. One `Rc` strong count
-/// is leaked per renderer on purpose: the projectM instance is never
-/// destroyed either, and the callback must stay valid for its lifetime.
-fn register_load_failure_sink(pm: &ProjectM, sink: &Rc<LoadFailures>) {
-    let handle = *pm.get_instance().borrow();
-    // SAFETY: `handle` is the live projectM instance owned by `pm`.
-    unsafe {
-        projectm_sys::projectm_set_preset_switch_failed_event_callback(
-            handle,
-            Some(on_preset_switch_failed),
-            Rc::into_raw(Rc::clone(sink)).cast_mut().cast(),
-        );
-    }
-}
-
-// SAFETY: ProjectM implements Send + Sync. The GL context is only used
-// from the renderer thread.
-unsafe impl Send for ProjectMRenderer {}
-
-impl ProjectMRenderer {
-    /// Create a new offscreen projectM renderer.
-    ///
-    /// Sets up a headless EGL context, creates an FBO, and initializes
-    /// projectM with the given preset directory.
-    pub fn new(preset_dir: Option<PathBuf>) -> Result<Self, String> {
-        // --- EGL device-based headless context ---
-        use glutin::api::egl::device::Device;
-        use glutin::api::egl::display::Display;
-        use glutin::config::{ConfigSurfaceTypes, ConfigTemplateBuilder};
-        use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext};
-        use glutin::display::GlDisplay;
-        use glutin::surface::{PbufferSurface, SurfaceAttributesBuilder};
-        use std::num::NonZeroU32;
-
-        // Query EGL devices
-        let devices: Vec<_> = Device::query_devices()
-            .map_err(|e| format!("Failed to query EGL devices: {e}"))?
-            .collect();
-
-        if devices.is_empty() {
-            return Err("No EGL devices available for headless rendering".to_string());
-        }
-
-        let device = &devices[0];
-
-        // Create display from device (no windowing system)
-        let display = unsafe {
-            Display::with_device(device, None)
-                .map_err(|e| format!("Failed to create EGL display: {e}"))?
-        };
-
-        // Configure for pbuffer offscreen rendering (see struct docs: projectM
-        // needs a real framebuffer 0 for its final composite pass).
-        let template = ConfigTemplateBuilder::new()
-            .with_alpha_size(8)
-            .with_surface_type(ConfigSurfaceTypes::PBUFFER)
-            .build();
-
-        let config = unsafe {
-            display
-                .find_configs(template)
-                .map_err(|e| format!("Failed to find EGL configs: {e}"))?
-                .next()
-                .ok_or("No suitable EGL pbuffer config found")?
-        };
-
-        // Create context (OpenGL, no window handle)
-        let context_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::OpenGl(None))
-            .build(None);
-
-        let context = unsafe {
-            display
-                .create_context(&config, &context_attrs)
-                .map_err(|e| format!("Failed to create GL context: {e}"))?
-        };
-
-        let surface_attrs = SurfaceAttributesBuilder::<PbufferSurface>::new().build(
-            NonZeroU32::new(RENDER_WIDTH as u32).expect("non-zero width"),
-            NonZeroU32::new(RENDER_HEIGHT as u32).expect("non-zero height"),
-        );
-        let surface = unsafe {
-            display
-                .create_pbuffer_surface(&config, &surface_attrs)
-                .map_err(|e| format!("Failed to create EGL pbuffer surface: {e}"))?
-        };
-
-        let context = context
-            .make_current(&surface)
-            .map_err(|e| format!("Failed to make context current: {e}"))?;
-
-        // Load GL function pointers
-        gl::load_with(|symbol| {
-            let cstr = std::ffi::CString::new(symbol).unwrap();
-            display.get_proc_address(cstr.as_c_str()) as *const _
-        });
-
-        unsafe {
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-            gl::Viewport(0, 0, RENDER_WIDTH as i32, RENDER_HEIGHT as i32);
-        }
-
-        // Initialize projectM
-        let pm = ProjectM::create();
-        pm.set_window_size(RENDER_WIDTH, RENDER_HEIGHT);
-        pm.set_fps(30);
-
-        // Search for preset directories in common locations — shared with
-        // the UI-side preset browser via `preset_search_dirs` so both
-        // always agree on where presets live.
-        let search_dirs = preset_search_dirs(preset_dir.clone());
-
-        let mut texture_paths = Vec::new();
-        for dir in &search_dirs {
-            if dir.exists() {
-                texture_paths.push(dir.to_string_lossy().to_string());
+/// Copies the mapped `readback` buffer into `out`, stripping the 256-byte
+/// row padding (`pitch` bytes per padded row), and forces alpha to opaque
+/// (the frame is composited onto the UI background, where lactea's alpha
+/// would show through).
+fn read_back(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    pitch: usize,
+    out: &mut [u8],
+) -> Result<(), String> {
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("poll: {e:?}"))?;
+    rx.recv()
+        .map_err(|e| format!("map: {e}"))?
+        .map_err(|e| format!("map: {e}"))?;
+    {
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| format!("mapped range: {e}"))?;
+        let row = RENDER_WIDTH * 4;
+        for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+            dst.copy_from_slice(&data[y * pitch..y * pitch + row]);
+            for px in dst.as_chunks_mut::<4>().0 {
+                px[3] = 255;
             }
         }
-        if !texture_paths.is_empty() {
-            pm.set_texture_search_paths(&texture_paths, texture_paths.len());
-        }
+    }
+    readback.unmap();
+    Ok(())
+}
 
-        let switch_request = Rc::new(Cell::new(None));
-        {
-            let switch_request = Rc::clone(&switch_request);
-            pm.set_preset_switch_requested_event_callback(move |hard_cut| {
-                switch_request.set(Some(hard_cut));
-            });
-        }
-        let load_failures = Rc::new(RefCell::new(Vec::new()));
-        register_load_failure_sink(&pm, &load_failures);
+impl VizRenderer {
+    /// Create the wgpu device (low-power adapter) and the lactea engine, and
+    /// load the first preset of the rotation.
+    pub fn new(preset_dir: Option<PathBuf>) -> Result<Self, String> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("no wgpu adapter: {e}"))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .map_err(|e| format!("request_device: {e}"))?;
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64);
+
+        let mut engine = lactea::Engine::new(
+            &device,
+            &queue,
+            lactea::EngineConfig {
+                width: RENDER_WIDTH as u32,
+                height: RENDER_HEIGHT as u32,
+                seed,
+                sample_rate: PCM_SAMPLE_RATE,
+                fps: RENDER_FPS,
+                preset_duration: PRESET_DURATION_SECONDS,
+                ..Default::default()
+            },
+        );
+        let mut control = lactea::PresetControl::new(seed);
+        control.set_preset_duration(PRESET_DURATION_SECONDS);
+        control.set_soft_cut_duration(SOFT_CUT_SECONDS);
+
+        // Preset directories are shared with the UI-side preset browser via
+        // `preset_search_dirs` so both always agree on where presets live.
+        let search_dirs = preset_search_dirs(preset_dir);
+        let mut texture_roots = search_dirs.clone();
+        texture_roots.extend(
+            search_dirs
+                .iter()
+                .filter_map(|d| d.parent().map(|p| p.join("textures"))),
+        );
+        let textures = DirTextures::scan(&texture_roots);
+        tracing::info!("lactea: {} user textures", textures.files.len());
+        engine.set_texture_provider(Box::new(textures));
 
         let items: Vec<PathBuf> = scan_presets(&search_dirs)
             .into_iter()
             .map(|entry| entry.path)
             .collect();
         tracing::info!(
-            "ProjectM: loaded {} presets from {search_dirs:?}",
+            "lactea: loaded {} presets from {search_dirs:?}",
             items.len()
         );
         if items.is_empty() {
-            tracing::warn!("ProjectM: no presets found in any search directory");
+            tracing::warn!("lactea: no presets found in any search directory");
         }
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64);
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aulos viz target"),
+            size: wgpu::Extent3d {
+                width: RENDER_WIDTH as u32,
+                height: RENDER_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let padded_bytes_per_row = (RENDER_WIDTH as u32 * 4)
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aulos viz readback"),
+            size: u64::from(padded_bytes_per_row) * RENDER_HEIGHT as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         let mut renderer = Self {
-            projectm: pm,
+            device,
+            queue,
+            engine,
+            control,
             presets: PresetPlaylist::new(items, seed),
             current_preset: None,
             current_changed: false,
-            switch_request,
-            load_failures,
-            _surface: surface,
-            _context: context,
-            _gl_ready: true,
+            target,
+            target_view,
+            readback,
+            padded_bytes_per_row,
+            started: std::time::Instant::now(),
+            frame: 0,
             pixel_pool: [
                 Arc::new(vec![0u8; RENDER_WIDTH * RENDER_HEIGHT * 4]),
                 Arc::new(vec![0u8; RENDER_WIDTH * RENDER_HEIGHT * 4]),
@@ -453,78 +443,73 @@ impl ProjectMRenderer {
         Ok(renderer)
     }
 
-    /// Render one frame and return RGBA pixel bytes.
+    /// Render one frame and return RGBA pixel bytes (row 0 = top).
     ///
-    /// Feed PCM audio data to projectM, render a frame into the FBO,
-    /// and read pixels back. The returned bytes are handed directly to
-    /// `viz_shader::VizFrameBuffer::update` — no PNG encoding needed.
+    /// Pushes `pcm` (interleaved stereo) to the analyser, renders into the
+    /// offscreen texture and reads it back. The returned bytes are handed
+    /// directly to `viz_shader::VizFrameBuffer::update`.
     ///
-    /// Reuses one of two pooled buffers for the GL readback instead of
-    /// allocating a fresh one every call: a slot is reused in place when
-    /// `Arc::get_mut` proves no reader still holds it, otherwise (a slow
-    /// downstream consumer) a fresh buffer is allocated just for that
-    /// frame so the readback never aliases memory a reader is using.
+    /// Reuses one of two pooled buffers instead of allocating per call; see
+    /// [`ensure_unique_pool_slot`].
     pub fn render_frame(&mut self, pcm: &[f32]) -> Arc<Vec<u8>> {
-        // Feed the newest ring-full of audio (projectM caps a single call at
-        // `pcm_get_max_samples()`, so it goes in a few chunks; see
-        // `pcm_feed_chunks`).
         if !pcm.is_empty() {
-            let max = ProjectM::pcm_get_max_samples() as usize;
-            for chunk in pcm_feed_chunks(pcm, max) {
-                self.projectm.pcm_add_float(chunk, projectm::core::STEREO);
-            }
+            self.engine.push_pcm_f32(pcm, 2);
         }
 
-        // Render the visualization. projectM draws its final composite into
-        // framebuffer 0 (our pbuffer).
-        unsafe {
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-            gl::Viewport(0, 0, RENDER_WIDTH as i32, RENDER_HEIGHT as i32);
-        }
-        self.projectm.render_frame();
-        self.service_switch_request();
+        let time = self.started.elapsed().as_secs_f64();
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        self.engine.render(
+            &mut enc,
+            &self.target_view,
+            lactea::FrameClock {
+                time,
+                frame: self.frame,
+            },
+        );
+        self.frame = self.frame.wrapping_add(1);
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(RENDER_HEIGHT as u32),
+                },
+            },
+            wgpu::Extent3d {
+                width: RENDER_WIDTH as u32,
+                height: RENDER_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(enc.finish()));
+
+        let request = self.control.update(time, self.engine.audio_frame().vol);
 
         let idx = self.pool_next;
         self.pool_next = (self.pool_next + 1) % self.pixel_pool.len();
-
         let pixels =
             ensure_unique_pool_slot(&mut self.pixel_pool, idx, RENDER_WIDTH * RENDER_HEIGHT * 4);
-
-        // Read pixels from the FBO
-        unsafe {
-            gl::Finish();
-            // projectM leaves its internal FBOs bound for reading; read the
-            // composited output from framebuffer 0 instead.
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-            gl::PixelStorei(gl::PACK_ALIGNMENT, 1);
-            gl::ReadPixels(
-                0,
-                0,
-                RENDER_WIDTH as i32,
-                RENDER_HEIGHT as i32,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                pixels.as_mut_ptr() as *mut std::ffi::c_void,
-            );
+        if let Err(e) = read_back(
+            &self.device,
+            &self.readback,
+            self.padded_bytes_per_row as usize,
+            pixels,
+        ) {
+            tracing::warn!("lactea: readback failed: {e}");
         }
 
-        // OpenGL reads bottom-to-top — flip vertically in-place
-        let row_size = RENDER_WIDTH * 4;
-        for y in 0..RENDER_HEIGHT / 2 {
-            let top = y * row_size;
-            let bot = (RENDER_HEIGHT - 1 - y) * row_size;
-            // Swap rows using split_at_mut to satisfy borrow checker
-            let (first, second) = pixels.split_at_mut(bot);
-            first[top..top + row_size].swap_with_slice(&mut second[..row_size]);
+        if let Some(request) = request {
+            self.advance(!request.hard_cut);
         }
-
-        // Force alpha to fully opaque. projectM often renders with alpha < 255
-        // which causes washed-out/transparent-looking colors when the image is
-        // composited onto the UI background.
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-
         Arc::clone(&self.pixel_pool[idx])
     }
 
@@ -538,9 +523,9 @@ impl ProjectMRenderer {
         self.advance(false);
     }
 
-    /// Load a specific preset file directly, with a smooth transition.
+    /// Load a specific preset file directly, with a soft cut.
     ///
-    /// Returns whether projectM accepted the file. On failure the previous
+    /// Returns whether lactea accepted the file. On failure the previous
     /// preset keeps playing and stays the tracked current one — nothing else
     /// is substituted behind the user's back.
     pub fn load_preset(&mut self, path: &Path) -> bool {
@@ -558,16 +543,6 @@ impl ProjectMRenderer {
         }
     }
 
-    /// Performs the automatic preset switch projectM asked for during the
-    /// last `render_frame` (preset timer elapsed, or a beat-driven hard
-    /// cut). Deferred out of the callback itself because projectM invokes it
-    /// from inside `RenderFrame`.
-    fn service_switch_request(&mut self) {
-        if let Some(hard_cut) = self.switch_request.take() {
-            self.advance(!hard_cut);
-        }
-    }
-
     /// Loads the next presets of the rotation until one is accepted, giving
     /// up after `MAX_SWITCH_ATTEMPTS` broken files in a row.
     fn advance(&mut self, smooth: bool) {
@@ -582,21 +557,34 @@ impl ProjectMRenderer {
     }
 
     fn try_load(&mut self, path: &Path, smooth: bool) -> bool {
-        self.load_failures.borrow_mut().clear();
-        // `ProjectM::load_preset_file` hands the `&str`'s raw pointer to C,
-        // which needs a NUL terminator that a Rust `str` does not have —
-        // without one projectM reads past the path into whatever heap bytes
-        // follow and (usually) fails to open the file. Pass a slice of a
-        // buffer that is NUL-terminated right after the slice end.
-        let mut c_path = path.to_string_lossy().into_owned();
-        c_path.push('\0');
-        self.projectm
-            .load_preset_file(&c_path[..c_path.len() - 1], smooth);
-
-        let failures = std::mem::take(&mut *self.load_failures.borrow_mut());
-        if let Some((file, message)) = failures.first() {
-            tracing::warn!("ProjectM: failed to load preset {file}: {message}");
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("lactea: failed to read preset {}: {e}", path.display());
+                return false;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map_or_else(|| "preset".into(), |s| s.to_string_lossy().into_owned());
+        // The very first preset has nothing to blend from.
+        let soft = smooth && self.current_preset.is_some();
+        let transition = if soft {
+            lactea::Transition::Soft {
+                seconds: SOFT_CUT_SECONDS,
+            }
+        } else {
+            lactea::Transition::Cut
+        };
+        if let Err(e) = self.engine.load_preset(&bytes, &name, transition) {
+            tracing::warn!("lactea: failed to load preset {}: {e}", path.display());
             return false;
+        }
+        let now = self.engine.last_frame_time();
+        if soft {
+            self.control.start_smoothing(now);
+        } else {
+            self.control.start_preset(now);
         }
         if self.current_preset.as_deref() != Some(path) {
             self.current_preset = Some(path.to_path_buf());
@@ -607,13 +595,13 @@ impl ProjectMRenderer {
 
     /// Lock/unlock automatic preset transitions. Manual switches (this
     /// renderer's `load_preset`/`next_preset`) always keep working.
-    pub fn set_locked(&self, locked: bool) {
-        self.projectm.set_preset_locked(locked);
+    pub fn set_locked(&mut self, locked: bool) {
+        self.control.set_preset_locked(locked);
     }
 
-    /// Adjust beat-reactivity sensitivity.
-    pub fn set_beat_sensitivity(&self, sensitivity: f32) {
-        self.projectm.set_beat_sensitivity(sensitivity);
+    /// Adjust beat-reactivity sensitivity (clamped to 0..=2 by lactea).
+    pub fn set_beat_sensitivity(&mut self, sensitivity: f32) {
+        self.control.set_beat_sensitivity(sensitivity);
     }
 }
 
@@ -664,7 +652,7 @@ impl PcmBuffer {
     ///
     /// Converting at write time — rather than trusting every reader to
     /// know the source channel count — is what lets `render_frame` always
-    /// call `projectm::core::STEREO` correctly regardless of whether the
+    /// call `push_pcm_f32(.., 2)` correctly regardless of whether the
     /// track underneath is mono, stereo, or multichannel.
     pub fn write_interleaved(&mut self, samples: &[f32], channels: usize) {
         if samples.is_empty() {
@@ -810,9 +798,8 @@ mod tests {
     }
 
     /// One render period at 30fps/44.1kHz is ~1470 stereo frames: a read
-    /// capped at `PCM_FEED_SAMPLES` must hand back a whole projectM ring
-    /// window (1152 samples), not the 480 `pcm_get_max_samples()` allows
-    /// per `pcm_add_float` call.
+    /// capped at `PCM_FEED_SAMPLES` must hand back a whole 1152-sample
+    /// window.
     #[test]
     fn read_since_returns_a_whole_ring_window_for_a_30fps_period() {
         let mut buf = PcmBuffer::new(8192);
@@ -824,43 +811,6 @@ mod tests {
         // Newest window, in order, ending on the last sample written.
         assert_eq!(out[0], (2940 - PCM_FEED_SAMPLES) as f32);
         assert_eq!(*out.last().unwrap(), 2939.0);
-    }
-
-    #[test]
-    fn pcm_feed_chunks_splits_in_order_within_the_call_limit() {
-        let pcm: Vec<f32> = (0..1152).map(|i| i as f32).collect();
-        let chunks: Vec<&[f32]> = pcm_feed_chunks(&pcm, 480).collect();
-        assert_eq!(
-            chunks.iter().map(|c| c.len()).collect::<Vec<_>>(),
-            vec![480, 480, 192]
-        );
-        let rejoined: Vec<f32> = chunks.concat();
-        assert_eq!(rejoined, pcm);
-    }
-
-    #[test]
-    fn pcm_feed_chunks_keeps_only_the_newest_ring_window() {
-        let pcm: Vec<f32> = (0..4000).map(|i| i as f32).collect();
-        let rejoined: Vec<f32> = pcm_feed_chunks(&pcm, 480).flatten().copied().collect();
-        assert_eq!(rejoined.len(), PCM_FEED_SAMPLES);
-        assert_eq!(rejoined[0], (4000 - PCM_FEED_SAMPLES) as f32);
-        assert_eq!(*rejoined.last().unwrap(), 3999.0);
-    }
-
-    /// Chunk boundaries must always fall between stereo frames (even
-    /// lengths) so L/R never swap, whatever the per-call limit, and a
-    /// dangling half-frame is dropped.
-    #[test]
-    fn pcm_feed_chunks_never_splits_a_stereo_frame() {
-        let pcm: Vec<f32> = (0..1001).map(|i| i as f32).collect(); // odd length
-        for max in [1usize, 2, 3, 479, 480, 481] {
-            let chunks: Vec<&[f32]> = pcm_feed_chunks(&pcm, max).collect();
-            assert!(chunks.iter().all(|c| c.len() % 2 == 0), "max={max}");
-            assert!(chunks.iter().all(|c| c.len() <= max.max(2)), "max={max}");
-            let total: usize = chunks.iter().map(|c| c.len()).sum();
-            assert_eq!(total, 1000, "max={max}");
-        }
-        assert_eq!(pcm_feed_chunks(&[], 480).count(), 0);
     }
 
     /// A slot with no outstanding reader must be reused in place (same
@@ -958,129 +908,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Regression: the readback must contain projectM's *composited* output
-    /// (comp shader applied), not its pre-composite main texture. Needs a GPU
-    /// / EGL, so it is ignored by default:
-    /// `AULOS_TEST_PRESET=path.milk cargo test --features visualizer -- --ignored comp_shader`
-    /// Writes the last frame to `$TMPDIR/aulos-viz-comp.png` for inspection.
-    #[test]
-    #[ignore = "requires EGL/GPU and a MilkDrop 2 preset with a comp shader"]
-    fn comp_shader_output_is_read_back() {
-        let Ok(preset) = std::env::var("AULOS_TEST_PRESET") else {
-            eprintln!("AULOS_TEST_PRESET not set; skipping");
-            return;
-        };
-        let mut r = ProjectMRenderer::new(None).expect("renderer");
-        r.set_locked(true);
-        r.load_preset(Path::new(&preset));
-        let pcm: Vec<f32> = (0..1470)
-            .flat_map(|i| {
-                let s = (i as f32 * 0.05).sin() * 0.5;
-                [s, s]
-            })
-            .collect();
-        let mut last = Arc::new(Vec::new());
-        for _ in 0..180 {
-            last = r.render_frame(&pcm);
-            std::thread::sleep(std::time::Duration::from_millis(33));
-        }
-        let img =
-            image::RgbaImage::from_raw(RENDER_WIDTH as u32, RENDER_HEIGHT as u32, (*last).clone())
-                .expect("frame size");
-        img.save(std::env::temp_dir().join("aulos-viz-comp.png"))
-            .unwrap();
-        // A blank/garbage frame would be (near) uniform; a composited one is not.
-        let lum: Vec<u32> = last
-            .chunks(4)
-            .map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32)
-            .collect();
-        let mean = lum.iter().sum::<u32>() as f64 / lum.len() as f64;
-        assert!(mean > 5.0, "frame is black (mean {mean})");
-    }
-
-    /// Regression: `ProjectM::load_preset_file` passes `str::as_ptr()` to C
-    /// without a NUL terminator, so loading by path read garbage after the
-    /// filename and often failed. Compares the raw wrapper call against
-    /// `ProjectMRenderer::load_preset` over many presets:
-    /// `AULOS_TEST_PRESET_DIR=/usr/share/projectM/presets cargo test --features visualizer --lib -- --ignored --nocapture nul_terminated`
-    #[test]
-    #[ignore = "requires EGL/GPU and a directory of presets"]
-    fn preset_paths_are_passed_nul_terminated() {
-        let dir = std::env::var("AULOS_TEST_PRESET_DIR")
-            .unwrap_or_else(|_| "/usr/share/projectM/presets".into());
-        let entries = scan_presets(&[PathBuf::from(dir)]);
-        let sample: Vec<PathBuf> = entries
-            .iter()
-            .step_by(7)
-            .take(150)
-            .map(|e| e.path.clone())
-            .collect();
-        if sample.is_empty() {
-            eprintln!("no presets found; skipping");
-            return;
-        }
-        let mut r = ProjectMRenderer::new(None).expect("renderer");
-
-        for path in &sample {
-            // Exactly what `load_preset` did before the fix.
-            r.projectm.load_preset_file(&path.to_string_lossy(), false);
-        }
-        let raw_failures = std::mem::take(&mut *r.load_failures.borrow_mut()).len();
-
-        let fixed_failures = sample.iter().filter(|p| !r.load_preset(p)).count();
-        eprintln!(
-            "{} presets: raw wrapper call failed {raw_failures}, NUL-terminated call failed {fixed_failures}",
-            sample.len(),
-        );
-        assert!(fixed_failures <= raw_failures);
-    }
-
-    /// The renderer must always report exactly the preset on screen: the
-    /// initial one, a manual pick, and an automatic timer switch — while a
-    /// failed load changes nothing:
-    /// `cargo test --features visualizer --lib -- --ignored --nocapture auto_switch`
-    #[test]
-    #[ignore = "requires EGL/GPU and a directory of presets"]
-    fn auto_switch_and_failed_load_keep_current_preset_exact() {
-        let dir = std::env::var("AULOS_TEST_PRESET_DIR")
-            .unwrap_or_else(|_| "/usr/share/projectM/presets".into());
-        let entries = scan_presets(&[PathBuf::from(dir)]);
-        if entries.len() < 3 {
-            eprintln!("need >= 3 presets; skipping");
-            return;
-        }
-        let mut r = ProjectMRenderer::new(None).expect("renderer");
-        let first = r.take_current_preset_change().expect("initial preset");
-        assert!(r.take_current_preset_change().is_none());
-
-        // Applies to presets started after this point (the duration is
-        // sampled when a preset begins), i.e. the manual pick below.
-        r.projectm.set_preset_duration(1.0);
-        let manual = entries[0].path.clone();
-        assert!(r.load_preset(&manual));
-        assert_eq!(r.take_current_preset_change(), Some(manual.clone()));
-
-        assert!(!r.load_preset(Path::new("/nonexistent/Missing.milk")));
-        assert_eq!(
-            r.take_current_preset_change(),
-            None,
-            "failed load must not change current"
-        );
-
-        let mut auto = None;
-        for _ in 0..300 {
-            r.render_frame(&[]);
-            std::thread::sleep(std::time::Duration::from_millis(33));
-            if let Some(p) = r.take_current_preset_change() {
-                auto = Some(p);
-                break;
-            }
-        }
-        let auto = auto.expect("timer switch should have been reported");
-        eprintln!("first {first:?}\nmanual {manual:?}\nauto {auto:?}");
-        assert_ne!(auto, manual);
-    }
-
     #[test]
     fn preset_entry_from_path_derives_name_category_and_lowercase_key() {
         let e = PresetEntry::from_path(PathBuf::from("/x/presets_milkdrop/Geiss - Eddies 2.milk"));
@@ -1113,5 +940,49 @@ mod tests {
         );
         assert_ne!(entries[1].path, entries[3].path);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Needs a GPU/wgpu adapter and a preset directory, so it is ignored by
+    /// default:
+    /// `AULOS_TEST_PRESET_DIR=/usr/share/projectM/presets cargo test --features visualizer --lib -- --ignored --nocapture renders_opaque`
+    /// Renders a few frames with a sine wave, checks the frame is opaque and
+    /// not black, and writes the last frame to `$TMPDIR/aulos-viz-frame.png`.
+    #[test]
+    #[ignore = "requires a wgpu adapter and a directory of presets"]
+    fn renders_opaque_non_black_frames() {
+        let dir = std::env::var("AULOS_TEST_PRESET_DIR")
+            .unwrap_or_else(|_| "/usr/share/projectM/presets".into());
+        let mut r = VizRenderer::new(Some(PathBuf::from(dir))).expect("renderer");
+        let first = r.take_current_preset_change().expect("initial preset");
+        eprintln!("preset: {}", first.display());
+        let pcm: Vec<f32> = (0..1152)
+            .map(|i| ((i / 2) as f32 * 0.05).sin() * 0.5)
+            .collect();
+        let mut frame = r.render_frame(&pcm);
+        for _ in 0..60 {
+            frame = r.render_frame(&pcm);
+        }
+        assert_eq!(frame.len(), RENDER_WIDTH * RENDER_HEIGHT * 4);
+        assert!(frame.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+        let mean = frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2]))
+            .sum::<f64>()
+            / (frame.len() / 4) as f64;
+        eprintln!("mean rgb sum {mean}");
+        image::save_buffer(
+            std::env::temp_dir().join("aulos-viz-frame.png"),
+            &frame,
+            RENDER_WIDTH as u32,
+            RENDER_HEIGHT as u32,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        assert!(mean > 5.0, "frame is black (mean {mean})");
+        assert!(r.load_preset(&first));
+        r.set_locked(true);
+        r.set_beat_sensitivity(1.5);
     }
 }

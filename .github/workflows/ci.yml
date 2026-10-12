@@ -17,8 +17,8 @@ env:
   FEATURES: visualizer
   # Native libraries needed by libcosmic
   # (wayland/xkbcommon/fontconfig/freetype/expat), cpal (ALSA) and the
-  # `visualizer` feature (ProjectM build: cmake/clang/libclang/GL/EGL/X11;
-  # MPD capture: PipeWire/SPA). Verified on Ubuntu 24.04.
+  # `visualizer` feature (MPD capture: PipeWire/SPA; the lactea engine
+  # is pure Rust on wgpu and needs no extra dev packages). Verified on Ubuntu 24.04.
   APT_DEPS: >-
     pkg-config
     libxkbcommon-dev
@@ -29,12 +29,6 @@ env:
     libasound2-dev
     libpipewire-0.3-dev
     libspa-0.2-dev
-    clang
-    libclang-dev
-    cmake
-    libgl-dev
-    libegl-dev
-    libx11-dev
 
 concurrency:
   group: ci-${{ github.ref }}

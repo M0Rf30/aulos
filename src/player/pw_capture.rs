@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Captures MPD's own PipeWire playback stream so the projectM visualizer
+//! Captures MPD's own PipeWire playback stream so the lactea visualizer
 //! reacts to audio when MPD is the active backend.
 //!
 //! Aulos only remote-controls MPD (see `mpd_backend`/`provider::mpd`): no PCM

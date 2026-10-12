@@ -2116,6 +2116,23 @@ impl AppModel {
             }
 
             #[cfg(feature = "visualizer")]
+            Message::VisualizerFailed(reason) => {
+                // Fall back to the blurred-cover backdrop and tell the user
+                // why, instead of leaving a permanently black panel.
+                self.visualizer_active = false;
+                self.viz_browser_open = false;
+                let fs_task = self.exit_viz_fullscreen();
+                if self.blurred_cover.is_none() {
+                    self.blurred_cover_key = None;
+                }
+                let toast = self.push_toast(widget::toaster::Toast::new(fl!(
+                    "viz-init-failed",
+                    reason = reason
+                )));
+                return Task::batch([fs_task, self.maybe_update_blurred_cover(), toast]);
+            }
+
+            #[cfg(feature = "visualizer")]
             Message::VizHudActivity => {
                 self.viz_hud_idle_frames = 0;
             }
@@ -2168,7 +2185,7 @@ impl AppModel {
                     // as is until the result lands.
                     let scan = cosmic::task::future(async move {
                         let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
-                            dirs::data_dir().map(|d| d.join("projectm").join("presets")),
+                            dirs::data_dir().map(|d| d.join("lactea").join("presets")),
                         );
                         let entries = tokio::task::spawn_blocking(move || {
                             crate::views::now_playing::visualizer::scan_presets(&dirs)

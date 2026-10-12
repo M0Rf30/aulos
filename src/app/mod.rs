@@ -466,7 +466,7 @@ pub struct AppModel {
     /// When the current transition started.
     expand_anim_start: Option<std::time::Instant>,
 
-    // ProjectM visualizer (behind feature flag)
+    // lactea visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
     visualizer_active: bool,
     /// Whether the visualizer is currently fullscreen.

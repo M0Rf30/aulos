@@ -25,7 +25,6 @@ ignore = [
 version = 2
 allow = [
     "GPL-3.0-only",
-    "LGPL-3.0-or-later", # projectm (visualizer feature), dynamically linked
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -115,7 +114,6 @@ allow-git = [
     "https://github.com/M0Rf30/Symphonia",
     "https://github.com/M0Rf30/opensubsonic-rs",
     "https://github.com/M0Rf30/mpd_client",
-    "https://github.com/M0Rf30/projectm-rs",
     "https://github.com/pop-os/libcosmic",
     "https://github.com/pop-os/winit",
     "https://github.com/pop-os/window_clipboard",

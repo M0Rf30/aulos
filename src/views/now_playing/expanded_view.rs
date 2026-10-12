@@ -943,15 +943,20 @@ pub fn expanded_now_playing<'a>(
             })
             .into()
         } else {
-            // No artwork for this track: pure theme surface, no hard-coded
-            // scrim — matches the "no artwork" rule for the whole view.
-            widget::container(widget::icon::from_name("media-optical-symbolic").size(160))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(theme_surface_class())
-                .into()
+            // No artwork for this track: the placeholder must stay transparent
+            // while a backdrop (visualizer / blurred cover) is painted behind
+            // it, otherwise an opaque surface hides the backdrop on this half.
+            let placeholder =
+                widget::container(widget::icon::from_name("media-optical-symbolic").size(160))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Horizontal::Center)
+                    .align_y(Vertical::Center);
+            if has_backdrop {
+                placeholder.into()
+            } else {
+                placeholder.class(theme_surface_class()).into()
+            }
         };
 
         let mut right_col = widget::Column::new().spacing(0);

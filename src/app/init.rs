@@ -269,7 +269,7 @@ impl AppModel {
         #[cfg(feature = "visualizer")]
         let mpd_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Command channel to the projectM render thread — replaces the
+        // Command channel to the lactea render thread — replaces the
         // old `next_preset_signal: AtomicBool` flag so the UI can also
         // request specific-preset loads, lock state, and beat sensitivity.
         // The `Sender` lives in `AppModel` for the whole app lifetime; the
@@ -468,7 +468,7 @@ impl AppModel {
             viz_prev_nav_active: true,
             #[cfg(feature = "visualizer")]
             viz_frame_buf: {
-                let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
+                let (w, h) = crate::views::now_playing::visualizer::VizRenderer::resolution();
                 Arc::new(Mutex::new(
                     crate::views::now_playing::viz_shader::VizFrameBuffer::new(w, h),
                 ))
