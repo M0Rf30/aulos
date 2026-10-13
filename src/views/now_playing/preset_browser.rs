@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Preset browser overlay for the lactea visualizer (behind the
-//! `visualizer` feature flag). Lists every discovered `.milk` preset,
+//! `visualizer` feature flag). Lists every discovered `.milk`/`.milk2` preset,
 //! grouped by category, with a live search filter, click-to-load, and
 //! playback controls (next/lock/beat sensitivity). Stacked as the topmost
 //! layer over the visualizer in `expanded_view::expanded_now_playing`.

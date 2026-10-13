@@ -36,14 +36,14 @@ pub enum VizCommand {
     SetBeatSensitivity(f32),
 }
 
-/// One `.milk` preset file discovered by `scan_presets`.
+/// One `.milk` / `.milk2` preset file discovered by `scan_presets`.
 ///
 /// The same stem routinely exists in several category directories (the
 /// stock MilkDrop pack ships ~940 duplicated names), so an entry is
 /// identified by its full `path`, never by `name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresetEntry {
-    /// File stem (filename without the `.milk` extension) — display only.
+    /// File stem (filename without the `.milk`/`.milk2` extension) — display only.
     pub name: String,
     /// The preset's immediate parent directory name, prettified by
     /// stripping the MilkDrop pack convention `presets_` prefix (e.g.
@@ -109,8 +109,9 @@ fn prettify_category(raw: &str) -> String {
     raw.strip_prefix("presets_").unwrap_or(raw).to_string()
 }
 
-/// Recursively scans `dirs` for `.milk` preset files (case-insensitive
-/// extension) off the render thread — no GPU needed.
+/// Recursively scans `dirs` for `.milk` and MilkDrop 3 `.milk2` (double
+/// preset) files (case-insensitive extension) off the render thread — no
+/// GPU needed.
 /// Returns one entry per file, sorted by `(category, name)` and
 /// deduplicated by path (in case two search dirs alias the same tree).
 pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
@@ -129,7 +130,9 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
             let is_milk = path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"));
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("milk") || ext.eq_ignore_ascii_case("milk2")
+                });
             // Non-UTF-8 paths are skipped: preset identity and display
             // names are UTF-8 throughout the UI.
             if !is_milk || path.to_str().is_none() {
@@ -360,6 +363,11 @@ impl VizRenderer {
                 sample_rate: PCM_SAMPLE_RATE,
                 fps: RENDER_FPS,
                 preset_duration: PRESET_DURATION_SECONDS,
+                // Per-preset compat detection: `.milk2` double presets (and
+                // `.milk` files using MilkDrop 3 features) need
+                // `Compat::MilkDrop3`, which the default projectM mode
+                // rejects with `EngineError::Unsupported`.
+                auto_compat: true,
                 ..Default::default()
             },
         );
@@ -564,8 +572,10 @@ impl VizRenderer {
                 return false;
             }
         };
+        // The full file name, not the stem: lactea dispatches on the
+        // extension (`.milk` = plain preset, otherwise a `.milk2` marker scan).
         let name = path
-            .file_stem()
+            .file_name()
             .map_or_else(|| "preset".into(), |s| s.to_string_lossy().into_owned());
         // The very first preset has nothing to blend from.
         let soft = smooth && self.current_preset.is_some();
@@ -859,8 +869,8 @@ mod tests {
         root
     }
 
-    /// Nested dirs, noise files, and a mixed-case extension all in one
-    /// tree: only the three `.milk` files should surface, each attributed
+    /// Nested dirs, noise files, and mixed-case extensions all in one
+    /// tree: only the `.milk`/`.milk2` files should surface, each attributed
     /// to its immediate parent directory (prettified), sorted by
     /// `(category, name)`.
     #[test]
@@ -876,6 +886,7 @@ mod tests {
         fs::write(milkdrop_dir.join("noise.txt"), b"").unwrap();
         fs::write(nested_dir.join("Deep.MILK"), b"").unwrap();
         fs::write(stock_dir.join("Basic.milk"), b"").unwrap();
+        fs::write(stock_dir.join("Double.Milk2"), b"").unwrap();
         fs::write(root.join("readme.txt"), b"").unwrap();
 
         let entries = scan_presets(std::slice::from_ref(&root));
@@ -888,6 +899,7 @@ mod tests {
             vec![
                 ("milkdrop", "Cool - Preset"),
                 ("stock", "Basic"),
+                ("stock", "Double"),
                 ("subdir", "Deep"),
             ]
         );
