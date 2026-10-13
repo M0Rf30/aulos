@@ -930,4 +930,118 @@ impl MusicProvider for SubsonicProvider {
             Ok(Some(crate::library::ArtistInfoResult { bio, image_bytes }))
         })
     }
+
+    #[tracing::instrument(skip(self, track), level = "debug")]
+    fn track_tech_info(
+        &self,
+        track: &Track,
+    ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
+        // The song ID lives in `track.path` (see `child_to_track`);
+        // `source_uri` is a signed stream URL and is never shown.
+        let song_id = track.path.to_string_lossy().to_string();
+        self.block_on(async {
+            let song = self
+                .client
+                .get_song(&song_id)
+                .await
+                .map_err(subsonic_err("getSong"))?;
+            Ok(Some(song_to_tech_info(&song)))
+        })
+    }
+}
+
+/// Convert a `getSong` response into the Properties drawer's display model.
+///
+/// Servers report zero for values they could not determine, so every
+/// numeric field is kept only when positive — the drawer then shows an em
+/// dash instead of a misleading `0`. Bit depth is dropped for lossy formats
+/// (it is meaningless there and the drawer shows "n/a" instead).
+fn song_to_tech_info(song: &opensubsonic::data::Child) -> crate::library::tech_info::TechInfo {
+    use crate::library::tech_info::{ReplayGain, TechInfo};
+
+    let positive = |v: Option<i32>| v.filter(|v| *v > 0).map(|v| v as u32);
+    let suffix = song.suffix.as_deref().unwrap_or_default();
+    let lossless = super::lossless_from_suffix(suffix);
+    let bitrate = positive(song.bit_rate);
+    let channels = positive(song.channel_count);
+    let bits = if lossless == Some(false) {
+        None
+    } else {
+        positive(song.bit_depth)
+    };
+    let gain = |v: Option<f64>| v.map(|g| format!("{g:.2} dB"));
+    let peak = |v: Option<f64>| v.map(|p| format!("{p:.6}"));
+    let replay_gain = song
+        .replay_gain
+        .as_ref()
+        .map(|rg| ReplayGain {
+            track_gain: gain(rg.track_gain),
+            track_peak: peak(rg.track_peak),
+            album_gain: gain(rg.album_gain),
+            album_peak: peak(rg.album_peak),
+        })
+        .unwrap_or_default();
+
+    TechInfo {
+        container: super::container_from_suffix(suffix),
+        codec_short: (!suffix.is_empty()).then(|| suffix.to_ascii_lowercase()),
+        sample_rate: positive(song.sampling_rate),
+        bits_per_sample: bits,
+        lossless,
+        channels,
+        channel_layout: channels.and_then(super::channel_layout_name),
+        duration: song
+            .duration
+            .filter(|d| *d > 0)
+            .map(|d| Duration::from_secs(d as u64)),
+        file_size: song.size.filter(|s| *s > 0).map(|s| s as u64),
+        bitrate_kbps: bitrate,
+        nominal_bitrate_kbps: bitrate,
+        replay_gain,
+        date: song.year.filter(|y| *y > 0).map(|y| y.to_string()),
+        mime_type: song.content_type.clone().filter(|m| !m.is_empty()),
+        remote_path: song.path.clone().filter(|p| !p.is_empty()),
+        composer: song.display_composer.clone().filter(|c| !c.is_empty()),
+        ..TechInfo::default()
+    }
+}
+
+#[cfg(test)]
+mod tech_info_tests {
+    use super::song_to_tech_info;
+    use opensubsonic::data::Child;
+
+    fn song(json: &str) -> Child {
+        serde_json::from_str(json).expect("valid Child JSON")
+    }
+
+    #[test]
+    fn lossless_song_keeps_bit_depth_and_server_fields() {
+        let info = song_to_tech_info(&song(
+            r#"{"id":"1","title":"t","suffix":"flac","contentType":"audio/flac",
+                "bitRate":900,"bitDepth":24,"samplingRate":96000,"channelCount":2,
+                "size":1000,"duration":10,"path":"A/B/c.flac","year":1999}"#,
+        ));
+        assert_eq!(info.container.as_deref(), Some("FLAC"));
+        assert_eq!(info.bits_per_sample, Some(24));
+        assert_eq!(info.sample_rate, Some(96_000));
+        assert_eq!(info.channel_layout.as_deref(), Some("Stereo"));
+        assert_eq!(info.bitrate_kbps, Some(900));
+        assert_eq!(info.remote_path.as_deref(), Some("A/B/c.flac"));
+        assert_eq!(info.date.as_deref(), Some("1999"));
+    }
+
+    #[test]
+    fn zero_and_missing_values_become_none_and_lossy_drops_bit_depth() {
+        let info = song_to_tech_info(&song(
+            r#"{"id":"1","title":"t","suffix":"mp3","bitRate":0,"bitDepth":16,
+                "samplingRate":0,"size":0,"duration":0}"#,
+        ));
+        assert_eq!(info.lossless, Some(false));
+        assert_eq!(info.bits_per_sample, None);
+        assert_eq!(info.bitrate_kbps, None);
+        assert_eq!(info.sample_rate, None);
+        assert_eq!(info.file_size, None);
+        assert_eq!(info.duration, None);
+    }
 }

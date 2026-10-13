@@ -633,6 +633,18 @@ impl LibraryDb {
             .ok()
     }
 
+    /// Forget the cached cover of one album, so the next scan re-reads it
+    /// from the (retagged) files.
+    pub fn remove_cached_cover(&self, album_key: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM cover_cache WHERE album_key = ?1",
+                params![album_key],
+            )
+            .map_err(|e| format!("Cover cache error: {e}"))?;
+        Ok(())
+    }
+
     /// Remove a single track by its file path.
     ///
     /// Used by the incremental filesystem-watcher scan to remove deleted files.
@@ -1490,6 +1502,18 @@ mod tests {
         let results = db.search_tracks("track_1", None).unwrap();
         assert_eq!(results.len(), 1, "unexpected matches: {results:?}");
         assert_eq!(results[0].title, "track_1");
+    }
+
+    #[test]
+    fn remove_cached_cover_drops_only_that_album() {
+        let db = LibraryDb::open_memory().unwrap();
+        db.cache_cover("a|x", b"one").unwrap();
+        db.cache_cover("b|y", b"two").unwrap();
+        db.remove_cached_cover("a|x").unwrap();
+        assert_eq!(db.get_cached_cover("a|x"), None);
+        assert_eq!(db.get_cached_cover("b|y").as_deref(), Some(&b"two"[..]));
+        // Removing a key that is not cached is not an error.
+        db.remove_cached_cover("zzz").unwrap();
     }
 
     #[test]

@@ -15,6 +15,15 @@ use cosmic::widget::{self, nav_bar};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// The editable (local-file) tracks of an album, cloned for the tag editor.
+fn taggable_tracks(tracks: &[crate::library::Track]) -> Vec<crate::library::Track> {
+    tracks
+        .iter()
+        .filter(|track| crate::tagger::is_taggable(track))
+        .cloned()
+        .collect()
+}
+
 impl AppModel {
     pub(super) fn handle_message(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
@@ -30,6 +39,19 @@ impl AppModel {
                     self.core.window.show_context = true;
                 }
             }
+
+            // -- Properties drawer --
+            Message::ShowTrackProperties(track) => return self.open_track_properties(track),
+            Message::PropertiesLoaded { request_id, result } => {
+                self.properties.finish_track(request_id, result);
+            }
+            Message::AlbumPropertiesLoaded {
+                request_id,
+                summary,
+            } => {
+                self.properties.finish_album(request_id, summary);
+            }
+            Message::Properties(msg) => return self.update_properties(msg),
 
             Message::TextInputFocused(focused) => {
                 self.text_input_focused = focused;
@@ -917,6 +939,12 @@ impl AppModel {
                 crate::views::folders::FolderMessage::SetRating(id, r) => {
                     return self.update(Message::SetRating(id, r));
                 }
+                crate::views::folders::FolderMessage::ShowProperties(track) => {
+                    return self.open_track_properties(track);
+                }
+                crate::views::folders::FolderMessage::Tag(track, action) => {
+                    return self.open_in_tagger(vec![track], action);
+                }
             },
 
             Message::PlayAlbum(album_idx) => {
@@ -944,6 +972,41 @@ impl AppModel {
                     && let Some(album) = artist.albums.get(album_idx)
                 {
                     return self.play_track_list(album.tracks.clone(), track_idx);
+                }
+            }
+
+            Message::ShowAlbumProperties(album_idx) => {
+                if let Some(album) = self.all_albums.get(album_idx).cloned() {
+                    return self.open_album_properties(album);
+                }
+            }
+
+            Message::ShowArtistAlbumProperties(artist_idx, album_idx) => {
+                if let Some(album) = self
+                    .all_artists
+                    .get(artist_idx)
+                    .and_then(|artist| artist.albums.get(album_idx))
+                    .cloned()
+                {
+                    return self.open_album_properties(album);
+                }
+            }
+
+            Message::TagTrack(track, action) => return self.open_in_tagger(vec![track], action),
+
+            Message::TagAlbum(album_idx, action) => {
+                if let Some(album) = self.all_albums.get(album_idx) {
+                    return self.open_in_tagger(taggable_tracks(&album.tracks), action);
+                }
+            }
+
+            Message::TagArtistAlbum(artist_idx, album_idx, action) => {
+                if let Some(album) = self
+                    .all_artists
+                    .get(artist_idx)
+                    .and_then(|artist| artist.albums.get(album_idx))
+                {
+                    return self.open_in_tagger(taggable_tracks(&album.tracks), action);
                 }
             }
 
@@ -1513,6 +1576,48 @@ impl AppModel {
                 self.config.experimental_converter = enabled;
                 self.save_config();
                 self.set_convert_nav_entry(enabled);
+            }
+
+            Message::SetAcoustidApiKey(key) => {
+                self.config.acoustid_api_key = key;
+                self.save_config();
+            }
+
+            Message::EditAcoustidUserKey(text) => {
+                self.acoustid_user_key_input = text;
+            }
+
+            Message::SaveAcoustidUserKey => {
+                let key = self.acoustid_user_key_input.trim().to_string();
+                self.acoustid_user_key_input.clear();
+                self.acoustid_user_key_saved = None;
+                return cosmic::task::future(async move {
+                    let stored = tokio::task::spawn_blocking(move || {
+                        let entry = crate::tagger::ACOUSTID_USER_KEY_ENTRY;
+                        if key.is_empty() {
+                            crate::credentials::delete_password(entry).map(|()| false)
+                        } else {
+                            crate::credentials::store_password(entry, &key).map(|()| true)
+                        }
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                    cosmic::Action::App(Message::AcoustidUserKeyStored(stored))
+                });
+            }
+
+            Message::AcoustidUserKeyStored(result) => match result {
+                Ok(stored) => self.acoustid_user_key_saved = Some(stored),
+                Err(e) => {
+                    tracing::warn!("AcoustID key keyring access failed: {e}");
+                    self.acoustid_user_key_saved = None;
+                }
+            },
+
+            Message::SetTaggerUseCaaCover(enabled) => {
+                self.config.tagger_use_caa_cover = enabled;
+                self.save_config();
             }
 
             Message::SetFetchArtistInfo(enabled) => {
@@ -2378,6 +2483,12 @@ impl AppModel {
                     SmartPlaylistMessage::Navigate(route) => {
                         return self.navigate(route);
                     }
+                    SmartPlaylistMessage::ShowProperties(track) => {
+                        return self.open_track_properties(track);
+                    }
+                    SmartPlaylistMessage::Tag(track, action) => {
+                        return self.open_in_tagger(vec![track], action);
+                    }
                     // List view
                     SmartPlaylistMessage::New => {
                         self.smart_playlist_editor =
@@ -2691,6 +2802,10 @@ impl AppModel {
             // -- Convert / transcode / rip --
             Message::Convert(msg) => return self.update_convert(msg),
             Message::ConvertEvent(event) => return self.update_convert_event(event),
+
+            // -- Tag editor --
+            Message::Tagger(msg) => return self.update_tagger(msg),
+            Message::TaggerEvent(event) => return self.update_tagger_event(event),
             Message::Quit => {
                 self.flush_config();
                 return cosmic::iced::exit();

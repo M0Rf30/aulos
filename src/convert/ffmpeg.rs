@@ -21,7 +21,6 @@ use std::sync::OnceLock;
 
 use super::ConvertError;
 use super::encoder::{LossyOptions, Mp3Mode, OutputFormat, SampleSink};
-use super::tag_writer::WriteTags;
 
 /// Whether `ffmpeg` was found on `$PATH`, detected once (a cheap
 /// `ffmpeg -version` probe) and cached for the process's lifetime.
@@ -238,89 +237,6 @@ impl Drop for FfmpegSink {
         if !self.finished {
             let _ = self.child.kill();
             let _ = self.child.wait();
-        }
-    }
-}
-
-/// Best-effort: re-mux `path`'s `ffmpeg`-encoded container to embed
-/// `tags`'s text fields via a `-c copy -metadata` pass (fast and
-/// lossless — only the container's tag frames change, the audio stream
-/// itself is never re-encoded). No-op if `ffmpeg` isn't available or
-/// `tags` has nothing to write.
-///
-/// Cover art isn't attempted here: embedding a picture needs a different
-/// `ffmpeg` invocation per container (ID3 `APIC` for MP3, MP4 `covr` for
-/// AAC/ALAC, a `METADATA_BLOCK_PICTURE` comment for Opus/Vorbis), which
-/// isn't worth the added complexity for a best-effort tag copy — matches
-/// `super::tag_writer`'s "tagging never fails the job" contract by simply
-/// skipping what it can't do rather than erroring.
-pub fn write_tags(path: &Path, tags: &WriteTags<'_>) {
-    if tags.is_empty() || !detect() {
-        return;
-    }
-
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return;
-    };
-    let tmp_path = path.with_extension(format!("tagtmp.{ext}"));
-
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-y")
-        .arg("-i")
-        .arg(path)
-        .arg("-c")
-        .arg("copy");
-
-    if let Some(v) = tags.title {
-        cmd.arg("-metadata").arg(format!("title={v}"));
-    }
-    if let Some(v) = tags.artist {
-        cmd.arg("-metadata").arg(format!("artist={v}"));
-    }
-    if let Some(v) = tags.album {
-        cmd.arg("-metadata").arg(format!("album={v}"));
-    }
-    if let Some(v) = tags.genre {
-        cmd.arg("-metadata").arg(format!("genre={v}"));
-    }
-    if let Some(v) = tags.date {
-        cmd.arg("-metadata").arg(format!("date={v}"));
-    }
-    if let Some(n) = tags.track_number {
-        let track = match tags.track_total {
-            Some(total) => format!("{n}/{total}"),
-            None => n.to_string(),
-        };
-        cmd.arg("-metadata").arg(format!("track={track}"));
-    }
-    if let Some(n) = tags.disc_number {
-        cmd.arg("-metadata").arg(format!("disc={n}"));
-    }
-
-    cmd.arg(&tmp_path);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    match cmd.status() {
-        Ok(status) if status.success() => {
-            if let Err(e) = std::fs::rename(&tmp_path, path) {
-                tracing::warn!(
-                    "ffmpeg tag remux: failed to install tagged output for {path:?}: {e}"
-                );
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-        }
-        Ok(status) => {
-            tracing::warn!("ffmpeg tag remux exited with {status} for {path:?}");
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        Err(e) => {
-            tracing::warn!("ffmpeg tag remux failed to run for {path:?}: {e}");
-            let _ = std::fs::remove_file(&tmp_path);
         }
     }
 }

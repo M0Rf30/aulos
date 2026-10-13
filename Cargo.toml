@@ -28,10 +28,18 @@ futures-util = "0.3"
 # out of core) that rodio 0.22 doesn't compile against. Depending on the
 # fork directly (not via `[patch.crates-io]`) sidesteps that conflict
 # entirely, matching the working approach in the sibling `rmpd` project.
-symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "1c2f6673688c197bffeaad47a8c4b77b8764309f", features = [
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "37665b31c580a4c686482a44129bbab599e73431", features = [
     "all",
     "dsd",
 ] }
+# Tag writing for the built-in tag editor (`src/library/tagio`): the fork's
+# `symphonia-tagging` crate (branch `rmpd-next`) shares its field mapping
+# tables with the readers, so what is written is read back identically. Same
+# rev as `symphonia`, so there is one `symphonia-core` in the graph.
+symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "37665b31c580a4c686482a44129bbab599e73431" }
+# Pure-Rust Chromaprint port: AcoustID fingerprints for the tag editor's
+# acoustic lookup/submission (`src/library/fingerprint.rs`).
+rusty-chromaprint = "0.3"
 cpal = "0.18"
 rubato = "5.0"
 audioadapter-buffers = "5.2"

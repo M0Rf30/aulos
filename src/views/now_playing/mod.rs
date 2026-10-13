@@ -47,6 +47,10 @@ pub enum NowPlayingMessage {
     /// Toggle "stop after this track" (`PlaybackExtrasMessage::ToggleStopAfter`).
     ToggleStopAfter,
     ShowLyrics,
+    /// Open the Properties drawer for the playing track
+    /// (`Message::ShowTrackProperties`). Opens a drawer only: it never
+    /// touches the expand/collapse sheet or its animation.
+    ShowProperties,
     /// Click on bar background — expand to full view.
     ExpandToggle,
     /// Collapse button or Escape — return to compact bar.

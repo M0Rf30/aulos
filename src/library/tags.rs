@@ -11,8 +11,8 @@
 //! actually surfaces (`crate::library::Track` has no bit-depth/channel
 //! fields — those are read independently by
 //! [`crate::convert::pipeline::AudioSource`] for the converter's own
-//! needs). Symphonia is read-only: writing tags into the file converter's
-//! output is handled separately by `crate::convert::tag_writer`.
+//! needs). Symphonia is read-only: writing tags is handled by
+//! `crate::library::tagio`.
 
 use std::fs;
 use std::path::Path;
@@ -54,7 +54,7 @@ pub struct AudioTags {
     pub album: Option<String>,
     pub genre: Option<String>,
     /// Full release date string as the container stored it (e.g. `"2024"`
-    /// or `"2024-05-01"`), preserved for `crate::convert::tag_writer`.
+    /// or `"2024-05-01"`).
     pub date: Option<String>,
     /// Just the leading 4-digit year, for `Track::year`.
     pub year: Option<u32>,
@@ -81,9 +81,10 @@ pub struct AudioTags {
 pub struct AudioProperties {
     pub duration: Duration,
     pub sample_rate: u32,
-    /// Derived from the audio-bitstream portion of the file (file size
-    /// minus embedded-artwork bytes) over duration, in kbps — symphonia
-    /// exposes no bitrate field directly.
+    /// Average bitrate of the audio payload (file size minus every tag and
+    /// metadata block, see [`super::tech_info`]) over duration, in kbps —
+    /// symphonia exposes no bitrate field directly. Computed by the same
+    /// function the Properties drawer uses, so both always agree.
     pub bitrate: u32,
 }
 
@@ -102,6 +103,8 @@ pub struct ProbedFile {
 pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
     let file = fs::File::open(path).ok()?;
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Positional header reads only (no seek), so the stream below still starts at 0.
+    let payload_bytes = super::tech_info::payload_bytes(&file, file_size);
 
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -132,15 +135,11 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
     };
 
     // The fork's WAV demuxer reads `id3 ` and `LIST INFO` chunks wherever they sit (including
-    // after `data`, where Mp3tag, foobar2000 and `crate::convert::tag_writer` put them), so the
+    // after `data`, where Mp3tag and foobar2000 put them), so the
     // container's own revision already carries them.
-    let (raw_tags, pictures, visual_bytes) =
-        drain_metadata(&mut reader.metadata(), want_pictures, track_id);
+    let (raw_tags, pictures) = drain_metadata(&mut reader.metadata(), want_pictures, track_id);
 
-    let bitrate = duration.filter(|d| d.as_secs_f64() > 0.0).map(|d| {
-        let audio_bytes = file_size.saturating_sub(visual_bytes);
-        ((audio_bytes as f64 * 8.0) / d.as_secs_f64() / 1000.0) as u32
-    });
+    let bitrate = duration.and_then(|d| super::tech_info::bitrate_kbps(payload_bytes, d));
 
     let mut tags = AudioTags {
         pictures,
@@ -162,7 +161,7 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
 /// precision symphonia exposes: the track's own frame count, then its
 /// declared duration in timebase units, then the reader's overall media
 /// duration (the only value some demuxers ever populate).
-fn track_duration(
+pub(crate) fn track_duration(
     track: Option<&Track>,
     media_info: &MediaInfo,
     format: FormatId,
@@ -189,7 +188,7 @@ fn track_duration(
         .and_then(|time| Duration::try_from_secs_f64(time.as_secs_f64()).ok())
 }
 
-/// Drain the metadata log into `(tags, pictures, visual_byte_total)`.
+/// Drain the metadata log into `(tags, pictures)`.
 ///
 /// `tags` merges every revision, newest first (checking the default audio
 /// track's per-track tags too, since e.g. Matroska routes track-targeted tag
@@ -200,23 +199,16 @@ fn track_duration(
 /// encoder-only leading ID3v2 before an appended tag) no longer hides the
 /// older block's fields.
 ///
-/// `visual_byte_total` is summed from every revision regardless of
-/// `want_pictures` (only picture lengths are read, never copied); the
-/// `pictures` list itself is only populated — cloning picture bytes —
-/// when a caller actually wants them.
-fn drain_metadata(
+/// The `pictures` list is only populated — cloning picture bytes — when a
+/// caller actually wants them.
+pub(crate) fn drain_metadata(
     log: &mut Metadata<'_>,
     want_pictures: bool,
     track_id: Option<u64>,
-) -> (Vec<SymTag>, Vec<Picture>, u64) {
+) -> (Vec<SymTag>, Vec<Picture>) {
     let mut older: Vec<MetadataRevision> = Vec::new();
     while let Some(discarded) = log.pop() {
         older.push(discarded);
-    }
-
-    let mut visual_bytes: u64 = older.iter().map(revision_visual_bytes).sum();
-    if let Some(rev) = log.current() {
-        visual_bytes += revision_visual_bytes(rev);
     }
 
     let mut tags: Vec<SymTag> = Vec::new();
@@ -243,11 +235,7 @@ fn drain_metadata(
         }
     }
 
-    (tags, pictures, visual_bytes)
-}
-
-fn revision_visual_bytes(rev: &MetadataRevision) -> u64 {
-    rev.media.visuals.iter().map(|v| v.data.len() as u64).sum()
+    (tags, pictures)
 }
 
 /// Identity of a tag field for merging revisions: the standard tag kind, or
@@ -444,5 +432,28 @@ mod tests {
 
         assert_eq!(tags.title.as_deref(), Some(title));
         assert_eq!(tags.artist.as_deref(), Some("ID3v1 Artst"));
+    }
+
+    /// The scanner's stored bitrate and the Properties drawer's must come from
+    /// the same payload (file minus ID3v2/ID3v1) so the two never disagree.
+    #[test]
+    fn scanner_bitrate_matches_tech_info_payload_bitrate() {
+        let title = "Bitrate agreement title longer than thirty chars";
+        let path = std::env::temp_dir().join(format!("aulos-tag-rate-{}.mp3", std::process::id()));
+        fs::write(&path, mp3_with_id3v2_and_id3v1(title)).unwrap();
+        let probed = probe(&path, false).expect("probe mp3");
+        let info = crate::library::tech_info::probe(&path);
+        let _ = fs::remove_file(&path);
+        let info = info.expect("tech_info probe");
+
+        // 32 frames of 417 bytes; the ID3v2 and ID3v1 tags are not payload.
+        assert_eq!(info.payload_bytes, Some(32 * 417));
+        assert_eq!(info.tag_formats, ["ID3v2.4", "ID3v1"]);
+        assert!(probed.properties.duration > Duration::ZERO);
+        assert_eq!(Some(probed.properties.bitrate), info.bitrate_kbps);
+        assert_eq!(
+            Some(probed.properties.bitrate),
+            crate::library::tech_info::bitrate_kbps(32 * 417, probed.properties.duration)
+        );
     }
 }

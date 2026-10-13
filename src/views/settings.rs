@@ -63,6 +63,16 @@ pub enum SettingsMessage {
     /// A message from the Startup block (start section / provider) — see
     /// `crate::app::startup`.
     Startup(crate::app::startup::StartupMessage),
+    /// The AcoustID application API key text changed (persisted to config).
+    SetAcoustidApiKey(String),
+    /// Live text of the user's AcoustID API key, before saving.
+    EditAcoustidUserKey(String),
+    /// Store the user's AcoustID API key in the keyring (empty deletes it).
+    SaveAcoustidUserKey,
+    /// Toggle preferring the Cover Art Archive front cover.
+    SetTaggerUseCaaCover(bool),
+    /// Open a web page (the AcoustID key pages).
+    OpenUrl(String),
     /// The settings search box changed (empty = show everything).
     Search(String),
 }
@@ -217,6 +227,16 @@ mod keywords {
         ]
     }
 
+    pub fn tagger() -> Vec<String> {
+        vec![
+            fl!("settings-tagger"),
+            fl!("settings-tagger-description"),
+            fl!("settings-tagger-app-key"),
+            fl!("settings-tagger-user-key"),
+            fl!("settings-tagger-caa-cover"),
+        ]
+    }
+
     pub fn shortcuts() -> Vec<String> {
         vec![
             fl!("settings-shortcuts"),
@@ -256,6 +276,10 @@ pub fn view<'a>(
     playback_extras: cosmic::Element<'a, SettingsMessage>,
     startup: cosmic::Element<'a, SettingsMessage>,
     search: &'a str,
+    acoustid_api_key: &'a str,
+    acoustid_user_key_input: &'a str,
+    acoustid_user_key_saved: Option<bool>,
+    tagger_use_caa_cover: bool,
 ) -> cosmic::Element<'a, SettingsMessage> {
     let sp = cosmic::theme::active().cosmic().spacing;
     let query = SearchQuery::new(search);
@@ -290,6 +314,15 @@ pub fn view<'a>(
             artist_info_section(fetch_artist_info),
         ),
         (crate::online::scrobble::view::keywords(), scrobbling),
+        (
+            keywords::tagger(),
+            tagger_section(
+                acoustid_api_key,
+                acoustid_user_key_input,
+                acoustid_user_key_saved,
+                tagger_use_caa_cover,
+            ),
+        ),
         (
             keywords::experimental(),
             experimental_section(experimental_converter),
@@ -606,6 +639,94 @@ fn appearance_section<'a>(grid_scale: f32) -> cosmic::Element<'a, SettingsMessag
             fl!("settings-appearance-description"),
         ))
         .add(grid_item)
+        .into()
+}
+
+/// Tag editor section: AcoustID application key, the user's own AcoustID
+/// key (keyring-only; `saved` is `None` while the keyring is being read),
+/// and the Cover Art Archive toggle.
+fn tagger_section<'a>(
+    acoustid_api_key: &'a str,
+    user_key_input: &'a str,
+    user_key_saved: Option<bool>,
+    use_caa_cover: bool,
+) -> cosmic::Element<'a, SettingsMessage> {
+    let sp = cosmic::theme::active().cosmic().spacing;
+    let wrap = cosmic::iced::core::text::Wrapping::Word;
+
+    let app_key_item = widget::Column::new()
+        .push(widget::text::body(fl!("settings-tagger-app-key")))
+        .push(
+            widget::text::caption(fl!("settings-tagger-app-key-description"))
+                .class(dim_text())
+                .wrapping(wrap),
+        )
+        .push(
+            widget::text_input(fl!("settings-tagger-app-key-placeholder"), acoustid_api_key)
+                .on_input(SettingsMessage::SetAcoustidApiKey)
+                .width(Length::Fill),
+        )
+        .push(
+            widget::button::link(fl!("settings-tagger-app-key-get"))
+                .on_press(SettingsMessage::OpenUrl(
+                    crate::tagger::ACOUSTID_NEW_APPLICATION_URL.to_string(),
+                ))
+                .padding(0),
+        )
+        .spacing(sp.space_xxs)
+        .width(Length::Fill);
+
+    let state = match user_key_saved {
+        None => fl!("settings-tagger-user-key-checking"),
+        Some(true) => fl!("settings-tagger-user-key-saved"),
+        Some(false) => fl!("settings-tagger-user-key-none"),
+    };
+    let user_key_item = widget::Column::new()
+        .push(widget::text::body(fl!("settings-tagger-user-key")))
+        .push(
+            widget::text::caption(fl!("settings-tagger-user-key-description"))
+                .class(dim_text())
+                .wrapping(wrap),
+        )
+        .push(
+            widget::Row::new()
+                .push(
+                    widget::text_input(fl!("settings-tagger-user-key-placeholder"), user_key_input)
+                        .on_input(SettingsMessage::EditAcoustidUserKey)
+                        .on_submit(|_| SettingsMessage::SaveAcoustidUserKey)
+                        .password()
+                        .width(Length::Fill),
+                )
+                .push(
+                    widget::button::standard(fl!("settings-tagger-user-key-save"))
+                        .on_press(SettingsMessage::SaveAcoustidUserKey),
+                )
+                .spacing(sp.space_xs)
+                .align_y(Alignment::Center),
+        )
+        .push(widget::text::caption(state).class(dim_text()))
+        .push(
+            widget::button::link(fl!("settings-tagger-user-key-find"))
+                .on_press(SettingsMessage::OpenUrl(
+                    crate::tagger::ACOUSTID_USER_KEY_URL.to_string(),
+                ))
+                .padding(0),
+        )
+        .spacing(sp.space_xxs)
+        .width(Length::Fill);
+
+    let caa_item = widget::settings::item::builder(fl!("settings-tagger-caa-cover"))
+        .description(fl!("settings-tagger-caa-cover-description"))
+        .toggler(use_caa_cover, SettingsMessage::SetTaggerUseCaaCover);
+
+    widget::settings::section()
+        .header(section_header(
+            fl!("settings-tagger"),
+            fl!("settings-tagger-description"),
+        ))
+        .add(app_key_item)
+        .add(user_key_item)
+        .add(caa_item)
         .into()
 }
 

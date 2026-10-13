@@ -7,6 +7,7 @@ use crate::config::ViewMode;
 use crate::fl;
 use crate::library::{Album, Playlist};
 use crate::views::common;
+use crate::views::context_menu::{self, AlbumMenuAction};
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -47,6 +48,16 @@ pub enum AlbumMessage {
     Navigate(crate::views::Route),
     /// A filter chip (kind / decade) was clicked.
     Filter(crate::views::album_filters::FilterMsg),
+    /// Open the Properties drawer for this track.
+    ShowProperties(crate::library::Track),
+    /// Open the Properties drawer for the album at this index (in the slice
+    /// handed to the view; `update` resolves it, so no tracks are cloned).
+    ShowAlbumProperties(usize),
+    /// Open the tag editor on this (local) track.
+    Tag(crate::library::Track, crate::tagger::TagAction),
+    /// Open the tag editor on the whole album at this index (resolved by
+    /// `update`, so no tracks are cloned).
+    TagAlbum(usize, crate::tagger::TagAction),
 }
 
 /// Minimum cover/label width of a grid card; the fluid grid stretches
@@ -183,15 +194,18 @@ pub fn albums_view<'a>(
                     album.name.clone()
                 };
 
-                widget::tooltip(
-                    widget::button::custom(album_card)
-                        .on_press(AlbumMessage::SelectAlbum(album_index))
-                        .padding(CARD_PADDING as u16)
-                        .class(card_button_class()),
-                    widget::text::caption(tooltip_label),
-                    widget::tooltip::Position::Top,
+                let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+                context_menu::with_menu(
+                    widget::tooltip(
+                        widget::button::custom(album_card)
+                            .on_press(AlbumMessage::SelectAlbum(album_index))
+                            .padding(CARD_PADDING as u16)
+                            .class(card_button_class()),
+                        widget::text::caption(tooltip_label),
+                        widget::tooltip::Position::Top,
+                    ),
+                    move || album_context_menu(album_index, taggable),
                 )
-                .into()
             },
         ),
         ViewMode::List => common::virtual_list(
@@ -271,7 +285,7 @@ fn list_row<'a>(
         widget::tooltip::Position::Top,
     );
 
-    widget::button::custom(
+    let row = widget::button::custom(
         widget::Row::new()
             .push(art_widget)
             .push(
@@ -309,8 +323,34 @@ fn list_row<'a>(
     .width(Length::Fill)
     .height(Length::Fixed(LIST_ROW_HEIGHT))
     .padding(0)
-    .class(list_row_button_class(false))
-    .into()
+    .class(list_row_button_class(false));
+    let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+    context_menu::with_menu(row, move || album_context_menu(index, taggable))
+}
+
+/// Right-click menu of an album card, list row or detail hero. `index` is
+/// the album's position in the slice the view was handed; the app resolves
+/// it (see the album message mapping in `app::view`). The tag-editor entries
+/// are offered only when `taggable` (the album's files are local).
+fn album_context_menu(
+    index: usize,
+    taggable: bool,
+) -> Vec<cosmic::widget::menu::Tree<AlbumMessage>> {
+    let mut entries = vec![
+        AlbumMenuAction::Play(AlbumMessage::PlayAlbum(index)),
+        AlbumMenuAction::PlayNext(AlbumMessage::PlayNext(index, None)),
+        AlbumMenuAction::AddToQueue(AlbumMessage::AddToQueue(index, None)),
+        AlbumMenuAction::Properties(AlbumMessage::ShowAlbumProperties(index)),
+    ];
+    if taggable {
+        use crate::tagger::TagAction;
+        entries.extend([
+            AlbumMenuAction::EditTags(AlbumMessage::TagAlbum(index, TagAction::Edit)),
+            AlbumMenuAction::LookUpMusicBrainz(AlbumMessage::TagAlbum(index, TagAction::LookUp)),
+            AlbumMenuAction::ScanAcoustId(AlbumMessage::TagAlbum(index, TagAction::AcoustId)),
+        ]);
+    }
+    context_menu::album_menu(entries)
 }
 
 /// List-mode row geometry: fixed height (uniform rhythm) and right-hand
@@ -478,22 +518,28 @@ pub fn album_detail_view<'a>(
                     AlbumMessage::AddToQueue(album_index, Some(track_idx)),
                 )
                 .with_add_to_playlist(playlists, AlbumMessage::AddToPlaylist)
+                .with_properties(AlbumMessage::ShowProperties(track.clone()))
+                .with_tagging(AlbumMessage::Tag)
                 .with_artist_subtitle(artist_differs && !columns.artist)
                 .view()
             }),
         )
     });
 
+    let hero_taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
     widget::scrollable(
         widget::Column::new()
-            .push(common::hero_header(
-                hero.and_then(|h| h.0),
-                hero.and_then(|h| h.1),
-                Some(common::hero_back_button(
-                    fl!("back-to-albums"),
-                    AlbumMessage::BackToGrid,
-                )),
-                header.into(),
+            .push(context_menu::with_menu(
+                common::hero_header(
+                    hero.and_then(|h| h.0),
+                    hero.and_then(|h| h.1),
+                    Some(common::hero_back_button(
+                        fl!("back-to-albums"),
+                        AlbumMessage::BackToGrid,
+                    )),
+                    header.into(),
+                ),
+                move || album_context_menu(album_index, hero_taggable),
             ))
             .push(track_list)
             .spacing(16)

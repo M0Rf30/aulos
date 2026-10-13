@@ -395,6 +395,10 @@ pub enum FolderMessage {
     SetRating(String, u8),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(Track),
+    /// Open the tag editor on this (local) track.
+    Tag(Track, crate::tagger::TagAction),
 }
 
 /// Fixed pixel size of the cover/placeholder in a subfolder tile.
@@ -582,6 +586,8 @@ fn page<'a>(
                 .with_navigate(FolderMessage::Navigate)
                 .with_favorite(FolderMessage::ToggleFavorite(track_id))
                 .with_rating(move |r| FolderMessage::SetRating(rating_track_id.clone(), r))
+                .with_properties(FolderMessage::ShowProperties(track.clone()))
+                .with_tagging(FolderMessage::Tag)
                 .with_artist_subtitle(!columns.artist)
                 .view(),
             )

@@ -76,14 +76,23 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 
 ### Visualizer
 
-The [lactea](https://github.com/M0Rf30/lactea) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets (`.milk`) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
+The [lactea](https://github.com/M0Rf30/lactea) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets (`.milk`, and MilkDrop 3 `.milk2` double presets) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
+
+### Tag editor
+
+A Picard-style editor for the tags of local files, opened from the **Tag Editor** page or from the right-click menu of a track or album ("Edit tags…").
+
+- **Editing**: files are grouped into albums, and a metadata table shows each field on disk next to the new value. Selecting several files edits them together, with "(different values)" where they disagree. Multi-valued fields (genre, artists…) are written as `Rock; Electronic`. Fields can be reverted, deleted or added, and cover art can be replaced, retyped, removed or added.
+- **MusicBrainz**: look up the release of an album, pick it from the search results and apply it. Files are matched to tracks by recording id, then by title, number and duration. Fields MusicBrainz doesn't provide (comment, lyrics, ReplayGain, custom fields) are kept, and the front cover can come from the Cover Art Archive. An album can also be sent to MusicBrainz as a new release.
+- **AcoustID**: identify files by their audio fingerprint, and submit fingerprints for files that have a MusicBrainz recording id. This needs an AcoustID application key (and, to submit, your own API key) in Settings.
+- **Saving**: writes MP3, FLAC, Ogg (Vorbis, Opus, FLAC, Speex), MP4/M4A, WAV, AIFF, DSF, WavPack, APE and Musepack tags. The library and its covers refresh as soon as the files are written.
 
 ### File converter (experimental)
 
 The converter is off by default; turn it on in Settings.
 
 - **Outputs**: converts to FLAC, WAV or AIFF without any external tools, and to MP3, AAC, Opus, Ogg Vorbis or ALAC through the system `ffmpeg`.
-- **Processing**: tags are copied, the sample rate can be changed, and CUE sheets can be split into per-track files.
+- **Processing**: all tags and the cover are copied to every output format, the sample rate can be changed, and CUE sheets can be split into per-track files.
 
 ## Installation
 
@@ -112,7 +121,7 @@ The archive contains the `aulos` binary, the `justfile` and `resources/` (deskto
 - ALSA (`alsa-lib`).
 - `libpipewire-0.3` and a Vulkan or GL driver, for the visualizer.
 - Optional: `ffmpeg`, for lossy formats in the converter.
-- Optional: MilkDrop (`.milk`) presets.
+- Optional: MilkDrop (`.milk` / `.milk2`) presets.
 
 ### From source
 

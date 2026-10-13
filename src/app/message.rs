@@ -18,6 +18,22 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
+    /// Open the Properties drawer for a track (see `AppModel::open_track_properties`).
+    ShowTrackProperties(Track),
+    /// The off-thread technical probe of a track finished. `request_id`
+    /// identifies the drawer opening it belongs to; results of an older
+    /// opening are dropped (see `properties::PropertiesState::accepts`).
+    PropertiesLoaded {
+        request_id: u64,
+        result: Result<crate::library::tech_info::TechInfo, String>,
+    },
+    /// The off-thread album summary finished (same `request_id` rule).
+    AlbumPropertiesLoaded {
+        request_id: u64,
+        summary: crate::library::tech_info::AlbumSummary,
+    },
+    /// A user action inside the Properties drawer.
+    Properties(crate::views::track_properties::PropertiesMessage),
     /// Set the grid card size multiplier (clamped to `GRID_SCALE_RANGE`).
     SetGridScale(f32),
     /// Toggle albums view between grid and list.
@@ -170,6 +186,18 @@ pub enum Message {
     PlayAlbumTrack(usize, usize),
     PlayArtistAlbum(usize, usize),
     PlayArtistTrack(usize, usize, usize),
+    /// Open the Properties drawer for album `.0` of `all_albums` (resolved
+    /// in `update`, so album context menus never clone an album's tracks).
+    ShowAlbumProperties(usize),
+    /// Open the Properties drawer for album `.1` of artist `.0`.
+    ShowArtistAlbumProperties(usize, usize),
+    /// Open the tag editor on one (local) track (`AppModel::open_in_tagger`).
+    TagTrack(Track, crate::tagger::TagAction),
+    /// Open the tag editor on album `.0` of `all_albums` (resolved in
+    /// `update`, like `ShowAlbumProperties`).
+    TagAlbum(usize, crate::tagger::TagAction),
+    /// Open the tag editor on album `.1` of artist `.0`.
+    TagArtistAlbum(usize, usize, crate::tagger::TagAction),
 
     // Albums view
     SelectAlbum(usize),
@@ -325,6 +353,17 @@ pub enum Message {
     /// Toggle fetching artist images/biography from online sources
     /// (Local/MPD mode only — ignored in Subsonic mode).
     SetFetchArtistInfo(bool),
+    /// The AcoustID application API key was edited (persisted to config).
+    SetAcoustidApiKey(String),
+    /// The user's AcoustID API key text box changed (not yet stored).
+    EditAcoustidUserKey(String),
+    /// Store the typed AcoustID user key in the keyring (empty deletes it).
+    SaveAcoustidUserKey,
+    /// Result of a keyring read/write of the AcoustID user key: whether a
+    /// key is now stored, or the keyring error.
+    AcoustidUserKeyStored(Result<bool, String>),
+    /// Toggle preferring the Cover Art Archive front cover in the tag editor.
+    SetTaggerUseCaaCover(bool),
 
     // Provider switching
     SwitchProvider(usize),
@@ -485,6 +524,12 @@ pub enum Message {
     /// `app::convert_page::ConvertEvent`).
     ConvertEvent(super::convert_page::ConvertEvent),
 
+    // Tag editor
+    /// UI actions from the tag editor view.
+    Tagger(crate::tagger::TaggerMessage),
+    /// Results of work the tag editor started.
+    TaggerEvent(crate::tagger::TaggerEvent),
+
     // Application lifecycle
     Quit,
     /// Playback extras (stop-after, fade, party/auto-play, notifications,
@@ -541,6 +586,10 @@ impl From<albums::AlbumMessage> for Message {
             },
             albums::AlbumMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
             albums::AlbumMessage::Filter(f) => Message::AlbumFilter(f),
+            albums::AlbumMessage::ShowProperties(track) => Message::ShowTrackProperties(track),
+            albums::AlbumMessage::ShowAlbumProperties(i) => Message::ShowAlbumProperties(i),
+            albums::AlbumMessage::Tag(track, action) => Message::TagTrack(track, action),
+            albums::AlbumMessage::TagAlbum(i, action) => Message::TagAlbum(i, action),
         }
     }
 }
@@ -575,6 +624,14 @@ impl From<artists::ArtistMessage> for Message {
             },
             artists::ArtistMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
             artists::ArtistMessage::ToggleBioExpanded => Message::ToggleArtistBioExpanded,
+            artists::ArtistMessage::ShowProperties(track) => Message::ShowTrackProperties(track),
+            artists::ArtistMessage::ShowAlbumProperties(artist, album) => {
+                Message::ShowArtistAlbumProperties(artist, album)
+            }
+            artists::ArtistMessage::Tag(track, action) => Message::TagTrack(track, action),
+            artists::ArtistMessage::TagAlbum(artist, album, action) => {
+                Message::TagArtistAlbum(artist, album, action)
+            }
         }
     }
 }

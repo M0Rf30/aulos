@@ -6,6 +6,7 @@
 use crate::fl;
 use crate::library::{Album, Artist};
 use crate::views::common;
+use crate::views::context_menu::{self, AlbumMenuAction};
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -41,6 +42,14 @@ pub enum ArtistMessage {
     ToggleBioExpanded,
     /// Jump to another view (album page, genre…).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(crate::library::Track),
+    /// Open the Properties drawer for album `.1` of artist `.0`.
+    ShowAlbumProperties(usize, usize),
+    /// Open the tag editor on this (local) track.
+    Tag(crate::library::Track, crate::tagger::TagAction),
+    /// Open the tag editor on album `.1` of artist `.0`.
+    TagAlbum(usize, usize, crate::tagger::TagAction),
 }
 
 /// Minimum avatar-frame/label width of a grid card; the fluid grid
@@ -292,7 +301,44 @@ pub fn artist_detail_view<'a>(
             .spacing(12)
             .align_y(Alignment::Center);
 
-        content = content.push(album_header);
+        // Right-clicking an album's header offers the album-level actions.
+        let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+        content = content.push(context_menu::with_menu(album_header, move || {
+            let mut entries = vec![
+                AlbumMenuAction::Play(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
+                AlbumMenuAction::PlayNext(ArtistMessage::PlayNext(artist_index, album_idx, None)),
+                AlbumMenuAction::AddToQueue(ArtistMessage::AddToQueue(
+                    artist_index,
+                    album_idx,
+                    None,
+                )),
+                AlbumMenuAction::Properties(ArtistMessage::ShowAlbumProperties(
+                    artist_index,
+                    album_idx,
+                )),
+            ];
+            if taggable {
+                use crate::tagger::TagAction;
+                entries.extend([
+                    AlbumMenuAction::EditTags(ArtistMessage::TagAlbum(
+                        artist_index,
+                        album_idx,
+                        TagAction::Edit,
+                    )),
+                    AlbumMenuAction::LookUpMusicBrainz(ArtistMessage::TagAlbum(
+                        artist_index,
+                        album_idx,
+                        TagAction::LookUp,
+                    )),
+                    AlbumMenuAction::ScanAcoustId(ArtistMessage::TagAlbum(
+                        artist_index,
+                        album_idx,
+                        TagAction::AcoustId,
+                    )),
+                ]);
+            }
+            context_menu::album_menu(entries)
+        }));
 
         let columns = track_row::Columns {
             favorite: true,
@@ -327,6 +373,8 @@ pub fn artist_detail_view<'a>(
                         ArtistMessage::PlayNext(artist_index, album_idx, Some(track_idx)),
                         ArtistMessage::AddToQueue(artist_index, album_idx, Some(track_idx)),
                     )
+                    .with_properties(ArtistMessage::ShowProperties(track.clone()))
+                    .with_tagging(ArtistMessage::Tag)
                     // Show the artist under the title only for guest /
                     // compilation tracks, where it differs from this page.
                     .with_artist_subtitle(track.artist != artist.name)

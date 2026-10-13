@@ -26,6 +26,7 @@ pub fn page_key(page: &Page) -> &'static str {
         Page::Podcasts => "podcasts",
         Page::Radio => "radio",
         Page::Convert => "convert",
+        Page::Tagger => "tagger",
     }
 }
 
@@ -43,6 +44,7 @@ pub fn page_from_key(key: &str) -> Option<Page> {
         "podcasts" => Page::Podcasts,
         "radio" => Page::Radio,
         "convert" => Page::Convert,
+        "tagger" => Page::Tagger,
         _ => return None,
     })
 }
@@ -219,7 +221,7 @@ impl AppModel {
 mod tests {
     use super::*;
 
-    const ALL_PAGES: [Page; 11] = [
+    const ALL_PAGES: [Page; 12] = [
         Page::Home,
         Page::Albums,
         Page::Artists,
@@ -230,6 +232,7 @@ mod tests {
         Page::Folders,
         Page::Podcasts,
         Page::Radio,
+        Page::Tagger,
         Page::Convert,
     ];
 
@@ -246,12 +249,20 @@ mod tests {
     }
 
     #[test]
+    fn tagger_page_key_is_persisted() {
+        assert_eq!(page_key(&Page::Tagger), "tagger");
+        assert_eq!(page_from_key("tagger"), Some(Page::Tagger));
+        assert_eq!(resolve_startup_page("last", "tagger", all), Page::Tagger);
+    }
+
+    #[test]
     fn startup_options_are_valid_keys_with_home_and_last_first() {
         assert_eq!(STARTUP_OPTIONS[0], "home");
         assert_eq!(STARTUP_OPTIONS[1], "last");
         for key in &STARTUP_OPTIONS[2..] {
             let page = page_from_key(key).expect("option is a page key");
             assert_ne!(page, Page::Convert);
+            assert_ne!(page, Page::Tagger);
             assert_eq!(page_key(&page), *key);
         }
         assert_eq!(startup_option_index("radio"), 10);

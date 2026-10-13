@@ -27,7 +27,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase};
 
-use crate::library::tags::{self as track_tags, Picture};
+use crate::library::tagio::{self, TagSet, keys, picture_type};
 use crate::player::engine::decoder::{
     MAX_SEEK_RESETS, ResettableSeek, SeekSkip, chain_duration_secs, local_file_format_options,
     seek_with_resets,
@@ -36,7 +36,6 @@ use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 
 use super::cue;
 use super::encoder;
-use super::tag_writer::{self, WriteTags};
 use super::{ConvertError, ConvertJob, JobId, JobKind, JobSettings};
 
 /// The settings `job` is running with. Panics if called before
@@ -69,7 +68,7 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
                 settings(job).format.extension(),
             );
             transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
-            copy_tags(&job.source, &out_path, settings(job).format);
+            copy_tags(&job.source, &out_path);
             Ok(())
         }
         JobKind::CueSplit => cue_split(job),
@@ -95,9 +94,10 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         .unwrap_or_else(|| PathBuf::from(&file_name));
 
     // Read the whole album's tag once so every track can carry over the
-    // fields the CUE sheet itself doesn't encode (album, genre, date, cover
-    // art), rather than each track ending up untagged beyond its title.
-    let src_tags = track_tags::probe(&audio_path, true).map(|p| p.tags);
+    // release-level fields the CUE sheet itself doesn't encode (album,
+    // genre, date, MBIDs, cover art), rather than each track ending up
+    // untagged beyond its title.
+    let album_tags = album_tags(&audio_path);
 
     let track_count = tracks.len();
     for (i, track) in tracks.iter().enumerate() {
@@ -124,14 +124,12 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
             progress_span,
         )?;
 
-        let write = WriteTags {
-            title: Some(track.title.as_str()),
-            artist: Some(track.performer.as_str()),
-            track_number: Some(track.number),
-            track_total: Some(track_count as u32),
-            ..src_tags.as_ref().map(shared_tags).unwrap_or_default()
-        };
-        write_output_tags(&out_path, settings(job).format, &write);
+        let mut tags = album_tags.clone().unwrap_or_default();
+        tags.set_one(keys::TITLE, track.title.as_str());
+        tags.set_one(keys::ARTIST, track.performer.as_str());
+        tags.set_one(keys::TRACKNUMBER, track.number.to_string());
+        tags.set_one(keys::TOTALTRACKS, track_count.to_string());
+        write_output_tags(&out_path, &tags);
     }
     Ok(())
 }
@@ -301,73 +299,88 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Copies title/artist/track/disc plus the shared album/genre/date/cover
-/// art fields (see [`shared_tags`]) from `src` to `dst`, best-effort — a
-/// missing source tag or an unwritable field is skipped, never a hard
-/// error, since the encoded output is already valid without it.
-fn copy_tags(src: &Path, dst: &Path, format: encoder::OutputFormat) {
-    let Some(src_tags) = track_tags::probe(src, true).map(|p| p.tags) else {
-        return;
+/// Copies the source file's full tag set (every field `tagio` reads, so
+/// MBIDs, ReplayGain, credits, … survive) plus its front-cover picture to
+/// `dst`, best-effort — an unreadable source or an unwritable output is
+/// logged, never a hard error, since the encoded output is already valid
+/// without it. Only one picture is carried (the front cover, or the first
+/// embedded picture when none is typed as front), as before.
+fn copy_tags(src: &Path, dst: &Path) {
+    let mut tags = match tagio::read(src) {
+        Ok(file) => file.tags,
+        Err(e) => {
+            tracing::warn!("couldn't read tags from {}: {e}", src.display());
+            return;
+        }
     };
-
-    let write = WriteTags {
-        title: src_tags.title.as_deref(),
-        artist: src_tags.artist.as_deref(),
-        track_number: src_tags.track_number,
-        disc_number: src_tags.disc_number,
-        ..shared_tags(&src_tags)
-    };
-    write_output_tags(dst, format, &write);
+    keep_front_cover(&mut tags);
+    write_output_tags(dst, &tags);
 }
 
-/// Builds the release-level fields both `copy_tags` (whole-file convert)
-/// and `cue_split` (per-track rip) need from the same source tag — album,
-/// genre, release date, and front-cover artwork — but neither title,
-/// artist, nor track number, since those differ per output (CUE tracks get
-/// their own title/artist/number from the cue sheet, not the source tag).
-fn shared_tags(src_tags: &track_tags::AudioTags) -> WriteTags<'_> {
-    WriteTags {
-        album: src_tags.album.as_deref(),
-        genre: src_tags.genre.as_deref(),
-        date: src_tags.date.as_deref(),
-        picture: front_cover(&src_tags.pictures),
-        ..Default::default()
-    }
-}
-
-/// Returns `pictures`'s front-cover picture, falling back to the first
+/// Reduces `tags.pictures` to the front cover, falling back to the first
 /// embedded picture if none is explicitly typed as the front cover — most
 /// rips only embed a single (untyped-as-front) picture, and that's still
 /// the one users expect to see as artwork.
-fn front_cover(pictures: &[Picture]) -> Option<&Picture> {
-    pictures
+fn keep_front_cover(tags: &mut TagSet) {
+    let idx = tags
+        .pictures
         .iter()
-        .find(|p| p.is_front_cover)
-        .or_else(|| pictures.first())
+        .position(|p| p.kind == picture_type::FRONT_COVER)
+        .unwrap_or(0);
+    if idx < tags.pictures.len() {
+        let cover = tags.pictures.swap_remove(idx);
+        tags.pictures = vec![cover];
+    }
 }
 
-/// Dispatches to the right tag writer for `format`'s output container:
-/// `super::tag_writer` (FLAC/WAV, this crate's own writers), a no-op for
-/// AIFF (no tag chunk writer exists yet), or `super::ffmpeg` (the five
-/// `ffmpeg`-backed formats, tagged via a `-metadata` remux pass since none
-/// of them are containers this crate writes natively).
-fn write_output_tags(path: &Path, format: encoder::OutputFormat, tags: &WriteTags<'_>) {
-    match format {
-        encoder::OutputFormat::Flac => tag_writer::write_flac_tags(path, tags),
-        encoder::OutputFormat::Wav16
-        | encoder::OutputFormat::Wav24
-        | encoder::OutputFormat::Wav32Float => tag_writer::write_wav_tags(path, tags),
-        // No native AIFF tag chunk is written (yet): AIFF has a standard
-        // `ID3 `/`NAME`/`AUTH`/`(c) ` chunk convention, but round-tripping
-        // it isn't implemented — matches the "best-effort, never a hard
-        // error" contract by simply skipping rather than half-implementing
-        // a reader-incompatible tag.
-        encoder::OutputFormat::Aiff16 | encoder::OutputFormat::Aiff24 => {}
-        encoder::OutputFormat::Mp3
-        | encoder::OutputFormat::Aac
-        | encoder::OutputFormat::Opus
-        | encoder::OutputFormat::OggVorbis
-        | encoder::OutputFormat::Alac => super::ffmpeg::write_tags(path, tags),
+/// Keys describing one specific recording/track rather than the release;
+/// dropped when an album-wide source tag is split into CUE tracks, which
+/// get their own title/artist/number from the cue sheet.
+const TRACK_LEVEL_KEYS: &[&str] = &[
+    keys::TITLE,
+    keys::ARTIST,
+    keys::ARTISTS,
+    keys::TRACKNUMBER,
+    keys::TOTALTRACKS,
+    keys::DISCNUMBER,
+    keys::TITLESORT,
+    keys::ARTISTSORT,
+    keys::LYRICS,
+    keys::ISRC,
+    keys::BPM,
+    keys::MUSICBRAINZ_RECORDINGID,
+    keys::MUSICBRAINZ_TRACKID,
+    keys::ACOUSTID_ID,
+    keys::ACOUSTID_FINGERPRINT,
+    keys::REPLAYGAIN_TRACK_GAIN,
+    keys::REPLAYGAIN_TRACK_PEAK,
+];
+
+/// Release-level tags of an album-wide source, for CUE-split tracks.
+fn album_tags(src: &Path) -> Option<TagSet> {
+    let mut tags = match tagio::read(src) {
+        Ok(file) => file.tags,
+        Err(e) => {
+            tracing::warn!("couldn't read tags from {}: {e}", src.display());
+            return None;
+        }
+    };
+    for key in TRACK_LEVEL_KEYS {
+        tags.remove(key);
+    }
+    keep_front_cover(&mut tags);
+    Some(tags)
+}
+
+/// Writes `tags` into the finished output via `tagio`, best-effort: a
+/// failure (including a container `tagio` can't write yet) is logged, never
+/// fails the job.
+fn write_output_tags(path: &Path, tags: &TagSet) {
+    if tags.is_empty() {
+        return;
+    }
+    if let Err(e) = tagio::write(path, tags) {
+        tracing::warn!("failed to write tags to {}: {e}", path.display());
     }
 }
 
@@ -715,6 +728,8 @@ impl AudioSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::tagio::EditPicture;
+    use crate::library::tags as track_tags;
     use std::f32::consts::TAU;
 
     /// Writes a mono 44.1kHz sine WAV of `num_frames` samples (no tags —
@@ -742,12 +757,17 @@ mod tests {
         write_test_wav_frames(path, 44_100);
     }
 
-    /// Writes a mono 44.1kHz sine FLAC of `num_frames` samples, untagged —
-    /// used as a fixture for tests that then tag it themselves via
-    /// `tag_writer::write_flac_tags`, exercising the same read-then-write
-    /// path a real source file goes through (`crate::library::tags::probe`
-    /// for reading, since FLAC — unlike this fork's WAV reader, see
-    /// `tag_writer`'s module docs — round-trips tags end to end).
+    /// Tags `path` through `tagio`, as a real tagged source file would be.
+    fn tag_source(path: &Path, fields: &[(&str, &str)], picture: Option<EditPicture>) {
+        let mut tags = TagSet::new();
+        for (k, v) in fields {
+            tags.set_one(k, *v);
+        }
+        tags.pictures.extend(picture);
+        tagio::write(path, &tags).expect("tag source fixture");
+    }
+
+    /// Writes a mono 44.1kHz sine FLAC of `num_frames` samples, untagged.
     fn write_test_flac_frames(path: &Path, num_frames: u32) {
         let mut sink = encoder::create_sink(
             encoder::OutputFormat::Flac,
@@ -777,12 +797,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.flac");
         write_test_flac(&source);
-        tag_writer::write_flac_tags(
+        tag_source(
             &source,
-            &WriteTags {
-                title: Some("Pipeline Test Track"),
-                ..Default::default()
-            },
+            &[
+                (keys::TITLE, "Pipeline Test Track"),
+                (
+                    keys::MUSICBRAINZ_ALBUMID,
+                    "11111111-2222-3333-4444-555555555555",
+                ),
+                (keys::REPLAYGAIN_TRACK_GAIN, "-6.50 dB"),
+            ],
+            None,
         );
 
         let out_dir = dir.join("out");
@@ -807,6 +832,13 @@ mod tests {
             probed.properties.duration
         );
         assert_eq!(probed.tags.title.as_deref(), Some("Pipeline Test Track"));
+        let out_tags = tagio::read(&out_path).expect("tagio read").tags;
+        assert_eq!(
+            out_tags.get(keys::MUSICBRAINZ_ALBUMID),
+            Some("11111111-2222-3333-4444-555555555555"),
+            "MBIDs should survive conversion"
+        );
+        assert_eq!(out_tags.get(keys::REPLAYGAIN_TRACK_GAIN), Some("-6.50 dB"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -825,19 +857,13 @@ mod tests {
         // since those come from elsewhere for CUE tracks and shouldn't be
         // conflated with the shared fields this test exercises).
         let cover_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xD9]; // minimal fake JPEG payload
-        let picture = Picture {
-            mime_type: "image/jpeg".to_string(),
-            is_front_cover: true,
+        let picture = EditPicture {
+            kind: picture_type::FRONT_COVER,
+            mime: "image/jpeg".to_string(),
+            description: String::new(),
             data: cover_bytes.clone(),
         };
-        tag_writer::write_flac_tags(
-            &source,
-            &WriteTags {
-                date: Some("2024"),
-                picture: Some(&picture),
-                ..Default::default()
-            },
-        );
+        tag_source(&source, &[(keys::DATE, "2024")], Some(picture));
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
@@ -991,13 +1017,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.wav");
         write_test_wav(&source);
-        tag_writer::write_wav_tags(
-            &source,
-            &WriteTags {
-                title: Some("MP3 Smoke Test"),
-                ..Default::default()
-            },
-        );
+        tag_source(&source, &[(keys::TITLE, "MP3 Smoke Test")], None);
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
@@ -1024,7 +1044,7 @@ mod tests {
         assert_eq!(
             probed.tags.title.as_deref(),
             Some("MP3 Smoke Test"),
-            "title tag should have survived the ffmpeg -metadata remux"
+            "title tag should have been written by tagio"
         );
 
         std::fs::remove_dir_all(&dir).ok();

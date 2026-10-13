@@ -64,6 +64,66 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Container label for a file suffix reported by a remote server (Subsonic
+/// `suffix`, the extension of an MPD path), in the same spelling the local
+/// probe uses (`"FLAC"`, `"MPEG-4 (M4A)"`…). Unknown suffixes are upper-cased.
+pub(crate) fn container_from_suffix(suffix: &str) -> Option<String> {
+    let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
+    let label = match suffix.as_str() {
+        "" => return None,
+        "flac" => "FLAC",
+        "mp3" => "MP3",
+        "m4a" | "m4b" | "mp4" | "alac" => "MPEG-4 (M4A)",
+        "aac" => "AAC (ADTS)",
+        "ogg" | "oga" => "Ogg",
+        "opus" => "Ogg Opus",
+        "wav" | "wave" => "WAV",
+        "aif" | "aiff" | "aifc" => "AIFF",
+        "wv" => "WavPack",
+        "ape" => "Monkey's Audio",
+        "dsf" => "DSF",
+        "dff" => "DFF",
+        "wma" => "WMA (ASF)",
+        other => return Some(other.to_ascii_uppercase()),
+    };
+    Some(label.to_string())
+}
+
+/// Whether a file suffix denotes a lossless format; `None` when the suffix
+/// alone cannot tell (`m4a` may hold ALAC or AAC, `wv` may be hybrid).
+pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
+    match suffix
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "flac" | "wav" | "wave" | "aif" | "aiff" | "aifc" | "ape" | "dsf" | "dff" | "alac" => {
+            Some(true)
+        }
+        "mp3" | "ogg" | "oga" | "opus" | "aac" | "wma" => Some(false),
+        _ => None,
+    }
+}
+
+/// Conventional channel-layout name for a channel count.
+pub(crate) fn channel_layout_name(channels: u32) -> Option<String> {
+    Some(
+        match channels {
+            1 => "Mono",
+            2 => "Stereo",
+            3 => "3.0",
+            4 => "4.0",
+            5 => "5.0",
+            6 => "5.1",
+            7 => "6.1",
+            8 => "7.1",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 impl From<String> for ProviderError {
     fn from(s: String) -> Self {
         Self::Other(s)
@@ -218,6 +278,20 @@ pub trait MusicProvider: Send + Sync {
     ) -> Result<Option<crate::library::ArtistInfoResult>, ProviderError> {
         let _ = name;
         Err(ProviderError::NotSupported("artist_info".into()))
+    }
+
+    // --- Technical properties (optional, default: nothing beyond the Track) ---
+
+    /// Technical data of a remote track for the Properties drawer (blocking:
+    /// a network round trip). `Ok(None)` — the default — means this provider
+    /// has nothing beyond what the [`Track`] already carries (the local
+    /// provider's files are probed directly by `library::tech_info::probe`).
+    fn track_tech_info(
+        &self,
+        track: &Track,
+    ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
+        let _ = track;
+        Ok(None)
     }
 }
 

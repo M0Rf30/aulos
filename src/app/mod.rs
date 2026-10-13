@@ -33,6 +33,7 @@ mod navigation;
 pub mod playback_extras;
 mod playlist_io;
 mod podcast_page;
+mod properties;
 mod provider_ops;
 mod queue_source;
 mod radio_page;
@@ -40,6 +41,7 @@ mod scrobble_glue;
 mod search_index;
 pub mod startup;
 mod subscriptions;
+mod tagger_page;
 mod tasks;
 mod update;
 mod view;
@@ -94,6 +96,8 @@ pub struct AppModel {
     /// echo of our own (debounced) writes in `UpdateConfig`.
     recent_saves: std::cell::RefCell<std::collections::VecDeque<Config>>,
     context_page: ContextPage,
+    /// State of the Track/Album Properties drawer.
+    properties: properties::PropertiesState,
     /// Runtime state of the playback/desktop extras (auto-play RNG,
     /// inhibit lock, notification bookkeeping).
     playback_extras: playback_extras::PlaybackExtrasState,
@@ -410,6 +414,14 @@ pub struct AppModel {
     /// only committed into `config` on submit.
     artist_tag_delimiters_input: String,
 
+    // Settings — tag editor
+    /// Live text of the user's AcoustID API key box (never pre-filled: the
+    /// key lives only in the keyring).
+    acoustid_user_key_input: String,
+    /// Whether the keyring holds the user's AcoustID key; `None` until the
+    /// first keyring read finishes (or after a failed one).
+    acoustid_user_key_saved: Option<bool>,
+
     // Provider settings (editing state)
     mpd_edit_states: Vec<providers::MpdEditState>,
     mpd_connection_status: Vec<Option<String>>,
@@ -536,6 +548,8 @@ pub struct AppModel {
     /// Inline error from the last failed output-directory validation
     /// (shown in the Output settings card); cleared on every new `Start`.
     convert_dir_error: Option<String>,
+    /// The tag editor page's files, selection and running jobs.
+    tagger: crate::tagger::TaggerState,
     /// Whether the preset browser overlay is currently open.
     #[cfg(feature = "visualizer")]
     viz_browser_open: bool,
@@ -584,6 +598,7 @@ pub enum Page {
     Podcasts,
     Radio,
     Convert,
+    Tagger,
 }
 
 /// A restorable place in the library UI, for link-navigation history.
@@ -613,6 +628,10 @@ pub enum ContextPage {
     Providers,
     /// The play queue ("Up Next").
     Queue,
+    /// Technical properties of one track (`AppModel::properties`).
+    TrackProperties,
+    /// Aggregate properties of one album (`AppModel::properties`).
+    AlbumProperties,
     Settings,
 }
 

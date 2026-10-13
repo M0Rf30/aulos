@@ -27,6 +27,10 @@ pub enum SongMessage {
     Scrolled(f32),
     /// Jump to another view (artist / album page).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(Track),
+    /// Open the tag editor on this (local) track.
+    Tag(Track, crate::tagger::TagAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +284,8 @@ fn build_row<'a>(
         SongMessage::AddToQueue(original_index),
     )
     .with_add_to_playlist(playlists, SongMessage::AddToPlaylist)
+    .with_properties(SongMessage::ShowProperties(track.clone()))
+    .with_tagging(SongMessage::Tag)
     // Without an artist column the artist moves under the title.
     .with_artist_subtitle(!columns.artist)
     .view()

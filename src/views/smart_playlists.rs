@@ -77,6 +77,10 @@ pub enum SmartPlaylistMessage {
     PlayResolved(Vec<Track>),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(Track),
+    /// Open the tag editor on this (local) track.
+    Tag(Track, crate::tagger::TagAction),
 }
 
 /// In-progress edit state for the rules editor: the playlist being built,
@@ -523,6 +527,8 @@ pub fn smart_playlist_detail_view<'a>(
                     .with_rating(move |r| {
                         SmartPlaylistMessage::SetRating(rating_track_id.clone(), r)
                     })
+                    .with_properties(SmartPlaylistMessage::ShowProperties(track.clone()))
+                    .with_tagging(SmartPlaylistMessage::Tag)
                     .with_artist_subtitle(!columns.artist)
                     .view()
                 }),

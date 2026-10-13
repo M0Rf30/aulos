@@ -1,0 +1,72 @@
+{
+  "status": "ok",
+  "results": [
+    {
+      "id": "00000000-0000-0000-0000-00000000dead",
+      "score": 0.42
+    },
+    {
+      "id": "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+      "score": 0.97,
+      "recordings": [
+        {
+          "id": "c35eb744-c525-44d0-ad21-b6af3e6caad2",
+          "title": "The Mark (interlude)",
+          "duration": 96,
+          "artists": [
+            {"id": "7754905b-8bf7-48e2-935a-03d566fec464", "name": "Moderat", "joinphrase": " feat. "},
+            {"id": "99999999-9999-9999-9999-999999999999", "name": "Someone"}
+          ],
+          "releasegroups": [
+            {
+              "id": "885181a4-9133-485f-bfce-fddc1168a3c1",
+              "title": "II",
+              "type": "Album",
+              "secondarytypes": ["Compilation"],
+              "artists": [{"id": "7754905b-8bf7-48e2-935a-03d566fec464", "name": "Moderat"}],
+              "releases": [
+                {
+                  "id": "00398749-1816-4c98-8a39-377627740365",
+                  "title": "II",
+                  "country": "DE",
+                  "date": {"year": 2013, "month": 8, "day": 2},
+                  "medium_count": 2,
+                  "track_count": 11,
+                  "mediums": [
+                    {
+                      "position": 1,
+                      "format": "12\" Vinyl",
+                      "track_count": 5,
+                      "tracks": [
+                        {
+                          "id": "665929cd-216d-4ed5-8c08-ac142096bd7a",
+                          "position": 1,
+                          "title": "The Mark (interlude)",
+                          "artists": [{"id": "7754905b-8bf7-48e2-935a-03d566fec464", "name": "Moderat"}]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "id": "80ef57a5-c1f1-45e9-b278-4096fd43011d",
+                  "title": "II",
+                  "country": "GB",
+                  "date": {"year": 2013, "month": 8},
+                  "medium_count": 1,
+                  "track_count": 12,
+                  "mediums": [
+                    {"position": 1, "format": "CD", "track_count": 12, "tracks": [{"id": "11111111-2222-3333-4444-555555555555", "position": 1, "title": "The Mark (interlude)"}]}
+                  ]
+                }
+              ]
+            }
+          ],
+          "releases": [
+            {"id": "9efefd2b-463f-41f0-bfcf-88eba093f3ca", "title": "II (tour edition)", "date": {"year": 2014}, "medium_count": 3, "track_count": 36}
+          ]
+        }
+      ]
+    }
+  ]
+}

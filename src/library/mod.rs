@@ -8,6 +8,7 @@ pub mod artist_tags;
 pub mod compilations;
 mod cover_art;
 mod db;
+pub mod fingerprint;
 pub mod history;
 mod lyrics;
 pub mod m3u;
@@ -15,7 +16,9 @@ pub mod palette;
 pub mod quality;
 mod scanner;
 pub mod smart_playlist;
+pub mod tagio;
 pub mod tags;
+pub mod tech_info;
 
 pub use cover_art::CoverArt;
 pub use db::LibraryDb;

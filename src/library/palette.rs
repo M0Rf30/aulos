@@ -193,6 +193,13 @@ impl CoverByteCache {
         self.missing.clear();
     }
 
+    /// Drop one key: its cached bytes and any "no art" mark, so the next
+    /// request loads it afresh (e.g. after its cover was retagged).
+    pub fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+        self.missing.remove(key);
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -494,6 +501,20 @@ mod tests {
         assert!(c.contains("k0"));
         c.insert("new".into(), vec![1]);
         assert!(!c.contains("k0"), "contains must not mark k0 as recent");
+    }
+
+    #[test]
+    fn cover_cache_remove_forgets_bytes_and_missing_mark() {
+        let mut c = CoverByteCache::new();
+        c.insert("a".into(), vec![1]);
+        assert!(c.begin_load("b"));
+        c.finish_load("b".into(), None);
+        c.remove("a");
+        c.remove("b");
+        c.remove("never-seen");
+        assert!(!c.contains("a"));
+        assert!(c.should_load("a"));
+        assert!(c.should_load("b"), "the missing mark is dropped too");
     }
 
     #[test]

@@ -24,6 +24,7 @@
 
 use crate::fl;
 use crate::library::{Playlist, Track};
+use crate::views::context_menu::{self, TrackMenuAction};
 use crate::views::{Route, common, list_row_button_class};
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -227,6 +228,37 @@ fn quiet_icon_button<'a, M: Clone + 'static>(
     .into()
 }
 
+/// The quality column's cell when the row has a Properties action: a quiet
+/// button that opens the Properties drawer. It wraps the Hi-Res / DSD badge
+/// when the track earns one, and otherwise shows a dim info glyph so every
+/// row carries the same affordance in the same fixed-width column.
+fn properties_cell<'a, M: Clone + 'static>(
+    quality: crate::library::quality::AudioQuality,
+    on_press: M,
+) -> cosmic::Element<'a, M> {
+    use crate::library::quality::AudioQuality;
+    if matches!(quality, AudioQuality::HiRes | AudioQuality::Dsd) {
+        widget::tooltip(
+            widget::button::custom(common::quality_badge(quality))
+                .padding([2, 0])
+                .class(quiet_button_class())
+                .on_press(on_press),
+            widget::text::caption(context_menu::properties_label()),
+            TooltipPosition::Top,
+        )
+        .into()
+    } else {
+        widget::tooltip(
+            widget::button::icon(widget::icon::from_name("dialog-information-symbolic").size(16))
+                .class(quiet_button_class())
+                .on_press(on_press),
+            widget::text::caption(context_menu::properties_label()),
+            TooltipPosition::Top,
+        )
+        .into()
+    }
+}
+
 /// Pill style shared by the genre cells and the Songs filter bar: a soft
 /// filled capsule, accent-tinted (with a hairline accent border) when
 /// `active`.
@@ -284,6 +316,9 @@ type Navigate<M> = fn(Route) -> M;
 /// Builds the add-to-playlist message from `(source_uri, playlist_id)`.
 type AddToPlaylistFn<M> = fn(String, String) -> M;
 
+/// Builds the tag-editor message from `(track, action)`.
+pub type TagFn<M> = fn(Track, crate::tagger::TagAction) -> M;
+
 /// Description of one track row. Create with [`TrackRow::new`], enable the
 /// actions the host view supports with the `with_*` methods, then call
 /// [`TrackRow::view`]. A column whose [`Columns`] flag is set but whose action
@@ -302,6 +337,8 @@ pub struct TrackRow<'a, M> {
     on_add_to_queue: Option<M>,
     add_to_playlist: Option<(&'a [Playlist], AddToPlaylistFn<M>)>,
     trailing: Option<(&'static str, String, M)>,
+    on_properties: Option<M>,
+    on_tag: Option<TagFn<M>>,
     artist_subtitle: bool,
 }
 
@@ -329,6 +366,8 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
             on_add_to_queue: None,
             add_to_playlist: None,
             trailing: None,
+            on_properties: None,
+            on_tag: None,
             artist_subtitle: false,
         }
     }
@@ -389,6 +428,25 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
         on_press: M,
     ) -> Self {
         self.trailing = Some((icon_name, label, on_press));
+        self
+    }
+
+    /// Open-Properties action: turns the quality cell into a button and adds
+    /// "Properties" to the row's context menu.
+    #[must_use]
+    pub fn with_properties(mut self, on_properties: M) -> Self {
+        self.on_properties = Some(on_properties);
+        self
+    }
+
+    /// "Edit tags…", "Look up on MusicBrainz" and "Scan with AcoustID" in the
+    /// row's context menu, each emitting `make(track, action)`. A no-op for
+    /// tracks that are not local files (see [`crate::tagger::is_taggable`]).
+    #[must_use]
+    pub fn with_tagging(mut self, make: TagFn<M>) -> Self {
+        if crate::tagger::is_taggable(self.track) {
+            self.on_tag = Some(make);
+        }
         self
     }
 
@@ -510,13 +568,14 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
         }
 
         if c.quality {
+            let quality =
+                crate::library::quality::classify(&track.path, track.sample_rate, track.bitrate);
             row = row.push(fixed_cell(
                 common::QUALITY_BADGE_WIDTH,
-                common::quality_badge(crate::library::quality::classify(
-                    &track.path,
-                    track.sample_rate,
-                    track.bitrate,
-                )),
+                match &self.on_properties {
+                    Some(msg) => properties_cell(quality, msg.clone()),
+                    None => common::quality_badge(quality),
+                },
             ));
         }
 
@@ -575,15 +634,97 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
 
         row = row.push(common::duration_cell(track.duration.as_secs()));
 
-        widget::button::custom(row.padding(c.padding(4.0)))
-            .on_press(self.on_press)
+        let row = widget::button::custom(row.padding(c.padding(4.0)))
+            .on_press(self.on_press.clone())
             .width(Length::Fill)
             // Uniform height is load-bearing for Songs' virtualization.
             .height(Length::Fixed(ROW_HEIGHT))
             // The row carries its own padding; don't let the button add more.
             .padding(0)
-            .class(list_row_button_class(self.is_playing))
-            .into()
+            .class(list_row_button_class(self.is_playing));
+        let menu = RowMenu {
+            track,
+            on_press: self.on_press,
+            navigate: self.navigate,
+            on_play_next: self.on_play_next,
+            on_add_to_queue: self.on_add_to_queue,
+            add_to_playlist: self.add_to_playlist,
+            on_tag: self.on_tag,
+            on_properties: self.on_properties,
+        };
+        // The menu wraps the whole button so a right-click anywhere on the
+        // row opens it; the wrapper reports the button's size, so the
+        // fixed row height Songs' virtualization relies on is unchanged.
+        context_menu::with_menu(row, move || context_menu::track_menu(menu.entries()))
+    }
+}
+
+/// The data a row's right-click menu is built from, kept (cheaply) in the
+/// row's [`context_menu::with_menu`] closure. The menu itself — the entries,
+/// their cloned messages and the playlist submenu — is only built when the
+/// row is actually right-clicked, so rendering a list costs nothing per row
+/// for it.
+struct RowMenu<'a, M> {
+    track: &'a Track,
+    on_press: M,
+    navigate: Option<Navigate<M>>,
+    on_play_next: Option<M>,
+    on_add_to_queue: Option<M>,
+    add_to_playlist: Option<(&'a [Playlist], AddToPlaylistFn<M>)>,
+    on_tag: Option<TagFn<M>>,
+    on_properties: Option<M>,
+}
+
+impl<M: Clone + 'static> RowMenu<'_, M> {
+    /// "Play" (the row's press action) plus whichever actions the host view
+    /// wired; [`context_menu::track_menu`] fixes their order.
+    fn entries(&self) -> Vec<TrackMenuAction<M>> {
+        let track = self.track;
+        let mut entries = Vec::with_capacity(10);
+        entries.push(TrackMenuAction::Play(self.on_press.clone()));
+        if let Some(msg) = &self.on_play_next {
+            entries.push(TrackMenuAction::PlayNext(msg.clone()));
+        }
+        if let Some(msg) = &self.on_add_to_queue {
+            entries.push(TrackMenuAction::AddToQueue(msg.clone()));
+        }
+        if let Some((playlists, make_message)) = self.add_to_playlist {
+            entries.push(TrackMenuAction::AddToPlaylist(
+                playlists
+                    .iter()
+                    .map(|playlist| {
+                        (
+                            playlist.name.clone(),
+                            make_message(track.source_uri.clone(), playlist.id.clone()),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+        if let Some(navigate) = self.navigate {
+            entries.push(TrackMenuAction::GoToAlbum(navigate(Route::album_of(track))));
+            entries.push(TrackMenuAction::GoToArtist(navigate(Route::Artist(
+                track.artist.clone(),
+            ))));
+        }
+        if let Some(make) = self.on_tag {
+            entries.push(TrackMenuAction::EditTags(make(
+                track.clone(),
+                crate::tagger::TagAction::Edit,
+            )));
+            entries.push(TrackMenuAction::LookUpMusicBrainz(make(
+                track.clone(),
+                crate::tagger::TagAction::LookUp,
+            )));
+            entries.push(TrackMenuAction::ScanAcoustId(make(
+                track.clone(),
+                crate::tagger::TagAction::AcoustId,
+            )));
+        }
+        if let Some(msg) = &self.on_properties {
+            entries.push(TrackMenuAction::Properties(msg.clone()));
+        }
+        entries
     }
 }
 
@@ -850,5 +991,92 @@ pub fn rows_column<'a, M: Clone + 'static>(
             .push(list)
             .into(),
         None => list.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tagger::TagAction;
+    use crate::views::context_menu::{MenuSpec, track_menu_specs};
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Msg {
+        Play,
+        Properties,
+        Tag(i64, TagAction),
+    }
+
+    fn track(provider: &str) -> Track {
+        Track {
+            id: 5,
+            path: "/music/a.flac".into(),
+            title: "Title".into(),
+            artist: "Artist".into(),
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            genre: String::new(),
+            track_number: 1,
+            disc_number: 1,
+            year: 2000,
+            duration: Duration::from_secs(60),
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: provider.into(),
+            source_uri: "/music/a.flac".into(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        }
+    }
+
+    fn row(track: &Track) -> TrackRow<'_, Msg> {
+        TrackRow::new(track, "1", false, Columns::default(), Msg::Play)
+            .with_properties(Msg::Properties)
+            .with_tagging(|track, action| Msg::Tag(track.id, action))
+    }
+
+    /// The messages of the menu's items, flat, in order.
+    fn messages(track: &Track) -> Vec<Msg> {
+        let row = row(track);
+        let menu = RowMenu {
+            track: row.track,
+            on_press: row.on_press,
+            navigate: row.navigate,
+            on_play_next: row.on_play_next,
+            on_add_to_queue: row.on_add_to_queue,
+            add_to_playlist: row.add_to_playlist,
+            on_tag: row.on_tag,
+            on_properties: row.on_properties,
+        };
+        track_menu_specs(menu.entries())
+            .into_iter()
+            .filter_map(|spec| match spec {
+                MenuSpec::Item { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_tracks_get_the_three_tag_entries_before_properties() {
+        assert_eq!(
+            messages(&track("local")),
+            [
+                Msg::Play,
+                Msg::Tag(5, TagAction::Edit),
+                Msg::Tag(5, TagAction::LookUp),
+                Msg::Tag(5, TagAction::AcoustId),
+                Msg::Properties,
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_tracks_get_no_tag_entries() {
+        assert_eq!(messages(&track("navidrome")), [Msg::Play, Msg::Properties]);
+        assert_eq!(messages(&track("mpd-home")), [Msg::Play, Msg::Properties]);
     }
 }

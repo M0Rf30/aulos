@@ -20,7 +20,6 @@ pub mod cue;
 pub mod encoder;
 pub mod ffmpeg;
 pub mod pipeline;
-pub mod tag_writer;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

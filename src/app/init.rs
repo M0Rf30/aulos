@@ -84,6 +84,12 @@ impl AppModel {
             .data::<Page>(Page::Radio)
             .icon(icon::from_name("network-wireless-symbolic"));
 
+        nav.insert()
+            .text(fl!("tagger-nav"))
+            .data::<Page>(Page::Tagger)
+            .icon(icon::from_name("document-edit-symbolic"))
+            .divider_above(true);
+
         let about = About::default()
             .name(fl!("app-title"))
             .comments(fl!("app-motto"))
@@ -304,6 +310,7 @@ impl AppModel {
             config_writer,
             recent_saves: Default::default(),
             context_page: ContextPage::default(),
+            properties: Default::default(),
             playback_extras: Default::default(),
             toasts: widget::toaster::Toasts::new(Message::CloseToast),
             registry,
@@ -443,6 +450,8 @@ impl AppModel {
             autoeq_loading: false,
             autoeq_search: String::new(),
             artist_tag_delimiters_input,
+            acoustid_user_key_input: String::new(),
+            acoustid_user_key_saved: None,
             mpd_edit_states,
             mpd_connection_status,
             subsonic_edit_states,
@@ -493,6 +502,7 @@ impl AppModel {
             convert_next_id: 0,
             convert_semaphore: Arc::new(tokio::sync::Semaphore::new(crate::convert::concurrency())),
             convert_dir_error: None,
+            tagger: crate::tagger::TaggerState::new(),
             #[cfg(feature = "visualizer")]
             viz_browser_open: false,
             #[cfg(feature = "visualizer")]
@@ -552,6 +562,17 @@ impl AppModel {
                 cosmic::Action::App(Message::CredentialsChecked(updates))
             }));
         }
+        // Whether the user's AcoustID key is in the keyring (read off the UI thread).
+        init_tasks.push(cosmic::task::future(async {
+            let present = tokio::task::spawn_blocking(|| {
+                crate::credentials::retrieve_password(crate::tagger::ACOUSTID_USER_KEY_ENTRY)
+                    .map(|key| key.is_some_and(|k| !k.is_empty()))
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            cosmic::Action::App(Message::AcoustidUserKeyStored(present))
+        }));
         for (name, reason) in subsonic_init_errors {
             init_tasks.push(app.push_toast(widget::toaster::Toast::new(fl!(
                 "toast-provider-connect-failed",
@@ -771,15 +792,15 @@ pub(super) fn apply_credential_updates(config: &mut Config, updates: &[Credentia
     changed
 }
 
-/// Appends the Convert nav entry at the end of `nav`'s display order —
-/// shared between the initial (config-gated) build in `init_model` and
+/// Appends the Convert nav entry at the end of `nav`'s display order (right
+/// after the Tag Editor, which already carries the divider) — shared
+/// between the initial (config-gated) build in `init_model` and
 /// `AppModel::set_convert_nav_entry`'s live re-enable path.
 fn insert_convert_nav_entry(nav: &mut nav_bar::Model) {
     nav.insert()
         .text(fl!("convert"))
         .data::<Page>(Page::Convert)
-        .icon(icon::from_name("document-save-as-symbolic"))
-        .divider_above(true);
+        .icon(icon::from_name("document-save-as-symbolic"));
 }
 #[cfg(test)]
 mod credential_tests {

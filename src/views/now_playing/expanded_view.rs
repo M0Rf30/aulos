@@ -591,6 +591,13 @@ fn utility_buttons<'a>(
             is_queue_open,
             fl!("queue"),
             Some(NowPlayingMessage::ToggleQueue),
+        ))
+        .push(transport_button(
+            "dialog-information-symbolic",
+            24,
+            false,
+            fl!("properties"),
+            Some(NowPlayingMessage::ShowProperties),
         ));
 
     #[cfg(feature = "visualizer")]

@@ -435,6 +435,13 @@ pub fn playback_bar<'a>(
             fl!("lyrics"),
             NowPlayingMessage::ShowLyrics,
         ))
+        .push(transport_icon_button(
+            "dialog-information-symbolic",
+            20,
+            has_track,
+            fl!("properties"),
+            NowPlayingMessage::ShowProperties,
+        ))
         .push(toggle_icon_button(
             "go-last-symbolic",
             20,

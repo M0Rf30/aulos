@@ -633,6 +633,144 @@ pub(crate) fn song_to_track(provider_id: &Arc<str>, song: &responses::Song) -> T
     }
 }
 
+/// Audio format of a song as reported by MPD's `Format:` field
+/// (`rate:bits:channels`).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MpdFormat {
+    sample_rate: Option<u32>,
+    bits: Option<u32>,
+    channels: Option<u32>,
+}
+
+/// Parse MPD's `Format:` value. `bits` may be `f` (32-bit float) or the
+/// rate may be `dsd<N>` (DSD<N>, i.e. N x 44.1 kHz, one bit per sample);
+/// MPD writes `*` for components it does not know, which parse to `None`.
+fn parse_mpd_format(format: &str) -> MpdFormat {
+    let positive = |s: &str| s.parse::<u32>().ok().filter(|v| *v > 0);
+    let mut parts = format.split(':');
+    let first = parts.next().unwrap_or_default();
+    if let Some(multiple) = first.strip_prefix("dsd") {
+        return MpdFormat {
+            sample_rate: positive(multiple).map(|m| if m <= 1024 { m * 44_100 } else { m }),
+            bits: Some(1),
+            channels: parts.next().and_then(positive),
+        };
+    }
+    MpdFormat {
+        sample_rate: positive(first),
+        bits: match parts.next() {
+            Some("f") => Some(32),
+            Some(bits) => positive(bits),
+            None => None,
+        },
+        channels: parts.next().and_then(positive),
+    }
+}
+
+/// Build the Properties drawer's display model from an MPD song.
+///
+/// `live_bitrate_kbps` is MPD's status bitrate and is only meaningful while
+/// this very song is playing; MPD reports no bitrate for a song at rest.
+/// The decoded bit depth MPD reports for a lossy file is a decoder output
+/// format, not a property of the file, so it is dropped for lossy suffixes.
+fn song_to_tech_info(
+    song: &responses::Song,
+    live_bitrate_kbps: Option<u64>,
+) -> crate::library::tech_info::TechInfo {
+    use crate::library::tech_info::TechInfo;
+
+    let format = song
+        .format
+        .as_deref()
+        .map(parse_mpd_format)
+        .unwrap_or_default();
+    let suffix = std::path::Path::new(&song.url)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let is_dsd = format.bits == Some(1);
+    let lossless = if is_dsd {
+        Some(true)
+    } else {
+        super::lossless_from_suffix(suffix)
+    };
+    let first_tag = |tag: &Tag| {
+        song.tags
+            .get(tag)
+            .and_then(|v| v.first())
+            .filter(|s| !s.is_empty())
+            .cloned()
+    };
+    let bitrate = live_bitrate_kbps.filter(|b| *b > 0).map(|b| b as u32);
+
+    TechInfo {
+        container: super::container_from_suffix(suffix),
+        codec_short: (!suffix.is_empty()).then(|| suffix.to_ascii_lowercase()),
+        sample_rate: format.sample_rate,
+        bits_per_sample: if lossless == Some(false) {
+            None
+        } else {
+            format.bits
+        },
+        lossless,
+        channels: format.channels,
+        channel_layout: format.channels.and_then(super::channel_layout_name),
+        duration: song.duration.filter(|d| !d.is_zero()),
+        bitrate_kbps: bitrate,
+        date: first_tag(&Tag::Date),
+        original_date: first_tag(&Tag::OriginalDate),
+        composer: first_tag(&Tag::Composer),
+        remote_path: Some(song.url.clone()),
+        ..TechInfo::default()
+    }
+}
+
+#[cfg(test)]
+mod tech_info_tests {
+    use super::{MpdFormat, parse_mpd_format};
+
+    #[test]
+    fn parses_integer_formats() {
+        assert_eq!(
+            parse_mpd_format("44100:16:2"),
+            MpdFormat {
+                sample_rate: Some(44_100),
+                bits: Some(16),
+                channels: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn float_bits_mean_32() {
+        assert_eq!(parse_mpd_format("48000:f:2").bits, Some(32));
+    }
+
+    #[test]
+    fn dsd_formats_are_one_bit_at_a_multiple_of_44_1_khz() {
+        assert_eq!(
+            parse_mpd_format("dsd64:2"),
+            MpdFormat {
+                sample_rate: Some(64 * 44_100),
+                bits: Some(1),
+                channels: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_components_are_none() {
+        assert_eq!(
+            parse_mpd_format("*:*:2"),
+            MpdFormat {
+                sample_rate: None,
+                bits: None,
+                channels: Some(2)
+            }
+        );
+    }
+}
+
 impl MusicProvider for MpdProvider {
     fn id(&self) -> &str {
         &self.config.id
@@ -790,6 +928,40 @@ impl MusicProvider for MpdProvider {
     fn get_lyrics(&self, _track: &Track) -> Result<Option<crate::library::Lyrics>, ProviderError> {
         // MPD doesn't serve lyrics; the app falls back to LRCLIB.
         Ok(None)
+    }
+
+    #[tracing::instrument(skip(self, track), level = "debug")]
+    fn track_tech_info(
+        &self,
+        track: &Track,
+    ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
+        let uri = track.source_uri.clone();
+        self.block_on(async {
+            let client = self.get_client().await?;
+
+            // The playing song carries a decoded `Format` and the only
+            // moment MPD reports a bitrate; any other song is looked up in
+            // the database.
+            let current = client
+                .command(CurrentSong)
+                .await
+                .map_err(mpd_err("currentsong"))?
+                .filter(|queued| queued.song.url == uri);
+            if let Some(queued) = current {
+                let bitrate = client
+                    .command(Status)
+                    .await
+                    .map_err(mpd_err("status"))?
+                    .bitrate;
+                return Ok(Some(song_to_tech_info(&queued.song, bitrate)));
+            }
+
+            let found = client
+                .command(FilterQuery::find(filter_expr::eq("file", &uri)))
+                .await
+                .map_err(mpd_err("find"))?;
+            Ok(found.first().map(|song| song_to_tech_info(song, None)))
+        })
     }
 
     #[tracing::instrument(skip(self), level = "debug")]

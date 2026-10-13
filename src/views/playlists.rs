@@ -45,6 +45,10 @@ pub enum PlaylistMessage {
     AddToQueue(usize, Option<usize>),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(crate::library::Track),
+    /// Open the tag editor on this (local) track.
+    Tag(crate::library::Track, crate::tagger::TagAction),
     /// Export the playlist at this index as an M3U file.
     Export(usize),
     /// Pick M3U/M3U8/PLS files to import as new playlists.
@@ -345,6 +349,8 @@ pub fn playlist_detail_view<'a>(
                             fl!("remove-from-playlist"),
                             PlaylistMessage::RemoveTrack(playlist_index, track_idx),
                         )
+                        .with_properties(PlaylistMessage::ShowProperties(track.clone()))
+                        .with_tagging(PlaylistMessage::Tag)
                         .with_artist_subtitle(!columns.artist)
                         .view()
                     }),

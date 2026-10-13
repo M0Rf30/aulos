@@ -17,6 +17,7 @@ pub mod mpris;
 pub mod online;
 pub mod player;
 pub mod provider;
+pub mod tagger;
 pub mod views;
 
 /// Decodes a `file://` URI into a filesystem path. Shared by `main`'s

@@ -5,6 +5,7 @@ pub mod album_filters;
 pub mod albums;
 pub mod artists;
 pub mod common;
+pub mod context_menu;
 pub mod convert;
 pub mod equalizer;
 pub mod folders;
@@ -22,6 +23,8 @@ pub mod radio;
 pub mod settings;
 pub mod smart_playlists;
 pub mod songs;
+pub mod tagger;
+pub mod track_properties;
 pub mod track_row;
 
 use cosmic::cosmic_theme::palette::WithAlpha;

@@ -360,6 +360,16 @@ queue-more-hidden = …and { $count } more
 queue-play-next = Play next
 queue-add = Add to queue
 
+## Context menus (track rows, album cards)
+properties = Properties
+menu-go-to-album = Go to album
+menu-go-to-artist = Go to artist
+menu-add-to-playlist = Add to playlist
+menu-edit-tags = Edit tags…
+menu-edit-album-tags = Edit album tags…
+menu-lookup-musicbrainz = Look up on MusicBrainz
+menu-scan-acoustid = Scan with AcoustID
+
 ## Radio
 radio = Radio
 radio-add-station = Add Station
@@ -715,3 +725,367 @@ inhibit-suspend = Prevent sleep while playing
 inhibit-suspend-description = Keep the computer awake and the screen from idling while music plays.
 background-playback = Keep playing when the window is closed
 background-playback-description = Closing the window minimizes Aulos while music plays instead of quitting.
+
+## Properties drawer
+track-properties = Track properties
+album-properties = Album properties
+props-section-overview = Overview
+props-section-technical = Technical
+props-section-loudness = Loudness
+props-section-file = File
+props-section-summary = Summary
+props-loading = Reading properties…
+props-error = Couldn't read the technical details: { $error }
+props-no-track = No track selected
+props-provider-unavailable = The server for this track isn't connected.
+props-not-applicable = n/a
+props-title = Title
+props-artist = Artist
+props-album-artist = Album artist
+props-album = Album
+props-composer = Composer
+props-genre = Genre
+props-year = Year
+props-date = Date
+props-original-date = Original date
+props-track-number = Track number
+props-disc-number = Disc number
+props-source = Source
+props-source-local = Local library
+props-source-radio = Internet radio
+props-source-podcast = Podcast
+props-format = Format
+props-codec = Codec
+props-bitrate = Bitrate
+props-sample-rate = Sample rate
+props-bit-depth = Bit depth
+props-channels = Channels
+props-duration = Duration
+props-file-size = File size
+props-encoder = Encoder
+props-tag-formats = Tags
+props-md5 = Audio MD5
+props-mime-type = MIME type
+props-mode-cbr = constant (CBR)
+props-mode-vbr = variable (VBR)
+props-mode-abr = average (ABR)
+props-mode-lossless = lossless
+props-nominal = nominal { $value }
+props-audio-data = { $size } of audio
+props-rg-track-gain = Track gain
+props-rg-track-peak = Track peak
+props-rg-album-gain = Album gain
+props-rg-album-peak = Album peak
+props-path = Path
+props-url = URL
+props-server-path = Server path
+props-open-folder = Open containing folder
+props-tracks = Tracks
+props-total-duration = Total duration
+props-formats = Formats
+props-sample-rates = Sample rates
+props-bit-depths = Bit depths
+props-bitrate-range = Bitrate range
+props-bitrate-average = Average bitrate
+props-total-size = Total size
+props-unprobed =
+    { $count ->
+        [one] { $count } track couldn't be analysed and is left out of these figures.
+       *[other] { $count } tracks couldn't be analysed and are left out of these figures.
+    }
+
+## Tag editor settings
+settings-tagger = Tag editor
+settings-tagger-description = Online lookups and fingerprinting for the built-in tag editor.
+settings-tagger-app-key = AcoustID application key
+settings-tagger-app-key-description = Needed for fingerprint lookups and submissions.
+settings-tagger-app-key-placeholder = Application API key
+settings-tagger-app-key-get = Get an application key
+settings-tagger-user-key = Your AcoustID API key
+settings-tagger-user-key-description = Only needed to submit fingerprints. Stored in the system keyring, never in the settings file.
+settings-tagger-user-key-placeholder = User API key
+settings-tagger-user-key-save = Save
+settings-tagger-user-key-find = Find your API key
+settings-tagger-user-key-checking = Checking the keyring…
+settings-tagger-user-key-saved = Key saved
+settings-tagger-user-key-none = No key
+settings-tagger-caa-cover = Use the Cover Art Archive front cover
+settings-tagger-caa-cover-description = When applying a release, also fetch its front cover from the Cover Art Archive.
+
+## Tag editor
+tagger-title = Tag editor
+tagger-subtitle = Edit tags, match files to MusicBrainz releases and identify them with AcoustID.
+tagger-unsaved-chip =
+    { $count ->
+        [one] { $count } file with unsaved edits
+       *[other] { $count } files with unsaved edits
+    }
+tagger-loading =
+    { $count ->
+        [one] Reading { $count } file…
+       *[other] Reading { $count } files…
+    }
+
+## Tag editor: toolbar
+tagger-add-files = Add files…
+tagger-add-folder = Add folder…
+tagger-lookup = Look up on MusicBrainz
+tagger-scan = Scan with AcoustID
+tagger-submit = Submit AcoustIDs
+tagger-submit-count = Submit AcoustIDs ({ $count })
+tagger-save = Save
+tagger-save-count = Save ({ $count })
+tagger-saving = Saving { $done } of { $total }…
+tagger-revert = Revert
+tagger-revert-all = Revert all
+tagger-remove = Remove
+tagger-clear = Clear
+tagger-add-as-release = Add as release…
+tagger-add-as-release-tooltip = Add these files as a new release on MusicBrainz
+
+## Tag editor: banners
+tagger-dismiss = Dismiss
+tagger-confirm-title = Discard unsaved edits?
+tagger-confirm-body =
+    { $count ->
+        [one] One of these files has edits that were not saved. They will be lost.
+       *[other] { $count } of these files have edits that were not saved. They will be lost.
+    }
+tagger-discard = Discard
+tagger-cancel = Cancel
+tagger-key-missing-title = AcoustID needs an application key
+tagger-key-missing-body = Scanning and submitting fingerprints requires a free AcoustID application key. Add it in Settings.
+tagger-user-key-missing-title = Submitting needs your AcoustID API key
+tagger-user-key-missing-body = Add your personal AcoustID API key in Settings to submit fingerprints.
+tagger-open-settings = Open Settings
+tagger-scan-running = Scanning with AcoustID: { $done } of { $total } files
+tagger-scan-resolving = AcoustID identified { $identified } files. Loading the matching release…
+tagger-scan-no-match = AcoustID found no release for these files ({ $identified } of { $total } identified).
+tagger-scan-failures =
+    { $count ->
+        [one] One file could not be fingerprinted or looked up.
+       *[other] { $count } files could not be fingerprinted or looked up.
+    }
+tagger-scan-cancel = Cancel scan
+tagger-submitting = Submitting fingerprints to AcoustID…
+
+## Tag editor: files
+tagger-files-count =
+    { $count ->
+        [one] { $count } file
+       *[other] { $count } files
+    }
+tagger-selected-count = { $count } selected
+tagger-select-all = Select all
+tagger-clear-selection = Clear selection
+tagger-unclustered = Files without an album
+tagger-various-artists = Various artists
+tagger-unknown-artist = Unknown artist
+tagger-cluster-select = Select this album
+tagger-cluster-lookup = Look up this album on MusicBrainz
+tagger-cluster-scan = Scan this album with AcoustID
+tagger-cluster-add-release = Add this album as a release on MusicBrainz
+tagger-empty-title = No files yet
+tagger-empty-hint = Add audio files or a folder to edit their tags. Files can also be sent here from the library with “Edit tags…”.
+tagger-status-modified = Unsaved changes
+tagger-status-saving = Saving…
+tagger-status-saved = Saved
+tagger-status-error = Could not save: { $error }
+tagger-readonly = Read-only
+tagger-assignment = → { $number } { $title } { $score }%
+tagger-unmatched = No matching track on the release
+tagger-acoustid-link = AcoustID
+tagger-acoustid-open = Open this AcoustID on acoustid.org
+tagger-recording-open = Open the recording on MusicBrainz
+tagger-submission-pending = Submitting…
+tagger-submission-pending-status = Submitted, waiting to be processed
+tagger-submission-imported-status = Submitted and imported
+tagger-submission-submitted = Submitted ({ $status })
+tagger-submission-failed = Submission failed: { $error }
+
+## Tag editor: metadata
+tagger-metadata-title = Metadata
+tagger-metadata-selection =
+    { $count ->
+        [one] 1 file selected
+       *[other] { $count } files selected
+    }
+tagger-metadata-empty-title = Nothing selected
+tagger-metadata-empty-hint = Select one or more files to see and edit their tags.
+tagger-metadata-readonly = The selected files can't be edited, so their tags are shown read-only.
+tagger-col-field = Field
+tagger-col-original = Original
+tagger-col-new = New
+tagger-different-values = (different values)
+tagger-multiline-tooltip = This value spans several lines and can't be edited here.
+tagger-multi-hint = Multiple values: separate them with “; ”. Only list fields such as genre or artists are split.
+tagger-revert-field = Put this field back to what is on disk
+tagger-delete-field = Remove this field
+tagger-add-field-title = Add a field
+tagger-add-field-custom = Custom field name
+tagger-add-field-value = Value
+tagger-add-field = Add
+tagger-add-field-known = Choose a field…
+tagger-add-field-error-no-selection = Select a file that can be edited first.
+tagger-add-field-error-no-key = Choose a field or type a field name.
+tagger-add-field-error-invalid-key = A field name may only use visible ASCII characters and no “=”.
+tagger-add-field-error-no-value = Type a value for the field.
+
+## Tag editor: cover art
+tagger-cover-title = Cover art
+tagger-cover-empty = No embedded pictures.
+tagger-cover-add = Add image…
+tagger-cover-add-as = as
+tagger-cover-revert = Revert pictures
+tagger-cover-fetch = Fetch from Cover Art Archive
+tagger-cover-fetch-hint = Look up a release first to fetch its front cover.
+tagger-cover-remove = Remove this picture
+tagger-cover-changed = Changed
+tagger-cover-in-files = in { $count } of { $total } files
+tagger-cover-placeholder = Decoding…
+tagger-cover-details = { $mime } · { $size }
+tagger-picture-front = Front cover
+tagger-picture-back = Back cover
+tagger-picture-leaflet = Leaflet
+tagger-picture-media = Media
+tagger-picture-artist = Artist
+tagger-picture-other = Other
+tagger-picture-type = Type { $kind }
+tagger-size-kb = { $value } KB
+tagger-size-mb = { $value } MB
+
+## Tag editor: MusicBrainz lookup
+tagger-lookup-title = MusicBrainz lookup
+tagger-lookup-title-acoustid = AcoustID result
+tagger-lookup-files =
+    { $count ->
+        [one] 1 file
+       *[other] { $count } files
+    }
+tagger-lookup-artist = Artist
+tagger-lookup-album = Album or release title
+tagger-lookup-search = Search
+tagger-lookup-idle = Type an artist and an album, then search.
+tagger-lookup-searching = Searching MusicBrainz…
+tagger-lookup-failed = The search failed: { $error }
+tagger-lookup-none = No release found. Adjust the artist or album and search again.
+tagger-lookup-tracks =
+    { $count ->
+        [one] 1 track
+       *[other] { $count } tracks
+    }
+tagger-lookup-loading-release = Loading the release…
+tagger-lookup-release-failed = The release could not be loaded: { $error }
+tagger-lookup-acoustid-summary = AcoustID matched { $matched } of { $total } files to { $release }
+tagger-lookup-matched = Matched { $matched } of { $total } files
+tagger-lookup-unused =
+    { $count ->
+        [one] 1 track of the release has no file.
+       *[other] { $count } tracks of the release have no file.
+    }
+tagger-lookup-unmatched = Not matched: { $files }
+tagger-lookup-unmatched-more = Not matched: { $files } and { $more } more
+tagger-lookup-open = Open on MusicBrainz
+tagger-lookup-discard = Discard release
+tagger-lookup-close = Close
+tagger-lookup-cover-loading = Fetching the front cover…
+tagger-lookup-cover-none = The Cover Art Archive has no front cover for this release.
+tagger-lookup-cover-failed = The front cover could not be fetched: { $error }
+tagger-lookup-cover-found = Front cover found on the Cover Art Archive.
+tagger-lookup-cover-off = The front cover is not fetched automatically (see Settings). Use “Fetch from Cover Art Archive” below.
+
+## Tag editor: field names
+tagger-field-title = Title
+tagger-field-artist = Artist
+tagger-field-album = Album
+tagger-field-albumartist = Album artist
+tagger-field-date = Date
+tagger-field-genre = Genre
+tagger-field-tracknumber = Track number
+tagger-field-totaltracks = Total tracks
+tagger-field-discnumber = Disc number
+tagger-field-totaldiscs = Total discs
+tagger-field-discsubtitle = Disc subtitle
+tagger-field-compilation = Compilation
+tagger-field-comment = Comment
+tagger-field-lyrics = Lyrics
+tagger-field-artists = Artists
+tagger-field-composer = Composer
+tagger-field-lyricist = Lyricist
+tagger-field-conductor = Conductor
+tagger-field-arranger = Arranger
+tagger-field-producer = Producer
+tagger-field-engineer = Engineer
+tagger-field-mixer = Mixer
+tagger-field-remixer = Remixer
+tagger-field-originaldate = Original release date
+tagger-field-originalyear = Original release year
+tagger-field-label = Label
+tagger-field-catalognumber = Catalog number
+tagger-field-barcode = Barcode
+tagger-field-isrc = ISRC
+tagger-field-asin = ASIN
+tagger-field-media = Media
+tagger-field-releasecountry = Release country
+tagger-field-releasestatus = Release status
+tagger-field-releasetype = Release type
+tagger-field-script = Script
+tagger-field-language = Language
+tagger-field-bpm = BPM
+tagger-field-key = Musical key
+tagger-field-mood = Mood
+tagger-field-grouping = Grouping
+tagger-field-copyright = Copyright
+tagger-field-license = License
+tagger-field-encodedby = Encoded by
+tagger-field-encodersettings = Encoder settings
+tagger-field-website = Website
+tagger-field-titlesort = Title sort order
+tagger-field-artistsort = Artist sort order
+tagger-field-albumsort = Album sort order
+tagger-field-albumartistsort = Album artist sort order
+tagger-field-composersort = Composer sort order
+tagger-field-musicbrainz-recordingid = MusicBrainz recording ID
+tagger-field-musicbrainz-trackid = MusicBrainz track ID
+tagger-field-musicbrainz-albumid = MusicBrainz release ID
+tagger-field-musicbrainz-artistid = MusicBrainz artist ID
+tagger-field-musicbrainz-albumartistid = MusicBrainz release artist ID
+tagger-field-musicbrainz-releasegroupid = MusicBrainz release group ID
+tagger-field-musicbrainz-workid = MusicBrainz work ID
+tagger-field-musicbrainz-discid = MusicBrainz disc ID
+tagger-field-musicbrainz-labelid = MusicBrainz label ID
+tagger-field-acoustid-id = AcoustID
+tagger-field-acoustid-fingerprint = AcoustID fingerprint
+tagger-field-replaygain-track-gain = ReplayGain track gain
+tagger-field-replaygain-track-peak = ReplayGain track peak
+tagger-field-replaygain-album-gain = ReplayGain album gain
+tagger-field-replaygain-album-peak = ReplayGain album peak
+
+## Tag editor page (navigation and notices)
+tagger-nav = Tag Editor
+tagger-notice-pick-failed = Couldn't add the files: { $error }
+tagger-notice-no-audio = No audio files were found in that folder.
+tagger-notice-image-failed = Couldn't add the image: { $error }
+tagger-notice-open-failed = Couldn't open the page: { $error }
+tagger-notice-seed-failed = Couldn't open MusicBrainz: { $error }
+tagger-notice-nothing-to-look-up = There are no files to look up.
+tagger-notice-nothing-to-add = There are no files to add as a release.
+tagger-notice-nothing-to-scan = There are no files to scan.
+tagger-notice-nothing-to-save = There are no changes to save.
+tagger-notice-nothing-to-submit = None of these files has a MusicBrainz recording ID to submit.
+tagger-notice-no-acoustid-key = Set an AcoustID application key in Settings to identify files by their audio.
+tagger-notice-no-user-key = Save your AcoustID API key in Settings to submit fingerprints.
+tagger-notice-keyring-failed = Couldn't read your AcoustID key from the keyring: { $error }
+tagger-notice-scan-no-match = AcoustID didn't recognise enough of these files to pick a release.
+tagger-notice-saved =
+    { $count ->
+        [one] 1 file saved.
+       *[other] { $count } files saved.
+    }
+tagger-notice-save-partial = { $saved } saved, { $failed } failed.
+tagger-notice-submitted =
+    { $count ->
+        [one] 1 fingerprint submitted.
+       *[other] { $count } fingerprints submitted.
+    }
+tagger-notice-submit-partial = { $ok } submitted, { $failed } failed.

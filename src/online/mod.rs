@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Online audio hub: podcast subscriptions (via `feed-rs`) and internet
-//! radio directory search/playback (Shoutcast/Icecast).
+//! Online audio hub: podcast subscriptions (via `feed-rs`), internet
+//! radio directory search/playback (Shoutcast/Icecast), and the tag
+//! editor's MusicBrainz / AcoustID clients.
 
+pub mod acoustid;
+pub mod musicbrainz;
 pub mod podcast;
 pub mod radio;
 pub mod scrobble;

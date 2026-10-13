@@ -302,6 +302,12 @@ pub struct Config {
     /// Last.fm / ListenBrainz) on Home. Only effective while a scrobbling
     /// service is connected.
     pub home_online_suggestions: bool,
+    /// AcoustID *application* API key (not a secret) used for fingerprint
+    /// lookups and submissions. The user's own key lives in the keyring.
+    pub acoustid_api_key: String,
+    /// Prefer the Cover Art Archive front cover when applying a release in
+    /// the tag editor.
+    pub tagger_use_caa_cover: bool,
 }
 
 impl Default for Config {
@@ -368,6 +374,8 @@ impl Default for Config {
             scrobble_lastfm_love_sync: true,
             scrobble_import_on_connect: false,
             home_online_suggestions: true,
+            acoustid_api_key: String::new(),
+            tagger_use_caa_cover: true,
         }
     }
 }
@@ -391,6 +399,12 @@ impl Config {
     /// See [`startup_provider_preference`].
     pub fn startup_provider_choice(&self) -> Option<&str> {
         startup_provider_preference(&self.startup_provider, self.active_provider.as_deref())
+    }
+
+    /// The AcoustID application API key, trimmed, when one is set.
+    pub fn acoustid_key(&self) -> Option<&str> {
+        let key = self.acoustid_api_key.trim();
+        (!key.is_empty()).then_some(key)
     }
 
     /// Persist only the fields that differ from `previous` (what is known
@@ -471,6 +485,8 @@ impl Config {
             scrobble_lastfm_love_sync,
             scrobble_import_on_connect,
             home_online_suggestions,
+            acoustid_api_key,
+            tagger_use_caa_cover,
         );
         if written > 0 {
             tx.commit()?;
@@ -589,6 +605,17 @@ mod startup_provider_tests {
         assert_eq!(config.startup_provider_choice(), Some("nav"));
         config.startup_provider = "local".into();
         assert_eq!(config.startup_provider_choice(), Some("local"));
+    }
+
+    #[test]
+    fn tagger_defaults_and_acoustid_key_trimming() {
+        let mut config = Config::default();
+        assert!(config.tagger_use_caa_cover);
+        assert_eq!(config.acoustid_key(), None);
+        config.acoustid_api_key = "   ".into();
+        assert_eq!(config.acoustid_key(), None);
+        config.acoustid_api_key = "  abc123 \n".into();
+        assert_eq!(config.acoustid_key(), Some("abc123"));
     }
 
     #[test]

@@ -39,6 +39,10 @@ pub enum GenreMessage {
     ToggleViewMode,
     /// Jump to another view (artist / album page).
     Navigate(crate::views::Route),
+    /// Open the Properties drawer for this track.
+    ShowProperties(Track),
+    /// Open the tag editor on this (local) track.
+    Tag(Track, crate::tagger::TagAction),
 }
 
 /// Minimum / maximum outer card width (including button padding).
@@ -345,6 +349,8 @@ pub fn genre_detail_view<'a>(
                     GenreMessage::PlayNext(Some(index)),
                     GenreMessage::AddToQueue(Some(index)),
                 )
+                .with_properties(GenreMessage::ShowProperties(track.clone()))
+                .with_tagging(GenreMessage::Tag)
                 .with_artist_subtitle(!columns.artist)
                 .view()
             }),

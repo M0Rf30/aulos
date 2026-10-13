@@ -424,6 +424,10 @@ impl AppModel {
                     self.startup_settings()
                         .map(settings::SettingsMessage::Startup),
                     &self.settings_search,
+                    &self.config.acoustid_api_key,
+                    &self.acoustid_user_key_input,
+                    self.acoustid_user_key_saved,
+                    self.config.tagger_use_caa_cover,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -471,6 +475,17 @@ impl AppModel {
                     settings::SettingsMessage::PlaybackExtras(m) => Message::Playback(m),
                     settings::SettingsMessage::Startup(m) => Message::Startup(m),
                     settings::SettingsMessage::Search(q) => Message::SettingsSearch(q),
+                    settings::SettingsMessage::SetAcoustidApiKey(v) => {
+                        Message::SetAcoustidApiKey(v)
+                    }
+                    settings::SettingsMessage::EditAcoustidUserKey(v) => {
+                        Message::EditAcoustidUserKey(v)
+                    }
+                    settings::SettingsMessage::SaveAcoustidUserKey => Message::SaveAcoustidUserKey,
+                    settings::SettingsMessage::SetTaggerUseCaaCover(v) => {
+                        Message::SetTaggerUseCaaCover(v)
+                    }
+                    settings::SettingsMessage::OpenUrl(url) => Message::LaunchUrl(url),
                 });
 
                 context_drawer::context_drawer(
@@ -541,6 +556,16 @@ impl AppModel {
                     None => drawer,
                 }
             }
+            ContextPage::TrackProperties => context_drawer::context_drawer(
+                self.properties_content(),
+                Message::ToggleContextPage(ContextPage::TrackProperties),
+            )
+            .title(fl!("track-properties")),
+            ContextPage::AlbumProperties => context_drawer::context_drawer(
+                self.properties_content(),
+                Message::ToggleContextPage(ContextPage::AlbumProperties),
+            )
+            .title(fl!("album-properties")),
         })
     }
 
@@ -630,6 +655,23 @@ impl AppModel {
                             }
                             albums::AlbumMessage::PlayAlbum(i) => {
                                 albums::AlbumMessage::PlayAlbum(unfilter_index(album_map, i))
+                            }
+                            albums::AlbumMessage::PlayNext(i, track) => {
+                                albums::AlbumMessage::PlayNext(unfilter_index(album_map, i), track)
+                            }
+                            albums::AlbumMessage::AddToQueue(i, track) => {
+                                albums::AlbumMessage::AddToQueue(
+                                    unfilter_index(album_map, i),
+                                    track,
+                                )
+                            }
+                            albums::AlbumMessage::ShowAlbumProperties(i) => {
+                                albums::AlbumMessage::ShowAlbumProperties(unfilter_index(
+                                    album_map, i,
+                                ))
+                            }
+                            albums::AlbumMessage::TagAlbum(i, action) => {
+                                albums::AlbumMessage::TagAlbum(unfilter_index(album_map, i), action)
                             }
                             other => other,
                         })
@@ -739,6 +781,10 @@ impl AppModel {
                     songs::SongMessage::AddToQueue(i) => {
                         Message::AddToQueue(tracks_data.get(i).cloned().into_iter().collect())
                     }
+                    songs::SongMessage::ShowProperties(track) => {
+                        Message::ShowTrackProperties(track)
+                    }
+                    songs::SongMessage::Tag(track, action) => Message::TagTrack(track, action),
                 })
             }
 
@@ -797,6 +843,12 @@ impl AppModel {
                             }
                             playlists::PlaylistMessage::ImportFiles => {
                                 Message::PlaylistIo(super::playlist_io::PlaylistIo::PickFiles)
+                            }
+                            playlists::PlaylistMessage::ShowProperties(track) => {
+                                Message::ShowTrackProperties(track)
+                            }
+                            playlists::PlaylistMessage::Tag(track, action) => {
+                                Message::TagTrack(track, action)
                             }
                         })
                     } else {
@@ -867,6 +919,12 @@ impl AppModel {
                             playlists::PlaylistMessage::ImportFiles => {
                                 Message::PlaylistIo(super::playlist_io::PlaylistIo::PickFiles)
                             }
+                            playlists::PlaylistMessage::ShowProperties(track) => {
+                                Message::ShowTrackProperties(track)
+                            }
+                            playlists::PlaylistMessage::Tag(track, action) => {
+                                Message::TagTrack(track, action)
+                            }
                         },
                     )
                 }
@@ -919,6 +977,12 @@ impl AppModel {
                             }
                             genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
                             genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
+                            genres::GenreMessage::ShowProperties(track) => {
+                                Message::ShowTrackProperties(track)
+                            }
+                            genres::GenreMessage::Tag(track, action) => {
+                                Message::TagTrack(track, action)
+                            }
                         })
                     } else {
                         widget::text("Genre not found").into()
@@ -956,6 +1020,12 @@ impl AppModel {
                         },
                         genres::GenreMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
                         genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
+                        genres::GenreMessage::ShowProperties(track) => {
+                            Message::ShowTrackProperties(track)
+                        }
+                        genres::GenreMessage::Tag(track, action) => {
+                            Message::TagTrack(track, action)
+                        }
                     })
                 }
             }
@@ -1054,6 +1124,16 @@ impl AppModel {
                 })
                 .map(Message::Convert)
             }
+
+            Page::Tagger => crate::views::tagger::view(
+                &self.tagger,
+                crate::views::tagger::TaggerViewProps {
+                    acoustid_key_set: self.config.acoustid_key().is_some(),
+                    acoustid_user_key_saved: self.acoustid_user_key_saved,
+                    use_caa_cover: self.config.tagger_use_caa_cover,
+                },
+            )
+            .map(Message::Tagger),
         };
 
         // Build bottom playback bar
@@ -1118,6 +1198,11 @@ impl AppModel {
             now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
             now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
+            now_playing::NowPlayingMessage::ShowProperties => match &self.current_track {
+                Some(track) => Message::ShowTrackProperties(track.clone()),
+                // The button is disabled without a track; keep the mapping total.
+                None => Message::ToggleContextPage(ContextPage::TrackProperties),
+            },
             now_playing::NowPlayingMessage::ExpandToggle => Message::ExpandNowPlaying,
             now_playing::NowPlayingMessage::Collapse => Message::CollapseNowPlaying,
             now_playing::NowPlayingMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),

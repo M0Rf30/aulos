@@ -162,6 +162,8 @@ fn message_label(message: &Message) -> &'static str {
         Message::QueueRemove(_) => "QueueRemove",
         Message::QueueMove { .. } => "QueueMove",
         Message::QueueClear => "QueueClear",
+        Message::Tagger(_) => "Tagger",
+        Message::TaggerEvent(_) => "TaggerEvent",
         _ => "Other",
     }
 }
