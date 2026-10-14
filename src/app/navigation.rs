@@ -18,14 +18,14 @@ impl AppModel {
     fn detail_cover_key(&mut self) -> Option<String> {
         match self.nav.active_data::<Page>()? {
             Page::Albums => {
-                let album = self.library.albums.get(self.selected_album?)?;
+                let album = self.session.library.albums.get(self.selected_album?)?;
                 Some(aulos_core::library::CoverArt::album_key(
                     &album.artist,
                     &album.name,
                 ))
             }
             Page::Artists => {
-                let artist = self.library.artists.get(self.selected_artist?)?;
+                let artist = self.session.library.artists.get(self.selected_artist?)?;
                 let keys: Vec<String> = artist
                     .albums
                     .iter()
@@ -44,9 +44,9 @@ impl AppModel {
     /// album, or the artist's album whose key matches).
     fn detail_cover_hint(&self, key: &str) -> Option<aulos_core::library::Album> {
         match self.nav.active_data::<Page>()? {
-            Page::Albums => self.library.albums.get(self.selected_album?),
+            Page::Albums => self.session.library.albums.get(self.selected_album?),
             Page::Artists => {
-                let artist = self.library.artists.get(self.selected_artist?)?;
+                let artist = self.session.library.artists.get(self.selected_artist?)?;
                 artist.albums.iter().find(|a| {
                     aulos_core::library::CoverArt::album_key(&artist.name, &a.name) == key
                 })
@@ -131,11 +131,11 @@ impl AppModel {
         (
             self.current_location(),
             [
-                self.config.albums_view_mode,
-                self.config.artists_view_mode,
-                self.config.genres_view_mode,
+                self.session.config.config.albums_view_mode,
+                self.session.config.config.artists_view_mode,
+                self.session.config.config.genres_view_mode,
             ],
-            self.home.decade.is_some(),
+            self.session.home.decade.is_some(),
         )
     }
 
@@ -209,23 +209,26 @@ impl AppModel {
     pub(super) fn navigate(&mut self, route: Route) -> Task<cosmic::Action<Message>> {
         let here = self.current_location();
         let task = match route {
-            Route::Artist(name) => match self.library.find_artist(&name) {
+            Route::Artist(name) => match self.session.library.find_artist(&name) {
                 Some(idx) => {
                     let show = self.show_page(&Page::Artists);
                     show.chain(self.update(Message::SelectArtist(idx)))
                 }
                 None => return self.not_found(&name),
             },
-            Route::Album { artist, album } => match self.library.find_album(&artist, &album) {
-                Some(idx) => {
-                    let show = self.show_page(&Page::Albums);
-                    self.selected_album = Some(idx);
-                    show
+            Route::Album { artist, album } => {
+                match self.session.library.find_album(&artist, &album) {
+                    Some(idx) => {
+                        let show = self.show_page(&Page::Albums);
+                        self.selected_album = Some(idx);
+                        show
+                    }
+                    None => return self.not_found(&album),
                 }
-                None => return self.not_found(&album),
-            },
+            }
             Route::Genre(name) => {
                 match self
+                    .session
                     .library
                     .genres
                     .iter()

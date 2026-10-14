@@ -14,7 +14,7 @@ mod similar;
 use crate::views::{Route, card_button_class, common};
 use aulos_core::fl;
 use aulos_core::library::CoverArt;
-use aulos_core::library::history::{AlbumRef, ArtistRef, DecadeCount, HomeData};
+use aulos_core::library::history::{AlbumRef, ArtistRef, DecadeCount};
 use aulos_core::library::home_state::{DecadeView, Greeting, HomeContext, HomeState, decade_label};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
@@ -59,31 +59,6 @@ pub enum HomeMessage {
     OpenUrl(String),
     /// The virtualized decade grid scrolled (area, absolute y offset).
     Scrolled(common::ScrollArea, f32),
-
-    // -- Async results (never emitted by the view) --
-    /// Shelves loaded; `request` ties the result to the latest load. With
-    /// `keep_picks` the previous random/rediscover shelves are kept, so
-    /// returning to Home doesn't reshuffle what the user just saw.
-    Loaded {
-        request: u64,
-        keep_picks: bool,
-        data: Box<HomeData>,
-    },
-    /// A "Because you listened to …" shelf is ready; `request` ties it to
-    /// the Home load it was computed for.
-    SimilarShelf {
-        request: u64,
-        shelf: Box<aulos_core::online::similar::SimilarShelf>,
-    },
-    /// All similar-artist shelves of `request` were delivered (`count` of
-    /// them) or the lookup gave up (offline).
-    SimilarDone { request: u64, count: usize },
-    /// A play was written to the history (no-op acknowledgement).
-    PlayRecorded,
-    /// A re-rolled random shelf.
-    RandomLoaded { request: u64, albums: Vec<AlbumRef> },
-    /// Albums of a decade.
-    DecadeLoaded { decade: u32, albums: Vec<AlbumRef> },
 }
 
 /// Cover/avatar size inside a shelf card.

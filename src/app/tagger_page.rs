@@ -94,87 +94,87 @@ impl AppModel {
             M::AddFiles => pick_files(),
             M::AddFolder => pick_folder(),
             M::SelectFile(id) => {
-                self.tagger.select_only(id);
+                self.session.tagger.select_only(id);
                 Task::none()
             }
             M::ToggleFile(id) => {
-                self.tagger.toggle(id);
+                self.session.tagger.toggle(id);
                 Task::none()
             }
             M::SelectCluster(key) => {
-                self.tagger.select_cluster(&key);
+                self.session.tagger.select_cluster(&key);
                 Task::none()
             }
             M::ToggleCluster(key) => {
-                self.tagger.toggle_cluster(&key);
+                self.session.tagger.toggle_cluster(&key);
                 Task::none()
             }
             M::SelectAll => {
-                self.tagger.select_all();
+                self.session.tagger.select_all();
                 Task::none()
             }
             M::ClearSelection => {
-                self.tagger.clear_selection();
+                self.session.tagger.clear_selection();
                 Task::none()
             }
             M::RemoveSelected => {
-                self.tagger.request_remove_selected();
+                self.session.tagger.request_remove_selected();
                 Task::none()
             }
             M::ClearAll => {
-                self.tagger.request_clear();
+                self.session.tagger.request_clear();
                 Task::none()
             }
             M::ConfirmDiscard => {
-                self.tagger.accept_confirm();
+                self.session.tagger.accept_confirm();
                 Task::none()
             }
             M::CancelDiscard => {
-                self.tagger.cancel_confirm();
+                self.session.tagger.cancel_confirm();
                 Task::none()
             }
 
             // --- Metadata table ---
             M::EditField { key, text } => {
-                self.tagger.set_field_text(&key, text);
+                self.session.tagger.set_field_text(&key, text);
                 Task::none()
             }
             M::RevertField(key) => {
-                self.tagger.revert_field(&key);
+                self.session.tagger.revert_field(&key);
                 Task::none()
             }
             M::DeleteField(key) => {
-                self.tagger.delete_field(&key);
+                self.session.tagger.delete_field(&key);
                 Task::none()
             }
             M::AddFieldKnown(index) => {
-                self.tagger.set_add_known(Some(index));
+                self.session.tagger.set_add_known(Some(index));
                 Task::none()
             }
             M::AddFieldCustom(name) => {
-                self.tagger.set_add_custom(name);
+                self.session.tagger.set_add_custom(name);
                 Task::none()
             }
             M::AddFieldValue(value) => {
-                self.tagger.set_add_value(value);
+                self.session.tagger.set_add_value(value);
                 Task::none()
             }
             M::AddFieldCommit => {
                 // A refused form keeps its error in the state, shown by the view.
-                let _ = self.tagger.commit_add_field();
+                let _ = self.session.tagger.commit_add_field();
                 Task::none()
             }
 
             // --- Cover art ---
-            M::AddPicture => pick_image(self.tagger.new_picture_kind()),
+            M::AddPicture => pick_image(self.session.tagger.new_picture_kind()),
             M::NewPictureKind(index) => {
                 if let Some(&kind) = PICTURE_KINDS.get(index) {
-                    self.tagger.set_new_picture_kind(kind);
+                    self.session.tagger.set_new_picture_kind(kind);
                 }
                 Task::none()
             }
             M::RemovePicture { hash, kind } => {
-                self.tagger.remove_picture(hash, kind);
+                self.session.tagger.remove_picture(hash, kind);
                 Task::none()
             }
             M::SetPictureKind {
@@ -182,14 +182,14 @@ impl AppModel {
                 kind,
                 new_kind,
             } => {
-                self.tagger.set_picture_kind(hash, kind, new_kind);
+                self.session.tagger.set_picture_kind(hash, kind, new_kind);
                 Task::none()
             }
             M::RevertPictures => {
-                self.tagger.revert_pictures();
+                self.session.tagger.revert_pictures();
                 Task::none()
             }
-            M::FetchCover => match self.tagger.fetch_cover_for_selection() {
+            M::FetchCover => match self.session.tagger.fetch_cover_for_selection() {
                 Some(request) => run(work::cover(request)),
                 None => Task::none(),
             },
@@ -197,42 +197,42 @@ impl AppModel {
             // --- Save / revert ---
             M::Save => self.start_save(),
             M::RevertSelected => {
-                self.tagger.revert_selected();
+                self.session.tagger.revert_selected();
                 Task::none()
             }
             M::RevertAll => {
-                self.tagger.revert_all();
+                self.session.tagger.revert_all();
                 Task::none()
             }
 
             // --- MusicBrainz ---
             M::Lookup => self.start_lookup(),
             M::LookupCluster(key) => {
-                self.tagger.select_cluster(&key);
+                self.session.tagger.select_cluster(&key);
                 self.start_lookup()
             }
             M::QueryArtist(artist) => {
-                self.tagger.set_query_artist(artist);
+                self.session.tagger.set_query_artist(artist);
                 Task::none()
             }
             M::QueryAlbum(album) => {
-                self.tagger.set_query_album(album);
+                self.session.tagger.set_query_album(album);
                 Task::none()
             }
-            M::SearchAgain => match self.tagger.search_again() {
+            M::SearchAgain => match self.session.tagger.search_again() {
                 Some(request) => run(work::search(request)),
                 None => Task::none(),
             },
-            M::ChooseRelease(id) => match self.tagger.choose_release(&id) {
+            M::ChooseRelease(id) => match self.session.tagger.choose_release(&id) {
                 Some(request) => run(work::release(request)),
                 None => Task::none(),
             },
             M::DiscardRelease => {
-                self.tagger.discard_release();
+                self.session.tagger.discard_release();
                 Task::none()
             }
             M::CloseLookup => {
-                self.tagger.close_lookup();
+                self.session.tagger.close_lookup();
                 Task::none()
             }
             M::OpenReleasePage(id) => {
@@ -252,12 +252,12 @@ impl AppModel {
             // --- AcoustID ---
             M::Scan => self.start_scan(),
             M::ScanCluster(key) => {
-                self.tagger.select_cluster(&key);
+                self.session.tagger.select_cluster(&key);
                 self.start_scan()
             }
             M::CancelScan => {
                 work::cancel_scan();
-                self.tagger.cancel_scan();
+                self.session.tagger.cancel_scan();
                 Task::none()
             }
             M::SubmitAcoustIds => self.start_submit(),
@@ -271,7 +271,7 @@ impl AppModel {
                 }
             }
             M::DismissNotice => {
-                self.tagger.dismiss_notice();
+                self.session.tagger.dismiss_notice();
                 Task::none()
             }
         }
@@ -286,33 +286,36 @@ impl AppModel {
                 }
                 // Files added to an empty editor are selected, so the table
                 // shows them right away; later additions keep the selection.
-                let select = self.tagger.is_empty();
+                let select = self.session.tagger.is_empty();
                 let load = self.start_load(paths, select, None);
                 let ready = self.run_ready_action();
                 Task::batch([load, ready])
             }
             E::FilesPicked(Err(error)) => {
-                self.tagger
+                self.session
+                    .tagger
                     .set_notice(true, fl!("tagger-notice-pick-failed", error = error));
                 Task::none()
             }
             E::FolderPicked(Ok(dir)) => run(work::folder_files(dir)),
             E::FolderPicked(Err(error)) => {
-                self.tagger
+                self.session
+                    .tagger
                     .set_notice(true, fl!("tagger-notice-pick-failed", error = error));
                 Task::none()
             }
             E::ImagePicked(Ok(picture)) => {
-                self.tagger.add_picture(&picture);
+                self.session.tagger.add_picture(&picture);
                 Task::none()
             }
             E::ImagePicked(Err(error)) => {
-                self.tagger
+                self.session
+                    .tagger
                     .set_notice(true, fl!("tagger-notice-image-failed", error = error));
                 Task::none()
             }
             E::FilesLoaded { generation, files } => {
-                self.tagger.finish_load(generation, files);
+                self.session.tagger.finish_load(generation, files);
                 self.run_ready_action()
             }
             E::ThumbDecoded { hash, pixels } => {
@@ -323,45 +326,53 @@ impl AppModel {
                 Task::none()
             }
             E::SearchFinished { request, result } => {
-                self.tagger.finish_search(request, result);
+                self.session.tagger.finish_search(request, result);
                 Task::none()
             }
             E::ReleaseFetched { request, result } => {
-                self.tagger
+                self.session
+                    .tagger
                     .finish_release(request, result.map(|release| *release));
                 if self
+                    .session
                     .tagger
                     .lookup()
                     .is_some_and(|l| l.source == aulos_core::tagger::LookupSource::AcoustId)
                 {
-                    self.tagger.finish_scan_release();
+                    self.session.tagger.finish_scan_release();
                 }
                 match self
+                    .session
                     .tagger
-                    .take_cover_request(self.config.tagger_use_caa_cover)
+                    .take_cover_request(self.session.config.config.tagger_use_caa_cover)
                 {
                     Some(request) => run(work::cover(request)),
                     None => Task::none(),
                 }
             }
             E::CoverFetched { request, result } => {
-                self.tagger.finish_cover(request, result);
+                self.session.tagger.finish_cover(request, result);
                 Task::none()
             }
             E::FileScanned {
                 generation,
                 file,
                 result,
-            } => match self.tagger.finish_scan_file(generation, file, result) {
+            } => match self
+                .session
+                .tagger
+                .finish_scan_file(generation, file, result)
+            {
                 ScanStep::Pending => Task::none(),
                 ScanStep::FetchRelease(request) => run(work::release(request)),
                 ScanStep::NoMatch => {
-                    self.tagger
+                    self.session
+                        .tagger
                         .set_notice(false, fl!("tagger-notice-scan-no-match"));
                     Task::none()
                 }
             },
-            E::FileSaved { file, result } => match self.tagger.finish_save(file, result) {
+            E::FileSaved { file, result } => match self.session.tagger.finish_save(file, result) {
                 Some(summary) => self.after_save(summary),
                 None => Task::none(),
             },
@@ -371,12 +382,13 @@ impl AppModel {
             } => {
                 let ok = results.iter().filter(|r| r.outcome.is_ok()).count();
                 let failed = results.len() - ok;
-                self.tagger.finish_submit(generation, results);
+                self.session.tagger.finish_submit(generation, results);
                 if failed == 0 {
-                    self.tagger
+                    self.session
+                        .tagger
                         .set_notice(false, fl!("tagger-notice-submitted", count = ok));
                 } else {
-                    self.tagger.set_notice(
+                    self.session.tagger.set_notice(
                         true,
                         fl!("tagger-notice-submit-partial", ok = ok, failed = failed),
                     );
@@ -384,13 +396,14 @@ impl AppModel {
                 Task::none()
             }
             E::SubmitAborted { generation, error } => {
-                self.tagger.abort_submit(generation, &error);
-                self.tagger.set_notice(true, error);
+                self.session.tagger.abort_submit(generation, &error);
+                self.session.tagger.set_notice(true, error);
                 Task::none()
             }
             E::SeedOpened(Ok(())) => Task::none(),
             E::SeedOpened(Err(error)) => {
-                self.tagger
+                self.session
+                    .tagger
                     .set_notice(true, fl!("tagger-notice-seed-failed", error = error));
                 Task::none()
             }
@@ -399,7 +412,8 @@ impl AppModel {
 
     fn report_open(&mut self, result: Result<(), String>) {
         if let Err(error) = result {
-            self.tagger
+            self.session
+                .tagger
                 .set_notice(true, fl!("tagger-notice-open-failed", error = error));
         }
     }
@@ -412,7 +426,7 @@ impl AppModel {
         select: bool,
         action: Option<TagAction>,
     ) -> Task<Action> {
-        match self.tagger.begin_load(paths, select, action) {
+        match self.session.tagger.begin_load(paths, select, action) {
             Some(request) => run_all(work::load(request)),
             None => Task::none(),
         }
@@ -420,7 +434,7 @@ impl AppModel {
 
     /// Runs the action that was waiting for the files to be read.
     fn run_ready_action(&mut self) -> Task<Action> {
-        match self.tagger.take_ready_action() {
+        match self.session.tagger.take_ready_action() {
             Some(TagAction::Edit) | None => Task::none(),
             Some(TagAction::LookUp) => self.start_lookup(),
             Some(TagAction::AcoustId) => self.start_scan(),
@@ -429,7 +443,7 @@ impl AppModel {
 
     /// Decodes the thumbnails of pictures the table shows for the first time.
     fn decode_missing_thumbs(&mut self) -> Task<Action> {
-        let wanted = self.tagger_thumbs.take_missing(&self.tagger);
+        let wanted = self.tagger_thumbs.take_missing(&self.session.tagger);
         run_all(
             wanted
                 .into_iter()
@@ -440,11 +454,12 @@ impl AppModel {
     // --- MusicBrainz ----------------------------------------------------------
 
     fn start_lookup(&mut self) -> Task<Action> {
-        match self.tagger.begin_lookup() {
+        match self.session.tagger.begin_lookup() {
             Some(request) => run(work::search(request)),
             None => {
-                if self.tagger.lookup().is_none() {
-                    self.tagger
+                if self.session.tagger.lookup().is_none() {
+                    self.session
+                        .tagger
                         .set_notice(true, fl!("tagger-notice-nothing-to-look-up"));
                 }
                 Task::none()
@@ -453,9 +468,10 @@ impl AppModel {
     }
 
     fn start_seed(&mut self, cluster: Option<ClusterKey>) -> Task<Action> {
-        let files = self.tagger.seed_files(cluster.as_ref());
+        let files = self.session.tagger.seed_files(cluster.as_ref());
         if files.is_empty() {
-            self.tagger
+            self.session
+                .tagger
                 .set_notice(true, fl!("tagger-notice-nothing-to-add"));
             return Task::none();
         }
@@ -465,13 +481,15 @@ impl AppModel {
     // --- AcoustID -------------------------------------------------------------
 
     fn start_scan(&mut self) -> Task<Action> {
-        let Some(key) = self.config.acoustid_key().map(str::to_owned) else {
-            self.tagger
+        let Some(key) = self.session.config.config.acoustid_key().map(str::to_owned) else {
+            self.session
+                .tagger
                 .set_notice(true, fl!("tagger-notice-no-acoustid-key"));
             return Task::none();
         };
-        let Some(start) = self.tagger.begin_scan() else {
-            self.tagger
+        let Some(start) = self.session.tagger.begin_scan() else {
+            self.session
+                .tagger
                 .set_notice(true, fl!("tagger-notice-nothing-to-scan"));
             return Task::none();
         };
@@ -479,15 +497,16 @@ impl AppModel {
     }
 
     fn start_submit(&mut self) -> Task<Action> {
-        let Some(start) = self.tagger.begin_submit() else {
-            self.tagger
+        let Some(start) = self.session.tagger.begin_submit() else {
+            self.session
+                .tagger
                 .set_notice(true, fl!("tagger-notice-nothing-to-submit"));
             return Task::none();
         };
-        let Some(app_key) = self.config.acoustid_key().map(str::to_owned) else {
+        let Some(app_key) = self.session.config.config.acoustid_key().map(str::to_owned) else {
             let error = fl!("tagger-notice-no-acoustid-key");
-            self.tagger.abort_submit(start.generation, &error);
-            self.tagger.set_notice(true, error);
+            self.session.tagger.abort_submit(start.generation, &error);
+            self.session.tagger.set_notice(true, error);
             return Task::none();
         };
         run(work::submit(start, app_key))
@@ -496,9 +515,10 @@ impl AppModel {
     // --- Saving ---------------------------------------------------------------
 
     fn start_save(&mut self) -> Task<Action> {
-        let jobs = self.tagger.begin_save();
+        let jobs = self.session.tagger.begin_save();
         if jobs.is_empty() {
-            self.tagger
+            self.session
+                .tagger
                 .set_notice(false, fl!("tagger-notice-nothing-to-save"));
             return Task::none();
         }
@@ -510,10 +530,11 @@ impl AppModel {
     fn after_save(&mut self, summary: SaveSummary) -> Task<Action> {
         let saved = summary.written.len();
         if summary.failed == 0 {
-            self.tagger
+            self.session
+                .tagger
                 .set_notice(false, fl!("tagger-notice-saved", count = saved));
         } else {
-            self.tagger.set_notice(
+            self.session.tagger.set_notice(
                 true,
                 fl!(
                     "tagger-notice-save-partial",
@@ -529,28 +550,16 @@ impl AppModel {
         if summary.written.is_empty() {
             return Task::none();
         }
-        let Some(provider) = self.registry.active_shared() else {
-            return Task::none();
-        };
-        if provider.provider_type() != aulos_core::provider::ProviderType::Local {
-            return Task::none();
-        }
-        self.library_scanning = true;
-        let generation = self.library.begin_reload_generation();
-        let provider_id = provider.id().to_string();
         let SaveSummary {
             written,
             album_keys,
             ..
         } = summary;
-        cosmic::task::future(async move {
-            let count = work::refresh_library(written, album_keys).await;
-            cosmic::Action::App(Message::LibraryScanComplete {
-                generation,
-                provider_id,
-                count,
-            })
-        })
+        super::tasks::effect(
+            self.session
+                .rescan_local(work::refresh_library(written, album_keys)),
+        )
+        .map(|event| cosmic::Action::App(Message::Library(event)))
     }
 }
 

@@ -233,6 +233,19 @@ impl MprisHandle {
     }
 }
 
+/// [`extract_art_url`] off the caller's thread (it parses tags and writes to
+/// an on-disk cache synchronously); the event is the resolved URL, if any.
+pub fn resolve_art_url(
+    track_id: i64,
+    path: std::path::PathBuf,
+) -> crate::task::Effect<Option<String>> {
+    crate::task::Effect::future(async move {
+        tokio::task::spawn_blocking(move || extract_art_url(track_id, &path))
+            .await
+            .unwrap_or(None)
+    })
+}
+
 /// Extracts embedded cover art for `path` and writes it to a small on-disk
 /// cache under the user's cache directory, returning a `file://` URL to it.
 /// This is the only disk-writing cover art cache in Aulos (the library's own

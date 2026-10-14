@@ -29,6 +29,24 @@ pub static HTTP_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 });
 
+/// Fetches a podcast artwork / station favicon URL and decodes it into RGBA
+/// pixels at most [`ONLINE_ICON_MAX_DIM`](crate::library::CoverArt::ONLINE_ICON_MAX_DIM)
+/// on a side. Fetch and decode run on one blocking task: both are IO/CPU
+/// work that must stay off the async reactor, and the raw bytes are only
+/// ever needed for decoding.
+pub async fn fetch_icon(url: String) -> Option<(u32, u32, Vec<u8>)> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = HTTP_CLIENT.get(&url).send().ok()?.bytes().ok()?;
+        crate::library::CoverArt::decode_thumbnail(
+            &bytes,
+            crate::library::CoverArt::ONLINE_ICON_MAX_DIM,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Why a typed-in feed or stream URL was rejected before any network use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlError {

@@ -294,7 +294,7 @@ fn empty_queue<'a>() -> cosmic::Element<'a, QueueMessage> {
 /// recently played entries. The now-playing card and Clear action live in
 /// [`queue_header_view`], pinned above this scrolling list.
 ///
-/// `queue_data` is `self.player.as_ref().map(|p| (p.queue(), p.queue_index()))`
+/// `queue_data` is `self.session.playback.player.as_ref().map(|p| (p.queue(), p.queue_index()))`
 /// — `None` when there is no active player (nothing has ever played).
 pub fn queue_view<'a>(
     queue_data: Option<(&'a [Track], usize)>,

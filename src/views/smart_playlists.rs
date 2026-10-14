@@ -68,13 +68,6 @@ pub enum SmartPlaylistMessage {
     /// Discard the in-progress edit and return to the list.
     EditorCancel,
 
-    // -- Async results, dispatched from app.rs after off-thread DB work --
-    /// Saved smart playlists (with resolved track counts) loaded from the DB.
-    Loaded(Vec<SmartPlaylist>),
-    /// Resolved tracks for the currently selected smart playlist (detail view).
-    TracksLoaded(Vec<Track>),
-    /// Resolved tracks ready for immediate playback (bypasses the detail view).
-    PlayResolved(Vec<Track>),
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
     /// Open the Properties drawer for this track.

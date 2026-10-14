@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use super::history::{AlbumRef, HomeData, PlayTracker};
+use super::home::HomeCache;
 use crate::fl;
 use crate::online::similar::SimilarShelf;
 
@@ -41,6 +42,8 @@ pub struct HomeState {
     pub similar_request: u64,
     /// Stops the in-flight similar-artist lookup when a new one starts.
     pub similar_cancel: Arc<AtomicBool>,
+    /// What the loaded shelves are valid for (see [`HomeCache`]).
+    pub cache: HomeCache,
 }
 
 /// Cheap, per-frame facts about the library the Home view needs.

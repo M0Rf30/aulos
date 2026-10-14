@@ -129,8 +129,10 @@ impl AppModel {
 
     /// The whole window content while in mini-player mode.
     pub(super) fn mini_player_view(&self) -> Element<'_, Message> {
-        let track = self.current_track.as_ref();
+        let track = self.session.playback.current_track.as_ref();
         let state = self
+            .session
+            .playback
             .player
             .as_ref()
             .map(|p| p.state())
@@ -139,7 +141,8 @@ impl AppModel {
         let (progress, seeking) = match self.seeking_preview {
             Some(fraction) => (fraction, true),
             None if duration > Duration::ZERO => (
-                (self.playback_position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0),
+                (self.session.playback.position.as_secs_f32() / duration.as_secs_f32())
+                    .clamp(0.0, 1.0),
                 false,
             ),
             None => (0.0, false),
@@ -163,7 +166,7 @@ impl AppModel {
             cover,
             playing: state == PlaybackState::Playing,
             progress,
-            position: self.playback_position,
+            position: self.session.playback.position,
             duration,
             seeking,
             accent: self

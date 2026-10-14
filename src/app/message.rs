@@ -5,12 +5,9 @@ use super::ContextPage;
 use crate::views::radio as radio_view;
 use crate::views::{albums, artists, convert, podcasts};
 use aulos_core::config::{Config, ReplayGainMode};
-use aulos_core::library::{Album, Artist, Lyrics, Track};
-use aulos_core::player::PlaybackState;
+use aulos_core::library::Track;
 use cosmic::widget;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// All application messages.
 #[derive(Debug, Clone)]
@@ -20,19 +17,8 @@ pub enum Message {
     ToggleContextPage(ContextPage),
     /// Open the Properties drawer for a track (see `AppModel::open_track_properties`).
     ShowTrackProperties(Track),
-    /// The off-thread technical probe of a track finished. `request_id`
-    /// identifies the drawer opening it belongs to; results of an older
-    /// opening are dropped (see `aulos_core::library::properties::PropertiesState::accepts`).
-    PropertiesLoaded {
-        request_id: u64,
-        result: Result<aulos_core::library::tech_info::TechInfo, String>,
-    },
-    /// The off-thread album summary finished (same `request_id` rule).
-    AlbumPropertiesLoaded {
-        request_id: u64,
-        summary: aulos_core::library::tech_info::AlbumSummary,
-    },
-    /// A user action inside the Properties drawer.
+    /// Off-thread result of opening the Properties drawer.
+    PropertiesProbed(aulos_core::session::PropertiesEvent),
     Properties(crate::views::track_properties::PropertiesMessage),
     /// Set the grid card size multiplier (clamped to `GRID_SCALE_RANGE`).
     SetGridScale(f32),
@@ -58,79 +44,25 @@ pub enum Message {
     /// Debounce timer for `LibrarySearchChanged`; carries the generation
     /// it was scheduled for (ignored if a newer keystroke arrived).
     LibrarySearchDebounced(u64),
-    /// Result of a favourite toggle dispatched off the UI thread.
-    /// `optimistic` is the state already applied locally.
-    FavoriteToggled {
-        track_id: String,
-        optimistic: bool,
-        result: Result<bool, String>,
-    },
-    /// Result of a rating change; `previous` is restored on error.
-    RatingSet {
-        track_id: String,
-        previous: Option<u8>,
-        result: Result<(), String>,
-    },
-    /// Result of a provider playlist mutation (add/create/delete/rename).
-    PlaylistOpDone {
-        op: PlaylistOp,
-        result: Result<(), String>,
-    },
     /// Toggle the header search input on/off.
     ToggleLibrarySearch,
     /// Clear the search query and deactivate the search input (Esc / clear icon).
     ClearLibrarySearch,
     // Library
     ScanLibrary,
-    /// `count` is the number of tracks the scan updated; `generation`
-    /// and `provider_id` identify the reload/scan this result belongs
-    /// to, so stale results (superseded by a later reload or a provider
-    /// switch) can be ignored.
-    LibraryScanComplete {
-        generation: u64,
-        provider_id: String,
-        count: usize,
-    },
-    LibraryLoaded {
-        generation: u64,
-        provider_id: String,
-        tracks: Vec<Track>,
-        albums: Vec<Album>,
-        artists: Vec<Artist>,
-        cover_images: HashMap<String, widget::icon::Handle>,
-        /// Content fingerprint of each album's cover (see
-        /// `helpers::cover_fingerprint`), used to keep an unchanged cover's
-        /// existing handle on refresh. The full-size bytes are deliberately
-        /// not carried: they are loaded lazily for the album that needs them.
-        cover_fingerprints: HashMap<String, u64>,
-    },
+    /// Async result of a library workflow (scan, load, batch, genres,
+    /// favourite/rating changes); see `Session::apply_library_event`.
+    Library(aulos_core::session::LibraryEvent),
     /// Filesystem watcher detected changes in music directories.
     /// Contains the deduplicated list of changed paths after debounce.
     FilesChanged(Vec<PathBuf>),
 
-    /// Incremental batch of albums from a remote provider (e.g. Subsonic).
-    /// Each batch appends albums, derives tracks/artists, and updates the UI.
-    LibraryBatch {
-        generation: u64,
-        provider_id: String,
-        albums: Vec<Album>,
-        cover_images: HashMap<String, widget::icon::Handle>,
-        /// Content fingerprint of each album's cover (see
-        /// `helpers::cover_fingerprint`), used to keep an unchanged cover's
-        /// existing handle on refresh. The full-size bytes are deliberately
-        /// not carried: they are loaded lazily for the album that needs them.
-        cover_fingerprints: HashMap<String, u64>,
-    },
-    /// Signals that incremental loading is complete.
-    LibraryLoadComplete {
-        generation: u64,
-        provider_id: String,
-    },
     /// Full-size cover bytes for `key` were loaded on demand (blur, detail
     /// hero, notification); `None` when the album has no art.
     CoverBytesLoaded(String, Option<Vec<u8>>),
-    /// Startup keyring check finished; the config changes it wants applied.
-    CredentialsChecked(Vec<super::init::CredentialUpdate>),
+    /// Result of a background keyring job (startup credential check,
+    /// AcoustID key probe/save).
+    Keyring(aulos_core::session::ConfigEvent),
 
     // Player transport
     TogglePlayback,
@@ -253,8 +185,9 @@ pub enum Message {
     NewPlaylistNameChanged(String),
     /// The rename input changed (playlist index, new text).
     RenamePlaylistInput(usize, String),
-    /// Playlists have been loaded from the provider.
-    PlaylistsLoaded(Vec<aulos_core::library::Playlist>),
+    /// Async result of a playlist workflow (load, provider mutation, smart
+    /// playlists, file import).
+    PlaylistEvent(aulos_core::session::PlaylistEvent),
 
     // Smart playlists view — a single wrapped variant keeps this feature's
     // full message vocabulary (list/detail/editor) out of the top-level enum.
@@ -262,6 +195,8 @@ pub enum Message {
 
     // Home page (suggested music, play history)
     Home(crate::views::home::HomeMessage),
+    /// Async result of a Home workflow (shelves, decades, play history).
+    HomeEvent(aulos_core::session::HomeEvent),
 
     // Startup preferences (Settings drawer)
     Startup(super::startup::StartupMessage),
@@ -279,14 +214,6 @@ pub enum Message {
     PlayGenreTrack(usize),
     /// Play the selected genre's tracks in shuffled order.
     ShuffleGenre,
-    /// Genres have been loaded from the provider.
-    GenresLoaded(Vec<String>),
-    /// Genre tracks have been loaded.
-    GenreTracksLoaded {
-        /// Genre index the load was issued for; stale results are dropped.
-        idx: usize,
-        tracks: Vec<Track>,
-    },
 
     // Folders view
     /// Messages from the folder browse view (navigation, playback,
@@ -295,7 +222,6 @@ pub enum Message {
 
     // Lyrics
     ShowLyrics,
-    LyricsLoaded(Option<Lyrics>),
     FetchLyricsOnline,
 
     // Equalizer
@@ -321,12 +247,10 @@ pub enum Message {
     AutoEQSearchChanged(String),
     /// Fetch AutoEQ index from GitHub (triggered by "Load AutoEQ..." button).
     FetchAutoEQIndex,
-    /// AutoEQ index fetched successfully (or error).
-    AutoEQIndexLoaded(Result<Vec<aulos_core::autoeq::AutoEQProfileMetadata>, String>),
     /// Select an AutoEQ profile by path from the dropdown.
     EqSelectAutoEQ(String),
-    /// AutoEQ profile fetched and ready to apply (or error).
-    AutoEQProfileLoaded(Result<aulos_core::autoeq::AutoEQProfile, String>),
+    /// An AutoEQ index/profile download finished.
+    AutoEQEvent(aulos_core::session::EqualizerEvent),
 
     // Settings
     AddMusicDir,
@@ -359,9 +283,6 @@ pub enum Message {
     EditAcoustidUserKey(String),
     /// Store the typed AcoustID user key in the keyring (empty deletes it).
     SaveAcoustidUserKey,
-    /// Result of a keyring read/write of the AcoustID user key: whether a
-    /// key is now stored, or the keyring error.
-    AcoustidUserKeyStored(Result<bool, String>),
     /// Toggle preferring the Cover Art Archive front cover in the tag editor.
     SetTaggerUseCaaCover(bool),
 
@@ -377,7 +298,8 @@ pub enum Message {
     MpdSaveServer(usize),
     MpdRemoveServer(usize),
     MpdTestConnection(usize),
-    MpdTestResult(usize, Result<(), String>),
+    /// Result of a connection test of an MPD or Subsonic card.
+    ProviderEvent(aulos_core::session::ProviderEvent),
 
     // MPD provider events
     MpdConnected(String),
@@ -390,16 +312,10 @@ pub enum Message {
     /// state, volume). `song` is `Some` only on the tick where MPD's
     /// current song identity changed (including the first tick after the
     /// subscription starts) — most ticks carry `None`.
-    MpdStatusUpdate {
-        position: Duration,
-        duration: Duration,
-        state: PlaybackState,
-        /// `None` when MPD has no mixer (volume unknown).
-        volume: Option<f32>,
-        song: Option<Track>,
-    },
-    /// An async MPD command failed — log and let the next poll self-correct.
-    MpdCommandError(String),
+    MpdStatusUpdate(aulos_core::provider::mpd_events::MpdStatusUpdate),
+    /// Result of asynchronous playback work (MPD commands, MPRIS art,
+    /// lyrics, opened files, inhibit and notification requests).
+    PlaybackEvent(aulos_core::session::PlaybackEvent),
 
     // Subsonic provider configuration
     SubsonicAddServer,
@@ -411,7 +327,6 @@ pub enum Message {
     SubsonicSaveServer(usize),
     SubsonicRemoveServer(usize),
     SubsonicTestConnection(usize),
-    SubsonicTestResult(usize, Result<(), String>),
     /// Subsonic transcoding bitrate changed (server index, bitrate or None).
     SubsonicTranscodingBitrate(usize, Option<u32>),
     /// Subsonic transcoding format changed (server index, format or None).
@@ -499,8 +414,8 @@ pub enum Message {
     // Podcasts
     /// UI events from the podcasts view (see `views::podcasts::PodcastMessage`).
     Podcast(podcasts::PodcastMessage),
-    /// Async results for the podcasts page (see `app::podcast_page::PodcastEvent`).
-    PodcastEvent(super::podcast_page::PodcastEvent),
+    /// Async results for the podcasts page.
+    PodcastEvent(aulos_core::session::PodcastEvent),
     /// A podcast/radio icon (artwork or favicon) finished downloading.
     /// `Some((width, height, rgba_pixels))` on success (already decoded
     /// and downscaled off-thread by `load_online_icons`, so the handler
@@ -511,8 +426,8 @@ pub enum Message {
     // Radio
     /// UI events from the radio view (see `views::radio::RadioMessage`).
     Radio(radio_view::RadioMessage),
-    /// Async results for the radio page (see `app::radio_page::RadioEvent`).
-    RadioEvent(super::radio_page::RadioEvent),
+    /// Async results for the radio page.
+    RadioEvent(aulos_core::session::RadioEvent),
 
     /// A toast notification was dismissed (by timeout or user action).
     CloseToast(widget::toaster::ToastId),
@@ -542,13 +457,6 @@ pub enum Message {
     /// file manager via `Exec=aulos %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri`).
     OpenFiles(Vec<PathBuf>),
-    /// The background tag-read kicked off by `OpenFiles` has finished;
-    /// queues the resulting tracks for playback. Empty when none of the
-    /// paths were readable audio files.
-    OpenFilesScanned(Vec<Track>),
-    /// Result of a background cover-art resolve kicked off by
-    /// `publish_mpris` for a track not yet in the MPRIS art cache.
-    MprisArtResolved(i64, Option<String>),
 
     // Playlist import/export, mini player, compilations and album filters
     /// M3U/M3U8/PLS playlist import and M3U export (see `app::playlist_io`).
@@ -634,13 +542,4 @@ impl From<artists::ArtistMessage> for Message {
             }
         }
     }
-}
-
-/// Which provider playlist mutation a `Message::PlaylistOpDone` reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaylistOp {
-    AddTrack,
-    Create,
-    Delete,
-    Rename,
 }

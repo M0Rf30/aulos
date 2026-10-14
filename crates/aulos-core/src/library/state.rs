@@ -158,6 +158,12 @@ pub struct LibraryState {
     pub search_debounce_gen: u64,
     /// Results of the current search; see [`SearchFilter`].
     pub filtered: SearchFilter,
+    /// Whether a library scan/reload is in flight.
+    pub scanning: bool,
+    /// [`Self::generation`] the UI's folder tree was last built for.
+    pub folder_tree_gen: Option<u64>,
+    /// Whether any configured music dir exists (cached; avoids `stat` per frame).
+    pub music_dirs_present: bool,
 }
 
 impl LibraryState {

@@ -45,6 +45,8 @@ impl AppModel {
 
         // Playback position ticker.
         let is_playing = self
+            .session
+            .playback
             .player
             .as_ref()
             .is_some_and(|p| p.state() == PlaybackState::Playing);
@@ -56,9 +58,9 @@ impl AppModel {
         // `active_backend_type()` only flips to `Mpd` once Aulos itself has
         // issued a `play` through it — gating on either would mean Aulos
         // never polls a server that was already playing before the switch.
-        if let Some(player) = &self.player
+        if let Some(player) = &self.session.playback.player
             && let Some(mpd) = player.mpd_backend_ref()
-            && let Some(provider) = self.active_mpd_provider()
+            && let Some(provider) = self.session.active_mpd_provider()
         {
             // MPD: poll status from the server — position/duration/state/
             // volume/current-song all come from the real MPD status.
@@ -79,6 +81,8 @@ impl AppModel {
         // provider — and that playback still needs its position ticked.
         if is_playing
             && self
+                .session
+                .playback
                 .player
                 .as_ref()
                 .is_some_and(|p| p.active_backend_type() != ActiveBackend::Mpd)
@@ -93,7 +97,7 @@ impl AppModel {
         // 2. Command connection — stored in MpdProvider for browse/search/playback
         //
         // This avoids protocol conflicts between idle mode and command execution.
-        for (idx, provider) in self.mpd_providers.iter().enumerate() {
+        for (idx, provider) in self.session.providers.mpd_providers.iter().enumerate() {
             let provider = Arc::clone(provider);
             subs.push(Subscription::run_with(
                 MpdIdleKey::new(idx, provider),
@@ -104,9 +108,11 @@ impl AppModel {
         // Convert queue progress ticker (every 500ms while jobs are running);
         // gated on the experimental-converter flag so it never runs while
         // the feature (and its nav entry) is disabled.
-        if self.config.experimental_converter
+        if self.session.config.config.experimental_converter
             && self
-                .convert_jobs
+                .session
+                .convert
+                .jobs
                 .iter()
                 .any(|j| j.state == JobState::Running)
         {
@@ -156,10 +162,12 @@ impl AppModel {
             && self.expand_progress > 0.0
             && let Some(pcm_buf) = &self.pcm_buffer
             && self
+                .session
+                .playback
                 .player
                 .as_ref()
                 .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd)
-            && let Some(provider) = self.active_mpd_provider()
+            && let Some(provider) = self.session.active_mpd_provider()
         {
             if aulos_core::player::pw_capture::is_local_mpd_host(provider.host()) {
                 let pcm = Arc::clone(pcm_buf);
@@ -191,13 +199,13 @@ impl AppModel {
         // Debounces events with a 2-second quiet timer before emitting
         // Message::FilesChanged with the collected paths.
         {
-            let is_local_active = self
-                .registry
-                .active()
-                .is_some_and(|p| p.provider_type() == aulos_core::provider::ProviderType::Local);
+            let is_local_active =
+                self.session.providers.registry.active().is_some_and(|p| {
+                    p.provider_type() == aulos_core::provider::ProviderType::Local
+                });
 
-            if is_local_active && !self.config.music_dirs.is_empty() {
-                let music_dirs = self.config.music_dirs.clone();
+            if is_local_active && !self.session.config.config.music_dirs.is_empty() {
+                let music_dirs = self.session.config.config.music_dirs.clone();
                 subs.push(Subscription::run_with(music_dirs, fs_watcher_stream));
             }
         }
@@ -251,13 +259,7 @@ impl AppModel {
 /// MPD: forwards the core status poll (see
 /// `aulos_core::provider::mpd_events::status_stream`) as `MpdStatusUpdate`.
 fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
-    status_stream(key).map(|update| Message::MpdStatusUpdate {
-        position: update.position,
-        duration: update.duration,
-        state: update.state,
-        volume: update.volume,
-        song: update.song,
-    })
+    status_stream(key).map(Message::MpdStatusUpdate)
 }
 
 /// Local/Subsonic: simple tick for UI updates (no captured state).

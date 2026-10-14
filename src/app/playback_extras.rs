@@ -27,13 +27,9 @@
 
 use super::{AppModel, Message};
 use aulos_core::config::AutoPlayMode;
-use aulos_core::desktop::{inhibit, notify};
-use aulos_core::player::PlaybackState;
-use aulos_core::player::extras::{
-    CloseAction, InhibitStep, close_action, toggle_party_genre, toggle_stop_after, wants_inhibit,
-};
+use aulos_core::player::extras::{CloseAction, close_action};
 use cosmic::Task;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 type AppTask = Task<cosmic::Action<Message>>;
 
@@ -54,12 +50,6 @@ pub enum PlaybackExtrasMessage {
     SetBackgroundPlayback(bool),
     /// The window was asked to close (header button, compositor, Alt+F4).
     CloseRequested,
-    /// Result of an async inhibit request.
-    InhibitAcquired(Option<inhibit::InhibitToken>),
-    /// The notification server's id for the last notification, to replace.
-    NotificationSent(Option<u32>),
-    /// Result of a fire-and-forget task.
-    Noop,
     /// Periodic housekeeping while idle/paused (the playback tick only runs
     /// while playing): releases the inhibit lock after a pause or stop.
     Sync,
@@ -68,217 +58,73 @@ pub enum PlaybackExtrasMessage {
 impl AppModel {
     /// Push the persisted settings into a (re)created player.
     pub(super) fn apply_playback_extras_config(&mut self) {
-        if let Some(player) = &mut self.player {
-            player.set_fade_secs(self.config.fade_duration_secs);
+        if let Some(player) = &mut self.session.playback.player {
+            player.set_fade_secs(self.session.config.config.fade_duration_secs);
         }
     }
 
     pub(super) fn update_playback_extras(&mut self, msg: PlaybackExtrasMessage) -> AppTask {
         match msg {
             PlaybackExtrasMessage::ToggleStopAfter => {
-                if let Some(player) = &mut self.player {
-                    toggle_stop_after(player);
-                }
+                self.session.toggle_stop_after();
                 Task::none()
             }
             PlaybackExtrasMessage::SetFadeDuration(secs) => {
-                let secs = secs.clamp(0.0, aulos_core::player::engine::fade::MAX_FADE_SECS);
-                self.config.fade_duration_secs = secs;
-                if let Some(player) = &mut self.player {
-                    player.set_fade_secs(secs);
-                }
-                self.save_config();
+                self.session.set_fade_duration(secs);
+                self.session.config.save();
                 Task::none()
             }
             PlaybackExtrasMessage::SetAutoPlayMode(mode) => {
-                self.config.auto_play_mode = mode;
-                self.save_config();
-                self.top_up_queue()
+                self.session.set_auto_play_mode(mode);
+                self.session.config.save();
+                Task::none()
             }
             PlaybackExtrasMessage::SetPartyMode(on) => {
-                self.config.party_mode = on;
-                self.save_config();
-                if on { self.start_party() } else { Task::none() }
+                let update = self.session.set_party_mode(on);
+                self.session.config.save();
+                self.playback_task(update)
             }
             PlaybackExtrasMessage::TogglePartyMode => {
-                let on = !self.config.party_mode;
+                let on = !self.session.config.config.party_mode;
                 self.update_playback_extras(PlaybackExtrasMessage::SetPartyMode(on))
             }
             PlaybackExtrasMessage::TogglePartyGenre(genre) => {
-                toggle_party_genre(&mut self.config.party_genres, genre);
-                self.save_config();
-                if self.config.party_mode {
-                    // The upcoming queue was drawn from the old pool.
-                    self.playback_extras
-                        .party_pool_changed(self.player.as_mut());
-                    return self.top_up_queue();
-                }
+                self.session.toggle_party_genre(genre);
+                self.session.config.save();
                 Task::none()
             }
             PlaybackExtrasMessage::SetNotifyTrackChange(on) => {
-                self.config.notify_track_change = on;
-                self.save_config();
+                self.session.config.config.notify_track_change = on;
+                self.session.config.save();
                 Task::none()
             }
             PlaybackExtrasMessage::SetInhibit(on) => {
-                self.config.inhibit_while_playing = on;
-                self.save_config();
-                self.playback_extras.clear_inhibit_retry();
-                self.sync_inhibit()
+                let effect = self.session.set_inhibit_while_playing(on);
+                self.session.config.save();
+                self.playback_effect(effect)
             }
             PlaybackExtrasMessage::SetBackgroundPlayback(on) => {
-                self.config.background_playback = on;
-                self.save_config();
+                self.session.config.config.background_playback = on;
+                self.session.config.save();
                 Task::none()
             }
             PlaybackExtrasMessage::CloseRequested => self.handle_close_requested(),
-            PlaybackExtrasMessage::InhibitAcquired(token) => {
-                let wanted = self.wants_inhibit();
-                // A token comes back only when playback stopped while the
-                // request was in flight.
-                match self
-                    .playback_extras
-                    .inhibit_acquired(token, wanted, Instant::now())
-                {
-                    Some(token) => release_token(token),
-                    None => Task::none(),
-                }
+            PlaybackExtrasMessage::Sync => {
+                let effect = self.session.playback_extras_tick();
+                self.playback_effect(effect)
             }
-            PlaybackExtrasMessage::NotificationSent(id) => {
-                if let Some(id) = id {
-                    self.playback_extras.set_notification_id(id);
-                }
-                Task::none()
-            }
-            PlaybackExtrasMessage::Noop => Task::none(),
-            PlaybackExtrasMessage::Sync => self.playback_extras_tick(),
         }
     }
-
-    /// Called from every `PlaybackTick`: keeps the queue topped up,
-    /// the inhibit lock in step with the playback state, and the engine's
-    /// fade duration in step with the (possibly externally edited) config.
-    pub(super) fn playback_extras_tick(&mut self) -> AppTask {
-        if let Some(player) = &mut self.player {
-            player.set_fade_secs(self.config.fade_duration_secs);
-        }
-        Task::batch([self.top_up_queue(), self.sync_inhibit()])
-    }
-
-    // -- Auto-play / party ---------------------------------------------
-
-    /// Append more music when the queue is about to run out (auto-random /
-    /// auto-similar) or party mode wants its look-ahead refilled; the
-    /// selection lives in `aulos_core::player::extras`.
-    fn top_up_queue(&mut self) -> AppTask {
-        self.playback_extras.top_up_queue(
-            self.player.as_mut(),
-            self.current_track.as_ref(),
-            &self.library.tracks,
-            &self.config,
-        );
-        Task::none()
-    }
-
-    /// Party mode was just switched on: make the upcoming queue party
-    /// material, starting playback from the pool if nothing is playing.
-    fn start_party(&mut self) -> AppTask {
-        match self.playback_extras.start_party(
-            self.player.as_mut(),
-            self.current_track.as_ref(),
-            &self.library.tracks,
-            &self.config,
-        ) {
-            Some(picks) => self.play_track_list(picks, 0),
-            None => Task::none(),
-        }
-    }
-
-    // -- Inhibit -------------------------------------------------------
-
-    fn wants_inhibit(&self) -> bool {
-        wants_inhibit(self.config.inhibit_while_playing, self.player.as_ref())
-    }
-
-    /// Acquire/release the suspend+idle inhibition to match playback.
-    fn sync_inhibit(&mut self) -> AppTask {
-        let want = self.wants_inhibit();
-        match self.playback_extras.sync_inhibit(want, Instant::now()) {
-            InhibitStep::Acquire => cosmic::task::future(async {
-                let token = inhibit::acquire(inhibit::REASON).await;
-                cosmic::Action::App(Message::Playback(PlaybackExtrasMessage::InhibitAcquired(
-                    token,
-                )))
-            }),
-            InhibitStep::Release(token) => release_token(token),
-            InhibitStep::None => Task::none(),
-        }
-    }
-
-    // -- Notifications -------------------------------------------------
 
     /// Pop a desktop notification for the track that just became current,
     /// when enabled and the window isn't focused.
     pub(super) fn notify_track_changed(&mut self) -> AppTask {
-        let Some(track) = self.current_track.clone() else {
-            return Task::none();
-        };
-        let playing = self
-            .player
-            .as_ref()
-            .is_some_and(|p| p.state() == PlaybackState::Playing);
         let focused = self.core.focused_window().is_some();
-        let Some(replaces_id) = self.playback_extras.begin_notification(
-            self.config.notify_track_change,
-            focused,
-            playing,
-            &track,
-        ) else {
-            return Task::none();
-        };
-
-        let cover_key = track.cover_key();
-        let cover_bytes = self.cover_art_bytes.get(&cover_key);
-        // Not cached: load the bytes inside the blocking job below instead of
-        // keeping every album's cover in memory.
-        let lazy_cover = if cover_bytes.is_none() {
-            self.registry.active_shared().zip(
-                self.library
-                    .cover_hint_for(track.grouping_artist(), &track.album),
-            )
-        } else {
-            None
-        };
-
-        cosmic::task::future(async move {
-            let for_cover = track.clone();
-            let image = tokio::task::spawn_blocking(move || {
-                let loaded;
-                let bytes: Option<&[u8]> = match (&cover_bytes, &lazy_cover) {
-                    (Some(b), _) => Some(b.as_slice()),
-                    (None, Some((provider, hint))) => {
-                        loaded = provider.get_cover_art(hint).ok().flatten();
-                        loaded.as_deref()
-                    }
-                    (None, None) => None,
-                };
-                notify::prepare_cover(&for_cover, bytes)
-            })
-            .await
-            .ok()
-            .flatten();
-            let (summary, body) = notify::notification_text(&track);
-            let id = match notify::send(&summary, &body, image.as_deref(), replaces_id).await {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::debug!("track notification failed: {e}");
-                    None
-                }
-            };
-            cosmic::Action::App(Message::Playback(PlaybackExtrasMessage::NotificationSent(
-                id,
-            )))
-        })
+        let cover_art_bytes = &mut self.cover_art_bytes;
+        let effect = self
+            .session
+            .notify_track_changed(focused, |track| cover_art_bytes.get(&track.cover_key()));
+        self.playback_effect(effect)
     }
 
     // -- Window lifecycle ----------------------------------------------
@@ -288,14 +134,14 @@ impl AppModel {
     fn handle_close_requested(&mut self) -> AppTask {
         let main_window = self.core.main_window_id();
         let action = close_action(
-            self.config.background_playback,
-            self.player.as_ref(),
+            self.session.config.config.background_playback,
+            self.session.playback.player.as_ref(),
             main_window.is_some(),
         );
         if let (CloseAction::Minimize, Some(id)) = (action, main_window) {
             return cosmic::iced::window::minimize(id, true);
         }
-        self.flush_config();
+        self.session.config.flush();
         cosmic::iced::exit()
     }
 
@@ -310,14 +156,6 @@ impl AppModel {
     }
 }
 
-/// Release a held inhibition in the background.
-fn release_token(token: inhibit::InhibitToken) -> AppTask {
-    cosmic::task::future(async move {
-        token.release().await;
-        cosmic::Action::App(Message::Playback(PlaybackExtrasMessage::Noop))
-    })
-}
-
 impl AppModel {
     /// Subscriptions owned by this module: window-close requests from the
     /// compositor (`exit_on_close` is off, see `main.rs`), plus — only while
@@ -329,7 +167,7 @@ impl AppModel {
             cosmic::iced::window::close_requests()
                 .map(|_| Message::Playback(PlaybackExtrasMessage::CloseRequested)),
         ];
-        if self.playback_extras.inhibit_busy() {
+        if self.session.playback.extras.inhibit_busy() {
             subs.push(cosmic::iced::Subscription::run(sync_stream));
         }
         cosmic::iced::Subscription::batch(subs)
@@ -373,7 +211,7 @@ impl AppModel {
         use cosmic::widget;
 
         let sp = cosmic::theme::active().cosmic().spacing;
-        let cfg = &self.config;
+        let cfg = &self.session.config.config;
         type Msg = PlaybackExtrasMessage;
 
         // Fade duration.
@@ -435,6 +273,7 @@ impl AppModel {
 
         if cfg.party_mode {
             let chips: Vec<cosmic::Element<'_, Msg>> = self
+                .session
                 .library
                 .genres
                 .iter()

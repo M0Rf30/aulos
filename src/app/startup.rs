@@ -154,10 +154,10 @@ impl AppModel {
     /// The "Startup" block of the Settings drawer.
     pub(super) fn startup_settings(&self) -> cosmic::Element<'_, StartupMessage> {
         let page_labels: Vec<String> = STARTUP_OPTIONS.iter().map(|k| option_label(k)).collect();
-        let provider_opts = provider_options(&self.config);
+        let provider_opts = provider_options(&self.session.config.config);
         let provider_labels: Vec<String> = provider_opts.iter().map(|(_, l)| l.clone()).collect();
         let provider_selected =
-            provider_option_index(&provider_opts, &self.config.startup_provider);
+            provider_option_index(&provider_opts, &self.session.config.config.startup_provider);
 
         widget::settings::section()
             .title(fl!("settings-startup"))
@@ -166,7 +166,9 @@ impl AppModel {
                     .description(fl!("startup-page-description"))
                     .control(widget::dropdown(
                         page_labels,
-                        Some(startup_option_index(&self.config.startup_page)),
+                        Some(startup_option_index(
+                            &self.session.config.config.startup_page,
+                        )),
                         StartupMessage::SetPage,
                     )),
             )
@@ -190,14 +192,14 @@ impl AppModel {
         match msg {
             StartupMessage::SetPage(i) => {
                 if let Some(key) = STARTUP_OPTIONS.get(i) {
-                    self.config.startup_page = (*key).to_string();
-                    self.save_config();
+                    self.session.config.config.startup_page = (*key).to_string();
+                    self.session.config.save();
                 }
             }
             StartupMessage::SetProvider(i) => {
-                if let Some((value, _)) = provider_options(&self.config).get(i) {
-                    self.config.startup_provider = value.clone();
-                    self.save_config();
+                if let Some((value, _)) = provider_options(&self.session.config.config).get(i) {
+                    self.session.config.config.startup_provider = value.clone();
+                    self.session.config.save();
                 }
             }
         }
@@ -210,9 +212,9 @@ impl AppModel {
             return;
         };
         let key = page_key(page);
-        if self.config.last_view != key {
-            self.config.last_view = key.to_string();
-            self.save_config();
+        if self.session.config.config.last_view != key {
+            self.session.config.config.last_view = key.to_string();
+            self.session.config.save();
         }
     }
 }

@@ -33,9 +33,13 @@ impl AppModel {
                 | ScrobbleMessage::Disconnect(_)
                 | ScrobbleMessage::SaveLastFmKeys
         );
-        let (effect, changed) = self.scrobble.update(msg, &mut self.config);
+        let (effect, changed) = self
+            .session
+            .playback
+            .scrobble
+            .update(msg, &mut self.session.config.config);
         if changed {
-            self.save_config();
+            self.session.config.save();
         }
         let mut tasks =
             vec![super::tasks::effect(effect).map(|m| cosmic::Action::App(Message::Scrobble(m)))];
@@ -92,17 +96,23 @@ impl AppModel {
     /// A track was (un)favorited in Aulos: mirror it to Last.fm if enabled.
     pub(super) fn scrobble_favorite_changed(&mut self, track_id: &str, loved: bool) {
         let track = self
+            .session
             .library
             .tracks
             .iter()
             .find(|t| t.id.to_string() == track_id)
             .or(self
+                .session
+                .playback
                 .current_track
                 .as_ref()
                 .filter(|t| t.id.to_string() == track_id))
             .cloned();
         if let Some(track) = track {
-            self.scrobble.on_favorite_changed(track_id, &track, loved);
+            self.session
+                .playback
+                .scrobble
+                .on_favorite_changed(track_id, &track, loved);
         }
     }
 
@@ -112,20 +122,23 @@ impl AppModel {
         let LovedSyncPlan {
             to_favorite,
             to_love,
-        } = plan_sync(&self.library.tracks, loved);
+        } = plan_sync(&self.session.library.tracks, loved);
 
         let added = to_favorite.len();
         let pushed = to_love.len();
         for (artist, title) in to_love {
-            self.scrobble.love_bulk(artist, title);
+            self.session.playback.scrobble.love_bulk(artist, title);
         }
         let mut tasks = Vec::new();
         for id in to_favorite {
             // These toggles come from Last.fm itself; don't echo them back.
-            self.scrobble.suppress_next_love(id.clone());
+            self.session
+                .playback
+                .scrobble
+                .suppress_next_love(id.clone());
             tasks.push(self.handle_message(Message::ToggleFavorite(id)));
         }
-        self.scrobble.finish_sync(fl!(
+        self.session.playback.scrobble.finish_sync(fl!(
             "scrobble-sync-done",
             added = added.to_string(),
             pushed = pushed.to_string()

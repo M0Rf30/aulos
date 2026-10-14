@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! M3U/M3U8/PLS playlist import and M3U export: portal file dialogs, the
-//! background task wrappers, and the result toasts. The parsing, writing and
-//! matching logic lives in `aulos_core::library::m3u`, the blocking
-//! import/export in `aulos_core::library::playlist_io`.
+//! Playlist glue: the M3U/M3U8/PLS import/export portal file dialogs, the
+//! result toasts, and the bridge from the session's playlist workflows
+//! (`aulos_core::session::playlists`) to iced tasks.
 
 use super::{AppModel, Message};
 use aulos_core::fl;
 use aulos_core::library::m3u;
 use aulos_core::library::playlist_io::{self, ExportOutcome, ExportSource, ImportSummary};
+use aulos_core::session::{PlaylistEvent, PlaylistOutcome};
+use aulos_core::task::Effect;
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -17,9 +18,9 @@ use std::path::PathBuf;
 /// Messages of the playlist import/export feature.
 #[derive(Debug, Clone)]
 pub enum PlaylistIo {
-    /// Export the playlist at this index of `AppModel::playlists`.
+    /// Export the playlist at this index of `Session::playlists`.
     Export(usize),
-    /// Export the smart playlist at this index of `AppModel::smart_playlists`.
+    /// Export the smart playlist at this index of `Session::smart_playlists`.
     ExportSmart(usize),
     /// Export finished (`Ok(None)` = the dialog was cancelled).
     Exported(Result<Option<ExportOutcome>, String>),
@@ -27,37 +28,32 @@ pub enum PlaylistIo {
     PickFiles,
     /// Import these playlist files (from the dialog, the CLI or `OpenUri`).
     Import(Vec<PathBuf>),
-    /// Import finished, one summary per playlist file.
-    Imported(Result<Vec<ImportSummary>, String>),
+}
+
+/// Runs a playlist workflow's [`Effect`] as an iced task.
+pub(super) fn run(effect: Effect<PlaylistEvent>) -> Task<cosmic::Action<Message>> {
+    super::tasks::effect(effect).map(|event| cosmic::Action::App(Message::PlaylistEvent(event)))
 }
 
 impl AppModel {
     pub(super) fn update_playlist_io(&mut self, msg: PlaylistIo) -> Task<cosmic::Action<Message>> {
         match msg {
             PlaylistIo::Export(index) => {
-                let Some(playlist) = self.playlists.get(index) else {
+                let Some((name, source)) = self.session.playlists.export_tracks(index) else {
                     return Task::none();
                 };
-                if playlist.tracks.is_empty() {
+                if self.session.playlists.playlist_tracks(index).is_none() {
                     return self.push_toast(widget::toaster::Toast::new(fl!(
                         "toast-playlist-export-empty"
                     )));
                 }
-                export_task(
-                    playlist.name.clone(),
-                    ExportSource::Tracks(playlist.tracks.clone()),
-                    self.config.m3u_relative_paths,
-                )
+                export_task(name, source, self.session.config.config.m3u_relative_paths)
             }
             PlaylistIo::ExportSmart(index) => {
-                let Some(playlist) = self.smart_playlists.get(index) else {
+                let Some((name, source)) = self.session.playlists.export_smart(index) else {
                     return Task::none();
                 };
-                export_task(
-                    playlist.name.clone(),
-                    ExportSource::Smart(playlist.clone()),
-                    self.config.m3u_relative_paths,
-                )
+                export_task(name, source, self.session.config.config.m3u_relative_paths)
             }
             PlaylistIo::Exported(Ok(Some(outcome))) => {
                 let file = outcome
@@ -90,21 +86,48 @@ impl AppModel {
                 let paths = pick_playlist_files().await;
                 cosmic::Action::App(match paths {
                     Ok(paths) => Message::PlaylistIo(PlaylistIo::Import(paths)),
-                    Err(e) => Message::PlaylistIo(PlaylistIo::Imported(Err(e))),
+                    Err(e) => Message::PlaylistEvent(PlaylistEvent::Imported(Err(e))),
                 })
             }),
             PlaylistIo::Import(paths) => self.import_playlist_files(paths),
-            PlaylistIo::Imported(Ok(summaries)) => {
-                let toast = import_toast_text(&summaries);
-                let reload = self.load_playlists();
-                let toast_task = self.push_toast(widget::toaster::Toast::new(toast));
-                Task::batch([reload, toast_task])
+        }
+    }
+
+    /// Applies an async playlist result to the session and reacts to its
+    /// outcome (toasts, input/selection resets).
+    pub(super) fn update_playlist_event(
+        &mut self,
+        event: PlaylistEvent,
+    ) -> Task<cosmic::Action<Message>> {
+        let (effect, outcome) = self.session.apply_playlist_event(event);
+        let follow_up = run(effect);
+        let reaction = match outcome {
+            PlaylistOutcome::None => Task::none(),
+            PlaylistOutcome::PlaylistsChanged => {
+                self.refresh_search_filter();
+                Task::none()
             }
-            PlaylistIo::Imported(Err(reason)) => self.push_toast(widget::toaster::Toast::new(fl!(
-                "toast-playlist-import-failed",
+            PlaylistOutcome::Created => {
+                self.new_playlist_name.clear();
+                Task::none()
+            }
+            PlaylistOutcome::Deleted => {
+                self.selected_playlist = None;
+                Task::none()
+            }
+            PlaylistOutcome::Failed(reason) => self.push_toast(widget::toaster::Toast::new(fl!(
+                "toast-provider-action-failed",
                 reason = reason
             ))),
-        }
+            PlaylistOutcome::Play(tracks) => self.play_track_list(tracks, 0),
+            PlaylistOutcome::Imported(summaries) => {
+                self.push_toast(widget::toaster::Toast::new(import_toast_text(&summaries)))
+            }
+            PlaylistOutcome::ImportFailed(reason) => self.push_toast(widget::toaster::Toast::new(
+                fl!("toast-playlist-import-failed", reason = reason),
+            )),
+        };
+        Task::batch([follow_up, reaction])
     }
 
     /// Imports playlist files into new library playlists (background task).
@@ -114,17 +137,12 @@ impl AppModel {
         &mut self,
         paths: Vec<PathBuf>,
     ) -> Task<cosmic::Action<Message>> {
-        if paths.is_empty() {
-            return Task::none();
-        }
-        let db_path = aulos_core::paths::library_db_path();
-        cosmic::task::future(async move {
-            let result =
-                tokio::task::spawn_blocking(move || playlist_io::import_blocking(&paths, &db_path))
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-            cosmic::Action::App(Message::PlaylistIo(PlaylistIo::Imported(result)))
-        })
+        run(aulos_core::session::import_playlist_files(paths))
+    }
+
+    /// Reload the active provider's playlists.
+    pub(super) fn load_playlists(&self) -> Task<cosmic::Action<Message>> {
+        run(self.session.load_playlists())
     }
 }
 
@@ -174,13 +192,9 @@ async fn export_flow(
         path.set_extension("m3u8");
     }
 
-    tokio::task::spawn_blocking(move || {
-        source
-            .export(&path, &aulos_core::paths::library_db_path(), relative)
-            .map(Some)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    aulos_core::session::export_playlist(source, path, relative)
+        .await
+        .map(Some)
 }
 
 async fn pick_playlist_files() -> Result<Vec<PathBuf>, String> {

@@ -125,7 +125,7 @@ impl AppModel {
                         menu::Item::CheckBox(
                             fl!("party-mode"),
                             glyph("media-playlist-shuffle-symbolic"),
-                            self.config.party_mode,
+                            self.session.config.config.party_mode,
                             MenuAction::PartyMode,
                         ),
                         menu::Item::Folder(
@@ -146,7 +146,7 @@ impl AppModel {
                                 menu::Item::CheckBox(
                                     label,
                                     None,
-                                    self.config.auto_play_mode == mode,
+                                    self.session.config.config.auto_play_mode == mode,
                                     MenuAction::AutoPlay(mode),
                                 )
                             })
@@ -174,7 +174,7 @@ impl AppModel {
             return vec![];
         }
 
-        let input = widget::search_input(fl!("search-library"), &self.library.search_query)
+        let input = widget::search_input(fl!("search-library"), &self.session.library.search_query)
             .id(widget::Id::new(SEARCH_INPUT_ID))
             .on_input(Message::LibrarySearchChanged)
             .on_clear(Message::ClearLibrarySearch)
@@ -203,15 +203,18 @@ impl AppModel {
         let shows_card_grid = match self.nav.active_data::<Page>() {
             Some(Page::Albums) => {
                 self.selected_album.is_none()
-                    && self.config.albums_view_mode == aulos_core::config::ViewMode::Grid
+                    && self.session.config.config.albums_view_mode
+                        == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Artists) => {
                 self.selected_artist.is_none()
-                    && self.config.artists_view_mode == aulos_core::config::ViewMode::Grid
+                    && self.session.config.config.artists_view_mode
+                        == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Genres) => {
                 self.selected_genre.is_none()
-                    && self.config.genres_view_mode == aulos_core::config::ViewMode::Grid
+                    && self.session.config.config.genres_view_mode
+                        == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Folders | Page::Radio) => true,
             Some(Page::Podcasts) => self.selected_podcast.is_none(),
@@ -244,8 +247,10 @@ impl AppModel {
             );
         }
 
-        if self.provider_list.len() > 1 {
+        if self.session.providers.provider_list.len() > 1 {
             let provider_names: Vec<String> = self
+                .session
+                .providers
                 .provider_list
                 .iter()
                 .map(|(_, name)| name.clone())
@@ -253,7 +258,7 @@ impl AppModel {
 
             let dropdown = widget::dropdown(
                 provider_names,
-                self.active_provider_index,
+                self.session.providers.active_index,
                 Message::SwitchProvider,
             );
 
@@ -290,6 +295,8 @@ impl AppModel {
 
                 // MPD plays audio itself, so the local EQ has no effect there.
                 let mpd_active = self
+                    .session
+                    .playback
                     .player
                     .as_ref()
                     .is_some_and(|p| p.mpd_backend_ref().is_some());
@@ -297,15 +304,15 @@ impl AppModel {
                     equalizer::mpd_unavailable_view()
                 } else {
                     equalizer::equalizer_view(
-                        &self.config.equalizer_bands,
-                        self.config.equalizer_enabled,
-                        self.config.equalizer_preamp,
-                        &self.all_presets,
-                        self.active_preset_name.as_deref(),
-                        self.eq_dirty,
+                        &self.session.config.config.equalizer_bands,
+                        self.session.config.config.equalizer_enabled,
+                        self.session.config.config.equalizer_preamp,
+                        &self.session.equalizer.all_presets,
+                        self.session.equalizer.active_preset_name.as_deref(),
+                        self.session.equalizer.dirty,
                         &self.save_as_name,
-                        &self.autoeq_profiles,
-                        self.autoeq_loading,
+                        &self.session.equalizer.autoeq_profiles,
+                        self.session.equalizer.autoeq_loading,
                         &self.autoeq_search,
                     )
                 };
@@ -342,10 +349,10 @@ impl AppModel {
             }
             ContextPage::Providers => {
                 let providers_content = providers::providers_view(
-                    &self.mpd_edit_states,
-                    &self.mpd_connection_status,
-                    &self.subsonic_edit_states,
-                    &self.subsonic_connection_status,
+                    &self.session.providers.mpd_edit_states,
+                    &self.session.providers.mpd_connection_status,
+                    &self.session.providers.subsonic_edit_states,
+                    &self.session.providers.subsonic_connection_status,
                 )
                 .map(|msg| match msg {
                     // MPD
@@ -400,26 +407,28 @@ impl AppModel {
             }
             ContextPage::Settings => {
                 let volume = self
+                    .session
+                    .playback
                     .player
                     .as_ref()
                     .map(|p| p.volume())
-                    .unwrap_or(self.config.volume);
+                    .unwrap_or(self.session.config.config.volume);
 
                 let settings_content = settings::view(
-                    &self.config.music_dirs,
-                    self.config.crossfade_duration_secs,
-                    self.config.replay_gain_mode,
+                    &self.session.config.config.music_dirs,
+                    self.session.config.config.crossfade_duration_secs,
+                    self.session.config.config.replay_gain_mode,
                     volume,
-                    self.config.split_artist_tags,
-                    self.config.experimental_converter,
-                    self.config.fetch_artist_info,
+                    self.session.config.config.split_artist_tags,
+                    self.session.config.config.experimental_converter,
+                    self.session.config.config.fetch_artist_info,
                     &self.artist_tag_delimiters_input,
-                    self.config.grid_scale,
-                    self.config.show_compilations_in_artists,
-                    self.config.m3u_relative_paths,
+                    self.session.config.config.grid_scale,
+                    self.session.config.config.show_compilations_in_artists,
+                    self.session.config.config.m3u_relative_paths,
                     crate::views::scrobble::view(
-                        &self.scrobble,
-                        &self.config,
+                        &self.session.playback.scrobble,
+                        &self.session.config.config,
                         &self.settings_search,
                     )
                     .map(settings::SettingsMessage::Scrobble),
@@ -428,10 +437,10 @@ impl AppModel {
                     self.startup_settings()
                         .map(settings::SettingsMessage::Startup),
                     &self.settings_search,
-                    &self.config.acoustid_api_key,
+                    &self.session.config.config.acoustid_api_key,
                     &self.acoustid_user_key_input,
-                    self.acoustid_user_key_saved,
-                    self.config.tagger_use_caa_cover,
+                    self.session.config.acoustid_key_stored,
+                    self.session.config.config.tagger_use_caa_cover,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -500,23 +509,25 @@ impl AppModel {
             }
             ContextPage::Lyrics => {
                 let (title, artist) = self
+                    .session
+                    .playback
                     .current_track
                     .as_ref()
                     .map(|t| (t.title.as_str(), t.artist.as_str()))
                     .unwrap_or(("", ""));
 
                 let lyrics_content = lyrics::lyrics_view(
-                    self.lyrics_text.as_ref(),
-                    self.lyrics_loading,
-                    self.playback_position,
+                    self.session.playback.lyrics.as_ref(),
+                    self.session.playback.lyrics_loading,
+                    self.session.playback.position,
                     self.accent.as_ref(),
                 )
                 .map(map_lyrics_message);
                 let lyrics_header = lyrics::lyrics_header_view(
-                    self.lyrics_text.as_ref(),
+                    self.session.playback.lyrics.as_ref(),
                     title,
                     artist,
-                    self.playback_position,
+                    self.session.playback.position,
                     self.accent.as_ref(),
                 )
                 .map(map_lyrics_message);
@@ -529,22 +540,29 @@ impl AppModel {
                 .header(lyrics_header)
             }
             ContextPage::Queue => {
-                let queue_data = self.player.as_ref().map(|p| (p.queue(), p.queue_index()));
+                let queue_data = self
+                    .session
+                    .playback
+                    .player
+                    .as_ref()
+                    .map(|p| (p.queue(), p.queue_index()));
                 let playback_state = self
+                    .session
+                    .playback
                     .player
                     .as_ref()
                     .map(|p| p.state())
                     .unwrap_or(PlaybackState::Stopped);
                 let queue_content = queue::queue_view(
                     queue_data,
-                    self.current_track.as_ref(),
+                    self.session.playback.current_track.as_ref(),
                     playback_state,
                     &self.cover_images,
                 )
                 .map(map_queue_message);
                 let queue_header = queue::queue_header_view(
                     queue_data,
-                    self.current_track.as_ref(),
+                    self.session.playback.current_track.as_ref(),
                     playback_state,
                     &self.cover_images,
                 )
@@ -586,26 +604,26 @@ impl AppModel {
         // `experimental_converter` is on (see `AppModel::set_convert_nav_entry`),
         // but guard here too in case `last_view` restoration ever lands on
         // it while the flag is off.
-        let page = if page == Page::Convert && !self.config.experimental_converter {
+        let page = if page == Page::Convert && !self.session.config.config.experimental_converter {
             Page::Albums
         } else {
             page
         };
 
         let search_query_active =
-            self.search_active && !self.library.search_query.trim().is_empty();
+            self.search_active && !self.session.library.search_query.trim().is_empty();
 
         let content: Element<'_, Message> = match page {
             Page::Home => crate::views::home::home_view(
-                &self.home,
+                &self.session.home,
                 aulos_core::library::home_state::HomeContext {
-                    library_albums: self.library.albums.len(),
-                    scanning: self.library_scanning,
+                    library_albums: self.session.library.albums.len(),
+                    scanning: self.session.library.scanning,
                     // A configured folder that doesn't exist (e.g. the
                     // default XDG Music dir on a fresh system) isn't "done".
-                    has_music_dirs: self.music_dirs_present,
-                    has_servers: !self.config.mpd_servers.is_empty()
-                        || !self.config.subsonic_servers.is_empty(),
+                    has_music_dirs: self.session.library.music_dirs_present,
+                    has_servers: !self.session.config.config.mpd_servers.is_empty()
+                        || !self.session.config.config.subsonic_servers.is_empty(),
                     decade_scroll: self
                         .extras
                         .grid_scroll
@@ -617,13 +635,13 @@ impl AppModel {
             .map(Message::Home),
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
-                    if let Some(album) = self.library.albums.get(album_idx) {
+                    if let Some(album) = self.session.library.albums.get(album_idx) {
                         albums::album_detail_view(
                             album,
                             album_idx,
                             &self.cover_images,
-                            &self.playlists,
-                            self.current_track.as_ref().map(|t| t.id),
+                            &self.session.playlists.playlists,
+                            self.session.playback.current_track.as_ref().map(|t| t.id),
                             self.detail_hero(&album.cover_key),
                         )
                         .map(Message::from)
@@ -634,22 +652,22 @@ impl AppModel {
                     let (albums_data, album_map): (&[Album], Option<&[usize]>) =
                         if search_query_active {
                             (
-                                &self.library.filtered.albums,
-                                Some(self.library.filtered.album_map.as_slice()),
+                                &self.session.library.filtered.albums,
+                                Some(self.session.library.filtered.album_map.as_slice()),
                             )
                         } else {
-                            (&self.library.albums, None)
+                            (&self.session.library.albums, None)
                         };
                     albums::albums_view(
                         albums_data,
                         &self.cover_images,
-                        self.config.albums_view_mode,
+                        self.session.config.config.albums_view_mode,
                         crate::views::album_filters::FilterCtx {
                             filter: &self.extras.album_filter,
                             cache: &self.extras.album_cache,
                             // The slice shown changes with the library
                             // (`LibraryState::generation`) and with the search state.
-                            epoch: (self.library.generation() << 1)
+                            epoch: (self.session.library.generation() << 1)
                                 | u64::from(search_query_active),
                         },
                         &self.extras.grid_scroll,
@@ -687,15 +705,19 @@ impl AppModel {
 
             Page::Artists => {
                 if let Some(artist_idx) = self.selected_artist {
-                    if let Some(artist) = self.library.artists.get(artist_idx) {
+                    if let Some(artist) = self.session.library.artists.get(artist_idx) {
                         artists::artist_detail_view(
                             artist,
                             artist_idx,
                             &self.artist_photos,
-                            self.artist_bios.get(&artist.name).map(String::as_str),
+                            self.session
+                                .artist_info
+                                .bios
+                                .get(&artist.name)
+                                .map(String::as_str),
                             self.artist_bio_expanded,
                             &self.cover_images,
-                            self.current_track.as_ref().map(|t| t.id),
+                            self.session.playback.current_track.as_ref().map(|t| t.id),
                             artist
                                 .albums
                                 .iter()
@@ -707,18 +729,18 @@ impl AppModel {
                     }
                 } else {
                     let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
-                        if search_query_active || self.library.filtered.artists_filtered {
+                        if search_query_active || self.session.library.filtered.artists_filtered {
                             (
-                                &self.library.filtered.artists,
-                                Some(self.library.filtered.artist_map.as_slice()),
+                                &self.session.library.filtered.artists,
+                                Some(self.session.library.filtered.artist_map.as_slice()),
                             )
                         } else {
-                            (&self.library.artists, None)
+                            (&self.session.library.artists, None)
                         };
                     artists::artists_view(
                         artists_data,
                         &self.artist_photos,
-                        self.config.artists_view_mode,
+                        self.session.config.config.artists_view_mode,
                         &self.extras.grid_scroll,
                     )
                     .map(move |msg| {
@@ -749,11 +771,11 @@ impl AppModel {
                 let (tracks_data, track_map): (&[Track], Option<&[usize]>) = if search_query_active
                 {
                     (
-                        &self.library.filtered.tracks,
-                        Some(self.library.filtered.track_map.as_slice()),
+                        &self.session.library.filtered.tracks,
+                        Some(self.session.library.filtered.track_map.as_slice()),
                     )
                 } else {
-                    (&self.library.tracks, None)
+                    (&self.session.library.tracks, None)
                 };
                 songs::songs_list_view(
                     tracks_data,
@@ -761,8 +783,8 @@ impl AppModel {
                     self.songs_sort_descending,
                     self.favorites_filter,
                     self.genre_filter.as_deref(),
-                    &self.playlists,
-                    self.current_track.as_ref().map(|t| t.id),
+                    &self.session.playlists.playlists,
+                    self.session.playback.current_track.as_ref().map(|t| t.id),
                     self.songs_scroll_offset,
                 )
                 .map(move |msg| match msg {
@@ -796,7 +818,7 @@ impl AppModel {
 
             Page::Playlists => {
                 if let Some(pl_idx) = self.selected_playlist {
-                    if let Some(playlist) = self.playlists.get(pl_idx) {
+                    if let Some(playlist) = self.session.playlists.playlists.get(pl_idx) {
                         playlists::playlist_detail_view(
                             playlist,
                             pl_idx,
@@ -866,11 +888,11 @@ impl AppModel {
                         Option<&[usize]>,
                     ) = if search_query_active {
                         (
-                            &self.library.filtered.playlists,
-                            Some(self.library.filtered.playlist_map.as_slice()),
+                            &self.session.library.filtered.playlists,
+                            Some(self.session.library.filtered.playlist_map.as_slice()),
                         )
                     } else {
-                        (&self.playlists, None)
+                        (&self.session.playlists.playlists, None)
                     };
                     playlists::playlist_list_view(playlists_data, &self.new_playlist_name).map(
                         move |msg| match msg {
@@ -937,33 +959,35 @@ impl AppModel {
             }
 
             Page::SmartPlaylists => {
-                if let Some(editor) = &self.smart_playlist_editor {
+                if let Some(editor) = &self.session.playlists.smart_playlist_editor {
                     crate::views::smart_playlists::editor_view(editor).map(Message::SmartPlaylists)
                 } else if let Some(idx) = self.selected_smart_playlist {
-                    if let Some(playlist) = self.smart_playlists.get(idx) {
+                    if let Some(playlist) = self.session.playlists.smart_playlists.get(idx) {
                         crate::views::smart_playlists::smart_playlist_detail_view(
                             playlist,
                             idx,
-                            &self.smart_playlist_tracks,
-                            self.current_track.as_ref().map(|t| t.id),
+                            &self.session.playlists.smart_playlist_tracks,
+                            self.session.playback.current_track.as_ref().map(|t| t.id),
                         )
                         .map(Message::SmartPlaylists)
                     } else {
                         widget::text("Smart playlist not found").into()
                     }
                 } else {
-                    crate::views::smart_playlists::smart_playlists_view(&self.smart_playlists)
-                        .map(Message::SmartPlaylists)
+                    crate::views::smart_playlists::smart_playlists_view(
+                        &self.session.playlists.smart_playlists,
+                    )
+                    .map(Message::SmartPlaylists)
                 }
             }
 
             Page::Genres => {
                 if let Some(genre_idx) = self.selected_genre {
-                    if let Some(genre_name) = self.library.genres.get(genre_idx) {
+                    if let Some(genre_name) = self.session.library.genres.get(genre_idx) {
                         genres::genre_detail_view(
                             genre_name,
-                            &self.library.genre_tracks,
-                            self.current_track.as_ref().map(|t| t.id),
+                            &self.session.library.genre_tracks,
+                            self.session.playback.current_track.as_ref().map(|t| t.id),
                         )
                         .map(|msg| match msg {
                             genres::GenreMessage::Navigate(route) => Message::Navigate(route),
@@ -1001,15 +1025,15 @@ impl AppModel {
                     let (genres_data, genre_map): (&[String], Option<&[usize]>) =
                         if search_query_active {
                             (
-                                &self.library.filtered.genres,
-                                Some(self.library.filtered.genre_map.as_slice()),
+                                &self.session.library.filtered.genres,
+                                Some(self.session.library.filtered.genre_map.as_slice()),
                             )
                         } else {
-                            (&self.library.genres, None)
+                            (&self.session.library.genres, None)
                         };
                     genres::genres_view(
                         genres_data,
-                        self.config.genres_view_mode,
+                        self.session.config.config.genres_view_mode,
                         &self.extras.grid_scroll,
                     )
                     .map(move |msg| match msg {
@@ -1046,18 +1070,20 @@ impl AppModel {
 
             Page::Folders => crate::views::folders::folder_view(
                 &self.folder_state,
-                &self.library.tracks,
-                self.current_track.as_ref(),
+                &self.session.library.tracks,
+                self.session.playback.current_track.as_ref(),
                 &self.cover_images,
             )
             .map(Message::Folders),
 
             Page::Podcasts => {
                 let is_podcast_track = self
+                    .session
+                    .playback
                     .current_track
                     .as_ref()
                     .is_some_and(|t| &*t.provider_id == "podcast");
-                let playback_state = self.player.as_ref().map(|p| p.state());
+                let playback_state = self.session.playback.player.as_ref().map(|p| p.state());
                 let is_episode_playing = is_podcast_track
                     && matches!(
                         playback_state,
@@ -1066,26 +1092,26 @@ impl AppModel {
                 let is_paused = matches!(playback_state, Some(PlaybackState::Paused));
                 let selected = self
                     .selected_podcast
-                    .and_then(|id| self.podcasts.iter().find(|p| p.id == id));
+                    .and_then(|id| self.session.podcasts.podcasts.iter().find(|p| p.id == id));
                 let props = podcasts::PodcastViewProps {
-                    podcasts: &self.podcasts,
+                    podcasts: &self.session.podcasts.podcasts,
                     tab: self.podcast_tab,
                     add_open: self.podcast_add_open,
                     add_url: &self.podcast_add_url,
                     add_error: self.podcast_add_error.as_deref(),
-                    refreshing: &self.refreshing_podcasts,
+                    refreshing: &self.session.podcasts.refreshing,
                     pending_unsubscribe: self.pending_unsubscribe_podcast,
                     search_query: &self.podcast_search_query,
-                    search_results: &self.podcast_search_results,
-                    search_loading: self.podcast_search_loading,
-                    search_error: self.podcast_search_error.as_deref(),
+                    search_results: &self.session.podcasts.search_results,
+                    search_loading: self.session.podcasts.search_loading,
+                    search_error: self.session.podcasts.search_error.as_deref(),
                     selected,
-                    episodes: &self.podcast_episodes,
+                    episodes: &self.session.podcasts.episodes,
                     episode_filter: self.podcast_episode_filter,
                     episode_text_filter: &self.podcast_episode_text_filter,
                     description_expanded: self.podcast_description_expanded,
-                    downloading: &self.downloading_episodes,
-                    current_episode_id: self.current_podcast_episode_id,
+                    downloading: &self.session.podcasts.downloading,
+                    current_episode_id: self.session.podcasts.current_episode_id,
                     is_episode_playing,
                     is_paused,
                     icons: &self.online_icons,
@@ -1095,7 +1121,7 @@ impl AppModel {
 
             Page::Radio => {
                 let props = radio_view::RadioViewProps {
-                    stations: &self.radio_stations,
+                    stations: &self.session.radio.stations,
                     tab: self.radio_tab,
                     filter: &self.radio_filter,
                     add_open: self.radio_add_open,
@@ -1107,16 +1133,16 @@ impl AppModel {
                     search_query: &self.radio_search_query,
                     search_tag: self.radio_search_tag,
                     search_country: &self.radio_search_country,
-                    locale_country: &self.radio_locale_country,
+                    locale_country: &self.session.radio.locale_country,
                     sort: self.radio_search_sort,
-                    results: &self.radio_search_results,
-                    results_loading: self.radio_search_loading,
-                    results_error: self.radio_search_error.as_deref(),
+                    results: &self.session.radio.search_results,
+                    results_loading: self.session.radio.search_loading,
+                    results_error: self.session.radio.search_error.as_deref(),
                     icons: &self.online_icons,
-                    current_track: self.current_track.as_ref(),
-                    playback_state: self.player.as_ref().map(|p| p.state()),
-                    now_playing_favicon: &self.radio_now_playing_favicon,
-                    now_playing_key: &self.radio_now_playing_key,
+                    current_track: self.session.playback.current_track.as_ref(),
+                    playback_state: self.session.playback.player.as_ref().map(|p| p.state()),
+                    now_playing_favicon: &self.session.radio.now_playing_favicon,
+                    now_playing_key: &self.session.radio.now_playing_key,
                 };
                 radio_view::radio_view(props).map(|msg| match msg {
                     radio_view::RadioMessage::Stop => Message::Stop,
@@ -1127,25 +1153,25 @@ impl AppModel {
             Page::Convert => {
                 let out_dir = self.convert_out_dir();
                 convert::convert_view(convert::ConvertViewProps {
-                    jobs: &self.convert_jobs,
+                    jobs: &self.session.convert.jobs,
                     out_dir: &out_dir,
-                    format: self.config.convert_format,
-                    sample_rate: self.config.convert_sample_rate,
-                    dir_error: self.convert_dir_error.as_deref(),
-                    flac_options: self.config.flac_options,
-                    lossy_options: self.config.lossy_options,
+                    format: self.session.config.config.convert_format,
+                    sample_rate: self.session.config.config.convert_sample_rate,
+                    dir_error: self.session.convert.dir_error.as_deref(),
+                    flac_options: self.session.config.config.flac_options,
+                    lossy_options: self.session.config.config.lossy_options,
                     ffmpeg_available: aulos_core::convert::ffmpeg::cached(),
                 })
                 .map(Message::Convert)
             }
 
             Page::Tagger => crate::views::tagger::view(
-                &self.tagger,
+                &self.session.tagger,
                 &self.tagger_thumbs,
                 crate::views::tagger::TaggerViewProps {
-                    acoustid_key_set: self.config.acoustid_key().is_some(),
-                    acoustid_user_key_saved: self.acoustid_user_key_saved,
-                    use_caa_cover: self.config.tagger_use_caa_cover,
+                    acoustid_key_set: self.session.config.config.acoustid_key().is_some(),
+                    acoustid_user_key_saved: self.session.config.acoustid_key_stored,
+                    use_caa_cover: self.session.config.config.tagger_use_caa_cover,
                 },
             )
             .map(Message::Tagger),
@@ -1153,21 +1179,32 @@ impl AppModel {
 
         // Build bottom playback bar
         let state = self
+            .session
+            .playback
             .player
             .as_ref()
             .map(|p| p.state())
             .unwrap_or(PlaybackState::Stopped);
         let duration = self
+            .session
+            .playback
             .current_track
             .as_ref()
             .map(|t| t.duration)
             .unwrap_or(Duration::ZERO);
         let volume = self
+            .session
+            .playback
             .player
             .as_ref()
             .map(|p| p.volume())
-            .unwrap_or(self.config.volume);
-        let current_cover_key = self.current_track.as_ref().map(Track::cover_key);
+            .unwrap_or(self.session.config.config.volume);
+        let current_cover_key = self
+            .session
+            .playback
+            .current_track
+            .as_ref()
+            .map(Track::cover_key);
         let current_cover = current_cover_key
             .as_ref()
             .and_then(|key| self.cover_images.get(key));
@@ -1204,11 +1241,13 @@ impl AppModel {
             now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
             now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
-            now_playing::NowPlayingMessage::ShowProperties => match &self.current_track {
-                Some(track) => Message::ShowTrackProperties(track.clone()),
-                // The button is disabled without a track; keep the mapping total.
-                None => Message::ToggleContextPage(ContextPage::TrackProperties),
-            },
+            now_playing::NowPlayingMessage::ShowProperties => {
+                match &self.session.playback.current_track {
+                    Some(track) => Message::ShowTrackProperties(track.clone()),
+                    // The button is disabled without a track; keep the mapping total.
+                    None => Message::ToggleContextPage(ContextPage::TrackProperties),
+                }
+            }
             now_playing::NowPlayingMessage::ExpandToggle => Message::ExpandNowPlaying,
             now_playing::NowPlayingMessage::Collapse => Message::CollapseNowPlaying,
             now_playing::NowPlayingMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
@@ -1252,13 +1291,13 @@ impl AppModel {
         };
 
         let bar = now_playing::compact_bar::playback_bar(
-            self.current_track.as_ref(),
+            self.session.playback.current_track.as_ref(),
             state,
-            self.playback_position,
+            self.session.playback.position,
             duration,
             volume,
-            self.config.shuffle,
-            self.config.repeat_mode,
+            self.session.config.config.shuffle,
+            self.session.config.config.repeat_mode,
             current_cover,
             self.seeking_preview,
             self.blurred_cover.as_ref(),
@@ -1284,7 +1323,7 @@ impl AppModel {
         // position in the column, resetting/flashing its state (see
         // module-level notes on iced's tree-position-keyed widget
         // state).
-        let scanning_indicator: Element<'_, Message> = if self.library_scanning {
+        let scanning_indicator: Element<'_, Message> = if self.session.library.scanning {
             use cosmic::cosmic_theme::palette::WithAlpha;
             let space_xs = cosmic::theme::active().cosmic().spacing.space_xs;
             let pill = widget::container(
@@ -1347,13 +1386,13 @@ impl AppModel {
                 || self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES
                 || self.viz_browser_open;
             let expanded = now_playing::expanded_view::expanded_now_playing(
-                self.current_track.as_ref(),
+                self.session.playback.current_track.as_ref(),
                 state,
-                self.playback_position,
+                self.session.playback.position,
                 duration,
                 volume,
-                self.config.shuffle,
-                self.config.repeat_mode,
+                self.session.config.config.shuffle,
+                self.session.config.config.repeat_mode,
                 current_cover_large,
                 self.blurred_cover.as_ref(),
                 self.accent.as_ref(),
@@ -1361,8 +1400,8 @@ impl AppModel {
                 self.seeking_preview,
                 self.expand_progress,
                 self.lyrics_overlay_active,
-                self.lyrics_text.as_ref(),
-                self.lyrics_loading,
+                self.session.playback.lyrics.as_ref(),
+                self.session.playback.lyrics_loading,
                 #[cfg(feature = "visualizer")]
                 self.visualizer_active,
                 #[cfg(feature = "visualizer")]

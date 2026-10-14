@@ -123,7 +123,7 @@ fn log_elapsed(kind: &str, label: &str, elapsed: std::time::Duration) {
 /// matches variants worth distinguishing (hot/frequent paths, and ones
 /// prone to doing real work); everything else collapses to a generic
 /// bucket rather than `format!("{:?}", message)` over the whole enum,
-/// which would force rendering the full payload (e.g. `LibraryLoaded`'s
+/// which would force rendering the full payload (e.g. a library load's
 /// vectors) on every single `update()` call just to get a label.
 fn message_label(message: &Message) -> &'static str {
     match message {
@@ -139,14 +139,12 @@ fn message_label(message: &Message) -> &'static str {
         Message::ToggleShuffle => "ToggleShuffle",
         Message::CycleRepeat => "CycleRepeat",
         Message::MpdIdleEvent(..) => "MpdIdleEvent",
-        Message::MpdStatusUpdate { .. } => "MpdStatusUpdate",
+        Message::MpdStatusUpdate(_) => "MpdStatusUpdate",
+        Message::PlaybackEvent(_) => "PlaybackEvent",
         Message::MpdConnected(_) => "MpdConnected",
         Message::MpdConnectionFailed(..) => "MpdConnectionFailed",
         Message::ScanLibrary => "ScanLibrary",
-        Message::LibraryScanComplete { .. } => "LibraryScanComplete",
-        Message::LibraryLoaded { .. } => "LibraryLoaded",
-        Message::LibraryBatch { .. } => "LibraryBatch",
-        Message::LibraryLoadComplete { .. } => "LibraryLoadComplete",
+        Message::Library(_) => "Library",
         Message::FilesChanged(_) => "FilesChanged",
         Message::SwitchProvider(_) => "SwitchProvider",
         Message::ToggleContextPage(_) => "ToggleContextPage",

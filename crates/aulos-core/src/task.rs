@@ -45,6 +45,17 @@ impl<M: Send + 'static> Effect<M> {
         })
     }
 
+    /// Every effect of `effects`, run concurrently; messages arrive in
+    /// completion order.
+    pub fn batch(effects: impl IntoIterator<Item = Effect<M>>) -> Self {
+        let mut streams: Vec<_> = effects.into_iter().filter_map(|e| e.0).collect();
+        match streams.len() {
+            0 => Self(None),
+            1 => Self(streams.pop()),
+            _ => Self(Some(stream::select_all(streams).boxed())),
+        }
+    }
+
     /// Converts every produced message with `f`.
     pub fn map<N: Send + 'static>(self, f: impl Fn(M) -> N + Send + 'static) -> Effect<N> {
         Effect(self.0.map(|s| s.map(f).boxed()))

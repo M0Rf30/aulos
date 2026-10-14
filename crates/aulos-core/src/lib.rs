@@ -24,6 +24,7 @@ pub mod online;
 pub mod paths;
 pub mod player;
 pub mod provider;
+pub mod session;
 pub mod settings_search;
 pub mod tagger;
 pub mod task;

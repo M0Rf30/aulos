@@ -3,63 +3,33 @@
 
 //! Radio page controller.
 //!
-//! Owns every piece of update logic for the Radio section: the
-//! `Message::Radio` UI-event dispatch (`update_radio`) and the
-//! `Message::RadioEvent` async-result dispatch (`handle_radio_event`),
-//! plus the private helpers/tasks that back them. The view
-//! (`crate::views::radio`) stays pure -- this is the only place that
-//! touches `AppModel`'s `radio_*` fields; the directory/store work itself
-//! lives in `aulos_core::online::radio`.
+//! Maps the `Message::Radio` UI events (`update_radio`) and the
+//! `Message::RadioEvent` async results (`handle_radio_event`) onto
+//! [`aulos_core::session::RadioState`], which owns the workflows, and keeps
+//! what is UI-only: the add/rename/search form inputs, toasts, icon loading
+//! and the focus tasks. The view (`crate::views::radio`) stays pure -- this
+//! is the only place that touches `AppModel`'s `radio_*` fields.
 
-use super::tasks::resolve_and_play_radio;
+use super::tasks::effect;
 use super::{AppModel, Message};
 use crate::views::radio::RadioMessage;
 use aulos_core::fl;
-use aulos_core::library::Track;
-use aulos_core::online::radio::{
-    self, DiscoverPreset, SortOrder, StationQuery, StationSearchResult,
-};
-use aulos_core::online::store::RadioStation;
-use aulos_core::online::{UrlError, validate_http_url};
+use aulos_core::online::UrlError;
+use aulos_core::online::radio::{self, SortOrder, StationQuery};
+use aulos_core::session::{RadioEvent, RadioNotice};
+use aulos_core::task::Effect;
 use cosmic::prelude::*;
 use cosmic::widget;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
-/// Async results for the radio page: search/list/save/play outcomes.
-#[derive(Debug, Clone)]
-pub enum RadioEvent {
-    StationsLoaded(Vec<RadioStation>),
-    /// `generation` pairs with the request that kicked it off, so a slow,
-    /// since-superseded query's results (or error) can be recognized and
-    /// dropped instead of overwriting a newer one.
-    SearchResults {
-        generation: u64,
-        result: Result<Vec<StationSearchResult>, String>,
-    },
-    Added {
-        name: String,
-        already_existed: bool,
-        result: Result<i64, String>,
-    },
-    StreamResolved {
-        name: String,
-        favicon: String,
-        key: String,
-        result: Result<String, String>,
-    },
+/// Runs a radio [`Effect`], routing its events to `Message::RadioEvent`.
+fn radio_task(radio_effect: Effect<RadioEvent>) -> Task<cosmic::Action<Message>> {
+    effect(radio_effect).map(|event| cosmic::Action::App(Message::RadioEvent(event)))
 }
 
 impl AppModel {
     /// Load saved radio stations from the online store.
     pub(super) fn load_radio_stations(&self) -> Task<cosmic::Action<Message>> {
-        cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(radio::load_saved)
-                .await
-                .unwrap_or_default();
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
-        })
+        radio_task(self.session.radio.load())
     }
 
     /// Handle a UI event from the radio view.
@@ -94,15 +64,9 @@ impl AppModel {
                 Task::none()
             }
             RadioMessage::SubmitAdd => self.submit_add_station(),
-            RadioMessage::PlaySaved(id) => self.play_saved_station(id),
+            RadioMessage::PlaySaved(id) => radio_task(self.session.radio.play_saved(id)),
             RadioMessage::RemoveSaved(id) => self.remove_saved_station(id),
-            RadioMessage::UndoRemove(station) => self.dispatch_add(
-                station.name,
-                station.stream_url,
-                station.homepage,
-                station.favicon_url,
-                station.tags,
-            ),
+            RadioMessage::UndoRemove(station) => radio_task(self.session.radio.restore(station)),
             RadioMessage::StartRename(id, name) => {
                 self.radio_renaming_id = Some(id);
                 self.radio_rename_input = name;
@@ -130,7 +94,7 @@ impl AppModel {
             }
             RadioMessage::CountryToggled => {
                 self.radio_search_country = if self.radio_search_country.is_empty() {
-                    self.radio_locale_country.clone()
+                    self.session.radio.locale_country.clone()
                 } else {
                     String::new()
                 };
@@ -143,9 +107,13 @@ impl AppModel {
                 self.dispatch_search()
             }
             RadioMessage::RetrySearch => self.dispatch_search(),
-            RadioMessage::Preset(preset) => self.dispatch_preset(preset),
-            RadioMessage::PlayResult(uuid) => self.play_search_result(&uuid),
-            RadioMessage::SaveResult(uuid) => self.save_search_result(&uuid),
+            RadioMessage::Preset(preset) => radio_task(self.session.radio.preset(preset)),
+            RadioMessage::PlayResult(uuid) => {
+                radio_task(self.session.radio.play_search_result(&uuid))
+            }
+            RadioMessage::SaveResult(uuid) => {
+                radio_task(self.session.radio.save_search_result(&uuid))
+            }
 
             // `src/app/view.rs` maps this variant straight to the
             // top-level `Message::Stop` at the call site (player
@@ -160,258 +128,83 @@ impl AppModel {
         &mut self,
         event: RadioEvent,
     ) -> Task<cosmic::Action<Message>> {
-        match event {
-            RadioEvent::StationsLoaded(stations) => {
-                let icon_urls: Vec<String> = stations
-                    .iter()
-                    .map(|s| s.favicon_url.clone())
-                    .filter(|u| !u.is_empty())
-                    .collect();
-                self.radio_stations = stations;
-                self.load_online_icons(icon_urls)
-            }
-            RadioEvent::SearchResults { generation, result } => {
-                if generation != self.radio_search_generation {
-                    // Superseded by a newer request; drop silently.
-                    return Task::none();
-                }
-                self.radio_search_loading = false;
-                match result {
-                    Ok(results) => {
-                        let icon_urls: Vec<String> = results
-                            .iter()
-                            .map(|r| r.favicon.clone())
-                            .filter(|u| !u.is_empty())
-                            .collect();
-                        self.radio_search_results = results;
-                        self.radio_search_error = None;
-                        self.load_online_icons(icon_urls)
-                    }
-                    Err(e) => {
-                        self.radio_search_results.clear();
-                        self.radio_search_error = Some(e);
-                        Task::none()
-                    }
-                }
-            }
-            RadioEvent::Added {
-                name,
-                already_existed,
-                result,
-            } => match result {
-                Ok(_) => {
-                    self.radio_add_name.clear();
-                    self.radio_add_url.clear();
-                    self.radio_add_open = false;
-                    self.radio_add_error = None;
-                    let toast = if already_existed {
-                        widget::toaster::Toast::new(fl!("toast-radio-already-saved", name = name))
-                    } else {
-                        widget::toaster::Toast::new(fl!("toast-radio-saved", name = name))
-                    };
-                    Task::batch([self.load_radio_stations(), self.push_toast(toast)])
-                }
-                Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
-                    "toast-radio-save-failed",
-                    reason = e
-                ))),
-            },
-            RadioEvent::StreamResolved {
-                name,
-                favicon,
-                key,
-                result,
-            } => match result {
-                Ok(resolved_url) => {
-                    self.radio_now_playing_favicon = favicon.clone();
-                    self.radio_now_playing_key = key;
-                    let icon_task = if favicon.is_empty() {
-                        Task::none()
-                    } else {
-                        self.load_online_icons(vec![favicon])
-                    };
-                    let track = Track {
-                        id: -1,
-                        path: PathBuf::new(),
-                        title: name,
-                        artist: String::new(),
-                        album_artist: String::new(),
-                        album: String::new(),
-                        genre: String::new(),
-                        track_number: 0,
-                        disc_number: 0,
-                        year: 0,
-                        duration: Duration::ZERO,
-                        bitrate: 0,
-                        sample_rate: 0,
-                        provider_id: Arc::from("radio"),
-                        source_uri: resolved_url,
-                        is_favorite: false,
-                        rating: None,
-                        rg_track_gain: None,
-                        rg_album_gain: None,
-                    };
-                    let play_task = self.play_track_list(vec![track], 0);
-                    Task::batch([icon_task, play_task])
-                }
-                Err(e) => self.push_toast(widget::toaster::Toast::new(fl!(
-                    "toast-radio-play-failed",
-                    reason = e
-                ))),
-            },
+        let update = self.session.radio.apply_event(event);
+        let mut tasks = vec![radio_task(update.effect)];
+        if !update.icon_urls.is_empty() {
+            tasks.push(self.load_online_icons(update.icon_urls));
         }
+        if let Some(track) = update.play {
+            tasks.push(self.play_track_list(vec![track], 0));
+        }
+        if let Some(notice) = update.notice {
+            let text = match notice {
+                RadioNotice::Saved { name } => {
+                    self.reset_radio_add_form();
+                    fl!("toast-radio-saved", name = name)
+                }
+                RadioNotice::AlreadySaved { name } => {
+                    self.reset_radio_add_form();
+                    fl!("toast-radio-already-saved", name = name)
+                }
+                RadioNotice::SaveFailed { reason } => {
+                    fl!("toast-radio-save-failed", reason = reason)
+                }
+                RadioNotice::PlayFailed { reason } => {
+                    fl!("toast-radio-play-failed", reason = reason)
+                }
+            };
+            tasks.push(self.push_toast(widget::toaster::Toast::new(text)));
+        }
+        Task::batch(tasks)
+    }
+
+    fn reset_radio_add_form(&mut self) {
+        self.radio_add_name.clear();
+        self.radio_add_url.clear();
+        self.radio_add_open = false;
+        self.radio_add_error = None;
     }
 
     fn submit_add_station(&mut self) -> Task<cosmic::Action<Message>> {
         let name = self.radio_add_name.trim().to_string();
         let url = self.radio_add_url.trim().to_string();
-        match validate_http_url(&url) {
+        match self.session.radio.add_by_url(name, url) {
+            Ok(add) => {
+                self.radio_add_error = None;
+                radio_task(add)
+            }
             Err(UrlError::Empty) => {
                 self.radio_add_error = Some(fl!("radio-add-url-required"));
-                return Task::none();
+                Task::none()
             }
             Err(UrlError::NotHttp) => {
                 self.radio_add_error = Some(fl!("radio-add-url-invalid"));
-                return Task::none();
+                Task::none()
             }
-            Ok(()) => {}
         }
-        self.radio_add_error = None;
-        let display_name = if name.is_empty() { url.clone() } else { name };
-        self.dispatch_add(
-            display_name,
-            url,
-            String::new(),
-            String::new(),
-            String::new(),
-        )
     }
 
-    /// Shared by add-by-URL, Save-from-Discover and Undo-remove: runs the
-    /// blocking DB upsert and dispatches `RadioEvent::Added` with the
-    /// outcome (including whether the station already existed).
-    fn dispatch_add(
-        &mut self,
-        name: String,
-        stream_url: String,
-        homepage: String,
-        favicon_url: String,
-        tags: String,
-    ) -> Task<cosmic::Action<Message>> {
-        let name_for_event = name.clone();
-        cosmic::task::future(async move {
-            let outcome = tokio::task::spawn_blocking(move || {
-                radio::save_station(&name, &stream_url, &homepage, &favicon_url, &tags)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-            let (result, already_existed) = match outcome {
-                Ok((id, existed)) => (Ok(id), existed),
-                Err(e) => (Err(e), false),
-            };
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::Added {
-                name: name_for_event,
-                already_existed,
-                result,
-            }))
-        })
-    }
-
-    fn play_saved_station(&mut self, id: i64) -> Task<cosmic::Action<Message>> {
-        let Some(station) = self.radio_stations.iter().find(|s| s.id == id) else {
-            return Task::none();
-        };
-        resolve_and_play_radio(
-            station.name.clone(),
-            station.favicon_url.clone(),
-            station.stream_url.clone(),
-            station.stream_url.clone(),
-        )
-    }
-
-    fn play_search_result(&mut self, uuid: &str) -> Task<cosmic::Action<Message>> {
-        let Some(result) = self
-            .radio_search_results
-            .iter()
-            .find(|r| r.stationuuid == uuid)
-        else {
-            return Task::none();
-        };
-        resolve_and_play_radio(
-            result.name.clone(),
-            result.favicon.clone(),
-            result.url.clone(),
-            result.url.clone(),
-        )
-    }
-
-    fn save_search_result(&mut self, uuid: &str) -> Task<cosmic::Action<Message>> {
-        let Some(result) = self
-            .radio_search_results
-            .iter()
-            .find(|r| r.stationuuid == uuid)
-            .cloned()
-        else {
-            return Task::none();
-        };
-        self.dispatch_add(
-            result.name,
-            result.url,
-            result.homepage,
-            result.favicon,
-            result.tags,
-        )
-    }
-
-    /// Remove a saved station: drop it from the in-memory list right away
-    /// (so the row disappears immediately) and delete it from the store,
-    /// with an Undo toast that re-saves it exactly as it was.
+    /// Remove a saved station, with an Undo toast that re-saves it exactly
+    /// as it was.
     fn remove_saved_station(&mut self, id: i64) -> Task<cosmic::Action<Message>> {
-        let Some(station) = self.radio_stations.iter().find(|s| s.id == id).cloned() else {
+        let Some((station, remove)) = self.session.radio.remove(id) else {
             return Task::none();
         };
-        self.radio_stations.retain(|s| s.id != id);
         let toast_name = station.name.clone();
         let toast = widget::toaster::Toast::new(fl!("toast-radio-removed", name = toast_name))
             .action(fl!("radio-undo"), move |_id| {
                 Message::Radio(RadioMessage::UndoRemove(station.clone()))
             });
-        let remove_task = cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(move || radio::remove_saved(id))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to remove radio station: {e}");
-                    Vec::new()
-                });
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
-        });
-        Task::batch([remove_task, self.push_toast(toast)])
+        Task::batch([radio_task(remove), self.push_toast(toast)])
     }
 
     fn commit_rename(&mut self, id: i64) -> Task<cosmic::Action<Message>> {
         let new_name = self.radio_rename_input.trim().to_string();
         self.radio_renaming_id = None;
-        if new_name.is_empty() {
-            return Task::none();
-        }
-        cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(move || radio::rename_saved(id, &new_name))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to rename radio station: {e}");
-                    Vec::new()
-                });
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
-        })
+        radio_task(self.session.radio.rename(id, new_name))
     }
 
     fn dispatch_search(&mut self) -> Task<cosmic::Action<Message>> {
-        self.radio_search_generation += 1;
-        let generation = self.radio_search_generation;
-        self.radio_search_loading = true;
-        self.radio_search_error = None;
         let query = StationQuery {
             name: self.radio_search_query.trim().to_string(),
             tag: self.radio_search_tag.unwrap_or_default().to_string(),
@@ -419,33 +212,6 @@ impl AppModel {
             order: self.radio_search_sort,
             limit: radio::DISCOVER_LIMIT,
         };
-        cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || radio::search(&query))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::SearchResults {
-                generation,
-                result,
-            }))
-        })
-    }
-
-    fn dispatch_preset(&mut self, preset: DiscoverPreset) -> Task<cosmic::Action<Message>> {
-        self.radio_search_generation += 1;
-        let generation = self.radio_search_generation;
-        self.radio_search_loading = true;
-        self.radio_search_error = None;
-        cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || match preset {
-                DiscoverPreset::Popular => radio::popular(),
-                DiscoverPreset::TopVoted => radio::top_voted(),
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-            cosmic::Action::App(Message::RadioEvent(RadioEvent::SearchResults {
-                generation,
-                result,
-            }))
-        })
+        radio_task(self.session.radio.search(query))
     }
 }
