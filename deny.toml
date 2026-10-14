@@ -41,6 +41,9 @@ allow = [
     "MPL-2.0",
     # clipboard-win / error-code (eframe -> arboard on Windows)
     "BSL-1.0",
+    # epaint_default_fonts ships egui's default fonts under these
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.8
 exceptions = []
