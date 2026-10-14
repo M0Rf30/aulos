@@ -1,6 +1,8 @@
 [workspace]
-members = [".", "crates/aulos-core"]
+members = [".", "crates/aulos-core", "crates/aulos-egui"]
 # Plain `cargo test`/`clippy`/`build` at the root cover the backend crate too.
+# `crates/aulos-egui` (an experimental egui front end) is a member but is
+# deliberately not a default member: build it with `-p aulos-egui`.
 default-members = [".", "crates/aulos-core"]
 resolver = "3"
 
