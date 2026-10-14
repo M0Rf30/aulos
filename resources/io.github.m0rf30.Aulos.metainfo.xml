@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.m0rf30.Aulos</id>
   <name>Aulos</name>
-  <summary>A modern music player for Linux</summary>
+  <summary>A modern music player</summary>
   <developer id="io.github.m0rf30">
     <name>Gianluca Boiano</name>
   </developer>

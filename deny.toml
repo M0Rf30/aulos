@@ -2,10 +2,14 @@
 # See: https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# Aulos is Linux-only (wayland/X11, zbus, ashpd, keyutils).
+# Aulos targets Linux (wayland/X11, zbus, ashpd, keyutils), Windows (MSVC)
+# and macOS (Apple silicon and Intel).
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
 ]
 all-features = true
 
@@ -35,6 +39,8 @@ allow = [
     "CC0-1.0",
     "Unlicense",
     "MPL-2.0",
+    # clipboard-win / error-code (eframe -> arboard on Windows)
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 exceptions = []

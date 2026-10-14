@@ -405,10 +405,20 @@ impl Session {
     }
 
     /// Tells the session whether a visualizer is on screen and wants audio:
-    /// the capture of a local MPD server's audio runs only then.
+    /// the capture of a local MPD server's audio runs only then. Only Linux
+    /// can capture it (see [`Self::visualizer_capture_supported`]); elsewhere
+    /// this does nothing.
     #[cfg(feature = "visualizer")]
     pub fn set_visualizer_capture(&mut self, wanted: bool) {
         self.playback.capture_wanted = wanted;
+    }
+
+    /// Whether this build can capture the audio of an MPD server for the
+    /// visualizer: it needs PipeWire, so Linux with the `visualizer`
+    /// feature only. Everywhere else the visualizer shows local playback
+    /// only, and MPD playback has nothing to draw from.
+    pub const fn visualizer_capture_supported() -> bool {
+        cfg!(all(feature = "visualizer", target_os = "linux"))
     }
 
     /// Requests the full-size cover bytes of the album `hint` under `key`
@@ -524,7 +534,7 @@ impl Session {
             ));
         }
 
-        #[cfg(feature = "visualizer")]
+        #[cfg(all(feature = "visualizer", target_os = "linux"))]
         self.push_capture_stream(&mut streams);
 
         // Filesystem watcher, only while the local provider is active.
@@ -550,7 +560,7 @@ impl Session {
     /// backend in charge and its server resolves to this machine (its audio
     /// can only appear on *this* PipeWire graph then); see
     /// `player::pw_capture` for the capture and matching rules.
-    #[cfg(feature = "visualizer")]
+    #[cfg(all(feature = "visualizer", target_os = "linux"))]
     fn push_capture_stream(
         &self,
         streams: &mut Vec<(BackgroundKey, BoxStream<'static, SessionEvent>)>,

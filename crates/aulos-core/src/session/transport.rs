@@ -809,8 +809,9 @@ impl Session {
 
     // -- MPRIS ---------------------------------------------------------
 
-    /// Forwards the current player/config state to the MPRIS D-Bus handle,
-    /// if the session-bus server is up. `MprisHandle::publish` diffs
+    /// Forwards the current player/config state to the media-session handle
+    /// (MPRIS on Linux, SMTC / Now Playing elsewhere), once its backend is
+    /// up. `MprisHandle::publish` diffs
     /// internally, so calling this on every tick is cheap.
     ///
     /// Cover art resolution involves blocking file I/O (tag parsing, an
@@ -871,6 +872,14 @@ impl Session {
             can_play: track.is_some(),
         });
         art_effect
+    }
+
+    /// Takes over the media-session handle the backend announced
+    /// ([`crate::mpris::MprisEvent::Ready`]) and publishes the current state
+    /// through it.
+    pub fn connect_media_session(&mut self, handle: crate::mpris::MprisHandle) -> PlaybackUpdate {
+        self.playback.mpris = Some(handle);
+        PlaybackUpdate::effect(self.publish_mpris())
     }
 
     /// Carries out a playback command relayed from MPRIS. The window and

@@ -4,10 +4,15 @@
 //! Secure credential storage using the system keyring.
 //!
 //! Passwords for MPD and Subsonic providers are stored in the platform's
-//! native credential store (e.g., GNOME Keyring, KDE Wallet, macOS Keychain)
-//! via the `keyring-core` crate. Each password is keyed by `(SERVICE, provider_id)`.
+//! native credential store via the `keyring-core` crate: the kernel keyutils
+//! or the D-Bus secret service (GNOME Keyring, KDE Wallet) on Linux, the
+//! Credential Manager on Windows, the Keychain on macOS. On other targets
+//! (the web build) there is no store, so every call reports the keyring as
+//! unavailable. Each password is keyed by `(SERVICE, provider_id)`.
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
+
+use keyring_core::api::CredentialStore;
 
 const SERVICE: &str = "io.github.m0rf30.Aulos";
 
@@ -18,29 +23,57 @@ const LEGACY_SERVICE: &str = "io.github.m0rf30.Lyra";
 
 static INIT: Once = Once::new();
 
+/// The platform's credential store, `None` when it cannot be reached.
+///
+/// On Linux the `keyring` facade only wires up the D-Bus secret service, so
+/// the stack is built here: the kernel keyutils store first, the secret
+/// service when keyutils is unavailable (the old keyring v3 default).
+#[cfg(target_os = "linux")]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    linux_keyutils_keyring_store::Store::new()
+        .map(|store| store as Arc<CredentialStore>)
+        .or_else(|_| {
+            zbus_secret_service_keyring_store::Store::new()
+                .map(|store| store as Arc<CredentialStore>)
+        })
+        .ok()
+}
+
+/// Windows Credential Manager.
+#[cfg(target_os = "windows")]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    windows_native_keyring_store::Store::new()
+        .map(|store| store as Arc<CredentialStore>)
+        .ok()
+}
+
+/// The macOS (login) Keychain.
+#[cfg(target_os = "macos")]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    apple_native_keyring_store::keychain::Store::new()
+        .map(|store| store as Arc<CredentialStore>)
+        .ok()
+}
+
+/// No credential store on this target.
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    None
+}
+
 /// Select the default credential store, once, before any [`keyring_core::Entry`] is created.
 ///
 /// `keyring-core` requires a default credential store to be set globally before
-/// `Entry::new` can succeed. The `keyring` facade crate only wires up the D-Bus
-/// secret service backend on Linux, so we build the store stack ourselves here,
-/// preferring the Linux kernel keyutils store and falling back to the D-Bus
-/// secret service when keyutils is unavailable. This restores the old keyring v3
-/// default behavior.
+/// `Entry::new` can succeed; [`platform_store`] picks it per OS.
 ///
 /// Safe to call multiple times (and from multiple threads/functions): the actual
-/// selection only happens on the first call, via [`std::sync::Once`]. If both
-/// backends fail to initialize, no default store is set and subsequent
+/// selection only happens on the first call, via [`std::sync::Once`]. If the
+/// store fails to initialize, no default store is set and subsequent
 /// `Entry::new` calls will error; callers already treat keyring errors as
 /// "keyring unavailable" degraded mode.
 pub fn init() {
     INIT.call_once(|| {
-        let store = linux_keyutils_keyring_store::Store::new()
-            .map(|store| store as std::sync::Arc<keyring_core::api::CredentialStore>)
-            .or_else(|_| {
-                zbus_secret_service_keyring_store::Store::new()
-                    .map(|store| store as std::sync::Arc<keyring_core::api::CredentialStore>)
-            });
-        if let Ok(store) = store {
+        if let Some(store) = platform_store() {
             keyring_core::set_default_store(store);
         }
     });

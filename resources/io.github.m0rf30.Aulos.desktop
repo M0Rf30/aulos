@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Aulos
-Comment=A modern music player for Linux
+Comment=A modern music player
 Exec=aulos
 Icon=io.github.m0rf30.Aulos
 Terminal=false

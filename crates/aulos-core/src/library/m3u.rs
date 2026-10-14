@@ -265,6 +265,11 @@ fn text_key(s: &str) -> String {
 pub fn resolve_location(location: &str, playlist_dir: &Path) -> Option<PathBuf> {
     let loc = location.trim();
     let loc = if let Some(rest) = strip_prefix_ci(loc, "file://") {
+        // A well-formed URI (including a Windows drive letter) first; the
+        // lenient parse below keeps accepting sloppy ones.
+        if let Some(path) = crate::file_uri_to_path(loc) {
+            return Some(normalize(&path));
+        }
         let rest = rest.strip_prefix("localhost").unwrap_or(rest);
         urlencoding::decode(rest)
             .map(|c| c.into_owned())

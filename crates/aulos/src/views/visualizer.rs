@@ -170,10 +170,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     } else if frame.entries.is_none() {
         notice(&ctx, rect, "Starting the visualizer…");
     } else if frame.entries.as_ref().is_some_and(|e| e.is_empty()) {
+        let dir = aulos_core::visualizer::presets::user_preset_dir().map_or_else(
+            || "the presets folder".into(),
+            |dir| dir.display().to_string(),
+        );
         notice(
             &ctx,
             rect,
-            "No MilkDrop presets found. Put .milk / .milk2 files in ~/.local/share/lactea/presets",
+            &format!("No MilkDrop presets found. Put .milk / .milk2 files in {dir}"),
         );
     }
 

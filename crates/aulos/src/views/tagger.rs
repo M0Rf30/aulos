@@ -9,6 +9,7 @@
 //! [`pump`].
 
 use crate::app::{App, Route};
+use crate::dialogs::{self, Filter};
 use crate::theme::{self, ColorExt, Palette};
 use crate::widgets::{
     PillKind, caps_label, cover_image, label_text, paint_icon, paint_text, paint_text_spaced,
@@ -25,7 +26,7 @@ use aulos_core::tagger::thumbs::ThumbCache;
 use aulos_core::tagger::{
     Cluster, ClusterKey, Confirm, Facts, FieldRow, FieldValue, FileId, FileStatus, LookupSource,
     LookupState, Remote, SaveSummary, ScanPhase, ScanStep, SubmissionState, TagAction, TagFile,
-    TaggerEvent, TaggerMessage, TaggerState, is_taggable, jobs, work,
+    TaggerEvent, TaggerMessage, TaggerState, is_taggable, work,
 };
 use egui::epaint::TextShape;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -562,113 +563,38 @@ fn after_save(app: &mut App, summary: SaveSummary) {
     app.run(effect);
 }
 
-// ---------------------------------------------------------------- portal pickers
+// ---------------------------------------------------------------- pickers
 
 /// The files the user picked, as an event; an empty list when cancelled.
 async fn pick_files() -> TaggerEvent {
-    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
-    let result = async {
-        let mut filter = FileFilter::new("Audio files");
-        for ext in aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS {
-            filter = filter.glob(&format!("*.{ext}"));
-        }
-        let selected = match SelectedFiles::open_file()
-            .title("Add files to the tag editor")
-            .multiple(true)
-            .modal(true)
-            .filter(filter)
-            .send()
-            .await
-            .map_err(|e| format!("Portal request failed: {e}"))?
-            .response()
-        {
-            Ok(selected) => selected,
-            Err(e) if is_cancelled(&e) => return Ok(Vec::new()),
-            Err(e) => return Err(format!("Portal response failed: {e}")),
-        };
-        selected
-            .uris()
+    let filter = Filter::new(
+        "Audio files",
+        aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
             .iter()
-            .map(|uri| jobs::uri_to_path(uri.as_str()))
-            .collect()
-    }
-    .await;
-    TaggerEvent::FilesPicked(result)
+            .copied(),
+    );
+    TaggerEvent::FilesPicked(Ok(dialogs::pick_files(
+        "Add files to the tag editor",
+        Some(&filter),
+    )
+    .await))
 }
 
 async fn pick_folder() -> TaggerEvent {
-    use ashpd::desktop::file_chooser::SelectedFiles;
-
-    let result = async {
-        let selected = match SelectedFiles::open_file()
-            .title("Add a folder to the tag editor")
-            .directory(true)
-            .modal(true)
-            .send()
-            .await
-            .map_err(|e| format!("Portal request failed: {e}"))?
-            .response()
-        {
-            Ok(selected) => selected,
-            Err(e) if is_cancelled(&e) => return Ok(None),
-            Err(e) => return Err(format!("Portal response failed: {e}")),
-        };
-        selected
-            .uris()
-            .first()
-            .map(|uri| jobs::uri_to_path(uri.as_str()))
-            .transpose()
-    }
-    .await;
-    match result {
-        Ok(Some(dir)) => TaggerEvent::FolderPicked(Ok(dir)),
+    match dialogs::pick_folder("Add a folder to the tag editor").await {
+        Some(dir) => TaggerEvent::FolderPicked(Ok(dir)),
         // Cancelled: nothing to add.
-        Ok(None) => TaggerEvent::FilesPicked(Ok(Vec::new())),
-        Err(e) => TaggerEvent::FolderPicked(Err(e)),
+        None => TaggerEvent::FilesPicked(Ok(Vec::new())),
     }
 }
 
 async fn pick_image(kind: u8) -> TaggerEvent {
-    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
-    let picked = async {
-        let mut filter = FileFilter::new("Images");
-        for ext in ["png", "jpg", "jpeg", "webp", "bmp"] {
-            filter = filter.glob(&format!("*.{ext}"));
-        }
-        let selected = match SelectedFiles::open_file()
-            .title("Choose an image")
-            .modal(true)
-            .filter(filter)
-            .send()
-            .await
-            .map_err(|e| format!("Portal request failed: {e}"))?
-            .response()
-        {
-            Ok(selected) => selected,
-            Err(e) if is_cancelled(&e) => return Ok(None),
-            Err(e) => return Err(format!("Portal response failed: {e}")),
-        };
-        let Some(uri) = selected.uris().first() else {
-            return Ok(None);
-        };
-        Ok(Some(jobs::uri_to_path(uri.as_str())?))
-    }
-    .await;
-    match picked {
-        Ok(Some(path)) => work::read_image(path, kind).await,
+    let filter = Filter::new("Images", ["png", "jpg", "jpeg", "webp", "bmp"]);
+    match dialogs::pick_file("Choose an image", Some(&filter)).await {
+        Some(path) => work::read_image(path, kind).await,
         // Cancelled: nothing to add.
-        Ok(None) => TaggerEvent::FilesPicked(Ok(Vec::new())),
-        Err(e) => TaggerEvent::ImagePicked(Err(e)),
+        None => TaggerEvent::FilesPicked(Ok(Vec::new())),
     }
-}
-
-fn is_cancelled(error: &ashpd::Error) -> bool {
-    matches!(
-        error,
-        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
-    )
 }
 
 // ---------------------------------------------------------------- small widgets

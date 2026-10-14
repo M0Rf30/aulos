@@ -3,7 +3,11 @@
 //! effects and background streams it hands out on a tokio runtime, feeds every
 //! resulting event back into it from `App::logic`, and paints the result.
 
+// A release build on Windows is a GUI program: no console window behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
+mod dialogs;
 mod smoke;
 mod theme;
 mod views;

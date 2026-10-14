@@ -76,30 +76,17 @@ rust-embed = "8"
 
 tracing.workspace = true
 
-# XDG Desktop Portal (suspend/idle inhibit)
-ashpd.workspace = true
-
-# Credential storage (system keyring)
-# keyring 4 is a thin facade re-exporting keyring-core; on Linux it only wires up
-# the D-Bus secret service backend, not the kernel keyutils one. We depend on
-# keyring-core directly and pick a default store ourselves (see src/credentials.rs),
-# preferring kernel keyutils and falling back to the D-Bus secret service, matching
-# legacy keyring v3 behavior.
+# Credential storage (system keyring): the platform store is picked in
+# src/credentials.rs.
 keyring-core = "1"
-linux-keyutils-keyring-store = "1"
-zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
-
-# MPRIS2 D-Bus media player interface (media keys, shell/panel integration).
-# Rides the zbus 5.x already pulled in by ashpd and the secret-service keyring
-# store, so this adds no new transitive D-Bus stack.
-mpris-server = { version = "0.10", features = ["tokio"] }
-zbus.workspace = true
 
 # Misc
 open.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
 urlencoding.workspace = true
+# `file://` URI <-> path conversion that is right on Windows drive letters too.
+url = "2"
 md5 = "0.8"
 notify = "8"
 thiserror = "2"
@@ -120,14 +107,55 @@ regex = "1"
 flacenc = "0.5"
 hound = "3.5"
 
+# Linux only: the desktop is reached over D-Bus and the kernel/keyring APIs.
+[target.'cfg(target_os = "linux")'.dependencies]
+# XDG Desktop Portal (suspend/idle inhibit), with logind as fallback via zbus.
+ashpd.workspace = true
+zbus.workspace = true
+
+# Credential storage (system keyring)
+# keyring 4 is a thin facade re-exporting keyring-core; on Linux it only wires up
+# the D-Bus secret service backend, not the kernel keyutils one. We depend on
+# keyring-core directly and pick a default store ourselves (see src/credentials.rs),
+# preferring kernel keyutils and falling back to the D-Bus secret service, matching
+# legacy keyring v3 behavior.
+linux-keyutils-keyring-store = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
+
+# MPRIS2 D-Bus media player interface (media keys, shell/panel integration).
+# Rides the zbus 5.x already pulled in by ashpd and the secret-service keyring
+# store, so this adds no new transitive D-Bus stack.
+mpris-server = { version = "0.10", features = ["tokio"] }
+
 # MPD visualizer audio: capture MPD's own PipeWire playback stream (aulos only
 # remote-controls MPD, so no PCM passes through the in-app engine tap).
 pipewire = { version = "0.10", optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows Credential Manager store for keyring-core.
+windows-native-keyring-store = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS Keychain store for keyring-core.
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+# Windows (System Media Transport Controls) and macOS (Now Playing / remote
+# command center) share the same crates; Linux uses its own D-Bus code above.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# Media keys and now-playing metadata (SMTC / MPNowPlayingInfoCenter). No D-Bus.
+souvlaki = { version = "0.8", default-features = false }
+# Sleep/idle inhibition while playing (SetThreadExecutionState / IOPMAssertion).
+keepawake = "0.6"
+# Native track-change notifications (WinRT toasts / NSUserNotification). No
+# zbus: Linux keeps its own `org.freedesktop.Notifications` client.
+notify-rust = { version = "4", default-features = false }
+
 [features]
 default = []
-# PCM capture for the visualizer (the MPD PipeWire tap). The rendering side
-# is UI-specific and lives in the UI crate's own `visualizer` feature.
+# PCM capture for the visualizer (the MPD PipeWire tap, Linux only: on other
+# platforms the feature builds but MPD capture reports unavailable). The
+# rendering side is UI-specific and lives in the UI crate's own `visualizer`
+# feature.
 visualizer = ["dep:pipewire"]
 
 [dev-dependencies]

@@ -1,20 +1,23 @@
 name: Release
 
-# Builds Linux release tarballs and publishes them as a GitHub Release.
+# Builds Linux, Windows and macOS release archives and publishes them as a
+# GitHub Release.
 #
 # Trigger: a bare semver tag (e.g. `0.1.0`, matching the Cargo.toml version), or
 # a manual run. A manual run builds and packages everything (as a dry run) but
 # does not publish, since there is no tag to attach a Release to; the tarballs
 # are kept as workflow artifacts.
 #
-# Targets are Linux only (the code depends on wayland, D-Bus portals and
-# keyutils) and glibc only (a GUI app that dlopen()s wayland/GPU libraries
-# cannot be statically linked with musl).
+# Targets: Linux x86_64/aarch64 (.tar.gz), Windows x86_64 MSVC (.zip) and macOS
+# aarch64/x86_64 (.tar.gz). Linux is glibc only (a GUI app that dlopen()s
+# wayland/GPU libraries cannot be statically linked with musl). All builds are
+# native, there is no cross-compilation.
 #
 # Features: release binaries are built with `--features visualizer`, so the
 # lactea visualizer ships enabled. lactea is pure Rust on wgpu (needs a Vulkan
-# or GL driver at runtime) and MPD audio is captured through PipeWire, so the
-# binary links libpipewire-0.3.
+# or GL driver at runtime on Linux, Direct3D 12/Vulkan on Windows, Metal on
+# macOS). MPD audio capture goes through PipeWire and exists on Linux only, so
+# only the Linux binary links libpipewire-0.3.
 # `tokio-console` is deliberately left out: it replaces normal logging with a
 # debug server on port 6669 and is only meant for local debugging.
 on:
@@ -122,12 +125,20 @@ jobs:
           # cross pkg-config.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # macos-15-intel is the x86_64 macOS runner (macos-13 is retired).
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
     env:
       VERSION: ${{ needs.test.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # shellcheck disable=SC2086
@@ -142,12 +153,14 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release
+        shell: bash
         run: cargo build --release --locked --features "$FEATURES"
 
       # The tarball unpacks to aulos-<version>-<target>/ with the binary next to
       # the justfile, so `sudo just install` works from inside the extracted
       # directory.
-      - name: Package
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -160,6 +173,35 @@ jobs:
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
           ls -l dist
           echo "TARBALL=dist/${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="aulos-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp target/release/aulos LICENSE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          ls -l dist
+          echo "TARBALL=dist/${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="aulos-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp target/release/aulos.exe LICENSE README.md "dist/${name}/"
+          (cd dist && 7z a -tzip "${name}.zip" "${name}")
+          (cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256")
+          ls -l dist
+          echo "TARBALL=dist/${name}.zip" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -205,6 +247,9 @@ jobs:
           base="aulos-${VERSION}"
           x86="${base}-x86_64-unknown-linux-gnu"
           arm="${base}-aarch64-unknown-linux-gnu"
+          win="${base}-x86_64-pc-windows-msvc"
+          macarm="${base}-aarch64-apple-darwin"
+          macx86="${base}-x86_64-apple-darwin"
           {
             echo "## What's Changed"
             echo
@@ -217,10 +262,15 @@ jobs:
             echo "|----------|--------------|------|"
             echo "| Linux | x86_64 | \`${x86}.tar.gz\` |"
             echo "| Linux | aarch64 | \`${arm}.tar.gz\` |"
+            echo "| Windows | x86_64 | \`${win}.zip\` |"
+            echo "| macOS | aarch64 (Apple silicon) | \`${macarm}.tar.gz\` |"
+            echo "| macOS | x86_64 (Intel) | \`${macx86}.tar.gz\` |"
             echo
-            echo "A \`.sha256\` file is published next to each tarball."
+            echo "A \`.sha256\` file is published next to each archive."
             echo
             echo "## Install"
+            echo
+            echo "### Linux"
             echo
             echo '```sh'
             echo "tar xzf ${x86}.tar.gz"
@@ -230,6 +280,20 @@ jobs:
             echo
             echo "Without \`just\`, copy \`aulos\` into your \`PATH\` and the"
             echo "files under \`resources/\` to the matching \`/usr/share\`."
+            echo
+            echo "### Windows"
+            echo
+            echo "Unzip \`${win}.zip\` and run \`aulos.exe\`."
+            echo
+            echo "### macOS"
+            echo
+            echo '```sh'
+            echo "tar xzf ${macarm}.tar.gz"
+            echo "./${macarm}/aulos"
+            echo '```'
+            echo
+            echo "The binary is not code-signed; if Gatekeeper blocks it, run"
+            echo "\`xattr -d com.apple.quarantine aulos\` once."
           } > release-notes.md
           cat release-notes.md
 
@@ -241,4 +305,6 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256
+            artifacts/*.zip
+            artifacts/*.zip.sha256
           generate_release_notes: false

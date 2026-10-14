@@ -29,8 +29,7 @@
 //!   header stays in the payload).
 
 use std::fs::File;
-use std::io;
-use std::os::unix::fs::FileExt;
+use std::io::{self, Read, Seek, SeekFrom};
 
 use super::BitrateMode;
 
@@ -63,17 +62,23 @@ pub(super) struct Mp3Info {
     pub mode: BitrateMode,
 }
 
-fn read_at(file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
+// Positional reads on a shared `&File` (seek, then read), portable where
+// `read_at`/`seek_read` are not: the file is never read concurrently here.
+fn read_at(mut file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
-    file.read_exact_at(&mut buf, off)?;
+    file.seek(SeekFrom::Start(off))?;
+    file.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn read_at_most(file: &File, off: u64, len: usize) -> Vec<u8> {
+fn read_at_most(mut file: &File, off: u64, len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
     let mut got = 0;
+    if file.seek(SeekFrom::Start(off)).is_err() {
+        return Vec::new();
+    }
     while got < len {
-        match file.read_at(&mut buf[got..], off + got as u64) {
+        match file.read(&mut buf[got..]) {
             Ok(0) | Err(_) => break,
             Ok(n) => got += n,
         }

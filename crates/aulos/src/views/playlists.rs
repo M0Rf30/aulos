@@ -4,6 +4,7 @@
 //! import / export.
 
 use crate::app::{App, Route};
+use crate::dialogs::{self, Filter};
 use crate::theme::{self, ColorExt, Palette};
 use crate::views::{home, menus};
 use crate::widgets::{
@@ -46,10 +47,9 @@ enum Dialog {
     Delete { sel: Sel, name: String },
 }
 
-/// Results of the portal file dialogs (they run off the UI thread).
+/// Results of the native file dialogs (they run off the UI thread).
 enum IoMsg {
     Picked(Vec<PathBuf>),
-    Failed(String),
     Exported(Result<Option<ExportOutcome>, String>),
 }
 
@@ -1677,11 +1677,7 @@ fn spawn_import(app: &mut App) {
     let tx = io_sender(app);
     let ctx = app.ctx.clone();
     app.handle.spawn(async move {
-        let msg = match pick_playlist_files().await {
-            Ok(paths) => IoMsg::Picked(paths),
-            Err(e) => IoMsg::Failed(e),
-        };
-        let _ = tx.send(msg);
+        let _ = tx.send(IoMsg::Picked(pick_playlist_files().await));
         ctx.request_repaint();
     });
 }
@@ -1735,7 +1731,6 @@ fn poll_io(app: &mut App, st: &mut State) {
                     app.run(effect);
                 }
             }
-            IoMsg::Failed(reason) => app.toast_error(format!("Playlist import failed: {reason}")),
             IoMsg::Exported(Ok(Some(outcome))) => {
                 let file = outcome
                     .path
@@ -1765,30 +1760,12 @@ async fn export_flow(
     source: ExportSource,
     relative: bool,
 ) -> Result<Option<ExportOutcome>, String> {
-    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
     let default_name = format!(
         "{}.m3u8",
         aulos_core::library::playlist_io::sanitize_file_name(name)
     );
-    let filter = FileFilter::new("M3U playlist").glob("*.m3u8").glob("*.m3u");
-    let request = SelectedFiles::save_file()
-        .title("Export playlist")
-        .current_name(default_name.as_str())
-        .modal(true)
-        .filter(filter)
-        .send()
-        .await
-        .map_err(|e| format!("Portal request failed: {e}"))?;
-    let selected = match request.response() {
-        Ok(selected) => selected,
-        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => return Ok(None),
-        Err(e) => return Err(format!("Portal response failed: {e}")),
-    };
-    let Some(mut path) = selected
-        .uris()
-        .first()
-        .and_then(|uri| aulos_core::file_uri_to_path(uri.as_str()))
+    let filter = Filter::new("M3U playlist", ["m3u8", "m3u"]);
+    let Some(mut path) = dialogs::save_file("Export playlist", &default_name, Some(&filter)).await
     else {
         return Ok(None);
     };
@@ -1800,28 +1777,13 @@ async fn export_flow(
         .map(Some)
 }
 
-async fn pick_playlist_files() -> Result<Vec<PathBuf>, String> {
-    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
-    let mut filter = FileFilter::new("Playlists (M3U, M3U8, PLS)");
-    for ext in aulos_core::library::m3u::PLAYLIST_EXTENSIONS {
-        filter = filter.glob(&format!("*.{ext}"));
-    }
-    let request = SelectedFiles::open_file()
-        .title("Import playlists")
-        .multiple(true)
-        .modal(true)
-        .filter(filter)
-        .send()
-        .await
-        .map_err(|e| format!("Portal request failed: {e}"))?;
-    match request.response() {
-        Ok(selected) => Ok(selected
-            .uris()
+/// The playlist files the user picked; empty when the dialog was cancelled.
+async fn pick_playlist_files() -> Vec<PathBuf> {
+    let filter = Filter::new(
+        "Playlists (M3U, M3U8, PLS)",
+        aulos_core::library::m3u::PLAYLIST_EXTENSIONS
             .iter()
-            .filter_map(|uri| aulos_core::file_uri_to_path(uri.as_str()))
-            .collect()),
-        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => Ok(Vec::new()),
-        Err(e) => Err(format!("Portal response failed: {e}")),
-    }
+            .copied(),
+    );
+    dialogs::pick_files("Import playlists", Some(&filter)).await
 }

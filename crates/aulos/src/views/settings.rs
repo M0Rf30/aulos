@@ -20,6 +20,7 @@ use egui::{
 use egui_phosphor::regular as ph;
 
 use crate::app::App;
+use crate::dialogs;
 use crate::theme::{self, ColorExt, Palette};
 use crate::widgets::{
     IconBtn, PillKind, empty_state, paint_icon, paint_text, paint_text_spaced, pill_button,
@@ -177,7 +178,8 @@ impl Sec {
 /// Results of off-thread work the page started.
 enum Msg {
     Scrobble(ScrobbleMessage),
-    Folder(Result<PathBuf, String>),
+    /// The chosen music folder; `None` when the dialog was cancelled.
+    Folder(Option<PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -955,7 +957,7 @@ fn apply_loved(app: &mut App, loved: &[(String, String)]) {
     ));
 }
 
-/// Opens the desktop portal's folder chooser; the answer arrives as [`Msg::Folder`].
+/// Opens the native folder chooser; the answer arrives as [`Msg::Folder`].
 fn pick_folder(app: &mut App) {
     if app.views.settings.picking_folder {
         return;
@@ -964,48 +966,18 @@ fn pick_folder(app: &mut App) {
     let tx = app.views.settings.sender();
     let ctx = app.ctx.clone();
     app.handle.spawn(async move {
-        let result = pick_folder_portal().await;
+        let result = dialogs::pick_folder("Select Music Directory").await;
         if tx.send(Msg::Folder(result)).is_ok() {
             ctx.request_repaint();
         }
     });
 }
 
-async fn pick_folder_portal() -> Result<PathBuf, String> {
-    use ashpd::desktop::file_chooser::SelectedFiles;
-
-    let selected = SelectedFiles::open_file()
-        .title("Select Music Directory")
-        .directory(true)
-        .modal(true)
-        .send()
-        .await
-        .map_err(|e| format!("Portal request failed: {e}"))?
-        .response()
-        .map_err(|e| format!("Portal response failed: {e}"))?;
-    let uris = selected.uris();
-    let uri = uris
-        .first()
-        .ok_or_else(|| "No directory selected".to_owned())?;
-    let uri = uri.as_str();
-    let encoded = uri
-        .strip_prefix("file://")
-        .ok_or_else(|| format!("Not a local file URI: {uri}"))?;
-    urlencoding::decode(encoded)
-        .map(|decoded| PathBuf::from(decoded.as_ref()))
-        .map_err(|e| format!("Could not decode URI path: {e}"))
-}
-
-fn folder_picked(app: &mut App, result: Result<PathBuf, String>) {
+fn folder_picked(app: &mut App, result: Option<PathBuf>) {
     app.views.settings.picking_folder = false;
-    match result {
-        Ok(path) => add_folder(app, path),
-        Err(e) => {
-            // Dismissing the dialog is not an error worth a toast.
-            if !e.to_lowercase().contains("cancel") {
-                app.toast_error(format!("Folder picker failed: {e}"));
-            }
-        }
+    // Dismissing the dialog is not worth a toast.
+    if let Some(path) = result {
+        add_folder(app, path);
     }
 }
 

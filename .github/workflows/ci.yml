@@ -33,12 +33,18 @@ concurrency:
 
 jobs:
   check:
-    name: Check
-    runs-on: ubuntu-24.04
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15-intel is the x86_64 macOS runner (macos-13 is retired).
+        os: [ubuntu-24.04, windows-latest, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # shellcheck disable=SC2086
@@ -55,15 +61,18 @@ jobs:
           cache-on-failure: true
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: Run clippy
+        shell: bash
         run: cargo clippy --all-targets --locked --features "$FEATURES" -- -D warnings
 
       # `aulos-core` is the UI-independent backend: it must build on its own
       # (no features unified in from the app crate) and never pull in a UI
       # toolkit.
       - name: Check backend stays UI-free
+        if: runner.os == 'Linux'
         run: |
           cargo check -p aulos-core --all-targets --locked --features "$FEATURES"
           if cargo tree -p aulos-core -e normal --prefix none --locked --features "$FEATURES" \
@@ -73,12 +82,17 @@ jobs:
           fi
 
   test:
-    name: Test Suite
-    runs-on: ubuntu-24.04
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # shellcheck disable=SC2086
@@ -93,6 +107,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run tests
+        shell: bash
         run: cargo test --locked --features "$FEATURES"
 
   build:
@@ -107,11 +122,19 @@ jobs:
           # Native aarch64 runner: no cross-compilation toolchain needed.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: aulos.exe
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # shellcheck disable=SC2086
@@ -126,11 +149,12 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release
+        shell: bash
         run: cargo build --release --locked --features "$FEATURES"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: aulos-${{ matrix.target }}
-          path: target/release/aulos
+          path: target/release/${{ matrix.exe || 'aulos' }}
           if-no-files-found: error

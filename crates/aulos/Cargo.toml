@@ -14,8 +14,10 @@ egui = "0.36.2"
 egui_extras = "0.36.2"
 egui-phosphor = { version = "0.14.0", features = ["fill"] }
 tokio.workspace = true
-# XDG portal file chooser (playlist import/export).
-ashpd.workspace = true
+futures = "0.3"
+# Native file/folder dialogs (XDG portal on Linux, Win32 / NSOpenPanel
+# elsewhere). The portal backend needs no GTK.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 urlencoding.workspace = true
 # Opens folders and web pages (converter output dir, MusicBrainz pages).
 open.workspace = true
@@ -31,7 +33,23 @@ walkdir = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 
+# Embeds the icon in the Windows executable (see `build.rs`).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[package.metadata.bundle]
+# `cargo bundle` (cargo-bundle) builds the macOS `Aulos.app`.
+name = "Aulos"
+identifier = "io.github.m0rf30.Aulos"
+icon = ["assets/icon-256.png"]
+category = "public.app-category.music"
+short_description = "A modern music player"
+
 [features]
 default = []
 # MilkDrop visualizer: the backend's PCM capture plus the lactea renderer.
 visualizer = ["aulos-core/visualizer", "dep:lactea", "dep:walkdir", "dep:dirs", "dep:image"]
+
+# The `HWND` the Windows media controls (SMTC) attach to.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"

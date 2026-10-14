@@ -3,10 +3,11 @@
 //! Everything the page decides lives in `aulos_core::session::ConvertState`
 //! (queue, start, cancel, retry) and in the persisted `Config` (format, sample
 //! rate, output folder, encoder options); this module draws them and routes
-//! the user's clicks. Pickers run through the XDG portal off the UI thread and
+//! the user's clicks. Pickers are native dialogs run off the UI thread and
 //! report back through a channel drained every frame.
 
 use crate::app::App;
+use crate::dialogs::{self, Filter};
 use crate::theme::{self, ColorExt, Palette, lerp_color};
 use crate::widgets::{
     PillKind, empty_state, paint_icon, paint_text, pill_button_enabled, tag_badge,
@@ -51,11 +52,10 @@ const OTHER_FORMATS: [OutputFormat; 6] = [
     OutputFormat::OggVorbis,
 ];
 
-/// What a portal picker brought back.
+/// What a picker brought back.
 enum Picked {
     Files(Vec<PathBuf>),
     OutDir(PathBuf),
-    Failed(String),
 }
 
 pub struct State {
@@ -1097,13 +1097,10 @@ fn apply(app: &mut App, intent: Intent) {
             let tx = app.views.converter.tx.clone();
             let ctx = app.ctx.clone();
             app.handle.spawn(async move {
-                let picked = match pick_files().await {
-                    Ok(files) if files.is_empty() => None,
-                    Ok(files) => Some(Picked::Files(files)),
-                    Err(error) => Some(Picked::Failed(error)),
-                };
-                if let Some(picked) = picked {
-                    let _ = tx.send(picked);
+                let files = pick_files().await;
+                // Cancelled: nothing to add.
+                if !files.is_empty() {
+                    let _ = tx.send(Picked::Files(files));
                     ctx.request_repaint();
                 }
             });
@@ -1112,13 +1109,8 @@ fn apply(app: &mut App, intent: Intent) {
             let tx = app.views.converter.tx.clone();
             let ctx = app.ctx.clone();
             app.handle.spawn(async move {
-                let picked = match pick_folder().await {
-                    Ok(None) => None,
-                    Ok(Some(dir)) => Some(Picked::OutDir(dir)),
-                    Err(error) => Some(Picked::Failed(error)),
-                };
-                if let Some(picked) = picked {
-                    let _ = tx.send(picked);
+                if let Some(dir) = pick_folder().await {
+                    let _ = tx.send(Picked::OutDir(dir));
                     ctx.request_repaint();
                 }
             });
@@ -1158,78 +1150,31 @@ fn set_config(app: &mut App, change: impl FnOnce(&mut Config)) {
     app.session.config.save();
 }
 
-/// Applies what the portal pickers brought back since the last frame.
+/// Applies what the pickers brought back since the last frame.
 fn drain_picks(app: &mut App) {
     while let Ok(picked) = app.views.converter.rx.try_recv() {
         match picked {
             Picked::Files(files) => app.session.convert.enqueue(files),
             Picked::OutDir(dir) => set_config(app, |c| c.convert_out_dir = Some(dir)),
-            Picked::Failed(error) => app.toast_error(error),
         }
     }
 }
 
-// ---------------------------------------------------------------- portal pickers
+// ---------------------------------------------------------------- pickers
 
 /// The files the user picked; empty when the dialog was cancelled.
-async fn pick_files() -> Result<Vec<PathBuf>, String> {
-    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-
-    let mut filter = FileFilter::new("Audio, video and CUE files");
-    for ext in aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
-        .iter()
-        .chain(["cue", "mkv", "mov", "avi"].iter())
-    {
-        filter = filter.glob(&format!("*.{ext}"));
-    }
-    let selected = match SelectedFiles::open_file()
-        .title("Select audio or video files, or a CUE sheet")
-        .multiple(true)
-        .modal(true)
-        .filter(filter)
-        .send()
-        .await
-        .map_err(|e| format!("Portal request failed: {e}"))?
-        .response()
-    {
-        Ok(selected) => selected,
-        Err(e) if is_cancelled(&e) => return Ok(Vec::new()),
-        Err(e) => return Err(format!("Portal response failed: {e}")),
-    };
-    selected
-        .uris()
-        .iter()
-        .map(|uri| aulos_core::tagger::jobs::uri_to_path(uri.as_str()))
-        .collect()
+async fn pick_files() -> Vec<PathBuf> {
+    let filter = Filter::new(
+        "Audio, video and CUE files",
+        aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
+            .iter()
+            .chain(["cue", "mkv", "mov", "avi"].iter())
+            .copied(),
+    );
+    dialogs::pick_files("Select audio or video files, or a CUE sheet", Some(&filter)).await
 }
 
 /// The folder the user picked; `None` when the dialog was cancelled.
-async fn pick_folder() -> Result<Option<PathBuf>, String> {
-    use ashpd::desktop::file_chooser::SelectedFiles;
-
-    let selected = match SelectedFiles::open_file()
-        .title("Select the output folder")
-        .directory(true)
-        .modal(true)
-        .send()
-        .await
-        .map_err(|e| format!("Portal request failed: {e}"))?
-        .response()
-    {
-        Ok(selected) => selected,
-        Err(e) if is_cancelled(&e) => return Ok(None),
-        Err(e) => return Err(format!("Portal response failed: {e}")),
-    };
-    selected
-        .uris()
-        .first()
-        .map(|uri| aulos_core::tagger::jobs::uri_to_path(uri.as_str()))
-        .transpose()
-}
-
-fn is_cancelled(error: &ashpd::Error) -> bool {
-    matches!(
-        error,
-        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
-    )
+async fn pick_folder() -> Option<PathBuf> {
+    dialogs::pick_folder("Select the output folder").await
 }

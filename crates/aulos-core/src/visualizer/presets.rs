@@ -51,22 +51,39 @@ impl PresetEntry {
     }
 }
 
+/// Where users put their own presets: `<data dir>/aulos/presets`, i.e.
+/// `~/.local/share/aulos/presets` on Linux,
+/// `%APPDATA%\aulos\presets` on Windows and
+/// `~/Library/Application Support/aulos/presets` on macOS. `None` when the
+/// platform has no data directory (the web build).
+pub fn user_preset_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|data| data.join("aulos").join("presets"))
+}
+
 /// Returns the full ordered list of preset search directories: the
-/// caller-supplied `user_dir` (if any) first, then the common
-/// system-wide MilkDrop preset install locations, then the Flatpak location under
-/// `dirs::data_dir()`. Shared by the UI's `VizRenderer::new` and
-/// [`scan_presets`] so both always agree on where presets live.
+/// caller-supplied `user_dir` (if any) first, then Aulos's own
+/// [`user_preset_dir`], the system-wide MilkDrop preset install locations of
+/// the platform (distro packages on Linux, Homebrew on macOS), and the
+/// lactea/projectM folders under `dirs::data_dir()` (the Flatpak location on
+/// Linux). Shared by the UI's `VizRenderer::new` and [`scan_presets`] so both
+/// always agree on where presets live.
 pub fn preset_search_dirs(user_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = user_dir {
-        dirs.push(dir);
+    dirs.extend(user_dir);
+    dirs.extend(user_preset_dir());
+    if cfg!(target_os = "linux") {
+        dirs.extend([
+            PathBuf::from("/usr/share/lactea/presets"),
+            PathBuf::from("/usr/share/projectM/presets"),
+            PathBuf::from("/usr/local/share/projectM/presets"),
+            PathBuf::from("/usr/share/projectm/presets"),
+        ]);
+    } else if cfg!(target_os = "macos") {
+        dirs.extend([
+            PathBuf::from("/opt/homebrew/share/projectM/presets"),
+            PathBuf::from("/usr/local/share/projectM/presets"),
+        ]);
     }
-    dirs.extend([
-        PathBuf::from("/usr/share/lactea/presets"),
-        PathBuf::from("/usr/share/projectM/presets"),
-        PathBuf::from("/usr/local/share/projectM/presets"),
-        PathBuf::from("/usr/share/projectm/presets"),
-    ]);
     if let Some(data) = dirs::data_dir() {
         dirs.push(data.join("lactea").join("presets"));
         dirs.push(data.join("projectM").join("presets"));

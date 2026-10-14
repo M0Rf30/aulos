@@ -6,7 +6,8 @@
 //! Moves each legacy directory to its new location, but only when the new
 //! one does not exist yet, so it never overwrites state created under the
 //! new name and is a no-op on every launch after the first. Keyring entries
-//! are migrated lazily in [`crate::credentials`].
+//! are migrated lazily in [`crate::credentials`]. Lyra only ever shipped for
+//! Linux, so this does nothing on other platforms.
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,9 @@ pub fn migrate_legacy_dirs() {
 
 fn legacy_dir_pairs() -> Vec<(PathBuf, PathBuf)> {
     let mut pairs = Vec::new();
+    if !cfg!(target_os = "linux") {
+        return pairs;
+    }
     for base in [dirs::data_dir(), dirs::cache_dir(), dirs::config_dir()]
         .into_iter()
         .flatten()

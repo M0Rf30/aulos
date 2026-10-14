@@ -33,12 +33,13 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester
 i18n-embed-fl = "0.10"
 tracing = "0.1"
 
-# XDG Desktop Portal (directory picker, suspend/idle inhibit)
-ashpd = { version = "0.13", features = ["file_chooser", "inhibit"] }
+# Linux only: XDG Desktop Portal suspend/idle inhibit (file dialogs go through
+# `rfd`, which talks to the same portal).
+ashpd = { version = "0.13", features = ["inhibit"] }
 
-# zbus 5.x, the same major already resolved transitively (via ashpd,
-# mpris-server and the secret-service keyring store), with only the `tokio`
-# feature so it doesn't pull in a second (async-io) executor.
+# Linux only. zbus 5.x, the same major already resolved transitively (via
+# ashpd, mpris-server and the secret-service keyring store), with only the
+# `tokio` feature so it doesn't pull in a second (async-io) executor.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 open = "5"

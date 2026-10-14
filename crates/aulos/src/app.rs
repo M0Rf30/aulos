@@ -9,12 +9,14 @@ use aulos_core::library::{
     CoverArt, Track, palette,
     quality::{self, AudioQuality},
 };
+use aulos_core::mpris::{self, MprisCommand, MprisEvent, NativeWindow};
 use aulos_core::session::{
     BackgroundKey, ConvertNotice, PodcastNotice, RadioNotice, Session, SessionEvent, SessionNotice,
     SessionUpdate,
 };
 use aulos_core::task::Effect;
 use egui::{Color32, Context, TextureHandle, TextureOptions};
+use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -117,6 +119,9 @@ pub enum AppEvent {
         accent: Option<palette::Accent>,
         large: Option<(u32, u32, Vec<u8>)>,
     },
+    /// The OS media session (media keys, Now Playing, MPRIS) came up or
+    /// relayed a command.
+    Media(MprisEvent),
 }
 
 /// Smoke-screenshot driver (see `smoke.rs`).
@@ -185,6 +190,22 @@ pub const UI_SCALE_STEPS: [f32; 8] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
 /// The widest the expanded cover is drawn, in points.
 const EXPANDED_COVER_POINTS: f32 = 480.0;
 
+/// The native window handle the Windows media controls attach to.
+#[cfg(windows)]
+fn native_window(cc: &eframe::CreationContext<'_>) -> Option<NativeWindow> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(NativeWindow(handle.hwnd.get() as usize)),
+        _ => None,
+    }
+}
+
+/// Only Windows' media controls need the window.
+#[cfg(not(windows))]
+fn native_window(_: &eframe::CreationContext<'_>) -> Option<NativeWindow> {
+    None
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, handle: tokio::runtime::Handle) -> Self {
         theme::install_fonts(&cc.egui_ctx);
@@ -251,11 +272,31 @@ impl App {
         for (name, reason) in &init_errors {
             views::overlays::on_connect_failed(&mut app, name, reason);
         }
+        app.start_media_session(native_window(cc));
         let start = app.session.start();
         app.run(start);
         let startup = app.startup_route();
         app.navigate(startup);
         app
+    }
+
+    /// Starts the OS media session (media keys, Now Playing, MPRIS); its
+    /// events come back as [`AppEvent::Media`]. Smoke runs skip it so they
+    /// never claim a name on the user's session bus.
+    fn start_media_session(&self, window: Option<NativeWindow>) {
+        if std::env::var_os("AULOS_SMOKE").is_some() {
+            return;
+        }
+        let (tx, ctx) = (self.app_tx.clone(), self.ctx.clone());
+        self.handle.spawn(async move {
+            let mut events = std::pin::pin!(mpris::mpris_stream(window));
+            while let Some(event) = events.next().await {
+                if tx.send(AppEvent::Media(event)).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// The route the user chose to open on (Home when unknown).
@@ -654,6 +695,11 @@ impl App {
 
     fn apply_app_event(&mut self, event: AppEvent) {
         match event {
+            AppEvent::Media(MprisEvent::Ready(handle)) => {
+                let update = self.session.connect_media_session(handle);
+                self.run(update);
+            }
+            AppEvent::Media(MprisEvent::Command(command)) => self.media_command(command),
             AppEvent::Art {
                 key,
                 backdrop,
@@ -686,6 +732,23 @@ impl App {
                 });
                 self.retarget_accent(color);
                 self.art_done = Some(key);
+            }
+        }
+    }
+
+    /// Carries out a command from the media session: window commands here,
+    /// playback ones in the session.
+    fn media_command(&mut self, command: MprisCommand) {
+        match command {
+            MprisCommand::Raise => {
+                self.ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            MprisCommand::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            command => {
+                let update = self.session.apply_mpris_command(command);
+                self.run(update);
             }
         }
     }

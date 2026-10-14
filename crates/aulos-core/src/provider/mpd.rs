@@ -395,7 +395,7 @@ impl MpdProvider {
     /// visualizer's MPD PipeWire capture subscription to decide whether
     /// this server can plausibly be found on the local PipeWire graph at
     /// all — see `player::pw_capture::is_local_mpd_host`.
-    #[cfg(feature = "visualizer")]
+    #[cfg(all(feature = "visualizer", target_os = "linux"))]
     pub fn host(&self) -> &str {
         &self.config.host
     }
