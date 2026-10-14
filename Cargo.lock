@@ -595,12 +595,22 @@ dependencies = [
 name = "aulos"
 version = "0.6.1"
 dependencies = [
+ "ashpd",
  "aulos-core",
+ "chrono",
+ "dirs",
  "eframe",
+ "egui",
+ "egui-phosphor",
  "egui_extras",
+ "image",
+ "lactea",
+ "open",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
+ "walkdir",
 ]
 
 [[package]]
@@ -1636,6 +1646,15 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "web-sys",
+]
+
+[[package]]
+name = "egui-phosphor"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f4299551488dddaa8f757727e1eb4ffdaf277ffe6e30b413403468f5ecf4634"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
@@ -3156,6 +3175,72 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "lactea"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d688a1bd5dd4651a5ff778c70536f0a47a18cbef71aad7980b7bf1eb7dd2b172"
+dependencies = [
+ "gif",
+ "lactea-abi",
+ "lactea-audio",
+ "lactea-eel",
+ "lactea-hlsl",
+ "lactea-preset",
+ "lactea-render",
+ "log",
+ "thiserror 2.0.21",
+ "wgpu",
+]
+
+[[package]]
+name = "lactea-abi"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "663f7b4474b25961ed5f08e1d5f1636240f90b437d22cbfa75ce8f5d037d9bcd"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "lactea-audio"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5aaa578055d572446eb0b10271205c24445cd11d3470be20fbf0cc7922be0fb"
+
+[[package]]
+name = "lactea-eel"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab30c5679eca40ed663724c252fd124bff6509e1117094c3218c3da3bd3d1f3"
+
+[[package]]
+name = "lactea-hlsl"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9856acd0e1ee882fdcf71ceae4d04ca2578934d5264286e95094256e17b5ffca"
+dependencies = [
+ "lactea-abi",
+]
+
+[[package]]
+name = "lactea-preset"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd2fd2ff3063a38baed1bf205e972e1089440c3e8464ee138035e2db1e793e0"
+
+[[package]]
+name = "lactea-render"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0d7d4bf90bfdb5fe5223d7c52b7b3183ea3c0efcd233b217e8cedba4da52f5e"
+dependencies = [
+ "bytemuck",
+ "lactea-abi",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]

@@ -10,13 +10,28 @@ repository.workspace = true
 [dependencies]
 aulos-core.workspace = true
 eframe = "0.36.2"
+egui = "0.36.2"
 egui_extras = "0.36.2"
+egui-phosphor = { version = "0.14.0", features = ["fill"] }
 tokio.workspace = true
+# XDG portal file chooser (playlist import/export).
+ashpd.workspace = true
+urlencoding.workspace = true
+# Opens folders and web pages (converter output dir, MusicBrainz pages).
+open.workspace = true
+# Local hour of day for the Home greeting.
+chrono = "0.4"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# MilkDrop visualizer (feature `visualizer`). 0.2 drives the host's own wgpu 30
+# device, the very one eframe renders with, so frames never leave the GPU.
+lactea = { version = "0.2.2", optional = true }
+# Preset texture lookup for the visualizer.
+walkdir = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 
 [features]
 default = []
-# Enables the backend's visualizer plumbing; the egui front end doesn't render
-# the lactea visualizer yet.
-visualizer = ["aulos-core/visualizer"]
+# MilkDrop visualizer: the backend's PCM capture plus the lactea renderer.
+visualizer = ["aulos-core/visualizer", "dep:lactea", "dep:walkdir", "dep:dirs", "dep:image"]

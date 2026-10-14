@@ -1,10 +1,11 @@
 <div align="center">
 
-<img src="resources/icons/hicolor/scalable/apps/io.github.m0rf30.Aulos.svg" width="120" height="120" alt="Aulos">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="resources/logo/aulos-wordmark-dark.svg">
+  <img src="resources/logo/aulos-wordmark-light.svg" width="260" alt="Aulos">
+</picture>
 
-# Aulos
-
-**A music player for Linux**
+**A modern music player for Linux**
 
 *Aulos: it really pipes the satyr's ass.*
 
@@ -17,15 +18,13 @@
 
 ---
 
-Aulos is a music player for Linux, written in Rust. Its backend (`aulos-core`) plays your local library, drives MPD servers, streams from Subsonic/OpenSubsonic servers, and also handles internet radio, podcasts and tag editing. The user interface is a native [egui](https://github.com/emilk/egui) app.
+Aulos is a modern music player for Linux, written in Rust. It plays your local library, drives MPD servers and streams from Subsonic/OpenSubsonic servers, with internet radio, podcasts, synced lyrics, a 10-band equalizer, a MilkDrop visualizer and a Picard-style tag editor. The interface is a native [egui](https://github.com/emilk/egui) app: dark by default, tinted by the colour of the cover that is playing.
 
-> **Status: early prototype.** The backend is feature-rich, but the egui front end is new and exposes only part of it: it loads and browses the local library, searches, and plays through the queue. Much of what is described below is implemented in `aulos-core` and is not reachable from the UI yet.
+> **Status: preview.** This branch replaces the previous libcosmic interface with egui. Every page of the design is in place (Home, Albums, Artists, Songs, Genres, Folders, Playlists, Podcasts, Radio, Tag editor, Converter, Settings, the expanded now-playing view, the mini player and the visualizer), but some controls are still missing because the backend can't feed them yet, and settings start fresh (nothing is imported from the old COSMIC settings).
 
-The name comes from the *aulos*, the double pipe of ancient Greece.
+The name comes from the *aulos*, the double pipe of ancient Greece; the logo's two slanted reeds are a nod to it.
 
 ## Features
-
-Everything below describes what the backend implements. The egui front end does not expose all of it yet (see the status note above).
 
 ### Music sources
 
@@ -78,7 +77,7 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 
 ### Visualizer
 
-The [lactea](https://github.com/M0Rf30/lactea) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets (`.milk`, and MilkDrop 3 `.milk2` double presets) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
+The [lactea](https://github.com/M0Rf30/lactea) visualizer (MilkDrop-style presets) renders on the GPU in a full-window view and reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. A HUD fades in on mouse movement with preset navigation (previous, random, next), preset locking, beat sensitivity, a searchable preset browser and fullscreen. Presets (`.milk`, and MilkDrop 3 `.milk2` double presets) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
 
 ### Tag editor
 
@@ -154,9 +153,22 @@ The repository is a Cargo workspace with two crates:
 
 ## Usage
 
-Start Aulos from your application menu, or from a terminal with `aulos`. The music folder is read from the settings file (see below); the egui front end has no settings page yet.
+Start Aulos from your application menu, or from a terminal with `aulos`. Add your music folders, MPD and Subsonic servers and everything else in **Settings**. The interface follows your display's scaling; **Settings → Appearance → Interface size** scales it further (75–200%).
 
 On the very first launch Aulos greets you with its intro jingle — a 4-second, 128 kbps MP3 in honour of Winamp's llama — and never again after that.
+
+### Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `Space` | Play / pause |
+| `/` | Search |
+| `1`–`8` | Jump to a page |
+| `Alt+←` / `Alt+→` | Back / forward |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / reset interface size |
+| `Esc` | Clear search, close sheets and the expanded view |
+
+In the visualizer: `←` / `→` previous / next preset, `L` lock, `P` preset browser, `F` or double-click fullscreen, `Esc` close.
 
 ### Where data lives
 

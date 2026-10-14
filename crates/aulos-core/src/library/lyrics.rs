@@ -119,7 +119,11 @@ impl LyricsProvider {
             urlencoded(title),
         );
 
-        let response = reqwest::get(&url).await.ok()?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let response = client.get(&url).send().await.ok()?;
 
         if !response.status().is_success() {
             return None;

@@ -265,6 +265,9 @@ pub struct Config {
     /// Size multiplier for cards in grid views (albums, artists, genres,
     /// folders, radio, podcasts…), 0.7–1.6; 1.0 is the default size.
     pub grid_scale: f32,
+    /// Interface zoom, [`Self::UI_SCALE_MIN`]–[`Self::UI_SCALE_MAX`]; 1.0
+    /// follows the display's own scale factor unchanged. Loading clamps it.
+    pub ui_scale: f32,
     /// Whether the first-run intro jingle ("it really pipes the satyr's
     /// ass") has already been played.
     pub intro_played: bool,
@@ -368,6 +371,7 @@ impl Default for Config {
             active_provider: None,
             fetch_artist_info: false,
             grid_scale: 1.0,
+            ui_scale: 1.0,
             intro_played: false,
             fade_duration_secs: 0.0,
             auto_play_mode: AutoPlayMode::Off,
@@ -441,8 +445,11 @@ impl Config {
                 return Config::default();
             }
         };
-        match ron::from_str(&text) {
-            Ok(config) => config,
+        match ron::from_str::<Config>(&text) {
+            Ok(mut config) => {
+                config.ui_scale = Self::clamp_ui_scale(config.ui_scale);
+                config
+            }
             Err(e) => {
                 let mut bad = path.as_os_str().to_owned();
                 bad.push(".bad");
@@ -456,6 +463,21 @@ impl Config {
                 }
                 Config::default()
             }
+        }
+    }
+
+    /// Smallest interface zoom.
+    pub const UI_SCALE_MIN: f32 = 0.75;
+    /// Largest interface zoom.
+    pub const UI_SCALE_MAX: f32 = 2.0;
+
+    /// `scale` limited to the supported zoom range (1.0 for NaN).
+    #[must_use]
+    pub fn clamp_ui_scale(scale: f32) -> f32 {
+        if scale.is_finite() {
+            scale.clamp(Self::UI_SCALE_MIN, Self::UI_SCALE_MAX)
+        } else {
+            1.0
         }
     }
 
@@ -681,6 +703,19 @@ mod persistence_tests {
             Config::load_from(&dir.join(SETTINGS_FILE)),
             Config::default()
         );
+    }
+
+    #[test]
+    fn ui_scale_defaults_to_one_and_loads_clamped() {
+        let dir = scratch("ui-scale");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        assert_eq!(Config::default().ui_scale, 1.0);
+        std::fs::write(&path, "(ui_scale: 5.0)").unwrap();
+        assert_eq!(Config::load_from(&path).ui_scale, Config::UI_SCALE_MAX);
+        std::fs::write(&path, "(ui_scale: 0.1)").unwrap();
+        assert_eq!(Config::load_from(&path).ui_scale, Config::UI_SCALE_MIN);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

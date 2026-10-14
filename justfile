@@ -26,6 +26,7 @@ bin-dst := base-dir / 'bin' / name
 desktop-dst := base-dir / 'share' / 'applications' / desktop
 icons-dst := base-dir / 'share' / 'icons' / 'hicolor'
 icon-svg-dst := icons-dst / 'scalable' / 'apps'
+icon-sym-dst := icons-dst / 'symbolic' / 'apps'
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -68,10 +69,11 @@ install:
     install -Dm0644 {{ 'resources' / desktop }} {{desktop-dst}}
     install -Dm0644 {{ 'resources' / appdata }} {{appdata-dst}}
     install -Dm0644 resources/icons/hicolor/scalable/apps/{{appid}}.svg {{icon-svg-dst}}/{{appid}}.svg
+    install -Dm0644 resources/icons/hicolor/symbolic/apps/{{appid}}-symbolic.svg {{icon-sym-dst}}/{{appid}}-symbolic.svg
 
 # Uninstalls installed files
 uninstall:
-    rm -f {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}}/{{appid}}.svg
+    rm -f {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}}/{{appid}}.svg {{icon-sym-dst}}/{{appid}}-symbolic.svg
 
 # Vendor dependencies locally
 vendor:
