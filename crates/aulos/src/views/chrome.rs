@@ -29,7 +29,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
 
     Panel::left("sidebar")
-        .exact_size(if app.narrow {
+        .exact_size(if app.narrow || app.sidebar_collapsed {
             size::RAIL
         } else {
             size::SIDEBAR

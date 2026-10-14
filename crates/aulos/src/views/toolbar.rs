@@ -69,7 +69,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 Route::Artists => !app.session.library.artists.is_empty(),
                 _ => !app.session.library.genres.is_empty(),
             };
-            if browse && populated {
+            let detail = matches!(
+                app.route,
+                Route::Album(_) | Route::Artist(_) | Route::Genre(_)
+            );
+            if browse && populated && !detail {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let cfg = &mut app.session.config.config;
@@ -100,8 +104,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 fn sources_menu(app: &mut App, ui: &mut Ui) {
     let t = Theme::get(ui.ctx());
     let providers = &app.session.providers;
+    // A single provider is just "all sources"; name the active one only when
+    // there is a choice.
     let label = providers
         .active_index
+        .filter(|_| providers.provider_list.len() > 1)
         .and_then(|i| providers.provider_list.get(i))
         .map_or("All sources", |(_, name)| name.as_str())
         .to_owned();

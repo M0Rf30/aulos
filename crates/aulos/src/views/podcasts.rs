@@ -3,8 +3,8 @@
 use crate::app::App;
 use crate::theme::{self, Accent, ColorExt, Palette, Theme};
 use crate::widgets::{
-    IconBtn, PillKind, chip, cover_image, empty_state, empty_state_tinted, paint_icon, paint_text,
-    pill_button, search_field, segmented, skeleton, text_field,
+    IconBtn, PillKind, chip, cover_image, empty_state, empty_state_actions, empty_state_tinted,
+    paint_icon, paint_text, pill_button, search_field, segmented, skeleton, text_field,
 };
 use aulos_core::online::UrlError;
 use aulos_core::online::podcast::{EpisodeFilter, primary_episode};
@@ -248,14 +248,22 @@ fn subscriptions(
         if recent(st.entered) {
             skeleton_rows(ui, cx, 5, 56.0, SHOW_ROW);
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else if empty_state(
-            ui,
-            regular::MICROPHONE_STAGE,
-            "No subscriptions yet",
-            "Find shows in Discover, or paste an RSS feed URL. New episodes show up here and in Home.",
-            Some("Open Discover"),
-        ) {
-            st.tab = TAB_DISCOVER;
+        } else {
+            let (discover, add) = empty_state_actions(
+                ui,
+                regular::MICROPHONE_STAGE,
+                "No subscriptions yet",
+                "Find shows in Discover, or paste an RSS feed URL. New episodes show up here and in Home.",
+                "Open Discover",
+                Some("Add feed URL"),
+                false,
+            );
+            if discover {
+                st.tab = TAB_DISCOVER;
+            }
+            if add {
+                st.add_open = true;
+            }
         }
         return;
     }

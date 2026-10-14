@@ -122,6 +122,7 @@ pub fn track_menu(
                     out = Some(MenuAction::TrackProperties(track.clone()));
                 }
                 if is_taggable(track) {
+                    separator(ui, pal);
                     out = tag_items(ui, std::slice::from_ref(track)).or(out);
                 }
                 out
@@ -185,13 +186,21 @@ pub fn album_menu(
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
-                if menu_item(ui, regular::INFO, "Album properties", Trailing::None).clicked() {
-                    out = Some(MenuAction::AlbumProperties(album.clone()));
-                }
                 if menu_item(ui, regular::MICROPHONE, "Go to artist", Trailing::None).clicked() {
                     out = Some(MenuAction::Open(Route::Artist(album.artist.clone())));
                 }
+                if menu_item(
+                    ui,
+                    regular::INFO,
+                    "Album properties",
+                    Trailing::Key("Alt ↵"),
+                )
+                .clicked()
+                {
+                    out = Some(MenuAction::AlbumProperties(album.clone()));
+                }
                 if album.tracks.iter().any(is_taggable) {
+                    separator(ui, pal);
                     out = tag_items(ui, &album.tracks).or(out);
                 }
                 out
@@ -240,15 +249,21 @@ pub fn menu_item(ui: &mut Ui, icon: &str, label: &str, trailing: Trailing) -> Re
         painter.rect_filled(rect, CornerRadius::same(6), pal.seg_sel);
     }
     let cy = rect.center().y;
+    // An empty `icon` makes a text-only row.
+    let label_x = if icon.is_empty() {
+        10.0
+    } else {
+        painter.text(
+            pos2(rect.left() + 15.5, cy),
+            Align2::CENTER_CENTER,
+            icon,
+            theme::icon(15.0),
+            pal.text_2,
+        );
+        31.0
+    };
     painter.text(
-        pos2(rect.left() + 15.5, cy),
-        Align2::CENTER_CENTER,
-        icon,
-        theme::icon(15.0),
-        pal.text_2,
-    );
-    painter.text(
-        pos2(rect.left() + 31.0, cy),
+        pos2(rect.left() + label_x, cy),
         Align2::LEFT_CENTER,
         label,
         theme::regular(13.0),
@@ -374,7 +389,7 @@ fn submenu(ui: &mut Ui, pal: Palette, spec: &Spec) -> Option<MenuAction> {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for playlist in playlists {
-                    if menu_item(ui, regular::PLAYLIST, &playlist.name, Trailing::None).clicked() {
+                    if menu_item(ui, "", &playlist.name, Trailing::None).clicked() {
                         out = Some(MenuAction::AddToPlaylist {
                             playlist: playlist.id.clone(),
                             uris: uris.clone(),

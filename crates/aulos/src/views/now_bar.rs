@@ -166,6 +166,9 @@ fn track_info(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Width of the elapsed / remaining labels: fits `\u{2212}1:00:00`.
+const LABEL_W: f32 = 56.0;
+
 fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     let t = Theme::get(ui.ctx());
     let playing = app.session.playback.is_playing();
@@ -302,7 +305,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     let mono = theme::mono(11.0);
     paint_text(
         ui.painter(),
-        Rect::from_min_size(line.min, vec2(34.0, 16.0)),
+        Rect::from_min_size(line.min, vec2(LABEL_W, 16.0)),
         Align::Max,
         &elapsed,
         mono.clone(),
@@ -310,15 +313,18 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     );
     paint_text(
         ui.painter(),
-        Rect::from_min_size(pos2(line.right() - 38.0, line.top()), vec2(38.0, 16.0)),
+        Rect::from_min_size(
+            pos2(line.right() - LABEL_W, line.top()),
+            vec2(LABEL_W, 16.0),
+        ),
         Align::Min,
         &remaining,
         mono,
         t.pal.text_2,
     );
     let rail = Rect::from_min_max(
-        pos2(line.left() + 34.0 + 10.0, line.top()),
-        pos2(line.right() - 38.0 - 10.0, line.bottom()),
+        pos2(line.left() + LABEL_W + 10.0, line.top()),
+        pos2(line.right() - LABEL_W - 10.0, line.bottom()),
     );
     let seek = ui
         .scope_builder(egui::UiBuilder::new().max_rect(rail), |ui| {
@@ -328,6 +334,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 4.0,
                 rail.width(),
                 has_track && !live && !duration.is_zero(),
+                duration.as_secs_f32(),
             )
         })
         .inner;

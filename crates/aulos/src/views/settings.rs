@@ -320,61 +320,67 @@ fn nav(app: &mut App, ui: &mut Ui) {
     let st = &mut app.views.settings;
     let searching = !st.parsed.is_empty();
     let mut clicked = None;
-    for (i, sec) in SECTIONS.iter().enumerate() {
-        let hit = st.hits.get(i).copied().unwrap_or(0);
-        let miss = searching && hit == 0;
-        let (rect, resp) = ui.allocate_exact_size(
-            vec2(ui.available_width(), 30.0),
-            if miss { Sense::hover() } else { Sense::click() },
-        );
-        let on = i == st.current && !searching;
-        if on {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(6), pal.surface_sel);
-        } else if resp.hovered() && !miss {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(6), pal.text.alpha(0.05));
-        }
-        let fade = if miss { 0.38 } else { 1.0 };
-        let fg = (if on { pal.text } else { pal.text_2 }).gamma_multiply(fade);
-        paint_icon(
-            ui.painter(),
-            pos2(rect.left() + 17.5, rect.center().y),
-            sec.icon(),
-            15.0,
-            fg,
-            false,
-        );
-        let label_rect = Rect::from_min_max(
-            pos2(rect.left() + 35.0, rect.top()),
-            pos2(rect.right() - 30.0, rect.bottom()),
-        );
-        paint_text(
-            ui.painter(),
-            label_rect,
-            Align::Min,
-            sec.label(),
-            theme::regular(13.0),
-            fg,
-        );
-        if searching && !miss {
-            let hit_rect = Rect::from_min_max(
-                pos2(rect.right() - 30.0, rect.top()),
-                pos2(rect.right() - 10.0, rect.bottom()),
-            );
-            paint_text(
-                ui.painter(),
-                hit_rect,
-                Align::Max,
-                &hit.to_string(),
-                theme::mono(10.5),
-                pal.text_3,
-            );
-        }
-        if resp.clicked() {
-            clicked = Some(i);
-        }
-    }
+    // Scrollable so the last entries stay reachable on short windows.
+    egui::ScrollArea::vertical()
+        .id_salt("settings-nav")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (i, sec) in SECTIONS.iter().enumerate() {
+                let hit = st.hits.get(i).copied().unwrap_or(0);
+                let miss = searching && hit == 0;
+                let (rect, resp) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), 30.0),
+                    if miss { Sense::hover() } else { Sense::click() },
+                );
+                let on = i == st.current && !searching;
+                if on {
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(6), pal.surface_sel);
+                } else if resp.hovered() && !miss {
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(6), pal.text.alpha(0.05));
+                }
+                let fade = if miss { 0.38 } else { 1.0 };
+                let fg = (if on { pal.text } else { pal.text_2 }).gamma_multiply(fade);
+                paint_icon(
+                    ui.painter(),
+                    pos2(rect.left() + 17.5, rect.center().y),
+                    sec.icon(),
+                    15.0,
+                    fg,
+                    false,
+                );
+                let label_rect = Rect::from_min_max(
+                    pos2(rect.left() + 35.0, rect.top()),
+                    pos2(rect.right() - 30.0, rect.bottom()),
+                );
+                paint_text(
+                    ui.painter(),
+                    label_rect,
+                    Align::Min,
+                    sec.label(),
+                    theme::regular(13.0),
+                    fg,
+                );
+                if searching && !miss {
+                    let hit_rect = Rect::from_min_max(
+                        pos2(rect.right() - 30.0, rect.top()),
+                        pos2(rect.right() - 10.0, rect.bottom()),
+                    );
+                    paint_text(
+                        ui.painter(),
+                        hit_rect,
+                        Align::Max,
+                        &hit.to_string(),
+                        theme::mono(10.5),
+                        pal.text_3,
+                    );
+                }
+                if resp.clicked() {
+                    clicked = Some(i);
+                }
+            }
+        });
     if let Some(i) = clicked {
         st.scroll_to = Some(i);
         st.current = i;
@@ -1469,9 +1475,10 @@ fn server_card(
     } else {
         (pal.text_4, "Not tested".to_owned(), pal.text_3)
     };
+    let failed = !testing && card.status.as_deref().is_some_and(|s| s.contains(':'));
     let border = if editing {
         accent
-    } else if !testing && card.status.as_deref().is_some_and(|s| s.contains(':')) {
+    } else if failed {
         pal.danger.alpha(0.35)
     } else {
         pal.stroke
@@ -1526,6 +1533,15 @@ fn server_card(
         theme::regular(12.0),
         text_color,
     );
+    if failed {
+        // The status line is truncated; the full reason is on hover.
+        ui.interact(
+            status,
+            ui.id().with(("server-status", card.at.index)),
+            Sense::hover(),
+        )
+        .on_hover_text(&text);
+    }
 
     let mut act = None;
     let mut buttons = ui.new_child(
@@ -1537,15 +1553,20 @@ fn server_card(
             .layout(Layout::left_to_right(Align::Center)),
     );
     buttons.spacing_mut().item_spacing.x = 6.0;
-    let (label, icon) = if card.status.is_some() {
-        ("Retest", ph::ARROWS_CLOCKWISE)
+    let (label, icon) = if testing {
+        ("Testing", None)
+    } else if failed {
+        ("Retry", Some(ph::ARROW_CLOCKWISE))
     } else {
-        ("Test", ph::PLUGS_CONNECTED)
+        ("Test", Some(ph::PLUGS_CONNECTED))
     };
+    if testing {
+        buttons.add(egui::Spinner::new().size(14.0).color(pal.text_2));
+    }
     if pill_button_enabled(
         &mut buttons,
         label,
-        Some(icon),
+        icon,
         PillKind::Secondary,
         26.0,
         0.0,

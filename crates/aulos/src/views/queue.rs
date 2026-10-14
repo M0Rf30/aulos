@@ -74,7 +74,7 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
 
     let content = ctx.content_rect();
     let width = if app.narrow { 340.0 } else { 360.0 };
-    let top = content.top() + theme::size::TOOLBAR + 8.0;
+    let top = content.top() + theme::size::TOOLBAR;
     let bottom = content.bottom() - theme::size::NOW_BAR - 8.0;
     let height = (bottom - top).max(0.0);
     let origin = pos2(content.right() - 8.0 - width, top);
@@ -95,6 +95,9 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
                 .show(ui, |ui| {
                     ui.set_width(width - 2.0);
                     ui.set_height(height - 2.0);
+                    // Header, body and footer stack flush: spacing would push
+                    // the footer under the now bar.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     header(ui, pal, &meta, !upcoming.is_empty(), &mut out);
                     ScrollArea::vertical()
                         .max_height(body_h)
@@ -114,19 +117,17 @@ fn header(ui: &mut Ui, pal: Palette, meta: &str, can_clear: bool, out: &mut Vec<
     let r = ui.horizontal(|ui| {
         ui.set_height(HEADER_H);
         ui.add_space(16.0);
-        ui.vertical(|ui| {
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new("Queue")
-                    .font(theme::semibold(15.0))
-                    .color(pal.text),
-            );
-            ui.label(
-                RichText::new(meta)
-                    .font(theme::regular(12.0))
-                    .color(pal.text_2),
-            );
-        });
+        ui.label(
+            RichText::new("Queue")
+                .font(theme::semibold(15.0))
+                .color(pal.text),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(meta)
+                .font(theme::regular(12.0))
+                .color(pal.text_2),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(10.0);
             if icon_button(ui, regular::X, 28.0).clicked() {

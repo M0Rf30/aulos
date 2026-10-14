@@ -5,6 +5,7 @@ use crate::app::App;
 use crate::theme;
 use crate::views::menus::{self, MenuAction};
 use crate::widgets::{self, Columns, HEADER_HEIGHT, PillKind, ROW_HEIGHT};
+use aulos_core::library::state::SortField;
 use egui::{Frame, Margin, ScrollArea, Sense, Ui, vec2};
 use egui_phosphor::regular;
 
@@ -14,6 +15,8 @@ pub struct State {
     selected: Option<i64>,
     /// `(visible_epoch, total seconds)` of the list the title row shows.
     totals: Option<(u64, u64)>,
+    /// Active sort column (`None` = the library's initial title order).
+    sort: Option<SortField>,
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -27,6 +30,7 @@ enum Intent {
     Menu(Box<MenuAction>),
     Select(i64),
     ShuffleAll,
+    Sort(SortField),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -146,9 +150,12 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
         }
     } else {
         let cols = Columns::songs(app.narrow);
-        Frame::NONE
-            .inner_margin(margin)
-            .show(ui, |ui| widgets::track_header(ui, cols, "#"));
+        let sorted = state.sort.unwrap_or(SortField::Title);
+        Frame::NONE.inner_margin(margin).show(ui, |ui| {
+            if let Some(field) = widgets::track_header_sortable(ui, cols, "#", sorted) {
+                intents.push(Intent::Sort(field));
+            }
+        });
         let current = app.session.playback.current_track.as_ref().map(|t| t.id);
         ui.spacing_mut().item_spacing.y = 0.0;
         ScrollArea::vertical()
@@ -227,6 +234,10 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
         match intent {
             Intent::Select(id) => app.views.songs.selected = Some(id),
             Intent::ShuffleAll => shuffle_all(app),
+            Intent::Sort(field) => {
+                app.views.songs.sort = Some(field);
+                app.session.sort_tracks(field);
+            }
             Intent::Play(index) => {
                 let update = app.session.play_library_track(index);
                 app.run(update);

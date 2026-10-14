@@ -5,7 +5,7 @@ use crate::theme::{self, ColorExt, Palette, lerp_color};
 use crate::views::menus::{self, MenuAction};
 use crate::widgets::{
     IconBtn, PillKind, avatar_tile, chip, cover_image, empty_state, label_text, paint_icon,
-    paint_text, pill_button, quality_badge, seed_colors, skeleton,
+    paint_text, pill_button, quality_badge, seed_colors, skeleton, text_width,
 };
 use aulos_core::config::ViewMode;
 use aulos_core::format::{format_duration, format_duration_coarse};
@@ -558,6 +558,12 @@ fn grid_body(
     );
     let base_id = ui.id();
     let painter = ui.painter().clone();
+    let playing = a
+        .session
+        .playback
+        .current_track
+        .as_ref()
+        .map(|t| t.grouping_artist().to_owned());
 
     for r in visible_rows(ui, rect.top(), stride, grid_rows) {
         for c in 0..cols {
@@ -579,7 +585,10 @@ fn grid_body(
                 a.covers.photo(&artist.name),
                 true,
             );
-            if resp.hovered() {
+            let is_playing = playing
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(&artist.name));
+            if resp.hovered() || is_playing {
                 painter.circle_stroke(
                     circle.center(),
                     cw / 2.0 + 3.0,
@@ -594,7 +603,7 @@ fn grid_body(
                 Align::Center,
                 &artist.name,
                 theme::semibold(13.0),
-                pal.text,
+                if is_playing { accent.text } else { pal.text },
             );
             paint_text(
                 &painter,
@@ -766,7 +775,7 @@ fn refresh_top(app: &mut App, idx: usize) {
         .filter(|t| t.rating.is_some() || t.is_favorite)
         .collect();
     let (title, tracks): (&'static str, Vec<Track>) = if ranked.is_empty() {
-        ("Songs", all().take(5).cloned().collect())
+        ("Top tracks", all().take(5).cloned().collect())
     } else {
         ranked.sort_by(|a, b| {
             b.rating
@@ -871,7 +880,6 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
                     tint,
                     pal.bg,
                 );
-                announce_hero_tint(ui, origin, tint);
                 ui.add_space(4.0);
                 Frame::NONE
                     .inner_margin(Margin::symmetric(pad as i8, 0))
@@ -1087,9 +1095,6 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
 fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     let pal = a.pal;
-    label_text(ui, "About", theme::semibold(17.0), pal.text);
-    ui.add_space(10.0);
-    let online = online_info_enabled(a);
     let bio = a
         .session
         .artist_info
@@ -1097,6 +1102,25 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
         .get(name)
         .map(String::as_str)
         .filter(|b| !b.trim().is_empty());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        label_text(ui, "About", theme::semibold(17.0), pal.text);
+        if bio.is_some() {
+            let font = theme::mono(10.5);
+            let text = "via MusicBrainz · Wikipedia";
+            let w = text_width(ui, text, font.clone()) + 12.0;
+            let (rect, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(4),
+                Stroke::new(1.0, pal.stroke),
+                egui::StrokeKind::Inside,
+            );
+            paint_text(ui.painter(), rect, Align::Center, text, font, pal.text_3);
+        }
+    });
+    ui.add_space(10.0);
+    let online = online_info_enabled(a);
     if let Some(bio) = bio {
         let expanded = a.views.artists.bio_expanded;
         let preview = bio_preview(bio, expanded);

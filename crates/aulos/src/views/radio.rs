@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::theme::{self, Accent, ColorExt, Palette, Theme};
 use crate::widgets::{
-    Covers, PillKind, avatar_tile, chip, cover_image, empty_state, empty_state_tinted, paint_icon,
+    Covers, PillKind, avatar_tile, chip, cover_image, empty_state, empty_state_actions, paint_icon,
     paint_text, pill_button, segmented, skeleton, text_field, text_width,
 };
 use aulos_core::online::UrlError;
@@ -84,6 +84,8 @@ struct Ctx {
     pal: Palette,
     accent: Accent,
     pad: f32,
+    /// Live ICY line ("artist — title") of the playing station, if any.
+    now: Option<String>,
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -122,6 +124,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         pal: t.pal,
         accent: t.accent,
         pad: app.page_pad(),
+        now: app
+            .session
+            .playback
+            .current_track
+            .as_ref()
+            .filter(|c| &*c.provider_id == "radio")
+            .map(|c| {
+                let title = c.title.replace(" - ", " \u{2014} ");
+                if c.artist.is_empty() || title.contains(" \u{2014} ") {
+                    title
+                } else {
+                    format!("{} \u{2014} {title}", c.artist)
+                }
+            }),
     };
     let mut intents: Vec<Intent> = Vec::new();
     {
@@ -514,18 +530,23 @@ fn discover(
             radio.stations.len(),
             if radio.stations.len() == 1 { "" } else { "s" }
         );
-        if empty_state_tinted(
+        let (retry, saved) = empty_state_actions(
             ui,
             regular::CELL_SIGNAL_X,
             "Station directory is unreachable",
             &body,
-            Some("Retry"),
-            Some(cx.pal.danger),
-        ) {
+            "Retry",
+            Some("Go to Saved"),
+            true,
+        );
+        if retry {
             intents.push(match st.last {
                 Last::Preset(p) => Intent::Preset(p),
                 Last::Query => Intent::Search,
             });
+        }
+        if saved {
+            st.tab = TAB_SAVED;
         }
         return;
     }
@@ -683,14 +704,32 @@ fn station_row(
         pos2(text_l, rect.center().y + 2.0),
         pos2(text_r, rect.center().y + 18.0),
     );
-    paint_text(
-        ui.painter(),
-        meta_rect,
-        Align::Min,
-        &d.meta,
-        theme::regular(12.0),
-        if d.current { pal.text_15 } else { pal.text_2 },
-    );
+    let now = cx
+        .now
+        .as_deref()
+        .filter(|n| d.current && !n.is_empty() && *n != d.name);
+    match now {
+        Some(n) => {
+            paint_text(
+                ui.painter(),
+                meta_rect,
+                Align::Min,
+                &format!("\u{266A} Now: {n}"),
+                theme::regular(12.0),
+                cx.accent.text,
+            );
+        }
+        None => {
+            paint_text(
+                ui.painter(),
+                meta_rect,
+                Align::Min,
+                &d.meta,
+                theme::regular(12.0),
+                if d.current { pal.text_15 } else { pal.text_2 },
+            );
+        }
+    }
     if fmt_w > 0.0 {
         let r = Rect::from_min_max(
             pos2(heart_rect.left() - 12.0 - fmt_w, rect.top()),
@@ -844,7 +883,14 @@ fn apply(app: &mut App, intent: Intent) {
         Intent::Remove(id) => {
             if let Some((station, effect)) = app.session.radio.remove(id) {
                 app.run(effect);
-                app.toast(format!("Removed {} from saved stations", station.name));
+                let name = station.name.clone();
+                app.toast_rich(
+                    regular::TRASH,
+                    "Removed ",
+                    name,
+                    " from saved stations",
+                    Some(crate::app::ToastAction::RestoreStation(station)),
+                );
             }
         }
         Intent::Rename(id, name) => {

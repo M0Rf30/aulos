@@ -217,9 +217,9 @@ pub struct Accent {
     pub row_tint: Color32,
 }
 
-/// The accent of the design's reference screens (teal), used until a cover
+/// The accent of the design's reference screens (Reed), used until a cover
 /// provides one.
-pub const DEFAULT_ACCENT_RGB: Color32 = hex(0x6CC3D9);
+pub const DEFAULT_ACCENT_RGB: Color32 = hex(0xE07A5F);
 
 impl Accent {
     /// Normalises a cover colour (`None`: nothing playing or the cover has no
@@ -234,7 +234,7 @@ impl Accent {
                 if pal.dark {
                     DEFAULT_ACCENT_RGB
                 } else {
-                    hex(0x1F7F96)
+                    hex(0xB4543C)
                 }
             }
         };

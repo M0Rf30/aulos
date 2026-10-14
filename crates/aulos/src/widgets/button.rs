@@ -146,6 +146,8 @@ pub enum PillKind {
     Ghost,
     /// Red text on tint.
     Danger,
+    /// Pressed toggle: strong-stroke fill with an inset hairline.
+    Active,
 }
 
 /// A fully-rounded pill button of `height`. `icon` is an optional leading
@@ -224,6 +226,7 @@ pub fn pill_button_enabled(
             None,
         ),
         PillKind::Danger => (p.danger.alpha(if hov { 0.2 } else { 0.12 }), p.danger, None),
+        PillKind::Active => (p.stroke_strong, p.text, Some(p.text_5)),
     };
     let (bg, fg) = if enabled {
         (bg, fg)

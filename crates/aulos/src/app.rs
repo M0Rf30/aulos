@@ -103,8 +103,28 @@ pub enum ToastKind {
     Error,
 }
 
+/// What a toast's action chip does when clicked.
+pub enum ToastAction {
+    /// Re-save a removed radio station.
+    RestoreStation(aulos_core::online::store::RadioStation),
+}
+
+impl ToastAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::RestoreStation(_) => "Undo",
+        }
+    }
+}
+
 pub struct Toast {
+    /// The text, or its part before `subject` when there is one.
     pub text: String,
+    /// A bold name inside the text, followed by `suffix`.
+    pub subject: Option<String>,
+    pub suffix: String,
+    pub icon: Option<&'static str>,
+    pub action: Option<ToastAction>,
     pub kind: ToastKind,
     pub born: f64,
     pub life: f64,
@@ -167,6 +187,8 @@ pub struct App {
     pub search: String,
     pub search_id: egui::Id,
     pub narrow: bool,
+    /// The sidebar was collapsed to the icon rail by hand.
+    pub sidebar_collapsed: bool,
     pub sheet: Option<Sheet>,
     pub expanded: bool,
     pub mini: bool,
@@ -252,6 +274,7 @@ impl App {
             search: String::new(),
             search_id: egui::Id::new("aulos-search"),
             narrow: false,
+            sidebar_collapsed: false,
             sheet: None,
             expanded: false,
             mini: false,
@@ -436,10 +459,36 @@ impl App {
         self.push_toast(text.into(), ToastKind::Error);
     }
 
+    /// A toast with an icon, a bold `subject` between `prefix` and `suffix`,
+    /// and an optional action chip (e.g. Undo).
+    pub fn toast_rich(
+        &mut self,
+        icon: &'static str,
+        prefix: impl Into<String>,
+        subject: impl Into<String>,
+        suffix: impl Into<String>,
+        action: Option<ToastAction>,
+    ) {
+        self.push_toast(prefix.into(), ToastKind::Info);
+        if let Some(toast) = self.toasts.last_mut() {
+            toast.icon = Some(icon);
+            toast.subject = Some(subject.into());
+            toast.suffix = suffix.into();
+            if action.is_some() {
+                toast.life = 8.0;
+            }
+            toast.action = action;
+        }
+    }
+
     fn push_toast(&mut self, text: String, kind: ToastKind) {
         let born = self.ctx.input(|i| i.time);
         self.toasts.push(Toast {
             text,
+            subject: None,
+            suffix: String::new(),
+            icon: None,
+            action: None,
             kind,
             born,
             life: f64::from(theme::motion::TOAST_LIFE),
@@ -871,6 +920,24 @@ impl App {
         });
         if let Some(direction) = zoom {
             self.step_ui_scale(direction);
+        }
+        let (find, toggle_mini) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::F),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::M),
+            )
+        });
+        if toggle_mini {
+            self.set_mini(ctx, !self.mini);
+        }
+        if self.mini {
+            if esc {
+                self.set_mini(ctx, false);
+            }
+            return;
+        }
+        if find {
+            ctx.memory_mut(|m| m.request_focus(self.search_id));
         }
         // The visualizer handles its own Esc (browser, fullscreen, close).
         #[cfg(feature = "visualizer")]

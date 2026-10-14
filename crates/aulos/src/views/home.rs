@@ -435,36 +435,59 @@ fn welcome(app: &App, ui: &mut Ui, out: &mut Out) {
     });
 }
 
-/// History empty but music present: the design's "this page fills up" block.
+/// History empty but music present: the design's centred "this page fills
+/// up" block with [Shuffle everything] [Browse albums].
 fn no_history(ui: &mut Ui, cx: &mut Cx) {
     let pal = cx.app.pal;
-    Frame::NONE
-        .fill(pal.surface_1)
-        .stroke(egui::Stroke::new(1.0, pal.stroke))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(16))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new("Nothing played yet").font(theme::semibold(15.0)).color(pal.text));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(
-                    "Start listening and this page fills up — recent plays, this month’s favourites, albums worth another spin.",
-                )
-                .font(theme::regular(13.5))
-                .color(pal.text_2),
-            );
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if pill_button(ui, "Shuffle everything", Some(regular::SHUFFLE), PillKind::Accent, 34.0, 0.0).clicked() {
-                    cx.out.act = Some(Act::ShuffleAll);
-                }
-                if pill_button(ui, "Browse albums", None, PillKind::Secondary, 34.0, 0.0).clicked() {
-                    cx.out.act = Some(Act::Goto(Route::Albums));
-                }
+    ui.vertical_centered(|ui| {
+        ui.add_space(24.0);
+        let (mark, _) = ui.allocate_exact_size(vec2(60.0, 56.0), Sense::hover());
+        brand_mark(ui, mark.center(), &pal);
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new("Welcome to Aulos")
+                .font(theme::semibold(22.0))
+                .color(pal.text),
+        );
+        ui.add_space(8.0);
+        ui.allocate_ui(vec2(ui.available_width().min(420.0), 44.0), |ui| {
+            ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(
+                        "Start listening and this page fills up — recent plays, this month’s favourites, albums worth another spin.",
+                    )
+                    .font(theme::regular(14.0))
+                    .color(pal.text_2),
+                );
             });
         });
+        ui.add_space(8.0);
+        let width = 170.0 + 130.0 + 8.0;
+        ui.allocate_ui_with_layout(
+            vec2(width, 34.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if pill_button(
+                    ui,
+                    "Shuffle everything",
+                    Some(regular::SHUFFLE),
+                    PillKind::Accent,
+                    34.0,
+                    0.0,
+                )
+                .clicked()
+                {
+                    cx.out.act = Some(Act::ShuffleAll);
+                }
+                if pill_button(ui, "Browse albums", None, PillKind::Secondary, 34.0, 0.0).clicked()
+                {
+                    cx.out.act = Some(Act::Goto(Route::Albums));
+                }
+            },
+        );
+        ui.add_space(24.0);
+    });
 }
 
 /// Pulsing placeholder shelves while the history is loading.

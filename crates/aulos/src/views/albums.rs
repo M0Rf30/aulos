@@ -528,11 +528,7 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                     );
                     let mut play_clicked = false;
                     if hovered {
-                        ui.painter().rect_filled(
-                            cover,
-                            CornerRadius::same(8),
-                            egui::Color32::BLACK.alpha(0.25),
-                        );
+                        hover_gradient(ui.painter(), cover, 8.0);
                         let pr = ui.interact(play_rect, id.with("play"), Sense::click());
                         let bg = if pr.hovered() {
                             pal.text
@@ -887,6 +883,44 @@ fn duration_text(secs: u64) -> String {
     } else {
         format!("{} min", (secs as f64 / 60.0).round() as u64)
     }
+}
+
+/// The hover scrim of a grid card: transparent from the top down to 45 % of
+/// the cover, then black fading in to 45 % alpha at the bottom, with the
+/// bottom corners following the cover's rounding.
+fn hover_gradient(painter: &egui::Painter, cover: Rect, radius: f32) {
+    use egui::epaint::{Mesh, Vertex, WHITE_UV};
+    let top = cover.top() + cover.height() * 0.45;
+    let span = cover.bottom() - top;
+    let steps = (span / 2.0).ceil().max(1.0) as usize;
+    let inset = |y: f32| {
+        let dy = y - (cover.bottom() - radius);
+        if dy <= 0.0 {
+            0.0
+        } else {
+            radius - (radius * radius - dy * dy).max(0.0).sqrt()
+        }
+    };
+    let color = |y: f32| egui::Color32::BLACK.alpha(0.45 * ((y - top) / span).clamp(0.0, 1.0));
+    let mut mesh = Mesh::default();
+    for i in 0..=steps {
+        let y = (top + span * i as f32 / steps as f32).min(cover.bottom());
+        let d = inset(y);
+        let c = color(y);
+        for x in [cover.left() + d, cover.right() - d] {
+            mesh.vertices.push(Vertex {
+                pos: pos2(x, y),
+                uv: WHITE_UV,
+                color: c,
+            });
+        }
+    }
+    for i in 0..steps as u32 {
+        let k = i * 2;
+        mesh.indices
+            .extend_from_slice(&[k, k + 1, k + 2, k + 1, k + 3, k + 2]);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {

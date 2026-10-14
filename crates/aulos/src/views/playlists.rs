@@ -12,7 +12,7 @@ use crate::widgets::{
     paint_text, pill_button, pill_button_enabled, quality_badge, seed_colors, segmented, skeleton,
     text_field, toggle,
 };
-use aulos_core::format::{format_duration, format_duration_coarse};
+use aulos_core::format::format_duration;
 use aulos_core::library::playlist_io::{ExportOutcome, ExportSource};
 use aulos_core::library::smart_playlist::{
     EditorState, MatchMode, OrderField, RuleField, RuleOp, SmartPlaylist,
@@ -30,6 +30,18 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 const ROW_H: f32 = 40.0;
+
+/// Header duration in the design's spaced style: `3 h 23 m`, `44 m`, `12 s`.
+fn duration_long(total_secs: u64) -> String {
+    let (h, m) = (total_secs / 3600, (total_secs % 3600) / 60);
+    if h > 0 {
+        format!("{h} h {m} m")
+    } else if m > 0 {
+        format!("{m} m")
+    } else {
+        format!("{total_secs} s")
+    }
+}
 const ITEM_H: f32 = 48.0;
 
 /// Which playlist the right pane shows.
@@ -100,6 +112,15 @@ pub fn open(app: &mut App, smart: bool, id: &str) {
     let mut st = std::mem::take(&mut app.views.playlists);
     select_with(app, &mut st, sel);
     app.views.playlists = st;
+}
+
+/// Whether the playlist page currently shows this playlist (sidebar highlight).
+pub fn is_open(app: &App, smart: bool, id: &str) -> bool {
+    match &app.views.playlists.sel {
+        Some(Sel::Smart(s)) => smart && s.to_string() == id,
+        Some(Sel::Plain(p)) => !smart && p == id,
+        None => false,
+    }
 }
 
 /// Starts creating a new playlist (the sidebar `+`).
@@ -414,7 +435,7 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
                     let n = p.tracks.len().max(p.track_count as usize);
                     let secs = plain_secs(p);
                     let meta = if secs > 0 {
-                        format!("{} · {}", songs(n), format_duration_coarse(secs))
+                        format!("{} · {}", songs(n), duration_long(secs))
                     } else {
                         songs(n)
                     };
@@ -635,7 +656,9 @@ fn right_column(
                         }
                         Some(cur) => {
                             let tracks = tracks_of(app, cur);
-                            detail_header(ui, app, st, cur, tracks, out);
+                            let editing = matches!(cur, Cur::Smart(p)
+                                if ed.as_ref().is_some_and(|e| e.playlist.id == p.id));
+                            detail_header(ui, app, st, cur, tracks, editing, out);
                             ui.add_space(18.0);
                             if let Cur::Smart(p) = cur
                                 && let Some(e) = ed.as_mut()
@@ -651,7 +674,15 @@ fn right_column(
         });
 }
 
-fn detail_header(ui: &mut Ui, app: &App, st: &State, cur: &Cur, tracks: &[Track], out: &mut Out) {
+fn detail_header(
+    ui: &mut Ui,
+    app: &App,
+    st: &State,
+    cur: &Cur,
+    tracks: &[Track],
+    editing: bool,
+    out: &mut Out,
+) {
     let pal = app.pal;
     let sel = cur.sel();
     let (kind, glyph, meta) = match cur {
@@ -659,7 +690,7 @@ fn detail_header(ui: &mut Ui, app: &App, st: &State, cur: &Cur, tracks: &[Track]
             let secs = plain_secs(p);
             let n = p.tracks.len().max(p.track_count as usize);
             let meta = if secs > 0 {
-                format!("{} · {}", songs(n), format_duration_coarse(secs))
+                format!("{} · {}", songs(n), duration_long(secs))
             } else {
                 songs(n)
             };
@@ -673,11 +704,7 @@ fn detail_header(ui: &mut Ui, app: &App, st: &State, cur: &Cur, tracks: &[Track]
                 tracks.len()
             };
             let meta = if secs > 0 {
-                format!(
-                    "{} · {} · updates live",
-                    songs(n),
-                    format_duration_coarse(secs)
-                )
+                format!("{} · {} · updates live", songs(n), duration_long(secs))
             } else {
                 format!("{} · updates live", songs(n))
             };
@@ -754,7 +781,11 @@ fn detail_header(ui: &mut Ui, app: &App, st: &State, cur: &Cur, tracks: &[Track]
                                 ui,
                                 "Edit rules",
                                 Some(regular::SLIDERS_HORIZONTAL),
-                                PillKind::Secondary,
+                                if editing {
+                                    PillKind::Active
+                                } else {
+                                    PillKind::Secondary
+                                },
                                 32.0,
                                 0.0,
                             )
