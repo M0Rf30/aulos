@@ -166,8 +166,10 @@ mod tests {
             .map(|p| {
                 p.strip_prefix(&root)
                     .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
             })
             .collect();
         assert_eq!(names, ["0.opus", "a/1.flac", "b/2.mp3", "b/deep/3.ogg"]);

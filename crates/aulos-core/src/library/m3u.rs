@@ -356,10 +356,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// A Unix-style absolute path made absolute on this platform too
+    /// (Windows needs a drive letter), built from components so the
+    /// expected strings match what the code writes.
+    fn abs(path: &str) -> PathBuf {
+        let mut out = PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" });
+        out.extend(path.split('/').filter(|c| !c.is_empty()));
+        out
+    }
+
     fn track(id: i64, path: &str, artist: &str, title: &str, secs: u64) -> Track {
         Track {
             id,
-            path: PathBuf::from(path),
+            path: abs(path),
             title: title.into(),
             artist: artist.into(),
             album_artist: artist.into(),
@@ -414,11 +423,11 @@ mod tests {
 
     #[test]
     fn relative_paths() {
-        let r = relative_path(Path::new("/m/a/b.flac"), Path::new("/m/pl")).unwrap();
-        assert_eq!(r, PathBuf::from("../a/b.flac"));
-        let r = relative_path(Path::new("/m/pl/x/b.flac"), Path::new("/m/pl")).unwrap();
-        assert_eq!(r, PathBuf::from("x/b.flac"));
-        assert!(relative_path(Path::new("rel"), Path::new("/m")).is_none());
+        let r = relative_path(&abs("/m/a/b.flac"), &abs("/m/pl")).unwrap();
+        assert_eq!(r, ["..", "a", "b.flac"].iter().collect::<PathBuf>());
+        let r = relative_path(&abs("/m/pl/x/b.flac"), &abs("/m/pl")).unwrap();
+        assert_eq!(r, ["x", "b.flac"].iter().collect::<PathBuf>());
+        assert!(relative_path(Path::new("rel"), &abs("/m")).is_none());
     }
 
     #[test]
@@ -427,14 +436,19 @@ mod tests {
             track(1, "/m/a/b.flac", "Art", "Song", 61),
             track(2, "/m/c.mp3", "", "Lonely", 3),
         ];
-        let abs = write_m3u(&tracks, None);
+        let written = write_m3u(&tracks, None);
         assert_eq!(
-            abs,
-            "#EXTM3U\n#EXTINF:61,Art - Song\n/m/a/b.flac\n#EXTINF:3,Lonely\n/m/c.mp3\n"
+            written,
+            format!(
+                "#EXTM3U\n#EXTINF:61,Art - Song\n{}\n#EXTINF:3,Lonely\n{}\n",
+                abs("/m/a/b.flac").display(),
+                abs("/m/c.mp3").display()
+            )
         );
-        let rel = write_m3u(&tracks, Some(Path::new("/m/pl")));
-        assert!(rel.contains("\n../a/b.flac\n"));
-        assert!(rel.contains("\n../c.mp3\n"));
+        let rel = write_m3u(&tracks, Some(&abs("/m/pl")));
+        let line = |parts: &[&str]| format!("\n{}\n", parts.iter().collect::<PathBuf>().display());
+        assert!(rel.contains(&line(&["..", "a", "b.flac"])));
+        assert!(rel.contains(&line(&["..", "c.mp3"])));
     }
 
     #[test]
@@ -451,9 +465,9 @@ mod tests {
             track(1, "/m/a/b.flac", "Art", "Song", 61),
             track(2, "/m/c.mp3", "X", "Y", 3),
         ];
-        let text = write_m3u(&lib, Some(Path::new("/m/pl")));
+        let text = write_m3u(&lib, Some(&abs("/m/pl")));
         let entries = parse_m3u(&text);
-        let r = match_entries(&entries, Path::new("/m/pl"), &lib);
+        let r = match_entries(&entries, &abs("/m/pl"), &lib);
         assert_eq!(r.matched, vec![1, 2]);
         assert_eq!(r.unmatched, 0);
     }
