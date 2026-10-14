@@ -15,17 +15,14 @@ env:
   RUST_BACKTRACE: 1
   # Same feature set as release binaries (see release.yml).
   FEATURES: visualizer
-  # Native libraries needed by libcosmic
-  # (wayland/xkbcommon/fontconfig/freetype/expat), cpal (ALSA) and the
-  # `visualizer` feature (MPD capture: PipeWire/SPA; the lactea engine
-  # is pure Rust on wgpu and needs no extra dev packages). Verified on Ubuntu 24.04.
+  # Native libraries needed by eframe/winit (xkbcommon, Wayland; X11/GL/Vulkan
+  # are dlopen()ed at runtime), cpal (ALSA) and the `visualizer` feature (MPD
+  # capture: PipeWire/SPA; the lactea engine is pure Rust on wgpu and needs no
+  # extra dev packages). Verified on Ubuntu 24.04.
   APT_DEPS: >-
     pkg-config
     libxkbcommon-dev
     libwayland-dev
-    libfontconfig-dev
-    libfreetype-dev
-    libexpat1-dev
     libasound2-dev
     libpipewire-0.3-dev
     libspa-0.2-dev
@@ -64,13 +61,13 @@ jobs:
         run: cargo clippy --all-targets --locked --features "$FEATURES" -- -D warnings
 
       # `aulos-core` is the UI-independent backend: it must build on its own
-      # (no features unified in from the UI crate) and never pull in a UI
+      # (no features unified in from the app crate) and never pull in a UI
       # toolkit.
       - name: Check backend stays UI-free
         run: |
           cargo check -p aulos-core --all-targets --locked --features "$FEATURES"
           if cargo tree -p aulos-core -e normal --prefix none --locked --features "$FEATURES" \
-            | grep -E '^(libcosmic|iced[a-z_]*|winit|egui[a-z_]*|eframe) '; then
+            | grep -E '^(winit|egui[a-z_]*|eframe) '; then
             echo "::error::aulos-core must not depend on a UI toolkit"
             exit 1
           fi

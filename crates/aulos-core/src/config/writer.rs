@@ -3,21 +3,19 @@
 
 //! Background, coalescing persistence of the whole [`Config`].
 //!
-//! cosmic-config stores every field as its own file and `write_entry`
-//! rewrites all of them atomically (temp file + fsync + rename each) — about
-//! 50 fsyncs, measured at ~425 ms on ext4. Doing that on the UI thread froze
-//! the app on every section switch and on every slider step. Saves are now
-//! handed to a dedicated thread that:
+//! Writing the settings means serialising them, fsyncing a temporary file
+//! and renaming it over `settings.ron`; doing that on the UI thread on every
+//! section switch and slider step would stall it. Saves are instead handed
+//! to a dedicated thread that:
 //! - waits [`DEBOUNCE`] for the burst to settle and writes only the latest
 //!   snapshot (a slider drag or rapid page switching = one write);
-//! - skips the write entirely when nothing changed since the last one;
-//! - writes only the keys that differ from what is on disk when it can tell
-//!   (see [`Config::write_changed`]).
+//! - skips the write entirely when nothing changed since the last one.
 //!
 //! [`ConfigWriter::flush`] blocks until pending writes are on disk; call it
 //! before the process exits.
 
 use super::Config;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::time::Duration;
 
@@ -41,13 +39,13 @@ impl std::fmt::Debug for ConfigWriter {
 }
 
 impl ConfigWriter {
-    /// Start the writer thread. `on_disk` is the config as currently stored,
-    /// used as the baseline for change detection.
-    pub fn spawn(context: cosmic_config::Config, on_disk: Config) -> Option<Self> {
+    /// Start the writer thread persisting to `path`. `on_disk` is the config
+    /// as currently stored there, used as the baseline for change detection.
+    pub fn spawn(path: PathBuf, on_disk: Config) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("aulos-config".into())
-            .spawn(move || run(&context, on_disk, &rx))
+            .spawn(move || run(&path, on_disk, &rx))
             .map_err(|e| tracing::error!("config writer thread not spawned: {e}"))
             .ok()?;
         Some(Self { tx })
@@ -67,7 +65,7 @@ impl ConfigWriter {
     }
 }
 
-fn run(context: &cosmic_config::Config, mut written: Config, rx: &Receiver<Command>) {
+fn run(path: &Path, mut written: Config, rx: &Receiver<Command>) {
     let mut pending: Option<Box<Config>> = None;
     loop {
         // Idle: block until something arrives. Pending: wait out the
@@ -81,18 +79,18 @@ fn run(context: &cosmic_config::Config, mut written: Config, rx: &Receiver<Comma
             Ok(Command::Save(config)) => pending = Some(config),
             Ok(Command::Flush(ack)) => {
                 if let Some(config) = pending.take() {
-                    write(context, &mut written, *config);
+                    write(path, &mut written, *config);
                 }
                 let _ = ack.send(());
             }
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(config) = pending.take() {
-                    write(context, &mut written, *config);
+                    write(path, &mut written, *config);
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 if let Some(config) = pending.take() {
-                    write(context, &mut written, *config);
+                    write(path, &mut written, *config);
                 }
                 return;
             }
@@ -100,17 +98,85 @@ fn run(context: &cosmic_config::Config, mut written: Config, rx: &Receiver<Comma
     }
 }
 
-fn write(context: &cosmic_config::Config, written: &mut Config, config: Config) {
+fn write(path: &Path, written: &mut Config, config: Config) {
     if *written == config {
         return;
     }
     let start = std::time::Instant::now();
-    match config.write_changed(context, written) {
-        Ok(keys) => tracing::debug!(
-            "config saved ({keys} key(s)) in {:.1} ms",
+    match config.save_to(path) {
+        Ok(()) => tracing::debug!(
+            "config saved in {:.1} ms",
             start.elapsed().as_secs_f64() * 1000.0
         ),
-        Err(e) => tracing::error!("Failed to save config: {e:?}"),
+        Err(e) => tracing::error!("Failed to save config: {e}"),
     }
     *written = config;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aulos-writer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("settings.ron")
+    }
+
+    fn with_volume(volume: f32) -> Config {
+        Config {
+            volume,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn flush_writes_the_latest_snapshot_only() {
+        let path = path("coalesce");
+        let writer = ConfigWriter::spawn(path.clone(), Config::default()).unwrap();
+        for step in 1..=20u8 {
+            writer.save(&with_volume(f32::from(step) / 100.0));
+        }
+        writer.flush();
+        assert_eq!(Config::load_from(&path), with_volume(0.2));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn saves_are_debounced_not_written_immediately() {
+        let path = path("debounce");
+        let writer = ConfigWriter::spawn(path.clone(), Config::default()).unwrap();
+        writer.save(&with_volume(0.3));
+        // Well inside the debounce window nothing is on disk yet.
+        assert!(!path.exists());
+        std::thread::sleep(DEBOUNCE * 3);
+        assert_eq!(Config::load_from(&path), with_volume(0.3));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_unchanged_config_is_not_written() {
+        let path = path("unchanged");
+        let writer = ConfigWriter::spawn(path.clone(), Config::default()).unwrap();
+        writer.save(&Config::default());
+        writer.flush();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn dropping_the_writer_writes_pending_saves() {
+        let path = path("drop");
+        let writer = ConfigWriter::spawn(path.clone(), Config::default()).unwrap();
+        writer.save(&with_volume(0.4));
+        drop(writer);
+        for _ in 0..50 {
+            if path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(Config::load_from(&path), with_volume(0.4));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

@@ -6,19 +6,18 @@ license.workspace = true
 description = "Aulos backend: library, playback, providers, online services, tagging and config, independent of any UI toolkit"
 repository.workspace = true
 
-# No UI toolkit here (no libcosmic/iced/egui): the UI crates depend on this
-# one, never the other way round.
+# No UI toolkit here: the UI crates depend on this one, never the other way
+# round.
 [dependencies]
-# Settings persistence. The standalone COSMIC config store (RON files under
-# `~/.config/cosmic/<app-id>/`), built without its iced subscription support.
-cosmic-config = { workspace = true, features = ["macro"] }
+# Settings persistence: one RON file (`settings.ron`, see `config`).
+ron = "0.12"
 
 # Async runtime
 tokio.workspace = true
 # Channels/sinks for the UI-agnostic streams in `task` (and MPRIS).
 futures = "0.3"
-# Shared, reference-counted cover thumbnail pixels (`library::covers`); the
-# same `Bytes` type iced image handles are built from, so UIs share them.
+# Shared, reference-counted cover thumbnail pixels (`library::covers`),
+# cheap to clone and hand to any UI toolkit.
 bytes = "1"
 
 # Audio playback engine — direct symphonia (DSD-capable fork) + cpal, no

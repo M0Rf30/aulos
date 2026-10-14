@@ -35,7 +35,7 @@ mod test_support;
 mod transport;
 
 pub use artist_info::{ARTIST_INFO_CONCURRENCY, ArtistInfoState, ArtistPhoto};
-pub use config::{ConfigEvent, ConfigState, ConfigUpdate};
+pub use config::{ConfigEvent, ConfigState};
 pub use convert::{ConvertEvent, ConvertNotice, ConvertState, ConvertUpdate};
 pub use credential_check::{CredentialKind, CredentialUpdate};
 pub use equalizer::{EqualizerEvent, EqualizerState};
@@ -64,7 +64,6 @@ use crate::library::palette::CoverByteCache;
 use crate::library::properties::PropertiesState;
 use crate::library::state::LibraryState;
 use crate::tagger::TaggerState;
-use cosmic_config::Config as ConfigContext;
 
 /// All domain state of a running Aulos; see the module docs.
 pub struct Session {
@@ -104,7 +103,7 @@ impl Session {
     ///
     /// # Panics
     /// If the equalizer presets directory cannot be created.
-    pub fn new(context: Option<ConfigContext>, config: Config) -> (Self, Vec<ProviderInitError>) {
+    pub fn new(config: Config) -> (Self, Vec<ProviderInitError>) {
         let (providers, init_errors) = ProvidersState::new(&config);
         let music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
         let mut session = Self {
@@ -122,7 +121,7 @@ impl Session {
             convert: ConvertState::new(),
             tagger: TaggerState::new(),
             properties: PropertiesState::default(),
-            config: ConfigState::new(context, config),
+            config: ConfigState::new(Some(Config::path()), config),
         };
         session.library.music_dirs_present = music_dirs_present;
         (session, init_errors)

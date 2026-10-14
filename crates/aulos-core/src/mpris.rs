@@ -5,7 +5,7 @@
 //!
 //! Exposes `org.mpris.MediaPlayer2` and `org.mpris.MediaPlayer2.Player` on the
 //! session bus (via the `mpris-server` crate) so Aulos responds to desktop
-//! media keys and shows up in the COSMIC/GNOME Shell media applet.
+//! media keys and shows up in the desktop shell media applet.
 //!
 //! This module owns nothing about playback itself: [`mpris_stream`] spawns
 //! the D-Bus server and yields [`MprisEvent`]s into `app.rs`'s subscription

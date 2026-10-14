@@ -105,7 +105,7 @@ impl CoverArt {
     /// buffer (via `widget::icon::from_raster_pixels`) instead of the
     /// original encoded bytes (`from_raster_bytes`) means the full-size
     /// JPEG/PNG is decoded here, once, off the UI thread, rather than
-    /// re-decoded on the UI thread every time iced's wgpu raster cache
+    /// re-decoded on the UI thread every time the toolkit's GPU image cache
     /// evicts and re-uploads the handle (e.g. on every page/drawer
     /// switch that stops drawing it for one frame).
     pub fn decode_thumbnail(bytes: &[u8], max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {

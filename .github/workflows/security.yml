@@ -40,20 +40,14 @@ jobs:
           tool: cargo-audit
 
       - name: Run cargo-audit
-        # Ignores mirror deny.toml: all are transitive, unmaintained/unsound
-        # crates pinned by libcosmic/iced git dependencies we do not control.
+        # Ignores mirror deny.toml: transitive, unmaintained crates we do not
+        # control.
         #   RUSTSEC-2024-0436 paste (unmaintained)
-        #   RUSTSEC-2026-0206 rustybuzz (unmaintained)
         #   RUSTSEC-2026-0192 ttf-parser (unmaintained)
-        #   RUSTSEC-2026-0253 lru 0.16 via cryoglyph (unsound, no fixed release in pinned rev)
-        #   RUSTSEC-2026-0186 memmap2 0.8 via xkbcommon (unsound advise/flush APIs, unused by us)
         run: >-
           cargo audit --deny warnings
           --ignore RUSTSEC-2024-0436
-          --ignore RUSTSEC-2026-0206
           --ignore RUSTSEC-2026-0192
-          --ignore RUSTSEC-2026-0253
-          --ignore RUSTSEC-2026-0186
 
   deny:
     name: Cargo Deny

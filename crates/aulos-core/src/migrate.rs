@@ -12,11 +12,9 @@ use std::path::{Path, PathBuf};
 
 const LEGACY_NAME: &str = "lyra";
 const NEW_NAME: &str = "aulos";
-const LEGACY_APP_ID: &str = "io.github.m0rf30.Lyra";
-const NEW_APP_ID: &str = "io.github.m0rf30.Aulos";
 
-/// Rename legacy Lyra data, cache, config and COSMIC config/state
-/// directories to their Aulos equivalents. Call once at startup, before
+/// Rename legacy Lyra data, cache and config directories to their Aulos
+/// equivalents. Call once at startup, before
 /// anything opens the library database or reads the config.
 pub fn migrate_legacy_dirs() {
     for (from, to) in legacy_dir_pairs() {
@@ -31,14 +29,6 @@ fn legacy_dir_pairs() -> Vec<(PathBuf, PathBuf)> {
         .flatten()
     {
         pairs.push((base.join(LEGACY_NAME), base.join(NEW_NAME)));
-    }
-    // cosmic-config keys its config and state trees by app id.
-    for base in [dirs::config_dir(), dirs::state_dir()]
-        .into_iter()
-        .flatten()
-    {
-        let cosmic = base.join("cosmic");
-        pairs.push((cosmic.join(LEGACY_APP_ID), cosmic.join(NEW_APP_ID)));
     }
     pairs
 }

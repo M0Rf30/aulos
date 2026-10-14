@@ -60,7 +60,7 @@ check-json: (check '--message-format=json')
 
 # Run the application for testing purposes
 run *args:
-    env RUST_BACKTRACE=full cargo run --release {{args}}
+    env RUST_BACKTRACE=full cargo run --release -p aulos {{args}}
 
 # Installs files
 install:

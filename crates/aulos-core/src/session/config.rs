@@ -1,16 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::Session;
 use super::credential_check::{
     CredentialUpdate, apply_credential_updates, needs_credential_check, run_credential_check,
 };
 use crate::config::Config;
 use crate::config::writer::ConfigWriter;
 use crate::task::Effect;
-use cosmic_config::Config as ConfigContext;
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::path::PathBuf;
 
 /// Results of the background keyring jobs of [`ConfigState`].
 #[derive(Debug, Clone)]
@@ -25,56 +22,38 @@ pub enum ConfigEvent {
 /// The loaded settings and how they are persisted.
 pub struct ConfigState {
     pub config: Config,
-    /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
-    pub context: Option<ConfigContext>,
+    /// Where the settings are persisted; `None`: not persisted.
+    pub path: Option<PathBuf>,
     /// Background, coalescing config persistence (see
     /// [`crate::config::writer`]).
     pub writer: Option<ConfigWriter>,
-    /// Last few configs handed to the writer, to recognise the watcher's
-    /// echo of our own (debounced) writes.
-    pub recent_saves: RefCell<VecDeque<Config>>,
     /// Whether the user's AcoustID key is in the keyring; `None` until
     /// known.
     pub acoustid_key_stored: Option<bool>,
 }
 
 impl ConfigState {
-    /// `config` must be exactly what is on disk now: it is the writer's
-    /// baseline for change detection.
-    pub(super) fn new(context: Option<ConfigContext>, config: Config) -> Self {
-        let writer = context
+    /// `config` must be exactly what is stored at `path` now: it is the
+    /// writer's baseline for change detection. `path` `None`: the settings
+    /// are never persisted.
+    pub(super) fn new(path: Option<PathBuf>, config: Config) -> Self {
+        let writer = path
             .clone()
-            .and_then(|ctx| ConfigWriter::spawn(ctx, config.clone()));
+            .and_then(|path| ConfigWriter::spawn(path, config.clone()));
         Self {
             config,
-            context,
+            path,
             writer,
-            recent_saves: RefCell::default(),
             acoustid_key_stored: None,
         }
     }
 
     /// Persist the current config. Non-blocking: the write happens on the
-    /// config writer thread, coalesced and limited to changed keys.
+    /// config writer thread, coalesced and skipped when nothing changed.
     pub fn save(&self) {
         if let Some(writer) = &self.writer {
-            let mut recent = self.recent_saves.borrow_mut();
-            if recent.back() == Some(&self.config) {
-                return; // unchanged since the last save request
-            }
-            if recent.len() == 8 {
-                recent.pop_front();
-            }
-            recent.push_back(self.config.clone());
             writer.save(&self.config);
         }
-    }
-
-    /// Whether `config` is one of our own recent saves coming back through
-    /// the config watcher (so it must not overwrite newer in-memory state).
-    #[must_use]
-    pub fn is_own_echo(&self, config: &Config) -> bool {
-        self.recent_saves.borrow().iter().any(|c| c == config)
     }
 
     /// Wait for queued config writes to reach disk (before exiting).
@@ -148,46 +127,6 @@ impl ConfigState {
                 tracing::warn!("AcoustID key keyring access failed: {e}");
                 self.acoustid_key_stored = None;
             }
-        }
-    }
-}
-
-/// What [`Session::apply_config_update`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigUpdate {
-    /// The update was the config watcher echoing one of our own saves;
-    /// nothing changed.
-    Echo,
-    /// Another process changed the settings and they are now in effect.
-    /// `artist_split_changed`: the artist index was rebuilt with new split
-    /// rules (and the search results refreshed), so artist-derived UI
-    /// state (delimiters input) must refresh.
-    Applied { artist_split_changed: bool },
-}
-
-impl Session {
-    /// The config watcher reported `config` on disk. Our own saves coming
-    /// back are ignored (they must not overwrite newer in-memory state);
-    /// anything else replaces the settings.
-    pub fn apply_config_update(&mut self, config: Config) -> ConfigUpdate {
-        if self.config.is_own_echo(&config) {
-            return ConfigUpdate::Echo;
-        }
-        let artist_split_changed = config.split_artist_tags != self.config.config.split_artist_tags
-            || config.artist_tag_delimiters != self.config.config.artist_tag_delimiters;
-        if config.music_dirs != self.config.config.music_dirs {
-            self.library.music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
-        }
-        let compilations_changed =
-            config.show_compilations_in_artists != self.config.config.show_compilations_in_artists;
-        self.config.config = config;
-        if artist_split_changed {
-            self.rebuild_artists();
-        } else if compilations_changed {
-            self.refresh_search();
-        }
-        ConfigUpdate::Applied {
-            artist_split_changed,
         }
     }
 }

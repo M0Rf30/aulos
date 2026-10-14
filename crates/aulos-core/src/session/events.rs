@@ -27,11 +27,11 @@
 
 use super::artist_info::ArtistPhoto;
 use super::{
-    ConfigEvent, ConfigUpdate, ConvertEvent, ConvertNotice, ConvertUpdate, EqualizerEvent,
-    HomeEvent, LibraryApplied, LibraryEvent, MpdIdleOutcome, PlaybackEvent, PlaybackNotice,
-    PlaybackUpdate, PlaylistEvent, PlaylistOutcome, PlaylistUpdate, PodcastEvent, PodcastNotice,
-    PodcastUpdate, PropertiesEvent, ProviderEvent, ProviderInitError, ProviderReinit, RadioEvent,
-    RadioNotice, RadioUpdate, Reload, Session,
+    ConfigEvent, ConvertEvent, ConvertNotice, ConvertUpdate, EqualizerEvent, HomeEvent,
+    LibraryApplied, LibraryEvent, MpdIdleOutcome, PlaybackEvent, PlaybackNotice, PlaybackUpdate,
+    PlaylistEvent, PlaylistOutcome, PlaylistUpdate, PodcastEvent, PodcastNotice, PodcastUpdate,
+    PropertiesEvent, ProviderEvent, ProviderInitError, ProviderReinit, RadioEvent, RadioNotice,
+    RadioUpdate, Reload, Session,
 };
 use crate::config::Config;
 use crate::library::Album;
@@ -93,9 +93,6 @@ pub enum SessionEvent {
     MpdStatus(MpdStatusUpdate),
     /// The filesystem watcher reported these changed paths.
     FilesChanged(Vec<PathBuf>),
-    /// The settings changed on disk (config watcher). Our own saves coming
-    /// back are recognised and ignored.
-    ConfigChanged(Box<Config>),
     /// Position ticker while playing locally ([`BackgroundKey::PlaybackTick`]).
     PlaybackTick,
     /// Slow housekeeping while an inhibit lock is held or being taken
@@ -192,9 +189,6 @@ pub struct SessionChanges {
     pub playlist_created: bool,
     /// A playlist was deleted: leave its detail view.
     pub playlist_deleted: bool,
-    /// The artist split rules changed on disk: refresh inputs derived from
-    /// them (the delimiters text field).
-    pub artist_split_changed: bool,
 }
 
 impl SessionChanges {
@@ -213,7 +207,6 @@ impl SessionChanges {
         self.online_icons.extend(later.online_icons);
         self.playlist_created |= later.playlist_created;
         self.playlist_deleted |= later.playlist_deleted;
-        self.artist_split_changed |= later.artist_split_changed;
     }
 }
 
@@ -385,8 +378,7 @@ impl Session {
     /// they run.
     pub fn bootstrap() -> (Self, Vec<ProviderInitError>) {
         crate::migrate::migrate_legacy_dirs();
-        let (context, config) = Config::load();
-        Self::new(context, config)
+        Self::new(Config::load())
     }
 
     /// Everything the backend kicks off at launch: the first-launch intro
@@ -401,13 +393,7 @@ impl Session {
         if !self.config.config.intro_played {
             crate::player::intro::play();
             self.config.config.intro_played = true;
-            // Single key (one small file), not a full `write_entry`: a
-            // full rewrite costs ~0.4 s before the first frame.
-            if let Some(context) = &self.config.context
-                && let Err(e) = self.config.config.set_intro_played(context, true)
-            {
-                tracing::error!("Failed to save config after intro: {e:?}");
-            }
+            self.config.save();
         }
         // The covers of the scan's reload are empty at launch: nothing is
         // shown yet that could be out of date.
@@ -678,16 +664,6 @@ impl Session {
                 self.apply_mpd_status(status).into()
             }
             SessionEvent::FilesChanged(paths) => self.files_changed(paths).into(),
-            SessionEvent::ConfigChanged(config) => {
-                let mut update = SessionUpdate::none();
-                if let ConfigUpdate::Applied {
-                    artist_split_changed: true,
-                } = self.apply_config_update(*config)
-                {
-                    update.changes.artist_split_changed = true;
-                }
-                update
-            }
             SessionEvent::PlaybackTick => self.playback_tick().into(),
             SessionEvent::ExtrasTick => self.playback_extras_tick().into(),
             SessionEvent::ConvertTick => SessionUpdate::none(),
@@ -908,15 +884,6 @@ mod tests {
         assert_eq!(loaded.changes.online_icons.len(), 1);
         // A loaded icon stays known: it is never fetched again.
         assert!(session.icons.request(vec!["u".into()]).is_empty());
-    }
-
-    #[test]
-    fn config_changes_from_disk_report_split_rule_changes() {
-        let mut session = test_session();
-        let mut config = session.config.config.clone();
-        config.split_artist_tags = !config.split_artist_tags;
-        let update = session.apply_session_event(SessionEvent::ConfigChanged(Box::new(config)));
-        assert!(update.changes.artist_split_changed);
     }
 
     #[test]

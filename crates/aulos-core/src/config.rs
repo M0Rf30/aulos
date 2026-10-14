@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub mod edit_state;
 pub mod writer;
 
-/// Application id under which the settings are stored by cosmic-config
-/// (and which the UI registers with the desktop).
+/// Application id the UI registers with the desktop (desktop entry, MPRIS,
+/// notifications, portals).
 pub const APP_ID: &str = "io.github.m0rf30.Aulos";
 
 /// Serializable configuration for an MPD server connection.
@@ -175,9 +175,12 @@ impl AutoPlayMode {
     pub const ALL: [AutoPlayMode; 3] = [Self::Off, Self::Random, Self::Similar];
 }
 
-/// Persistent configuration stored via cosmic-config.
-#[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 2]
+/// Persistent configuration, stored as RON in [`Config::path`].
+///
+/// Every field has a default, so a file written by an older version (missing
+/// the newer fields) or a newer one (carrying unknown fields) still loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Music library directories to scan.
     pub music_dirs: Vec<PathBuf>,
@@ -407,23 +410,79 @@ pub fn startup_provider_preference<'a>(
     }
 }
 
+/// File name of the settings inside [`crate::paths::config_dir`].
+const SETTINGS_FILE: &str = "settings.ron";
+
 impl Config {
-    /// Opens the cosmic-config context for [`APP_ID`] and loads the stored
-    /// settings (defaults for missing or unreadable keys; all-defaults when
-    /// the context itself cannot be opened). The context is returned so the
-    /// caller can keep it: creating one sets up a D-Bus watcher, which is
-    /// too costly to repeat per save.
+    /// Where the settings live: `settings.ron` in [`crate::paths::config_dir`].
     #[must_use]
-    pub fn load() -> (Option<cosmic_config::Config>, Config) {
-        let context = cosmic_config::Config::new(APP_ID, Self::VERSION).ok();
-        let config = context
-            .as_ref()
-            .map(|context| match Self::get_entry(context) {
-                Ok(config) => config,
-                Err((_errors, config)) => config,
-            })
-            .unwrap_or_default();
-        (context, config)
+    pub fn path() -> PathBuf {
+        crate::paths::config_dir().join(SETTINGS_FILE)
+    }
+
+    /// Loads the settings from [`Config::path`]; see [`Config::load_from`].
+    #[must_use]
+    pub fn load() -> Config {
+        Self::load_from(&Self::path())
+    }
+
+    /// Loads the settings stored at `path`. Defaults when the file does not
+    /// exist (first launch) or cannot be read; a file that is not valid RON
+    /// is moved aside to `<path>.bad` (so the next save does not destroy it)
+    /// and the defaults are used.
+    #[must_use]
+    pub fn load_from(path: &Path) -> Config {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::error!("Cannot read settings {}: {e}", path.display());
+                }
+                return Config::default();
+            }
+        };
+        match ron::from_str(&text) {
+            Ok(config) => config,
+            Err(e) => {
+                let mut bad = path.as_os_str().to_owned();
+                bad.push(".bad");
+                tracing::error!(
+                    "Invalid settings {} ({e}); keeping it as {} and using defaults",
+                    path.display(),
+                    Path::new(&bad).display()
+                );
+                if let Err(e) = std::fs::rename(path, &bad) {
+                    tracing::warn!("Could not move the invalid settings aside: {e}");
+                }
+                Config::default()
+            }
+        }
+    }
+
+    /// Writes the settings to `path` atomically: serialised to a temporary
+    /// file in the same directory, flushed to disk, then renamed over `path`,
+    /// so a crash never leaves a truncated file. Creates the directory.
+    ///
+    /// # Errors
+    /// If the directory or the file cannot be written.
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(std::io::Error::other)?;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        let mut tmp_name = path.file_name().unwrap_or_default().to_owned();
+        tmp_name.push(".tmp");
+        let tmp = dir.join(tmp_name);
+        let result = (|| {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// See [`startup_provider_preference`].
@@ -435,93 +494,6 @@ impl Config {
     pub fn acoustid_key(&self) -> Option<&str> {
         let key = self.acoustid_api_key.trim();
         (!key.is_empty()).then_some(key)
-    }
-
-    /// Persist only the fields that differ from `previous` (what is known
-    /// to be on disk), in one transaction. Returns how many keys were
-    /// written. Each key is its own file in cosmic-config, so this turns a
-    /// ~50-file rewrite (with an fsync each) into one or two files.
-    ///
-    /// The destructuring below deliberately has no `..`: adding a field to
-    /// `Config` without listing it here is a compile error, so no setting
-    /// can silently stop being saved.
-    pub fn write_changed(
-        &self,
-        context: &cosmic_config::Config,
-        previous: &Config,
-    ) -> Result<usize, cosmic_config::Error> {
-        use cosmic_config::ConfigSet;
-        let tx = context.transaction();
-        let mut written = 0usize;
-        macro_rules! diff {
-            ($($field:ident),* $(,)?) => {{
-                let Config { $($field),* } = self;
-                $(
-                    if *$field != previous.$field {
-                        tx.set(stringify!($field), $field)?;
-                        written += 1;
-                    }
-                )*
-            }};
-        }
-        diff!(
-            music_dirs,
-            split_artist_tags,
-            artist_tag_delimiters,
-            volume,
-            shuffle,
-            repeat_mode,
-            equalizer_bands,
-            equalizer_enabled,
-            equalizer_preamp,
-            active_eq_preset_name,
-            last_view,
-            startup_page,
-            startup_provider,
-            mpd_servers,
-            subsonic_servers,
-            crossfade_duration_secs,
-            replay_gain_mode,
-            albums_view_mode,
-            artists_view_mode,
-            genres_view_mode,
-            convert_out_dir,
-            convert_format,
-            convert_sample_rate,
-            experimental_converter,
-            flac_options,
-            lossy_options,
-            active_provider,
-            fetch_artist_info,
-            grid_scale,
-            intro_played,
-            fade_duration_secs,
-            auto_play_mode,
-            party_mode,
-            party_genres,
-            notify_track_change,
-            inhibit_while_playing,
-            background_playback,
-            show_compilations_in_artists,
-            m3u_relative_paths,
-            scrobble_listenbrainz_enabled,
-            scrobble_lastfm_enabled,
-            scrobble_librefm_enabled,
-            scrobble_listenbrainz_user,
-            scrobble_lastfm_user,
-            scrobble_librefm_user,
-            scrobble_lastfm_api_key,
-            scrobble_streams,
-            scrobble_lastfm_love_sync,
-            scrobble_import_on_connect,
-            home_online_suggestions,
-            acoustid_api_key,
-            tagger_use_caa_cover,
-        );
-        if written > 0 {
-            tx.commit()?;
-        }
-        Ok(written)
     }
 }
 
@@ -665,40 +637,95 @@ mod startup_provider_tests {
 }
 
 #[cfg(test)]
-mod write_changed_tests {
+mod persistence_tests {
     use super::*;
 
-    fn context(tag: &str) -> (cosmic_config::Config, PathBuf) {
+    fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aulos-cfg-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let ctx =
-            cosmic_config::Config::with_custom_path("io.github.m0rf30.AulosTest", 2, dir.clone())
-                .unwrap();
-        (ctx, dir)
+        dir
     }
 
     #[test]
-    fn unchanged_config_writes_nothing() {
-        let (ctx, dir) = context("same");
-        let cfg = Config::default();
-        assert_eq!(cfg.write_changed(&ctx, &cfg).unwrap(), 0);
+    fn save_then_load_round_trips() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("nested").join(SETTINGS_FILE);
+        let config = Config {
+            last_view: "genres".into(),
+            grid_scale: 1.25,
+            volume: 0.35,
+            albums_view_mode: ViewMode::List,
+            repeat_mode: RepeatMode::One,
+            music_dirs: vec![PathBuf::from("/music"), PathBuf::from("/more music")],
+            active_provider: Some("mpd-home".into()),
+            equalizer_bands: vec![1.5, -2.0, 0.0],
+            mpd_servers: vec![MpdConfigEntry::default()],
+            ..Config::default()
+        };
+        config.save_to(&path).unwrap();
+
+        assert_eq!(Config::load_from(&path), config);
+        // No temporary file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, [std::ffi::OsString::from(SETTINGS_FILE)]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn only_changed_keys_are_written_and_read_back() {
-        let (ctx, dir) = context("diff");
-        let base = Config::default();
-        base.write_entry(&ctx).unwrap();
+    fn a_missing_file_loads_the_defaults() {
+        let dir = scratch("missing");
+        assert_eq!(
+            Config::load_from(&dir.join(SETTINGS_FILE)),
+            Config::default()
+        );
+    }
 
-        let mut next = base.clone();
-        next.last_view = "genres".into();
-        next.grid_scale = 1.25;
-        next.albums_view_mode = ViewMode::List;
-        assert_eq!(next.write_changed(&ctx, &base).unwrap(), 3);
+    #[test]
+    fn missing_fields_take_their_defaults() {
+        let dir = scratch("partial");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, "(volume: 0.25, shuffle: true)").unwrap();
+        let loaded = Config::load_from(&path);
+        let defaults = Config::default();
+        assert_eq!(loaded.volume, 0.25);
+        assert!(loaded.shuffle);
+        assert_eq!(loaded.startup_page, defaults.startup_page);
+        assert_eq!(loaded.grid_scale, defaults.grid_scale);
+        assert_eq!(loaded.music_dirs, defaults.music_dirs);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
-        let loaded = Config::get_entry(&ctx).unwrap_or_else(|(_, c)| c);
-        assert_eq!(loaded, next);
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let dir = scratch("unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(
+            &path,
+            "(volume: 0.5, from_the_future: [1, 2], other: \"x\")",
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path);
+        assert_eq!(loaded.volume, 0.5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_invalid_file_is_kept_aside_and_defaults_are_used() {
+        let dir = scratch("invalid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, "(volume: not-a-number").unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.ron.bad")).unwrap(),
+            "(volume: not-a-number"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

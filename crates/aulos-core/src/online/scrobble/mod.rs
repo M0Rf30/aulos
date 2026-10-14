@@ -23,7 +23,7 @@
 //! Last.fm requires every application to use its own registered API key and
 //! shared secret (<https://www.last.fm/api/account/create>). Aulos does not
 //! ship one: enter yours under Settings → Scrobbling → Last.fm. The key is
-//! stored in the cosmic config, the secret in the system keyring. Libre.fm
+//! stored in the settings file, the secret in the system keyring. Libre.fm
 //! accepts any key, so a fixed placeholder is used.
 
 pub mod audioscrobbler;

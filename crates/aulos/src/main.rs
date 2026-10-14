@@ -37,10 +37,10 @@ pub struct App {
     smoke: Option<Smoke>,
 }
 
-/// Headless-ish smoke test, enabled by `AULOS_EGUI_SMOKE=<out.ppm>`: once the
+/// Headless-ish smoke test, enabled by `AULOS_SMOKE=<out.ppm>`: once the
 /// library is loaded, plays the first album for a second, saves a screenshot
 /// of the window (egui's own capture, so nothing else on screen is read) and
-/// exits. `AULOS_EGUI_SMOKE_TAB=songs` and `AULOS_EGUI_SMOKE_SEARCH=<text>`
+/// exits. `AULOS_SMOKE_TAB=songs` and `AULOS_SMOKE_SEARCH=<text>`
 /// pick the tab and a search to show.
 struct Smoke {
     out: PathBuf,
@@ -52,10 +52,10 @@ impl Smoke {
     fn step(&mut self, app: &mut App, ctx: &egui::Context) -> bool {
         let Some(started) = self.started else {
             if !app.session.library.albums.is_empty() && !app.session.library.scanning {
-                if std::env::var("AULOS_EGUI_SMOKE_TAB").is_ok_and(|t| t == "songs") {
+                if std::env::var("AULOS_SMOKE_TAB").is_ok_and(|t| t == "songs") {
                     app.tab = ui::Tab::Songs;
                 }
-                if let Ok(query) = std::env::var("AULOS_EGUI_SMOKE_SEARCH") {
+                if let Ok(query) = std::env::var("AULOS_SMOKE_SEARCH") {
                     app.search = query.clone();
                     let update = app.session.set_search_query(query);
                     app.run(update);
@@ -108,7 +108,7 @@ impl App {
             seek_preview: None,
             volume_dirty: false,
             status: String::new(),
-            smoke: std::env::var_os("AULOS_EGUI_SMOKE").map(|out| Smoke {
+            smoke: std::env::var_os("AULOS_SMOKE").map(|out| Smoke {
                 out: out.into(),
                 started: None,
                 requested: false,
@@ -256,11 +256,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 650.0])
-            .with_app_id("io.github.m0rf30.Aulos.egui"),
+            .with_app_id("io.github.m0rf30.Aulos"),
         ..Default::default()
     };
     eframe::run_native(
-        "Aulos (egui)",
+        "Aulos",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc, handle)))),
     )

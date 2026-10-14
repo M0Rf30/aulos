@@ -1,0 +1,22 @@
+[package]
+name = "aulos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A music player built on the Aulos backend (egui front end, early prototype)"
+repository.workspace = true
+
+# UI-only crate: depends on `aulos-core` (the backend), never the other way round.
+[dependencies]
+aulos-core.workspace = true
+eframe = "0.36.2"
+egui_extras = "0.36.2"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[features]
+default = []
+# Enables the backend's visualizer plumbing; the egui front end doesn't render
+# the lactea visualizer yet.
+visualizer = ["aulos-core/visualizer"]

@@ -420,11 +420,8 @@ impl Session {
     /// Persists the current master volume to the config.
     pub fn commit_volume(&mut self) {
         let volume = self.current_volume();
-        if let Some(ctx) = &self.config.context
-            && let Err(e) = self.config.config.set_volume(ctx, volume)
-        {
-            tracing::error!("Failed to persist volume: {e}");
-        }
+        self.config.config.volume = volume;
+        self.config.save();
     }
 
     /// Sets and persists the volume (discrete changes: shortcuts, MPRIS).
@@ -1237,6 +1234,7 @@ impl Session {
 mod tests {
     use super::super::test_support::{test_session, test_session_persisting, track};
     use super::*;
+    use crate::config::Config;
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
@@ -1329,20 +1327,21 @@ mod tests {
     #[test]
     fn shuffle_and_repeat_changes_are_saved() {
         let mut session = test_session_persisting();
-        assert!(session.config.recent_saves.borrow().is_empty());
-        let last_saved = |session: &Session| session.config.recent_saves.borrow().back().cloned();
+        let path = session.config.path.clone().unwrap();
+        assert!(!path.exists());
+        let last_saved = |session: &Session| {
+            session.config.flush();
+            Config::load_from(&path)
+        };
 
         let _ = session.toggle_shuffle();
-        assert!(last_saved(&session).unwrap().shuffle);
+        assert!(last_saved(&session).shuffle);
         let _ = session.toggle_shuffle();
-        assert!(!last_saved(&session).unwrap().shuffle);
+        assert!(!last_saved(&session).shuffle);
 
         let _ = session.set_repeat_mode(RepeatMode::One);
-        assert_eq!(last_saved(&session).unwrap().repeat_mode, RepeatMode::One);
+        assert_eq!(last_saved(&session).repeat_mode, RepeatMode::One);
         let _ = session.cycle_repeat();
-        assert_eq!(
-            last_saved(&session).unwrap().repeat_mode,
-            RepeatMode::One.next()
-        );
+        assert_eq!(last_saved(&session).repeat_mode, RepeatMode::One.next());
     }
 }

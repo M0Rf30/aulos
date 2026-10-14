@@ -3,8 +3,8 @@
 
 //! Decoded cover thumbnails of the editor's pictures.
 //!
-//! The cache is generic over the image type the UI draws (`H`: an iced
-//! handle, an egui texture, …), so the UI keeps a stable image per picture
+//! The cache is generic over the image type the UI draws (`H`: an egui texture,
+//! an image handle, …), so the UI keeps a stable image per picture
 //! and only the bookkeeping — which pictures still need decoding, each
 //! handed out once — lives here.
 

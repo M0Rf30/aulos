@@ -6,7 +6,7 @@
 //! Backend controllers own their state and an `update(message)` method, and
 //! hand back an [`Effect`]: the asynchronous work the UI must run, whose
 //! messages it feeds back into the same `update`. The UI decides how to run
-//! it (an iced `Task::stream`, a tokio task feeding an egui channel, …).
+//! it (a tokio task feeding a UI channel, a toolkit-native stream, …).
 
 use futures::channel::mpsc;
 use futures::stream::{self, BoxStream, Stream, StreamExt};
@@ -75,7 +75,7 @@ impl<M: Send + 'static> Effect<M> {
     /// `sink` in order: for UIs that are not built around an executor of
     /// their own (a sink that pushes into a channel and wakes the UI, say).
     /// Returns the task, to abort it, or `None` when there was nothing to
-    /// run. Iced-style UIs use [`Self::into_stream`] instead.
+    /// run. UIs with their own executor use [`Self::into_stream`] instead.
     pub fn spawn(
         self,
         runtime: &tokio::runtime::Handle,

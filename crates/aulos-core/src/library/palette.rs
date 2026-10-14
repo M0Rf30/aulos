@@ -7,7 +7,7 @@
 //! around for blur processing (`AppModel.cover_art_bytes`); this module
 //! reuses that same byte source to pick a small, legible accent colour so
 //! the now-playing surfaces can visually match the artwork instead of
-//! always showing the fixed COSMIC system accent. There is no dependency on
+//! always showing the fixed system accent. There is no dependency on
 //! `auto-palette` (Euphonica's choice) — `extract` works directly off the
 //! `image` crate already in the dependency tree with a coarse HSL
 //! histogram, which is more than adequate at the fixed 32x32 working
@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// black/white pairing that stays legible drawn on top of it.
 ///
 /// Both fields are linear 0.0..=1.0 sRGB-ish triples (matching how the rest
-/// of the UI layer hands colours to `cosmic::iced::Color::from_rgb`).
+/// of the UI layer hands colours to its toolkit's colour constructors).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Accent {
     pub color: [f32; 3],

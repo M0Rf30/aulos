@@ -587,7 +587,7 @@ pub(crate) fn is_local_host(host: &str, machine_hostname: Option<&str>) -> bool 
 
 /// Reads this machine's hostname from `/proc/sys/kernel/hostname`.
 ///
-/// Aulos is Linux/COSMIC-specific, so reading this virtual file avoids
+/// Aulos is Linux-specific, so reading this virtual file avoids
 /// pulling in a whole crate (`hostname`/`gethostname`) for a single
 /// `libc::gethostname()` call.
 fn local_hostname() -> Option<String> {

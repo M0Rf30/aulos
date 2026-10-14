@@ -1,9 +1,7 @@
 [workspace]
-members = [".", "crates/aulos-core", "crates/aulos-egui"]
-# Plain `cargo test`/`clippy`/`build` at the root cover the backend crate too.
-# `crates/aulos-egui` (an experimental egui front end) is a member but is
-# deliberately not a default member: build it with `-p aulos-egui`.
-default-members = [".", "crates/aulos-core"]
+members = ["crates/aulos-core", "crates/aulos"]
+# Plain `cargo test`/`clippy`/`build` at the root cover both crates.
+default-members = ["crates/aulos-core", "crates/aulos"]
 resolver = "3"
 
 [workspace.package]
@@ -12,18 +10,12 @@ edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/M0Rf30/aulos"
 
-# Dependencies used by both the backend (`aulos-core`) and the UI (`aulos`),
+# Dependencies used by both the backend (`aulos-core`) and the app (`aulos`),
 # pinned once here.
 [workspace.dependencies]
 aulos-core = { path = "crates/aulos-core" }
 
-# COSMIC: the UI toolkit, and its standalone config store (used by the
-# backend without any iced/UI dependency). Keep both on the same rev.
-libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "a6ac45c" }
-cosmic-config = { git = "https://github.com/pop-os/libcosmic.git", rev = "a6ac45c", default-features = false }
-
 tokio = { version = "1", features = ["full"] }
-futures-util = "0.3"
 
 # MPD protocol client. Pinned to the `aulos` branch of the M0Rf30 fork, which
 # merges the fixes submitted upstream (elomatreb/mpd_client#26-#33): argument
@@ -54,65 +46,6 @@ dirs = "7"
 walkdir = "2"
 urlencoding = "2"
 
-[package]
-name = "aulos"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "A modern music player for the COSMIC desktop"
-repository.workspace = true
-
-[dependencies]
-# Backend: library, playback, providers, online services, tagging, config.
-# Everything UI-independent lives there; this crate is the COSMIC UI.
-aulos-core.workspace = true
-
-# COSMIC / UI framework
-libcosmic = { workspace = true, features = [
-    "about",
-    "tokio",
-    "wayland",
-    "winit",
-    "wgpu",
-] }
-
-tokio.workspace = true
-futures-util.workspace = true
-mpd_client.workspace = true
-opensubsonic.workspace = true
-reqwest.workspace = true
-image.workspace = true
-# `aulos_core::fl!` expands to `i18n_embed_fl::fl!`, which must be resolvable
-# from (and checks message ids against) the calling crate.
-i18n-embed-fl.workspace = true
-tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ashpd.workspace = true
-# main.rs's cold-start handoff to an already-running instance (name-owner
-# check + `OpenUri`/`Raise` over D-Bus, before the app's own event loop --
-# and mpris-server's own zbus/tokio integration -- starts).
-zbus.workspace = true
-open.workspace = true
-dirs.workspace = true
-walkdir.workspace = true
-urlencoding.workspace = true
-chrono = "0.4"
-
-# Optional: tokio-console support for runtime introspection
-console-subscriber = { version = "0.5", optional = true }
-
-# Optional: lactea MilkDrop visualizer (behind `visualizer` feature flag). It
-# renders on its own wgpu 30 device (iced/libcosmic is on a different wgpu
-# major), so frames are read back and uploaded into the UI's texture.
-lactea = { version = "0.1.2", optional = true }
-wgpu = { version = "30", optional = true }
-pollster = { version = "1", optional = true }
-
-[features]
-default = []
-tokio-console = ["dep:console-subscriber"]
-visualizer = ["aulos-core/visualizer", "dep:lactea", "dep:wgpu", "dep:pollster"]
-
 [profile.release]
 lto = "thin"
 strip = "symbols"
@@ -121,9 +54,3 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = false
-
-# Uncomment to test a locally-cloned libcosmic
-# [patch.'https://github.com/pop-os/libcosmic']
-# libcosmic = { path = "../libcosmic" }
-# cosmic-config = { path = "../libcosmic/cosmic-config" }
-# cosmic-theme = { path = "../libcosmic/cosmic-theme" }

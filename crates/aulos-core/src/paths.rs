@@ -16,8 +16,8 @@ pub fn data_dir() -> PathBuf {
         .join(APP_DIR)
 }
 
-/// `$XDG_CONFIG_HOME/aulos`: user files besides the settings (which
-/// cosmic-config keeps under its own app id).
+/// `$XDG_CONFIG_HOME/aulos`: the settings (`settings.ron`, see
+/// [`crate::config::Config::path`]) and other user files.
 #[must_use]
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()

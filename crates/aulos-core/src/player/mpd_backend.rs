@@ -4,7 +4,7 @@
 //! MPD playback backend — fully non-blocking.
 //!
 //! Sends play/pause/seek/volume commands to an MPD server. **No `block_on()`
-//! calls** — all async commands are dispatched via `cosmic::task::future()`
+//! calls** — all async commands are dispatched as background tasks
 //! and the UI is updated optimistically.  Actual MPD state is polled by a
 //! background subscription that pushes `Message::MpdStatusUpdate`.
 

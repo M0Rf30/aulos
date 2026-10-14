@@ -36,9 +36,8 @@ static FFMPEG_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Runs the (cheap, well under a second) availability probe and caches
 /// the result. Blocking — callers on the UI thread must run this inside
-/// `spawn_blocking`/`cosmic::task::future` (see
-/// `crate::app::convert_page::AppModel::detect_ffmpeg_once`), which also
-/// only fires it once per process by checking [`cached`] first.
+/// `spawn_blocking` (or an equivalent background task); check [`cached`]
+/// first so it only runs once per process.
 pub fn detect() -> bool {
     *FFMPEG_AVAILABLE.get_or_init(|| {
         Command::new("ffmpeg")
