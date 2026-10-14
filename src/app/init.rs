@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds};
-use aulos_core::config::Config;
 use aulos_core::fl;
 use aulos_core::library::state::SortField;
 use aulos_core::session::Session;
@@ -17,6 +16,12 @@ impl AppModel {
         core: cosmic::Core,
         flags: AppFlags,
     ) -> (Self, Task<cosmic::Action<Message>>) {
+        // Settings, library database, providers, player, stores: the domain
+        // state of a real launch (needs this runtime), with the servers that
+        // failed to construct.
+        let (session, provider_init_errors) = Session::bootstrap();
+        crate::views::common::set_grid_scale(session.config.config.grid_scale);
+
         let mut nav = nav_bar::Model::default();
 
         nav.insert()
@@ -85,72 +90,23 @@ impl AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license("GPL-3.0");
 
-        // Load config and cache the context to avoid repeated D-Bus watcher creation
-        let (config_context, mut config) = Config::load();
-        crate::views::common::set_grid_scale(config.grid_scale);
-
-        // First launch: play the intro jingle once, Winamp-style, and
-        // remember that it has been heard.
-        if !config.intro_played {
-            aulos_core::player::intro::play();
-            config.intro_played = true;
-            // Single key (one small file), not a full `write_entry`: a
-            // full rewrite costs ~0.4 s before the first frame.
-            if let Some(context) = &config_context
-                && let Err(e) = config.set_intro_played(context, true)
-            {
-                tracing::error!("Failed to save config after intro: {e:?}");
-            }
-        }
-
-        if config.experimental_converter {
+        if session.config.config.experimental_converter {
             insert_convert_nav_entry(&mut nav);
         }
 
         // Open on the configured section (Home by default); unknown or
         // unavailable choices fall back to Home.
-        let start_page =
-            super::startup::resolve_startup_page(&config.startup_page, &config.last_view, |page| {
-                nav.iter().any(|id| nav.data::<Page>(id) == Some(page))
-            });
+        let start_page = super::startup::resolve_startup_page(
+            &session.config.config.startup_page,
+            &session.config.config.last_view,
+            |page| nav.iter().any(|id| nav.data::<Page>(id) == Some(page)),
+        );
         let start_id = nav
             .iter()
             .find(|&id| nav.data::<Page>(id) == Some(&start_page));
         if let Some(id) = start_id {
             nav.activate(id);
         }
-
-        // Keyring work (availability probe, verifying that stored passwords
-        // still exist, migrating plaintext passwords) costs secret-service
-        // D-Bus round trips -- 50-500 ms, or an unlock prompt -- so it runs
-        // as a startup background task (`ConfigState::startup_checks`)
-        // instead of before the first frame. Providers are still constructed
-        // below with whatever password they can get right now: entries
-        // already in the keyring are read by `MpdConfig::from` /
-        // `SubsonicConfig::from` (unavoidable, the connection needs the
-        // password), plaintext ones use the config value, which stays valid
-        // for this session even after the background migration moved it.
-        // Settings writer, providers, player, stores: the domain state.
-        // `config` is exactly what is on disk now (baseline for the
-        // writer's change detection).
-        #[cfg_attr(not(feature = "visualizer"), allow(unused_mut))]
-        let (mut session, subsonic_init_errors) = Session::new(config_context, config);
-
-        // Create shared PCM buffer for visualizer audio tapping
-        #[cfg(feature = "visualizer")]
-        let pcm_buffer = {
-            let buf = Arc::new(Mutex::new(aulos_core::player::pcm::PcmBuffer::new(8192)));
-            if let Some(p) = session.playback.player.as_mut() {
-                p.set_pcm_buffer(Arc::clone(&buf));
-            }
-            Some(buf)
-        };
-
-        // Tracks whether MPD itself reports `Playing`, for the PipeWire
-        // capture thread's default-sink-monitor fallback gating (see
-        // `AppModel::mpd_playing`'s doc comment).
-        #[cfg(feature = "visualizer")]
-        let mpd_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Command channel to the lactea render thread — replaces the
         // old `next_preset_signal: AtomicBool` flag so the UI can also
@@ -183,7 +139,6 @@ impl AppModel {
             context_page: ContextPage::default(),
             session,
             toasts: widget::toaster::Toasts::new(Message::CloseToast),
-            cover_staging: None,
             search_active: false,
             extras: Default::default(),
             podcast_tab: aulos_core::online::podcast::PodcastTab::default(),
@@ -192,7 +147,6 @@ impl AppModel {
             podcast_add_error: None,
             pending_unsubscribe_podcast: None,
             podcast_search_query: String::new(),
-            selected_podcast: None,
             podcast_episode_filter: aulos_core::online::podcast::EpisodeFilter::default(),
             podcast_episode_text_filter: String::new(),
             podcast_description_expanded: false,
@@ -223,7 +177,6 @@ impl AppModel {
             new_playlist_name: String::new(),
             rename_playlist_input: String::new(),
             selected_smart_playlist: None,
-            selected_genre: None,
             folder_state: aulos_core::library::folder_tree::FolderState::default(),
             cover_images: HashMap::new(),
             artist_photos: HashMap::new(),
@@ -234,8 +187,6 @@ impl AppModel {
             autoeq_search: String::new(),
             artist_tag_delimiters_input,
             acoustid_user_key_input: String::new(),
-            cover_art_bytes: aulos_core::library::palette::CoverByteCache::new(),
-            cover_fingerprints: HashMap::new(),
             blurred_cover: None,
             blurred_cover_key: None,
             blur_pending_key: None,
@@ -259,10 +210,6 @@ impl AppModel {
                     crate::views::now_playing::viz_shader::VizFrameBuffer::new(w, h),
                 ))
             },
-            #[cfg(feature = "visualizer")]
-            pcm_buffer,
-            #[cfg(feature = "visualizer")]
-            mpd_playing,
             #[cfg(feature = "visualizer")]
             viz_cmd_tx,
             #[cfg(feature = "visualizer")]
@@ -294,14 +241,14 @@ impl AppModel {
             viz_preset_scroll: 0.0,
         };
 
-        app.apply_playback_extras_config();
         let title_cmd = app.update_title();
 
-        // Trigger initial library scan
-        let scan_cmd = cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+        // What the backend kicks off at launch: the first-launch jingle, the
+        // library scan and the keyring checks (their results arrive as
+        // session events).
+        let start_cmd = super::tasks::session_effect(app.session.start());
 
-        // Surface any provider construction failures collected above as toasts.
-        let mut init_tasks = vec![title_cmd, scan_cmd];
+        let mut init_tasks = vec![title_cmd, start_cmd];
         // A non-Home start page may lazy-load its data (playlists, radio…)
         // exactly like a sidebar selection would.
         if start_page != Page::Home {
@@ -313,13 +260,8 @@ impl AppModel {
                 init_tasks.push(app.select_nav(id));
             }
         }
-        // Keyring work (credential check, AcoustID key probe) runs off the
-        // UI thread.
-        init_tasks.push(
-            super::tasks::effect(app.session.config.startup_checks().map(Message::Keyring))
-                .map(cosmic::Action::App),
-        );
-        for (name, reason) in subsonic_init_errors {
+        // Surface any provider construction failures as toasts.
+        for (name, reason) in provider_init_errors {
             init_tasks.push(app.push_toast(widget::toaster::Toast::new(fl!(
                 "toast-provider-connect-failed",
                 provider = name,

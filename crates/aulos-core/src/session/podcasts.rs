@@ -126,6 +126,9 @@ pub enum EpisodePlayback {
 #[derive(Default)]
 pub struct PodcastsState {
     pub podcasts: Vec<Podcast>,
+    /// The show open in the detail view (see [`Self::select`] /
+    /// [`Self::close_show`]).
+    pub selected: Option<i64>,
     /// Episodes of the show open in the detail view.
     pub episodes: Vec<Episode>,
     /// Podcast ids currently being refreshed.
@@ -199,12 +202,14 @@ impl PodcastsState {
     /// Opens a show's detail: drops the previous show's episodes and loads
     /// this one's.
     pub fn select(&mut self, id: i64) -> Effect<PodcastEvent> {
+        self.selected = Some(id);
         self.episodes.clear();
         Self::load_episodes(id)
     }
 
     /// Closes the show detail.
     pub fn close_show(&mut self) {
+        self.selected = None;
         self.episodes.clear();
     }
 
@@ -250,16 +255,15 @@ impl PodcastsState {
     /// a podcast's per-episode playback positions and downloads would be
     /// permanently lost by the cascade delete, so a UI should confirm first.
     ///
-    /// `selected` is the show open in the detail view; when it is `id` its
-    /// episodes are dropped and the UI must deselect it. Returns `None` for
-    /// an unknown id.
-    pub fn unsubscribe(&mut self, id: i64, selected: Option<i64>) -> Option<Effect<PodcastEvent>> {
+    /// When `id` is the show open in the detail view it is closed (see
+    /// [`Self::close_show`]). Returns `None` for an unknown id.
+    pub fn unsubscribe(&mut self, id: i64) -> Option<Effect<PodcastEvent>> {
         if !self.podcasts.iter().any(|p| p.id == id) {
             return None;
         }
         self.podcasts.retain(|p| p.id != id);
-        if selected == Some(id) {
-            self.episodes.clear();
+        if self.selected == Some(id) {
+            self.close_show();
         }
         Some(Effect::blocking(
             move || podcast::unsubscribe(id),
@@ -283,13 +287,12 @@ impl PodcastsState {
         )
     }
 
-    /// Decides how to start `episode_id` of the show `selected`: toggle if it
-    /// is already the current track, else the track to play. `None` when the
+    /// Decides how to start `episode_id` of the open show: toggle if it is
+    /// already the current track, else the track to play. `None` when the
     /// episode or its show cannot be found.
     pub fn episode_playback(
         &self,
         episode_id: i64,
-        selected: Option<i64>,
         current_track: Option<&Track>,
     ) -> Option<EpisodePlayback> {
         let already_current = self.current_episode_id == Some(episode_id)
@@ -298,7 +301,7 @@ impl PodcastsState {
             return Some(EpisodePlayback::Toggle);
         }
 
-        let podcast_id = selected?;
+        let podcast_id = self.selected?;
         let episode = self.episodes.iter().find(|e| e.id == episode_id)?;
         let show = self.podcasts.iter().find(|p| p.id == podcast_id)?;
 
@@ -385,9 +388,10 @@ impl PodcastsState {
         )
     }
 
-    /// Applies an async result. `selected` is the show open in the detail
-    /// view (episode results for any other show are dropped).
-    pub fn apply_event(&mut self, event: PodcastEvent, selected: Option<i64>) -> PodcastUpdate {
+    /// Applies an async result (episode results for any show but the open
+    /// one are dropped).
+    pub fn apply_event(&mut self, event: PodcastEvent) -> PodcastUpdate {
+        let selected = self.selected;
         match event {
             PodcastEvent::PodcastsLoaded(podcasts) => {
                 let icon_urls = non_empty(podcasts.iter().map(|p| &p.image_url));
@@ -530,13 +534,10 @@ mod tests {
             search_loading: true,
             ..Default::default()
         };
-        let update = state.apply_event(
-            PodcastEvent::SearchResults {
-                generation: 1,
-                result: Err("late".into()),
-            },
-            None,
-        );
+        let update = state.apply_event(PodcastEvent::SearchResults {
+            generation: 1,
+            result: Err("late".into()),
+        });
         assert!(state.search_loading);
         assert!(state.search_error.is_none());
         assert!(update.effect.is_none());
@@ -549,9 +550,11 @@ mod tests {
             podcast_id: 7,
             episodes: vec![episode(1, 0, false)],
         };
-        let _ = state.apply_event(event(), Some(8));
+        state.selected = Some(8);
+        let _ = state.apply_event(event());
         assert!(state.episodes.is_empty());
-        let _ = state.apply_event(event(), Some(7));
+        state.selected = Some(7);
+        let _ = state.apply_event(event());
         assert_eq!(state.episodes.len(), 1);
     }
 
@@ -559,16 +562,15 @@ mod tests {
     fn finished_episode_restarts_from_the_top() {
         let mut state = PodcastsState {
             podcasts: vec![podcast(1)],
+            selected: Some(1),
             episodes: vec![episode(10, 5_000, true), episode(11, 5_000, false)],
             ..PodcastsState::default()
         };
-        let Some(EpisodePlayback::Play { resume, .. }) = state.episode_playback(10, Some(1), None)
-        else {
+        let Some(EpisodePlayback::Play { resume, .. }) = state.episode_playback(10, None) else {
             panic!("expected Play");
         };
         assert_eq!(resume, None);
-        let Some(EpisodePlayback::Play { resume, .. }) = state.episode_playback(11, Some(1), None)
-        else {
+        let Some(EpisodePlayback::Play { resume, .. }) = state.episode_playback(11, None) else {
             panic!("expected Play");
         };
         assert_eq!(resume, Some(Duration::from_millis(5_000)));

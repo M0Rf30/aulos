@@ -6,12 +6,14 @@
 //! and in-flight async results, the non-destructive reload staging buffer,
 //! and the header-search filter results.
 //!
-//! UI-side caches that hang off the library (cover image handles, folder
-//! tree, navigation) are *not* here; a UI keeps those next to a
-//! [`LibraryState`] and drives them from the same events.
+//! The album covers live here too ([`CoverStore`]); UI-side caches that hang
+//! off the library (image handles built from them, folder tree, navigation)
+//! are *not* here; a UI keeps those next to a [`LibraryState`] and drives
+//! them from the same events.
 
 use super::compilations::is_various_artists;
-use super::search::SearchIndex;
+use super::covers::CoverStore;
+use super::search::{SearchIndex, is_latest_generation};
 use super::{Album, Artist, Playlist, Track};
 use crate::config::Config;
 use std::collections::HashMap;
@@ -36,7 +38,7 @@ pub fn names_match(a: &str, b: &str) -> bool {
 /// the corresponding unfiltered library vector. Passthrough when `map` is
 /// `None` (search inactive or the query is empty).
 #[must_use]
-pub fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
+fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
     map.map_or(i, |m| m[i])
 }
 
@@ -97,23 +99,27 @@ struct ReloadStaging {
 /// borrow `&'a [T]` slices that must live as long as `&self`.
 #[derive(Default)]
 pub struct SearchFilter {
-    pub albums: Vec<Album>,
-    pub album_map: Vec<usize>,
-    pub artists: Vec<Artist>,
-    pub artist_map: Vec<usize>,
-    pub tracks: Vec<Track>,
-    pub track_map: Vec<usize>,
-    pub playlists: Vec<Playlist>,
-    pub playlist_map: Vec<usize>,
-    pub genres: Vec<String>,
-    pub genre_map: Vec<usize>,
+    /// Whether the lists below hold the results of a non-empty query (the
+    /// query of the last refresh, not necessarily the latest typed one).
+    active: bool,
+    albums: Vec<Album>,
+    album_map: Vec<usize>,
+    artists: Vec<Artist>,
+    artist_map: Vec<usize>,
+    tracks: Vec<Track>,
+    track_map: Vec<usize>,
+    playlists: Vec<Playlist>,
+    playlist_map: Vec<usize>,
+    genres: Vec<String>,
+    genre_map: Vec<usize>,
     /// Whether the Artists view must read [`Self::artists`] (query active,
     /// or compilations hidden and at least one such artist exists).
-    pub artists_filtered: bool,
+    artists_filtered: bool,
 }
 
 impl SearchFilter {
     fn clear(&mut self) {
+        self.active = false;
         self.albums.clear();
         self.album_map.clear();
         self.artists.clear();
@@ -135,6 +141,10 @@ pub struct LibraryState {
     pub artists: Vec<Artist>,
     /// All distinct genres from the active provider.
     pub genres: Vec<String>,
+    /// The genre row open in the genre detail view, if any (set by
+    /// `Session::load_genre_tracks`; a UI clears it when leaving the view).
+    /// Loaded tracks for any other genre are dropped.
+    pub selected_genre: Option<usize>,
     /// Tracks of the genre currently shown in the genre detail view.
     pub genre_tracks: Vec<Track>,
     /// Bumped whenever `tracks`/`albums`/`artists` change (load, batch,
@@ -152,12 +162,17 @@ pub struct LibraryState {
     /// Pre-lowercased search keys (rebuilt per `generation`).
     search_index: SearchIndex,
     /// Current header-search query (case-insensitive substring match
-    /// against the active page's fields).
-    pub search_query: String,
+    /// against the active page's fields); see [`Self::search_query`].
+    search_query: String,
     /// Latest debounce generation for search-query changes.
-    pub search_debounce_gen: u64,
+    search_debounce_gen: u64,
+    /// Bumped on every [`Self::refresh_search`], i.e. whenever the lists of
+    /// the `visible_*` accessors may have changed.
+    filter_generation: u64,
     /// Results of the current search; see [`SearchFilter`].
-    pub filtered: SearchFilter,
+    filtered: SearchFilter,
+    /// Album cover thumbnails.
+    pub covers: CoverStore,
     /// Whether a library scan/reload is in flight.
     pub scanning: bool,
     /// [`Self::generation`] the UI's folder tree was last built for.
@@ -380,6 +395,7 @@ impl LibraryState {
     /// by name); `hide_compilations` hides "Various Artists" from the
     /// Artists view through the same cache.
     pub fn refresh_search(&mut self, playlists: &[Playlist], hide_compilations: bool) {
+        self.filter_generation += 1;
         let query = self.search_query.trim().to_lowercase();
         let filtered = &mut self.filtered;
         filtered.clear();
@@ -399,6 +415,7 @@ impl LibraryState {
             }
             return;
         }
+        filtered.active = true;
         filtered.artists_filtered = true;
 
         self.search_index
@@ -440,6 +457,145 @@ impl LibraryState {
                 filtered.genre_map.push(i);
             }
         }
+    }
+
+    /// The header-search query as typed.
+    #[must_use]
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Stores a new query and supersedes any pending debounce. Returns the
+    /// debounce generation to schedule a refresh for, or `None` for an empty
+    /// query, which the caller must refresh at once (clearing is cheap and
+    /// should feel instant).
+    pub(crate) fn begin_search(&mut self, query: String) -> Option<u64> {
+        self.search_query = query;
+        self.search_debounce_gen += 1;
+        (!self.search_query.trim().is_empty()).then_some(self.search_debounce_gen)
+    }
+
+    /// Whether the debounce for `generation` is still the latest one.
+    #[must_use]
+    pub(crate) fn is_latest_search(&self, generation: u64) -> bool {
+        is_latest_generation(generation, self.search_debounce_gen)
+    }
+
+    /// Changes whenever the lists the `visible_*` accessors return may have
+    /// changed (library data or search results); a cache key for views
+    /// memoising something derived from them.
+    #[must_use]
+    pub fn visible_epoch(&self) -> u64 {
+        (self.generation << 32) | (self.filter_generation & 0xffff_ffff)
+    }
+
+    /// The albums to show: the search results, or all of them.
+    #[must_use]
+    pub fn visible_albums(&self) -> &[Album] {
+        if self.filtered.active {
+            &self.filtered.albums
+        } else {
+            &self.albums
+        }
+    }
+
+    /// Index in [`Self::albums`] of position `i` of [`Self::visible_albums`].
+    #[must_use]
+    pub fn album_index(&self, i: usize) -> usize {
+        unfilter_index(
+            self.filtered
+                .active
+                .then_some(self.filtered.album_map.as_slice()),
+            i,
+        )
+    }
+
+    /// The tracks to show: the search results, or all of them.
+    #[must_use]
+    pub fn visible_tracks(&self) -> &[Track] {
+        if self.filtered.active {
+            &self.filtered.tracks
+        } else {
+            &self.tracks
+        }
+    }
+
+    /// Index in [`Self::tracks`] of position `i` of [`Self::visible_tracks`].
+    #[must_use]
+    pub fn track_index(&self, i: usize) -> usize {
+        unfilter_index(
+            self.filtered
+                .active
+                .then_some(self.filtered.track_map.as_slice()),
+            i,
+        )
+    }
+
+    /// The artists to show: the search results and/or without compilations
+    /// (when hidden), or all of them.
+    #[must_use]
+    pub fn visible_artists(&self) -> &[Artist] {
+        if self.filtered.artists_filtered {
+            &self.filtered.artists
+        } else {
+            &self.artists
+        }
+    }
+
+    /// Index in [`Self::artists`] of position `i` of
+    /// [`Self::visible_artists`].
+    #[must_use]
+    pub fn artist_index(&self, i: usize) -> usize {
+        unfilter_index(
+            self.filtered
+                .artists_filtered
+                .then_some(self.filtered.artist_map.as_slice()),
+            i,
+        )
+    }
+
+    /// The genres to show: the search results, or all of them.
+    #[must_use]
+    pub fn visible_genres(&self) -> &[String] {
+        if self.filtered.active {
+            &self.filtered.genres
+        } else {
+            &self.genres
+        }
+    }
+
+    /// Index in [`Self::genres`] of position `i` of [`Self::visible_genres`].
+    #[must_use]
+    pub fn genre_index(&self, i: usize) -> usize {
+        unfilter_index(
+            self.filtered
+                .active
+                .then_some(self.filtered.genre_map.as_slice()),
+            i,
+        )
+    }
+
+    /// The playlists to show: the search results, or `all` (the session's
+    /// playlists, which this state does not hold).
+    #[must_use]
+    pub fn visible_playlists<'a>(&'a self, all: &'a [Playlist]) -> &'a [Playlist] {
+        if self.filtered.active {
+            &self.filtered.playlists
+        } else {
+            all
+        }
+    }
+
+    /// Index in the session's playlists of position `i` of
+    /// [`Self::visible_playlists`].
+    #[must_use]
+    pub fn playlist_index(&self, i: usize) -> usize {
+        unfilter_index(
+            self.filtered
+                .active
+                .then_some(self.filtered.playlist_map.as_slice()),
+            i,
+        )
     }
 
     /// Index of the artist named `name`, falling back to the primary artist
@@ -492,29 +648,28 @@ impl LibraryState {
     }
 
     /// Apply `f` to every copy of the track with `track_id` held here
-    /// (flat list, albums and artists' albums).
+    /// (flat list, albums and artists' albums, and the search-result
+    /// copies of those).
     pub fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
-        for track in &mut self.tracks {
+        let mut visit = |track: &mut Track| {
             if track.id.to_string() == track_id {
                 f(track);
             }
+        };
+        let albums = self.albums.iter_mut().chain(&mut self.filtered.albums);
+        for album in albums {
+            album.tracks.iter_mut().for_each(&mut visit);
         }
-        for album in &mut self.albums {
-            for track in &mut album.tracks {
-                if track.id.to_string() == track_id {
-                    f(track);
-                }
-            }
-        }
-        for artist in &mut self.artists {
+        let artists = self.artists.iter_mut().chain(&mut self.filtered.artists);
+        for artist in artists {
             for album in &mut artist.albums {
-                for track in &mut album.tracks {
-                    if track.id.to_string() == track_id {
-                        f(track);
-                    }
-                }
+                album.tracks.iter_mut().for_each(&mut visit);
             }
         }
+        self.tracks
+            .iter_mut()
+            .chain(&mut self.filtered.tracks)
+            .for_each(&mut visit);
     }
 
     /// Current favourite state of a track, if known locally. `current` (the

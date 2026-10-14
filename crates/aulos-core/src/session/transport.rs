@@ -126,14 +126,15 @@ impl Session {
 
     /// Bookkeeping whenever the current track changes (queue advance, jump
     /// or edit, MPD adopting an externally-changed song, ...): resets the
-    /// lyrics and scrobble state, starts the pending MPD track and
-    /// republishes MPRIS. The caller must already have set
-    /// `playback.current_track` and `playback.position`.
+    /// lyrics and scrobble state, starts the pending MPD track,
+    /// republishes MPRIS and pops the track notification. The caller must
+    /// already have set `playback.current_track` and `playback.position`.
     fn on_track_changed(&mut self) -> PlaybackUpdate {
         self.playback.reset_for_new_track();
         let mpd = self.playback.mpd_after_play();
         let mpris = self.publish_mpris();
-        let mut update = PlaybackUpdate::effect(Effect::batch([mpd, mpris]));
+        let notify = self.notify_track_changed();
+        let mut update = PlaybackUpdate::effect(Effect::batch([mpd, mpris, notify]));
         update.track_changed = true;
         update
     }
@@ -454,27 +455,29 @@ impl Session {
             .map_or(self.config.config.volume, |p| p.volume())
     }
 
-    /// Flips shuffle (config + queue).
+    /// Flips shuffle (config, saved, + queue).
     pub fn toggle_shuffle(&mut self) -> PlaybackUpdate {
         self.config.config.shuffle = !self.config.config.shuffle;
         if let Some(player) = &mut self.playback.player {
             player.set_shuffle(self.config.config.shuffle);
         }
+        self.config.save();
         PlaybackUpdate::effect(self.publish_mpris())
     }
 
-    /// Steps the repeat mode (config + queue).
+    /// Steps the repeat mode (config, saved, + queue).
     pub fn cycle_repeat(&mut self) -> PlaybackUpdate {
         let mode = self.config.config.repeat_mode.next();
         self.set_repeat_mode(mode)
     }
 
-    /// Sets the repeat mode (config + queue).
+    /// Sets the repeat mode (config, saved, + queue).
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) -> PlaybackUpdate {
         self.config.config.repeat_mode = mode;
         if let Some(player) = &mut self.playback.player {
             player.set_repeat_mode(mode);
         }
+        self.config.save();
         PlaybackUpdate::effect(self.publish_mpris())
     }
 
@@ -571,13 +574,14 @@ impl Session {
     // -- Ticks and backend events --------------------------------------
 
     /// The playback tick (twice a second): refreshes the position (unless
-    /// the user is dragging the seek slider, `seeking`), advances a finished
-    /// track, follows radio ICY titles, saves the podcast position, drives
-    /// the scrobblers and republishes MPRIS and the extras housekeeping.
-    pub fn playback_tick(&mut self, seeking: bool) -> PlaybackUpdate {
+    /// the user is dragging the seek slider, see [`Self::set_seeking`]),
+    /// advances a finished track, follows radio ICY titles, saves the podcast
+    /// position, drives the scrobblers and the play history and republishes
+    /// MPRIS and the extras housekeeping.
+    pub fn playback_tick(&mut self) -> PlaybackUpdate {
         let mut update = PlaybackUpdate::none();
         if let Some(player) = &mut self.playback.player {
-            if !seeking {
+            if !self.playback.seeking {
                 self.playback.position =
                     capped_position(player.position(), self.playback.current_track.as_ref());
             }
@@ -627,12 +631,15 @@ impl Session {
         }
         let mpris = self.publish_mpris();
         let extras = self.playback_extras_tick();
-        update.also(Effect::batch([position_save, mpris, extras]))
+        let history = self
+            .track_play_history()
+            .map(|_| PlaybackEvent::PlayRecorded);
+        update.also(Effect::batch([position_save, mpris, extras, history]))
     }
 
     /// Applies a polled MPD status. While the user drags the seek slider
-    /// (`seeking`) the position is left alone.
-    pub fn apply_mpd_status(&mut self, status: MpdStatusUpdate, seeking: bool) -> PlaybackUpdate {
+    /// (see [`Self::set_seeking`]) the position is left alone.
+    pub fn apply_mpd_status(&mut self, status: MpdStatusUpdate) -> PlaybackUpdate {
         let MpdStatusUpdate {
             position,
             duration,
@@ -673,7 +680,7 @@ impl Session {
                 track_changed = true;
             }
 
-            if !seeking {
+            if !self.playback.seeking {
                 self.playback.position =
                     capped_position(position, self.playback.current_track.as_ref());
             }
@@ -746,11 +753,18 @@ impl Session {
     /// Applies the result of earlier asynchronous work.
     pub fn apply_playback_event(&mut self, event: PlaybackEvent) -> PlaybackUpdate {
         match event {
-            PlaybackEvent::MpdCommand(result) => {
-                if let Err(e) = result {
+            PlaybackEvent::MpdCommand(result) => match result {
+                // The status poll confirms the command's effect, but the
+                // position/state catch up right away.
+                Ok(()) => self.playback_tick(),
+                Err(e) => {
                     // The next status poll corrects the UI state.
                     tracing::error!("Async MPD command failed: {e}");
+                    PlaybackUpdate::none()
                 }
+            },
+            PlaybackEvent::PlayRecorded => {
+                self.home.cache.invalidate();
                 PlaybackUpdate::none()
             }
             PlaybackEvent::MprisArt { track_id, art_url } => {
@@ -974,12 +988,7 @@ impl Session {
     /// Replaces the player with one using the active provider's backend
     /// (MPD when it is connected), re-applying the saved EQ, volume and
     /// extras settings.
-    pub fn recreate_player(
-        &mut self,
-        #[cfg(feature = "visualizer")] pcm_buffer: Option<
-            &Arc<std::sync::Mutex<crate::player::pcm::PcmBuffer>>,
-        >,
-    ) {
+    pub fn recreate_player(&mut self) {
         let active_id = self.providers.registry.active_id();
         let mpd_backend = self
             .providers
@@ -995,11 +1004,9 @@ impl Session {
             Ok(mut p) => {
                 // Re-wire PCM buffer for visualizer
                 #[cfg(feature = "visualizer")]
-                if let Some(buf) = pcm_buffer {
+                {
                     tracing::debug!("Reconnecting PCM buffer to new player instance");
-                    p.set_pcm_buffer(Arc::clone(buf));
-                } else {
-                    tracing::warn!("PCM buffer is None - visualizer will not receive audio");
+                    p.set_pcm_buffer(Arc::clone(&self.playback.pcm_buffer));
                 }
 
                 // Apply saved EQ state to the new player's DSP.
@@ -1132,30 +1139,61 @@ impl Session {
         }
     }
 
+    /// Tells the session whether the UI window has focus; track-change
+    /// notifications are only shown while it has not.
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.playback.window_focused = focused;
+    }
+
+    /// Tells the session whether the user is dragging the seek slider; the
+    /// playback tick and MPD status leave the displayed position alone
+    /// meanwhile.
+    pub fn set_seeking(&mut self, seeking: bool) {
+        self.playback.seeking = seeking;
+    }
+
+    /// A track was (un)favorited in Aulos: mirrors it to Last.fm when
+    /// love-sync is on. Called by the library event handling.
+    pub(super) fn scrobble_favorite_changed(&mut self, track_id: &str, loved: bool) {
+        let track = self
+            .library
+            .tracks
+            .iter()
+            .find(|t| t.id.to_string() == track_id)
+            .or(self
+                .playback
+                .current_track
+                .as_ref()
+                .filter(|t| t.id.to_string() == track_id))
+            .cloned();
+        if let Some(track) = track {
+            self.playback
+                .scrobble
+                .on_favorite_changed(track_id, &track, loved);
+        }
+    }
+
     /// Pops a desktop notification for the track that just became current,
-    /// when enabled and the window isn't focused. `cached_cover` looks the
-    /// track's cover up in the UI's memory cache (only called when a
-    /// notification is actually shown); a miss loads it from the provider
-    /// inside the background job instead of keeping every cover in memory.
-    pub fn notify_track_changed(
-        &mut self,
-        window_focused: bool,
-        cached_cover: impl FnOnce(&Track) -> Option<Arc<Vec<u8>>>,
-    ) -> Effect<PlaybackEvent> {
+    /// when enabled and the window isn't focused (see
+    /// [`Self::set_window_focused`]). The cover comes from
+    /// [`Session::cover_bytes`] (only looked up when a notification is
+    /// actually shown); a miss loads it from the provider inside the
+    /// background job instead of keeping every cover in memory.
+    fn notify_track_changed(&mut self) -> Effect<PlaybackEvent> {
         let Some(track) = self.playback.current_track.clone() else {
             return Effect::none();
         };
         let playing = self.playback.is_playing();
         let Some(replaces_id) = self.playback.extras.begin_notification(
             self.config.config.notify_track_change,
-            window_focused,
+            self.playback.window_focused,
             playing,
             &track,
         ) else {
             return Effect::none();
         };
 
-        let cached_cover = cached_cover(&track);
+        let cached_cover = self.cover_bytes.get(&track.cover_key());
         let lazy_cover = if cached_cover.is_none() {
             self.providers.registry.active_shared().zip(
                 self.library
@@ -1197,6 +1235,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{test_session, test_session_persisting, track};
     use super::*;
 
     fn secs(s: u64) -> Duration {
@@ -1239,5 +1278,71 @@ mod tests {
     fn unmuting_without_a_record_goes_to_full_volume() {
         let mut pre = None;
         assert_eq!(mute_target(0.0, &mut pre), 1.0);
+    }
+
+    #[test]
+    fn a_finished_mpd_command_runs_the_playback_tick_itself() {
+        let mut session = test_session();
+        session.playback.current_track = Some(track(7));
+        // The tick feeds the play-history tracker, which starts following
+        // the current track.
+        let _ = session.apply_playback_event(PlaybackEvent::MpdCommand(Err("boom".into())));
+        assert_eq!(session.home.tracked_track, None);
+        let _ = session.apply_playback_event(PlaybackEvent::MpdCommand(Ok(())));
+        assert_eq!(session.home.tracked_track, Some(7));
+    }
+
+    #[test]
+    fn the_scheduled_tick_feeds_the_play_history_too() {
+        let mut session = test_session();
+        session.playback.current_track = Some(track(3));
+        let _ = session.playback_tick();
+        assert_eq!(session.home.tracked_track, Some(3));
+    }
+
+    #[test]
+    fn a_confirmed_favorite_reaches_the_scrobbler() {
+        use crate::session::LibraryEvent;
+        let toggled = |track_id: &str| LibraryEvent::FavoriteToggled {
+            track_id: track_id.into(),
+            optimistic: true,
+            result: Ok(true),
+        };
+        let mut session = test_session();
+        session.library.tracks = vec![track(5)];
+        session.playback.current_track = Some(track(6));
+        for id in ["5", "6", "9"] {
+            session.playback.scrobble.suppress_next_love(id.into());
+        }
+
+        // A library track, then the current track (not in the library).
+        let _ = session.apply_library_event(toggled("5"));
+        let _ = session.apply_library_event(toggled("6"));
+        assert!(!session.playback.scrobble.is_love_suppressed("5"));
+        assert!(!session.playback.scrobble.is_love_suppressed("6"));
+
+        // An unknown track is ignored.
+        let _ = session.apply_library_event(toggled("9"));
+        assert!(session.playback.scrobble.is_love_suppressed("9"));
+    }
+
+    #[test]
+    fn shuffle_and_repeat_changes_are_saved() {
+        let mut session = test_session_persisting();
+        assert!(session.config.recent_saves.borrow().is_empty());
+        let last_saved = |session: &Session| session.config.recent_saves.borrow().back().cloned();
+
+        let _ = session.toggle_shuffle();
+        assert!(last_saved(&session).unwrap().shuffle);
+        let _ = session.toggle_shuffle();
+        assert!(!last_saved(&session).unwrap().shuffle);
+
+        let _ = session.set_repeat_mode(RepeatMode::One);
+        assert_eq!(last_saved(&session).unwrap().repeat_mode, RepeatMode::One);
+        let _ = session.cycle_repeat();
+        assert_eq!(
+            last_saved(&session).unwrap().repeat_mode,
+            RepeatMode::One.next()
+        );
     }
 }

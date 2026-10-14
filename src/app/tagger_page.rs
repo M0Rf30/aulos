@@ -545,7 +545,7 @@ impl AppModel {
         }
         // Covers of the albums the files left or joined are stale now.
         for key in &summary.album_keys {
-            self.cover_art_bytes.remove(key);
+            self.session.cover_bytes.remove(key);
         }
         if summary.written.is_empty() {
             return Task::none();
@@ -555,11 +555,10 @@ impl AppModel {
             album_keys,
             ..
         } = summary;
-        super::tasks::effect(
+        super::tasks::session_effect(
             self.session
                 .rescan_local(work::refresh_library(written, album_keys)),
         )
-        .map(|event| cosmic::Action::App(Message::Library(event)))
     }
 }
 

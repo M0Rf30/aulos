@@ -9,16 +9,21 @@ use crate::online::scrobble::ScrobbleController;
 use crate::player::extras::PlaybackExtrasState;
 use crate::player::{ActiveBackend, Player, clamp_display_position};
 use crate::task::Effect;
+#[cfg(feature = "visualizer")]
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::Duration;
 
 /// Asynchronous results of the playback workflows; feed each to
 /// [`Session::apply_playback_event`](super::Session::apply_playback_event).
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
-    /// A command sent to the MPD server finished. A UI that wants the
-    /// position/state to catch up immediately runs a playback tick after an
-    /// `Ok`; the status poll corrects it otherwise.
+    /// A command sent to the MPD server finished. After an `Ok` the session
+    /// runs a playback tick right away so the position/state catches up; the
+    /// status poll corrects it otherwise.
     MpdCommand(Result<(), String>),
+    /// A play was written to the library history (nothing to do beyond
+    /// refreshing what depends on it).
+    PlayRecorded,
     /// The MPRIS cover-art URL of a track was resolved off-thread (`None`:
     /// no art).
     MprisArt {
@@ -62,9 +67,9 @@ pub enum QueuePlacement {
 /// What a playback workflow asks of the UI.
 #[must_use = "run the effect and refresh the track-dependent presentation"]
 pub struct PlaybackUpdate {
-    /// The current track changed: the UI refreshes what depends on it (cover
-    /// backdrop, visualizer metadata) and calls
-    /// [`Session::notify_track_changed`](super::Session::notify_track_changed).
+    /// The current track changed. The session already did its half (lyrics
+    /// and scrobble reset, MPRIS, the track notification); the UI refreshes
+    /// what depends on the track (cover backdrop, visualizer metadata).
     pub track_changed: bool,
     pub notice: Option<PlaybackNotice>,
     pub effect: Effect<PlaybackEvent>,
@@ -131,6 +136,31 @@ pub struct PlaybackState {
     /// Runtime state of the playback/desktop extras (auto-play RNG,
     /// inhibit lock, notification bookkeeping).
     pub extras: PlaybackExtrasState,
+    /// Whether the UI window has focus (see
+    /// [`Session::set_window_focused`](super::Session::set_window_focused));
+    /// track-change notifications are only shown while it has not.
+    pub window_focused: bool,
+    /// Whether the user is dragging the seek slider (see
+    /// [`Session::set_seeking`](super::Session::set_seeking)); the displayed
+    /// position is left alone meanwhile.
+    pub seeking: bool,
+    /// The PCM tap the audio engine writes the visualizer's samples to (and
+    /// the MPD capture thread, `player::pw_capture`); it
+    /// follows the player across [`Session::recreate_player`](super::Session::recreate_player).
+    #[cfg(feature = "visualizer")]
+    pub pcm_buffer: Arc<Mutex<crate::player::pcm::PcmBuffer>>,
+    /// Whether MPD itself reports `Playing`, mirrored from every applied
+    /// status. The MPD capture thread reads it to gate writes made while it
+    /// falls back to the default-sink monitor (no MPD stream on the audio
+    /// graph yet), so other applications' audio does not drive the
+    /// visualizer while MPD is paused or stopped.
+    #[cfg(feature = "visualizer")]
+    pub mpd_playing: Arc<AtomicBool>,
+    /// Whether the UI shows a visualizer that wants audio right now (set via
+    /// [`Session::set_visualizer_capture`](super::Session::set_visualizer_capture)).
+    /// Gates the MPD PipeWire capture background stream.
+    #[cfg(feature = "visualizer")]
+    pub capture_wanted: bool,
 }
 
 impl PlaybackState {
@@ -237,13 +267,19 @@ impl PlaybackState {
     /// Creates the audio player (absent when the audio device cannot be
     /// opened) with the persisted master volume applied.
     pub(super) fn new(config: &Config) -> Self {
+        #[cfg(feature = "visualizer")]
+        let pcm_buffer = Arc::new(Mutex::new(crate::player::pcm::PcmBuffer::new(8192)));
         let player = match Player::new(None) {
+            #[allow(unused_mut)]
             Ok(mut p) => {
                 // `Player::new` hardcodes 0.8 internally, so without this
                 // every launch would ignore the saved level.
                 if let Err(e) = p.set_volume(config.volume) {
                     tracing::warn!("Failed to apply saved volume: {e}");
                 }
+                p.set_fade_secs(config.fade_duration_secs);
+                #[cfg(feature = "visualizer")]
+                p.set_pcm_buffer(Arc::clone(&pcm_buffer));
                 Some(p)
             }
             Err(e) => {
@@ -263,6 +299,14 @@ impl PlaybackState {
             lyrics: None,
             lyrics_loading: false,
             extras: PlaybackExtrasState::default(),
+            window_focused: false,
+            seeking: false,
+            #[cfg(feature = "visualizer")]
+            pcm_buffer,
+            #[cfg(feature = "visualizer")]
+            mpd_playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "visualizer")]
+            capture_wanted: false,
         }
     }
 }

@@ -160,8 +160,8 @@ pub enum ConfigUpdate {
     Echo,
     /// Another process changed the settings and they are now in effect.
     /// `artist_split_changed`: the artist index was rebuilt with new split
-    /// rules, so artist-derived UI state (delimiters input, search filter)
-    /// must refresh.
+    /// rules (and the search results refreshed), so artist-derived UI
+    /// state (delimiters input) must refresh.
     Applied { artist_split_changed: bool },
 }
 
@@ -178,9 +178,13 @@ impl Session {
         if config.music_dirs != self.config.config.music_dirs {
             self.library.music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
         }
+        let compilations_changed =
+            config.show_compilations_in_artists != self.config.config.show_compilations_in_artists;
         self.config.config = config;
         if artist_split_changed {
-            self.library.rebuild_artists(&self.config.config);
+            self.rebuild_artists();
+        } else if compilations_changed {
+            self.refresh_search();
         }
         ConfigUpdate::Applied {
             artist_split_changed,

@@ -4,51 +4,21 @@
 //! Event streams for a connected MPD server: the status poll and the idle
 //! (subsystem change) listener.
 //!
-//! Both are plain [`Stream`]s of core event types; a UI wraps them in
-//! whatever subscription mechanism it has and maps the events to its own
-//! messages. The key types hash only what identifies the logical stream, so
-//! a UI that dedupes subscriptions by `Hash` (iced) keeps one running stream
-//! per provider and never restarts it when a client handle is replaced.
+//! Both are boxed streams of core event types. A UI does not start them by
+//! hand: `Session::background_streams` hands them out under a stable
+//! `BackgroundKey` that identifies the logical stream, so a UI that dedupes
+//! subscriptions by key keeps one running stream per provider and never
+//! restarts it when a client handle is replaced.
 
 use super::MusicProvider;
 use super::mpd::{GetVolume, MpdProvider, song_to_track};
 use crate::library::Track;
 use crate::player::PlaybackState;
 use crate::task::channel_stream;
-use futures::{SinkExt, Stream};
-use std::hash::{Hash, Hasher};
+use futures::stream::BoxStream;
+use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Identity key for the MPD status-poll stream. Hashing only a fixed string
-/// plus the provider id preserves the old behavior: a single persistent
-/// stream while an MPD backend exists, never restarted just because the
-/// client handle value changes.
-pub struct MpdPollKey {
-    client: mpd_client::Client,
-    provider_id: Arc<str>,
-}
-
-impl MpdPollKey {
-    #[must_use]
-    pub fn new(client: mpd_client::Client, provider_id: Arc<str>) -> Self {
-        Self {
-            client,
-            provider_id,
-        }
-    }
-}
-
-impl Hash for MpdPollKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Include the provider id so switching to a *different* MPD server
-        // restarts the poll against the new client; excluding the client
-        // handle itself keeps a reconnect to the same server from
-        // needlessly tearing the stream down.
-        "mpd-status-poll".hash(state);
-        self.provider_id.hash(state);
-    }
-}
 
 /// A polled MPD status (position, duration, state, volume).
 #[derive(Debug, Clone)]
@@ -116,10 +86,11 @@ fn status_waker(provider_id: &str) -> Arc<tokio::sync::Notify> {
 /// smooth); while stopped/paused it sleeps until an idle event wakes it (with
 /// a slow safety poll). The current song is fetched only when its identity
 /// changes, so steady state stays at exactly one `Status` command per tick.
-pub fn status_stream(key: &MpdPollKey) -> impl Stream<Item = MpdStatusUpdate> + use<> {
-    let client = key.client.clone();
-    let provider_id = Arc::clone(&key.provider_id);
-    let waker = status_waker(&key.provider_id);
+pub fn status_stream(
+    client: mpd_client::Client,
+    provider_id: Arc<str>,
+) -> BoxStream<'static, MpdStatusUpdate> {
+    let waker = status_waker(&provider_id);
     channel_stream(1, |mut emitter| async move {
         let mut last_song_id: Option<mpd_client::commands::SongId> = None;
         let mut last_sent: Option<StatusSig> = None;
@@ -207,26 +178,7 @@ pub fn status_stream(key: &MpdPollKey) -> impl Stream<Item = MpdStatusUpdate> + 
             }
         }
     })
-}
-
-/// Identity key for an MPD idle-event stream. Hashing only `idx` (not the
-/// provider) preserves the old `("mpd-idle", idx)` identity semantics.
-pub struct MpdIdleKey {
-    idx: usize,
-    provider: Arc<MpdProvider>,
-}
-
-impl MpdIdleKey {
-    #[must_use]
-    pub fn new(idx: usize, provider: Arc<MpdProvider>) -> Self {
-        Self { idx, provider }
-    }
-}
-
-impl Hash for MpdIdleKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.idx.hash(state);
-    }
+    .boxed()
 }
 
 /// What the idle stream reports about one MPD provider.
@@ -248,8 +200,7 @@ pub enum MpdEvent {
 /// 2. Command connection — stored in MpdProvider for browse/search/playback
 ///
 /// This avoids protocol conflicts between idle mode and command execution.
-pub fn idle_stream(key: &MpdIdleKey) -> impl Stream<Item = MpdEvent> + use<> {
-    let provider = Arc::clone(&key.provider);
+pub fn idle_stream(provider: Arc<MpdProvider>) -> BoxStream<'static, MpdEvent> {
     channel_stream(4, move |mut emitter| async move {
         loop {
             let pid = provider.id().to_string();
@@ -320,6 +271,7 @@ pub fn idle_stream(key: &MpdIdleKey) -> impl Stream<Item = MpdEvent> + use<> {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     })
+    .boxed()
 }
 
 /// Mirrors the subset of `mpd_client::client::Subsystem` variants Aulos's

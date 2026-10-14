@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::tasks::artist_info_task;
+use super::tasks::session_effect;
 use super::{AppModel, Message};
 use aulos_core::fl;
 use aulos_core::library::{Album, Track};
-use aulos_core::session::{PlaybackEvent, PlaybackNotice, PlaybackUpdate};
-use aulos_core::task::Effect;
+use aulos_core::session::{
+    ConvertNotice, PlaybackNotice, PodcastNotice, RadioNotice, SessionNotice, SessionUpdate,
+};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -27,58 +28,76 @@ impl AppModel {
         }
     }
 
-    /// Recreate the Player with the appropriate backend for the current provider.
-    pub(super) fn recreate_player(&mut self) {
-        self.session.recreate_player(
-            #[cfg(feature = "visualizer")]
-            self.pcm_buffer.as_ref(),
-        );
-    }
-
-    /// Turns a playback workflow's outcome into UI work: runs its effect,
-    /// the UI half of a track change and the notice toast, if any.
-    pub(super) fn playback_task(
+    /// Presents a [`SessionUpdate`]: applies what changed in the session to
+    /// the UI's presentation state (image handles, derived views), shows
+    /// the notices as toasts and runs the effect, whose events come back
+    /// as `Message::Session`. The one path every session result takes,
+    /// whether it is the answer to an action or to an asynchronous event.
+    pub(super) fn session_task(
         &mut self,
-        update: PlaybackUpdate,
+        update: impl Into<SessionUpdate>,
     ) -> Task<cosmic::Action<Message>> {
-        let PlaybackUpdate {
-            track_changed,
-            notice,
-            effect: playback_effect,
-        } = update;
-        let mut tasks = vec![self.playback_effect(playback_effect)];
-        if track_changed {
-            tasks.push(self.on_track_changed());
-        }
-        match notice {
-            Some(PlaybackNotice::Queued(count)) => {
-                tasks.push(self.push_toast(widget::toaster::Toast::new(fl!(
-                    "queued-tracks",
-                    count = count
-                ))));
-            }
-            Some(PlaybackNotice::OpenFilesFailed) => {
-                tasks.push(
-                    self.push_toast(widget::toaster::Toast::new(fl!("toast-open-files-failed"))),
-                );
-            }
-            None => {}
-        }
-        Task::batch(tasks)
-    }
+        let SessionUpdate {
+            effect,
+            notices,
+            changes,
+        } = update.into();
+        let mut tasks = Vec::new();
 
-    /// Runs asynchronous playback work; its results come back as
-    /// `Message::PlaybackEvent`.
-    pub(super) fn playback_effect(
-        &self,
-        effect: Effect<PlaybackEvent>,
-    ) -> Task<cosmic::Action<Message>> {
-        super::tasks::effect(effect).map(|event| cosmic::Action::App(Message::PlaybackEvent(event)))
+        let mut refresh_cover = changes.library_updated || changes.cover_bytes_loaded;
+        self.apply_cover_delta(changes.covers);
+        if changes.library_loaded {
+            // The folder tree is derived from the whole library; rebuild it
+            // only when it is on screen or was already built.
+            self.rebuild_folder_tree_if_shown();
+        }
+        if changes.artist_photos_cleared {
+            self.artist_photos.clear();
+        }
+        for photo in changes.artist_photos {
+            self.artist_photos.insert(
+                photo.name,
+                widget::image::Handle::from_rgba(photo.width, photo.height, photo.rgba),
+            );
+        }
+        for icon in changes.online_icons {
+            self.online_icons.insert(
+                icon.url,
+                widget::icon::from_raster_pixels(icon.width, icon.height, icon.rgba),
+            );
+        }
+        if changes.playlist_created {
+            self.new_playlist_name.clear();
+        }
+        if changes.playlist_deleted {
+            self.selected_playlist = None;
+        }
+        if changes.artist_split_changed {
+            self.artist_tag_delimiters_input =
+                self.session.config.config.artist_tag_delimiters.join(" | ");
+        }
+        if changes.track_changed {
+            #[cfg(feature = "visualizer")]
+            {
+                self.viz_metadata_opacity = 1.0;
+            }
+            refresh_cover = true;
+        }
+        if refresh_cover {
+            tasks.push(self.maybe_update_blurred_cover());
+        }
+
+        for notice in notices {
+            self.reset_forms_for(&notice);
+            tasks.push(self.push_toast(notice_toast(notice)));
+        }
+        tasks.push(session_effect(effect));
+        Task::batch(tasks)
     }
 
     /// Republishes the playback state to MPRIS.
     pub(super) fn publish_mpris(&self) -> Task<cosmic::Action<Message>> {
-        self.playback_effect(self.session.publish_mpris())
+        session_effect(self.session.publish_mpris())
     }
 
     /// Start playback from the given queue at `start_index`.
@@ -88,31 +107,7 @@ impl AppModel {
         start_index: usize,
     ) -> Task<cosmic::Action<Message>> {
         let update = self.session.play_tracks(tracks, start_index);
-        self.playback_task(update)
-    }
-
-    /// The UI half of a track change (the session already did its half):
-    /// restarts the visualizer metadata fade-in, re-blurs the cover and
-    /// pops the track notification.
-    fn on_track_changed(&mut self) -> Task<cosmic::Action<Message>> {
-        #[cfg(feature = "visualizer")]
-        {
-            self.viz_metadata_opacity = 1.0;
-        }
-        let blur_task = self.maybe_update_blurred_cover();
-        let notify_task = self.notify_track_changed();
-        Task::batch([blur_task, notify_task])
-    }
-
-    /// Recomputes the search-filtered library caches (see
-    /// `LibraryState::refresh_search`) and drops the album-filter memo,
-    /// since the albums slice the Albums page shows may have changed.
-    pub(super) fn refresh_search_filter(&mut self) {
-        self.extras.album_cache.invalidate();
-        self.session.library.refresh_search(
-            &self.session.playlists.playlists,
-            !self.session.config.config.show_compilations_in_artists,
-        );
+        self.session_task(update)
     }
 
     /// Every track under the folder view's current directory, recursively,
@@ -155,36 +150,23 @@ impl AppModel {
     }
 
     /// Load full-size cover bytes for an album key into the LRU on a
-    /// blocking thread, unless they are cached / in flight / known absent.
-    /// Replies with `Message::CoverBytesLoaded`. `hint` is only evaluated
-    /// when a load is actually going to start.
+    /// blocking thread, unless they are cached / in flight / known absent
+    /// (see `Session::load_cover_bytes`). `hint` is only evaluated when a
+    /// load is actually going to start.
     pub(super) fn request_cover_bytes(
         &mut self,
         key: String,
         hint: impl FnOnce(&Self) -> Option<Album>,
     ) -> Task<cosmic::Action<Message>> {
-        if !self.cover_art_bytes.should_load(&key) {
+        if !self.session.cover_bytes.should_load(&key) {
             return Task::none();
         }
-        let Some(provider) = self.session.providers.registry.active_shared() else {
-            return Task::none();
-        };
         let Some(hint) = hint(self) else {
             // Album not (yet) in the library -- e.g. mid incremental load.
             // Don't mark it missing; the next library event retries.
             return Task::none();
         };
-        if !self.cover_art_bytes.begin_load(&key) {
-            return Task::none();
-        }
-        cosmic::task::future(async move {
-            let bytes =
-                tokio::task::spawn_blocking(move || provider.get_cover_art(&hint).ok().flatten())
-                    .await
-                    .ok()
-                    .flatten();
-            cosmic::Action::App(Message::CoverBytesLoaded(key, bytes))
-        })
+        session_effect(self.session.load_cover_bytes(key, hint))
     }
 
     /// [`Self::request_cover_bytes`] for the album identified by its
@@ -242,10 +224,10 @@ impl AppModel {
 
         // Look up raw bytes. If they are not cached yet, load them lazily
         // (the library load no longer carries full-size covers), reset the
-        // key so we retry when `CoverBytesLoaded` arrives, but keep the
+        // key so we retry when `SessionEvent::CoverBytes` arrives, but keep the
         // current blurred_cover showing (previous track's blur) rather than
         // blanking the background immediately.
-        let bytes = match self.cover_art_bytes.get(&key) {
+        let bytes = match self.session.cover_bytes.get(&key) {
             Some(b) => b,
             None => {
                 self.blurred_cover_key = None; // ensure retry on next bytes-ready event
@@ -293,22 +275,6 @@ impl AppModel {
         })
     }
 
-    /// Fetch each not-yet-cached icon URL and dispatch `OnlineIconLoaded` for
-    /// it, used for podcast artwork and radio station favicons alike.
-    pub(super) fn load_online_icons(&self, urls: Vec<String>) -> Task<cosmic::Action<Message>> {
-        let tasks: Vec<_> = urls
-            .into_iter()
-            .filter(|url| !url.is_empty() && !self.online_icons.contains_key(url))
-            .map(|url| {
-                cosmic::task::future(async move {
-                    let decoded = aulos_core::online::fetch_icon(url.clone()).await;
-                    cosmic::Action::App(Message::OnlineIconLoaded(url, decoded))
-                })
-            })
-            .collect();
-        Task::batch(tasks)
-    }
-
     /// Reads tags for a set of ad-hoc files -- double-clicked in a file
     /// manager via `Exec=aulos %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri` -- and
@@ -326,7 +292,7 @@ impl AppModel {
         if paths.is_empty() {
             return import_task;
         }
-        let play_task = self.playback_effect(self.session.read_audio_files(paths));
+        let play_task = session_effect(self.session.read_audio_files(paths));
         Task::batch([import_task, play_task])
     }
 
@@ -334,11 +300,7 @@ impl AppModel {
     /// from `select_nav` when the page becomes active (see
     /// `Session::fetch_artist_info_for_visible`).
     pub(super) fn load_artist_info_for_visible(&mut self) -> Task<cosmic::Action<Message>> {
-        let photos = &self.artist_photos;
-        artist_info_task(
-            self.session
-                .fetch_artist_info_for_visible(|name| photos.contains_key(name)),
-        )
+        session_effect(self.session.fetch_artist_info_for_visible())
     }
 
     /// Fetches artist info for a single artist immediately (e.g. when
@@ -347,10 +309,58 @@ impl AppModel {
         &mut self,
         name: &str,
     ) -> Task<cosmic::Action<Message>> {
-        let photos = &self.artist_photos;
-        artist_info_task(
-            self.session
-                .fetch_artist_info_for(name, |name| photos.contains_key(name)),
-        )
+        session_effect(self.session.fetch_artist_info_for(name))
     }
+
+    /// Resets the add-forms whose content a session notice just consumed:
+    /// a subscribed podcast clears the feed-URL input, a saved radio
+    /// station the radio add form.
+    fn reset_forms_for(&mut self, notice: &SessionNotice) {
+        match notice {
+            SessionNotice::Podcast(PodcastNotice::Subscribed { .. }) => self.reset_podcast_form(),
+            SessionNotice::Radio(RadioNotice::Saved { .. } | RadioNotice::AlreadySaved { .. }) => {
+                self.reset_radio_form();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The toast for a session notice.
+fn notice_toast(notice: SessionNotice) -> widget::toaster::Toast<Message> {
+    let text = match notice {
+        SessionNotice::Playback(PlaybackNotice::Queued(count)) => {
+            fl!("queued-tracks", count = count)
+        }
+        SessionNotice::Playback(PlaybackNotice::OpenFilesFailed) => fl!("toast-open-files-failed"),
+        SessionNotice::Podcast(notice) => super::podcast_page::notice_text(notice),
+        SessionNotice::Radio(notice) => super::radio_page::notice_text(notice),
+        SessionNotice::Convert(ConvertNotice::QueueFinished { done, failed }) => {
+            // Queue just drained: summarize the batch.
+            if failed > 0 {
+                fl!(
+                    "toast-convert-queue-done-with-failures",
+                    done = done,
+                    failed = failed
+                )
+            } else {
+                fl!("toast-convert-queue-done", done = done)
+            }
+        }
+        SessionNotice::ProviderActionFailed(reason) => {
+            fl!("toast-provider-action-failed", reason = reason)
+        }
+        SessionNotice::ProviderConnectFailed { provider, reason } => fl!(
+            "toast-provider-connect-failed",
+            provider = provider,
+            reason = reason
+        ),
+        SessionNotice::PlaylistsImported(summaries) => {
+            super::playlist_io::import_toast_text(&summaries)
+        }
+        SessionNotice::PlaylistImportFailed(reason) => {
+            fl!("toast-playlist-import-failed", reason = reason)
+        }
+    };
+    widget::toaster::Toast::new(text)
 }

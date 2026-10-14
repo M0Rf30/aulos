@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::Session;
 use super::library::Reload;
+use super::{Session, SessionUpdate};
 use crate::config::edit_state::{MpdEditState, SubsonicEditState};
 use crate::config::{self, Config};
 use crate::fl;
@@ -47,7 +47,7 @@ pub struct ProvidersState {
 }
 
 /// Async results of the provider workflows; feed them to
-/// [`ProvidersState::apply`].
+/// [`ProvidersState::apply_event`].
 #[derive(Debug, Clone)]
 pub enum ProviderEvent {
     /// Result of testing the connection of MPD card `0`.
@@ -351,14 +351,16 @@ impl ProvidersState {
 
 impl Session {
     /// Make provider row `index` the active one. Persists the choice and
-    /// resets everything derived from the previous provider's library; the
-    /// UI recreates the player for the new backend, drops its own caches
-    /// (covers, artist photos) and runs the returned reload. `None` when
-    /// `index` is not a registered provider.
-    pub fn switch_provider(&mut self, index: usize) -> Option<Reload> {
-        let (id, _name) = self.providers.provider_list.get(index)?.clone();
+    /// resets everything derived from the previous provider's library and
+    /// recreates the player for the new backend. The update carries the
+    /// library reload plus [`SessionChanges::artist_photos_cleared`]; it is
+    /// empty when `index` is not a registered provider.
+    pub fn switch_provider(&mut self, index: usize) -> SessionUpdate {
+        let Some((id, _name)) = self.providers.provider_list.get(index).cloned() else {
+            return SessionUpdate::none();
+        };
         if !self.providers.registry.set_active(&id) {
-            return None;
+            return SessionUpdate::none();
         }
         self.providers.active_index = Some(index);
         self.providers.manually_switched = true;
@@ -367,9 +369,17 @@ impl Session {
         tracing::info!("Switched to provider: {id}");
 
         // Clear current library data and reload from the new provider.
+        let covers_cleared = self.library.covers.clear().cleared;
+        self.cover_bytes.clear();
         self.library.clear_collections();
+        self.refresh_search();
         self.artist_info.clear();
-        Some(self.reload_library())
+        self.recreate_player();
+        let mut reload = self.reload_library();
+        reload.covers.cleared |= covers_cleared;
+        let mut update = SessionUpdate::from(reload);
+        update.changes.artist_photos_cleared = true;
+        update
     }
 
     /// Store the password of a settings card in the keyring right away, so

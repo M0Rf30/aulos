@@ -7,7 +7,7 @@
 //! Workflows return an [`Effect`] of [`PlaylistEvent`]s; the UI feeds each
 //! event back through [`Session::apply_playlist_event`].
 
-use super::Session;
+use super::{PlaybackUpdate, Session};
 use crate::library::playlist_io::{self, ExportSource, ImportSummary};
 use crate::library::smart_playlist::{EditorState, SmartPlaylist};
 use crate::library::{LibraryDb, Playlist, Track};
@@ -43,26 +43,46 @@ pub enum PlaylistEvent {
     Imported(Result<Vec<ImportSummary>, String>),
 }
 
-/// What the UI must do after [`Session::apply_playlist_event`], besides
-/// running the returned effect.
+/// What the UI must show or reset after [`Session::apply_playlist_event`].
 #[derive(Debug, Clone)]
 pub enum PlaylistOutcome {
     /// Nothing.
     None,
-    /// `PlaylistsState::playlists` was replaced.
-    PlaylistsChanged,
     /// A playlist was created.
     Created,
     /// A playlist was deleted.
     Deleted,
     /// A provider mutation failed; the UI shows `reason`.
     Failed(String),
-    /// Smart-playlist tracks to start playing (never empty).
-    Play(Vec<Track>),
     /// Playlist files were imported.
     Imported(Vec<ImportSummary>),
     /// Importing playlist files failed.
     ImportFailed(String),
+}
+
+/// What a UI must do after [`Session::apply_playlist_event`].
+#[must_use]
+pub struct PlaylistUpdate {
+    /// Follow-up work; its events go back into `apply_playlist_event`.
+    pub effect: Effect<PlaylistEvent>,
+    /// Set when the event started playback (a smart playlist to play): the
+    /// UI runs it like any other playback update.
+    pub playback: Option<PlaybackUpdate>,
+    pub outcome: PlaylistOutcome,
+}
+
+impl PlaylistUpdate {
+    fn outcome(outcome: PlaylistOutcome) -> Self {
+        Self::new(Effect::none(), outcome)
+    }
+
+    fn new(effect: Effect<PlaylistEvent>, outcome: PlaylistOutcome) -> Self {
+        Self {
+            effect,
+            playback: None,
+            outcome,
+        }
+    }
 }
 
 /// Saved playlists and smart (rule-based) playlists.
@@ -282,50 +302,54 @@ impl Session {
         self.load_playlists()
     }
 
-    /// Applies an async playlist result; returns the follow-up work to run
-    /// and what the UI must react to.
-    pub fn apply_playlist_event(
-        &mut self,
-        event: PlaylistEvent,
-    ) -> (Effect<PlaylistEvent>, PlaylistOutcome) {
+    /// Applies an async playlist result. Replacing the playlists refreshes
+    /// the library search results (they include playlists), and resolved
+    /// smart-playlist tracks start playing.
+    pub fn apply_playlist_event(&mut self, event: PlaylistEvent) -> PlaylistUpdate {
         match event {
             PlaylistEvent::Loaded(playlists) => {
                 self.playlists.playlists = playlists;
-                (Effect::none(), PlaylistOutcome::PlaylistsChanged)
+                self.refresh_search();
+                PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
             PlaylistEvent::OpDone { op, result } => match result {
                 Ok(()) => match op {
-                    PlaylistOp::AddTrack => (Effect::none(), PlaylistOutcome::None),
-                    PlaylistOp::Create => (self.load_playlists(), PlaylistOutcome::Created),
-                    PlaylistOp::Delete => (self.load_playlists(), PlaylistOutcome::Deleted),
-                    PlaylistOp::Rename => (self.load_playlists(), PlaylistOutcome::None),
+                    PlaylistOp::AddTrack => PlaylistUpdate::outcome(PlaylistOutcome::None),
+                    PlaylistOp::Create => {
+                        PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::Created)
+                    }
+                    PlaylistOp::Delete => {
+                        PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::Deleted)
+                    }
+                    PlaylistOp::Rename => {
+                        PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::None)
+                    }
                 },
                 Err(e) => {
                     tracing::error!("Playlist operation {op:?} failed: {e}");
-                    (Effect::none(), PlaylistOutcome::Failed(e))
+                    PlaylistUpdate::outcome(PlaylistOutcome::Failed(e))
                 }
             },
             PlaylistEvent::SmartLoaded(playlists) => {
                 self.playlists.smart_playlists = playlists;
-                (Effect::none(), PlaylistOutcome::None)
+                PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
             PlaylistEvent::SmartTracksLoaded(tracks) => {
                 self.playlists.smart_playlist_tracks = tracks;
-                (Effect::none(), PlaylistOutcome::None)
+                PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
-            PlaylistEvent::SmartPlayResolved(tracks) => (
-                Effect::none(),
-                if tracks.is_empty() {
-                    PlaylistOutcome::None
-                } else {
-                    PlaylistOutcome::Play(tracks)
-                },
-            ),
+            PlaylistEvent::SmartPlayResolved(tracks) => {
+                let mut update = PlaylistUpdate::outcome(PlaylistOutcome::None);
+                if !tracks.is_empty() {
+                    update.playback = Some(self.play_tracks(tracks, 0));
+                }
+                update
+            }
             PlaylistEvent::Imported(Ok(summaries)) => {
-                (self.load_playlists(), PlaylistOutcome::Imported(summaries))
+                PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::Imported(summaries))
             }
             PlaylistEvent::Imported(Err(reason)) => {
-                (Effect::none(), PlaylistOutcome::ImportFailed(reason))
+                PlaylistUpdate::outcome(PlaylistOutcome::ImportFailed(reason))
             }
         }
     }
@@ -400,6 +424,7 @@ pub async fn export_playlist(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::test_session;
     use super::*;
     use std::time::Duration;
 
@@ -462,6 +487,37 @@ mod tests {
         assert!(state.smart_playlist_editor.is_some());
         state.cancel_smart_editor();
         assert!(state.smart_playlist_editor.is_none());
+    }
+
+    #[test]
+    fn resolved_smart_playlist_tracks_start_playing() {
+        let mut session = test_session();
+        let update = session.apply_playlist_event(PlaylistEvent::SmartPlayResolved(Vec::new()));
+        assert!(update.playback.is_none());
+
+        let update =
+            session.apply_playlist_event(PlaylistEvent::SmartPlayResolved(vec![track(), track()]));
+        assert!(update.playback.is_some());
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
+    }
+
+    #[test]
+    fn loaded_playlists_refresh_the_search_results() {
+        let mut session = test_session();
+        drop(session.set_search_query("mix".into()));
+        let names = |session: &Session| {
+            session
+                .library
+                .visible_playlists(&session.playlists.playlists)
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let loaded = vec![playlist("Road Mix", vec![]), playlist("Other", vec![])];
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded(loaded));
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
+        assert_eq!(names(&session), ["Road Mix"]);
     }
 
     #[test]

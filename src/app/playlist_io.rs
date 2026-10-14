@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Playlist glue: the M3U/M3U8/PLS import/export portal file dialogs, the
-//! result toasts, and the bridge from the session's playlist workflows
-//! (`aulos_core::session::playlists`) to iced tasks.
+//! and the toast text of an import (the session's playlist workflows,
+//! `aulos_core::session::playlists`, report through session updates).
 
+use super::tasks::session_effect;
 use super::{AppModel, Message};
 use aulos_core::fl;
 use aulos_core::library::m3u;
 use aulos_core::library::playlist_io::{self, ExportOutcome, ExportSource, ImportSummary};
-use aulos_core::session::{PlaylistEvent, PlaylistOutcome};
-use aulos_core::task::Effect;
+use aulos_core::session::PlaylistEvent;
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -28,11 +28,6 @@ pub enum PlaylistIo {
     PickFiles,
     /// Import these playlist files (from the dialog, the CLI or `OpenUri`).
     Import(Vec<PathBuf>),
-}
-
-/// Runs a playlist workflow's [`Effect`] as an iced task.
-pub(super) fn run(effect: Effect<PlaylistEvent>) -> Task<cosmic::Action<Message>> {
-    super::tasks::effect(effect).map(|event| cosmic::Action::App(Message::PlaylistEvent(event)))
 }
 
 impl AppModel {
@@ -86,48 +81,11 @@ impl AppModel {
                 let paths = pick_playlist_files().await;
                 cosmic::Action::App(match paths {
                     Ok(paths) => Message::PlaylistIo(PlaylistIo::Import(paths)),
-                    Err(e) => Message::PlaylistEvent(PlaylistEvent::Imported(Err(e))),
+                    Err(e) => Message::Session(PlaylistEvent::Imported(Err(e)).into()),
                 })
             }),
             PlaylistIo::Import(paths) => self.import_playlist_files(paths),
         }
-    }
-
-    /// Applies an async playlist result to the session and reacts to its
-    /// outcome (toasts, input/selection resets).
-    pub(super) fn update_playlist_event(
-        &mut self,
-        event: PlaylistEvent,
-    ) -> Task<cosmic::Action<Message>> {
-        let (effect, outcome) = self.session.apply_playlist_event(event);
-        let follow_up = run(effect);
-        let reaction = match outcome {
-            PlaylistOutcome::None => Task::none(),
-            PlaylistOutcome::PlaylistsChanged => {
-                self.refresh_search_filter();
-                Task::none()
-            }
-            PlaylistOutcome::Created => {
-                self.new_playlist_name.clear();
-                Task::none()
-            }
-            PlaylistOutcome::Deleted => {
-                self.selected_playlist = None;
-                Task::none()
-            }
-            PlaylistOutcome::Failed(reason) => self.push_toast(widget::toaster::Toast::new(fl!(
-                "toast-provider-action-failed",
-                reason = reason
-            ))),
-            PlaylistOutcome::Play(tracks) => self.play_track_list(tracks, 0),
-            PlaylistOutcome::Imported(summaries) => {
-                self.push_toast(widget::toaster::Toast::new(import_toast_text(&summaries)))
-            }
-            PlaylistOutcome::ImportFailed(reason) => self.push_toast(widget::toaster::Toast::new(
-                fl!("toast-playlist-import-failed", reason = reason),
-            )),
-        };
-        Task::batch([follow_up, reaction])
     }
 
     /// Imports playlist files into new library playlists (background task).
@@ -137,12 +95,12 @@ impl AppModel {
         &mut self,
         paths: Vec<PathBuf>,
     ) -> Task<cosmic::Action<Message>> {
-        run(aulos_core::session::import_playlist_files(paths))
+        session_effect(aulos_core::session::import_playlist_files(paths))
     }
 
     /// Reload the active provider's playlists.
     pub(super) fn load_playlists(&self) -> Task<cosmic::Action<Message>> {
-        run(self.session.load_playlists())
+        session_effect(self.session.load_playlists())
     }
 }
 
@@ -224,7 +182,7 @@ async fn pick_playlist_files() -> Result<Vec<PathBuf>, String> {
     }
 }
 
-fn import_toast_text(summaries: &[ImportSummary]) -> String {
+pub(super) fn import_toast_text(summaries: &[ImportSummary]) -> String {
     let matched: usize = summaries.iter().map(|s| s.matched).sum();
     let unmatched: usize = summaries.iter().map(|s| s.unmatched).sum();
     match summaries {

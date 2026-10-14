@@ -25,11 +25,11 @@
 //! restores and focuses it. The window stays in the task list; it cannot be
 //! hidden from it.
 
+use super::tasks::session_effect;
 use super::{AppModel, Message};
 use aulos_core::config::AutoPlayMode;
 use aulos_core::player::extras::{CloseAction, close_action};
 use cosmic::Task;
-use std::time::Duration;
 
 type AppTask = Task<cosmic::Action<Message>>;
 
@@ -50,19 +50,9 @@ pub enum PlaybackExtrasMessage {
     SetBackgroundPlayback(bool),
     /// The window was asked to close (header button, compositor, Alt+F4).
     CloseRequested,
-    /// Periodic housekeeping while idle/paused (the playback tick only runs
-    /// while playing): releases the inhibit lock after a pause or stop.
-    Sync,
 }
 
 impl AppModel {
-    /// Push the persisted settings into a (re)created player.
-    pub(super) fn apply_playback_extras_config(&mut self) {
-        if let Some(player) = &mut self.session.playback.player {
-            player.set_fade_secs(self.session.config.config.fade_duration_secs);
-        }
-    }
-
     pub(super) fn update_playback_extras(&mut self, msg: PlaybackExtrasMessage) -> AppTask {
         match msg {
             PlaybackExtrasMessage::ToggleStopAfter => {
@@ -82,7 +72,7 @@ impl AppModel {
             PlaybackExtrasMessage::SetPartyMode(on) => {
                 let update = self.session.set_party_mode(on);
                 self.session.config.save();
-                self.playback_task(update)
+                self.session_task(update)
             }
             PlaybackExtrasMessage::TogglePartyMode => {
                 let on = !self.session.config.config.party_mode;
@@ -101,7 +91,7 @@ impl AppModel {
             PlaybackExtrasMessage::SetInhibit(on) => {
                 let effect = self.session.set_inhibit_while_playing(on);
                 self.session.config.save();
-                self.playback_effect(effect)
+                session_effect(effect)
             }
             PlaybackExtrasMessage::SetBackgroundPlayback(on) => {
                 self.session.config.config.background_playback = on;
@@ -109,22 +99,7 @@ impl AppModel {
                 Task::none()
             }
             PlaybackExtrasMessage::CloseRequested => self.handle_close_requested(),
-            PlaybackExtrasMessage::Sync => {
-                let effect = self.session.playback_extras_tick();
-                self.playback_effect(effect)
-            }
         }
-    }
-
-    /// Pop a desktop notification for the track that just became current,
-    /// when enabled and the window isn't focused.
-    pub(super) fn notify_track_changed(&mut self) -> AppTask {
-        let focused = self.core.focused_window().is_some();
-        let cover_art_bytes = &mut self.cover_art_bytes;
-        let effect = self
-            .session
-            .notify_track_changed(focused, |track| cover_art_bytes.get(&track.cover_key()));
-        self.playback_effect(effect)
     }
 
     // -- Window lifecycle ----------------------------------------------
@@ -158,26 +133,13 @@ impl AppModel {
 
 impl AppModel {
     /// Subscriptions owned by this module: window-close requests from the
-    /// compositor (`exit_on_close` is off, see `main.rs`), plus — only while
-    /// an inhibit lock is held or being taken — a slow housekeeping tick
-    /// that releases it after a pause/stop (the playback tick only runs
-    /// while playing).
+    /// compositor (`exit_on_close` is off, see `main.rs`). The slow
+    /// housekeeping tick that releases an inhibit lock after a pause/stop
+    /// is one of the session's background streams.
     pub(super) fn playback_extras_subscription(&self) -> cosmic::iced::Subscription<Message> {
-        let mut subs = vec![
-            cosmic::iced::window::close_requests()
-                .map(|_| Message::Playback(PlaybackExtrasMessage::CloseRequested)),
-        ];
-        if self.session.playback.extras.inhibit_busy() {
-            subs.push(cosmic::iced::Subscription::run(sync_stream));
-        }
-        cosmic::iced::Subscription::batch(subs)
+        cosmic::iced::window::close_requests()
+            .map(|_| Message::Playback(PlaybackExtrasMessage::CloseRequested))
     }
-}
-
-fn sync_stream() -> impl futures_util::Stream<Item = Message> {
-    use futures_util::StreamExt;
-    aulos_core::task::interval_stream(Duration::from_secs(2))
-        .map(|()| Message::Playback(PlaybackExtrasMessage::Sync))
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,8 @@
 //! Filesystem watcher for the local music directories.
 
 use crate::task::channel_stream;
-use futures::{SinkExt, Stream};
+use futures::stream::BoxStream;
+use futures::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ const DEBOUNCE: Duration = Duration::from_secs(2);
 /// yields the deduplicated, sorted set of changed paths once the filesystem
 /// has been quiet for two seconds. The watcher lives as long as the stream is
 /// polled; dropping the stream stops it.
-pub fn watch_stream(music_dirs: &[PathBuf]) -> impl Stream<Item = Vec<PathBuf>> + use<> {
+pub fn watch_stream(music_dirs: &[PathBuf]) -> BoxStream<'static, Vec<PathBuf>> {
     let music_dirs = music_dirs.to_vec();
     channel_stream(4, move |mut emitter| async move {
         use notify::{RecursiveMode, Watcher};
@@ -95,4 +96,5 @@ pub fn watch_stream(music_dirs: &[PathBuf]) -> impl Stream<Item = Vec<PathBuf>> 
             _ = emitter.send(changed_paths).await;
         }
     })
+    .boxed()
 }

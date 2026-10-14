@@ -10,8 +10,7 @@ use crate::views::{
     providers, queue, settings, songs,
 };
 use aulos_core::fl;
-use aulos_core::library::state::unfilter_index;
-use aulos_core::library::{Album, Artist, Track};
+use aulos_core::library::Track;
 use aulos_core::player::PlaybackState;
 use cosmic::app::context_drawer;
 use cosmic::iced::{Alignment, Length};
@@ -174,11 +173,12 @@ impl AppModel {
             return vec![];
         }
 
-        let input = widget::search_input(fl!("search-library"), &self.session.library.search_query)
-            .id(widget::Id::new(SEARCH_INPUT_ID))
-            .on_input(Message::LibrarySearchChanged)
-            .on_clear(Message::ClearLibrarySearch)
-            .width(Length::Fill);
+        let input =
+            widget::search_input(fl!("search-library"), self.session.library.search_query())
+                .id(widget::Id::new(SEARCH_INPUT_ID))
+                .on_input(Message::LibrarySearchChanged)
+                .on_clear(Message::ClearLibrarySearch)
+                .width(Length::Fill);
 
         vec![
             widget::container(input)
@@ -212,12 +212,12 @@ impl AppModel {
                         == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Genres) => {
-                self.selected_genre.is_none()
+                self.session.library.selected_genre.is_none()
                     && self.session.config.config.genres_view_mode
                         == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Folders | Page::Radio) => true,
-            Some(Page::Podcasts) => self.selected_podcast.is_none(),
+            Some(Page::Podcasts) => self.session.podcasts.selected.is_none(),
             _ => false,
         };
         if shows_card_grid {
@@ -610,9 +610,6 @@ impl AppModel {
             page
         };
 
-        let search_query_active =
-            self.search_active && !self.session.library.search_query.trim().is_empty();
-
         let content: Element<'_, Message> = match page {
             Page::Home => crate::views::home::home_view(
                 &self.session.home,
@@ -649,53 +646,39 @@ impl AppModel {
                         widget::text("Album not found").into()
                     }
                 } else {
-                    let (albums_data, album_map): (&[Album], Option<&[usize]>) =
-                        if search_query_active {
-                            (
-                                &self.session.library.filtered.albums,
-                                Some(self.session.library.filtered.album_map.as_slice()),
-                            )
-                        } else {
-                            (&self.session.library.albums, None)
-                        };
+                    let library = &self.session.library;
                     albums::albums_view(
-                        albums_data,
+                        library.visible_albums(),
                         &self.cover_images,
                         self.session.config.config.albums_view_mode,
                         crate::views::album_filters::FilterCtx {
                             filter: &self.extras.album_filter,
                             cache: &self.extras.album_cache,
-                            // The slice shown changes with the library
-                            // (`LibraryState::generation`) and with the search state.
-                            epoch: (self.session.library.generation() << 1)
-                                | u64::from(search_query_active),
+                            // The slice shown changes with the library and
+                            // with the search results.
+                            epoch: library.visible_epoch(),
                         },
                         &self.extras.grid_scroll,
                     )
                     .map(move |msg| {
                         Message::from(match msg {
                             albums::AlbumMessage::SelectAlbum(i) => {
-                                albums::AlbumMessage::SelectAlbum(unfilter_index(album_map, i))
+                                albums::AlbumMessage::SelectAlbum(library.album_index(i))
                             }
                             albums::AlbumMessage::PlayAlbum(i) => {
-                                albums::AlbumMessage::PlayAlbum(unfilter_index(album_map, i))
+                                albums::AlbumMessage::PlayAlbum(library.album_index(i))
                             }
                             albums::AlbumMessage::PlayNext(i, track) => {
-                                albums::AlbumMessage::PlayNext(unfilter_index(album_map, i), track)
+                                albums::AlbumMessage::PlayNext(library.album_index(i), track)
                             }
                             albums::AlbumMessage::AddToQueue(i, track) => {
-                                albums::AlbumMessage::AddToQueue(
-                                    unfilter_index(album_map, i),
-                                    track,
-                                )
+                                albums::AlbumMessage::AddToQueue(library.album_index(i), track)
                             }
                             albums::AlbumMessage::ShowAlbumProperties(i) => {
-                                albums::AlbumMessage::ShowAlbumProperties(unfilter_index(
-                                    album_map, i,
-                                ))
+                                albums::AlbumMessage::ShowAlbumProperties(library.album_index(i))
                             }
                             albums::AlbumMessage::TagAlbum(i, action) => {
-                                albums::AlbumMessage::TagAlbum(unfilter_index(album_map, i), action)
+                                albums::AlbumMessage::TagAlbum(library.album_index(i), action)
                             }
                             other => other,
                         })
@@ -728,17 +711,9 @@ impl AppModel {
                         widget::text("Artist not found").into()
                     }
                 } else {
-                    let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
-                        if search_query_active || self.session.library.filtered.artists_filtered {
-                            (
-                                &self.session.library.filtered.artists,
-                                Some(self.session.library.filtered.artist_map.as_slice()),
-                            )
-                        } else {
-                            (&self.session.library.artists, None)
-                        };
+                    let library = &self.session.library;
                     artists::artists_view(
-                        artists_data,
+                        library.visible_artists(),
                         &self.artist_photos,
                         self.session.config.config.artists_view_mode,
                         &self.extras.grid_scroll,
@@ -746,20 +721,16 @@ impl AppModel {
                     .map(move |msg| {
                         Message::from(match msg {
                             artists::ArtistMessage::SelectArtist(i) => {
-                                artists::ArtistMessage::SelectArtist(unfilter_index(artist_map, i))
+                                artists::ArtistMessage::SelectArtist(library.artist_index(i))
                             }
                             artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
                                 artists::ArtistMessage::PlayArtistAlbum(
-                                    unfilter_index(artist_map, ai),
+                                    library.artist_index(ai),
                                     ali,
                                 )
                             }
                             artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
-                                artists::ArtistMessage::PlayTrack(
-                                    unfilter_index(artist_map, ai),
-                                    ali,
-                                    ti,
-                                )
+                                artists::ArtistMessage::PlayTrack(library.artist_index(ai), ali, ti)
                             }
                             other => other,
                         })
@@ -768,15 +739,8 @@ impl AppModel {
             }
 
             Page::Songs => {
-                let (tracks_data, track_map): (&[Track], Option<&[usize]>) = if search_query_active
-                {
-                    (
-                        &self.session.library.filtered.tracks,
-                        Some(self.session.library.filtered.track_map.as_slice()),
-                    )
-                } else {
-                    (&self.session.library.tracks, None)
-                };
+                let library = &self.session.library;
+                let tracks_data = library.visible_tracks();
                 songs::songs_list_view(
                     tracks_data,
                     self.songs_sort,
@@ -790,7 +754,7 @@ impl AppModel {
                 .map(move |msg| match msg {
                     songs::SongMessage::Navigate(route) => Message::Navigate(route),
                     songs::SongMessage::PlayTrack(i) => {
-                        Message::PlayTrackIndex(unfilter_index(track_map, i))
+                        Message::PlayTrackIndex(library.track_index(i))
                     }
                     songs::SongMessage::SortBy(f) => Message::SortSongs(f),
                     songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
@@ -802,7 +766,7 @@ impl AppModel {
                     songs::SongMessage::Scrolled(y) => Message::SongsScrolled(y),
                     // `i` indexes `tracks_data` (the slice actually shown,
                     // filtered or not), so resolve it there directly —
-                    // `unfilter_index` maps into the library tracks instead.
+                    // `track_index` maps into the library tracks instead.
                     songs::SongMessage::PlayNext(i) => {
                         Message::PlayNext(tracks_data.get(i).cloned().into_iter().collect())
                     }
@@ -883,67 +847,57 @@ impl AppModel {
                         widget::text("Playlist not found").into()
                     }
                 } else {
-                    let (playlists_data, playlist_map): (
-                        &[aulos_core::library::Playlist],
-                        Option<&[usize]>,
-                    ) = if search_query_active {
-                        (
-                            &self.session.library.filtered.playlists,
-                            Some(self.session.library.filtered.playlist_map.as_slice()),
-                        )
-                    } else {
-                        (&self.session.playlists.playlists, None)
-                    };
+                    let library = &self.session.library;
+                    let playlists_data =
+                        library.visible_playlists(&self.session.playlists.playlists);
                     playlists::playlist_list_view(playlists_data, &self.new_playlist_name).map(
                         move |msg| match msg {
                             playlists::PlaylistMessage::Navigate(route) => Message::Navigate(route),
                             playlists::PlaylistMessage::SelectPlaylist(i) => {
-                                Message::SelectPlaylist(unfilter_index(playlist_map, i))
+                                Message::SelectPlaylist(library.playlist_index(i))
                             }
                             playlists::PlaylistMessage::CreatePlaylist(n) => {
                                 Message::CreatePlaylist(n)
                             }
                             playlists::PlaylistMessage::DeletePlaylist(i) => {
-                                Message::DeletePlaylist(unfilter_index(playlist_map, i))
+                                Message::DeletePlaylist(library.playlist_index(i))
                             }
                             playlists::PlaylistMessage::RenamePlaylist(i, n) => {
-                                Message::RenamePlaylist(unfilter_index(playlist_map, i), n)
+                                Message::RenamePlaylist(library.playlist_index(i), n)
                             }
                             playlists::PlaylistMessage::NewPlaylistNameChanged(n) => {
                                 Message::NewPlaylistNameChanged(n)
                             }
                             playlists::PlaylistMessage::RenameInputChanged(i, n) => {
-                                Message::RenamePlaylistInput(unfilter_index(playlist_map, i), n)
+                                Message::RenamePlaylistInput(library.playlist_index(i), n)
                             }
                             playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
                             playlists::PlaylistMessage::PlayPlaylist(i) => {
-                                Message::PlayPlaylist(unfilter_index(playlist_map, i))
+                                Message::PlayPlaylist(library.playlist_index(i))
                             }
                             playlists::PlaylistMessage::PlayTrack(pi, ti) => {
-                                Message::PlayPlaylistTrack(unfilter_index(playlist_map, pi), ti)
+                                Message::PlayPlaylistTrack(library.playlist_index(pi), ti)
                             }
                             playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
-                                Message::RemovePlaylistTrack(unfilter_index(playlist_map, pi), ti)
+                                Message::RemovePlaylistTrack(library.playlist_index(pi), ti)
                             }
                             playlists::PlaylistMessage::PlayNext(pi, ti) => Message::QueueFrom {
                                 source: aulos_core::library::queue_source::QueueSource::Playlist {
-                                    playlist: unfilter_index(playlist_map, pi),
+                                    playlist: library.playlist_index(pi),
                                     track: ti,
                                 },
                                 next: true,
                             },
                             playlists::PlaylistMessage::AddToQueue(pi, ti) => Message::QueueFrom {
                                 source: aulos_core::library::queue_source::QueueSource::Playlist {
-                                    playlist: unfilter_index(playlist_map, pi),
+                                    playlist: library.playlist_index(pi),
                                     track: ti,
                                 },
                                 next: false,
                             },
-                            playlists::PlaylistMessage::Export(i) => {
-                                Message::PlaylistIo(super::playlist_io::PlaylistIo::Export(
-                                    unfilter_index(playlist_map, i),
-                                ))
-                            }
+                            playlists::PlaylistMessage::Export(i) => Message::PlaylistIo(
+                                super::playlist_io::PlaylistIo::Export(library.playlist_index(i)),
+                            ),
                             playlists::PlaylistMessage::ImportFiles => {
                                 Message::PlaylistIo(super::playlist_io::PlaylistIo::PickFiles)
                             }
@@ -982,7 +936,7 @@ impl AppModel {
             }
 
             Page::Genres => {
-                if let Some(genre_idx) = self.selected_genre {
+                if let Some(genre_idx) = self.session.library.selected_genre {
                     if let Some(genre_name) = self.session.library.genres.get(genre_idx) {
                         genres::genre_detail_view(
                             genre_name,
@@ -1022,24 +976,16 @@ impl AppModel {
                         widget::text("Genre not found").into()
                     }
                 } else {
-                    let (genres_data, genre_map): (&[String], Option<&[usize]>) =
-                        if search_query_active {
-                            (
-                                &self.session.library.filtered.genres,
-                                Some(self.session.library.filtered.genre_map.as_slice()),
-                            )
-                        } else {
-                            (&self.session.library.genres, None)
-                        };
+                    let library = &self.session.library;
                     genres::genres_view(
-                        genres_data,
+                        library.visible_genres(),
                         self.session.config.config.genres_view_mode,
                         &self.extras.grid_scroll,
                     )
                     .map(move |msg| match msg {
                         genres::GenreMessage::Navigate(route) => Message::Navigate(route),
                         genres::GenreMessage::SelectGenre(i) => {
-                            Message::SelectGenre(unfilter_index(genre_map, i))
+                            Message::SelectGenre(library.genre_index(i))
                         }
                         genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
@@ -1091,7 +1037,9 @@ impl AppModel {
                     );
                 let is_paused = matches!(playback_state, Some(PlaybackState::Paused));
                 let selected = self
-                    .selected_podcast
+                    .session
+                    .podcasts
+                    .selected
                     .and_then(|id| self.session.podcasts.podcasts.iter().find(|p| p.id == id));
                 let props = podcasts::PodcastViewProps {
                     podcasts: &self.session.podcasts.podcasts,

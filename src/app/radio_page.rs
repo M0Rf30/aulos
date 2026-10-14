@@ -3,33 +3,38 @@
 
 //! Radio page controller.
 //!
-//! Maps the `Message::Radio` UI events (`update_radio`) and the
-//! `Message::RadioEvent` async results (`handle_radio_event`) onto
+//! Maps the `Message::Radio` UI events (`update_radio`) onto
 //! [`aulos_core::session::RadioState`], which owns the workflows, and keeps
-//! what is UI-only: the add/rename/search form inputs, toasts, icon loading
-//! and the focus tasks. The view (`crate::views::radio`) stays pure -- this
+//! what is UI-only: the add/rename/search form inputs, the notice texts and
+//! the focus tasks. The async results are session events
+//! (`Message::Session`); icons and starting the played station are done by
+//! the session. The view (`crate::views::radio`) stays pure -- this
 //! is the only place that touches `AppModel`'s `radio_*` fields.
 
-use super::tasks::effect;
+use super::tasks::session_effect;
 use super::{AppModel, Message};
 use crate::views::radio::RadioMessage;
 use aulos_core::fl;
 use aulos_core::online::UrlError;
 use aulos_core::online::radio::{self, SortOrder, StationQuery};
-use aulos_core::session::{RadioEvent, RadioNotice};
-use aulos_core::task::Effect;
+use aulos_core::session::RadioNotice;
 use cosmic::prelude::*;
 use cosmic::widget;
 
-/// Runs a radio [`Effect`], routing its events to `Message::RadioEvent`.
-fn radio_task(radio_effect: Effect<RadioEvent>) -> Task<cosmic::Action<Message>> {
-    effect(radio_effect).map(|event| cosmic::Action::App(Message::RadioEvent(event)))
+/// The toast text of a radio notice.
+pub(super) fn notice_text(notice: RadioNotice) -> String {
+    match notice {
+        RadioNotice::Saved { name } => fl!("toast-radio-saved", name = name),
+        RadioNotice::AlreadySaved { name } => fl!("toast-radio-already-saved", name = name),
+        RadioNotice::SaveFailed { reason } => fl!("toast-radio-save-failed", reason = reason),
+        RadioNotice::PlayFailed { reason } => fl!("toast-radio-play-failed", reason = reason),
+    }
 }
 
 impl AppModel {
     /// Load saved radio stations from the online store.
     pub(super) fn load_radio_stations(&self) -> Task<cosmic::Action<Message>> {
-        radio_task(self.session.radio.load())
+        session_effect(self.session.radio.load())
     }
 
     /// Handle a UI event from the radio view.
@@ -64,9 +69,11 @@ impl AppModel {
                 Task::none()
             }
             RadioMessage::SubmitAdd => self.submit_add_station(),
-            RadioMessage::PlaySaved(id) => radio_task(self.session.radio.play_saved(id)),
+            RadioMessage::PlaySaved(id) => session_effect(self.session.radio.play_saved(id)),
             RadioMessage::RemoveSaved(id) => self.remove_saved_station(id),
-            RadioMessage::UndoRemove(station) => radio_task(self.session.radio.restore(station)),
+            RadioMessage::UndoRemove(station) => {
+                session_effect(self.session.radio.restore(station))
+            }
             RadioMessage::StartRename(id, name) => {
                 self.radio_renaming_id = Some(id);
                 self.radio_rename_input = name;
@@ -107,12 +114,12 @@ impl AppModel {
                 self.dispatch_search()
             }
             RadioMessage::RetrySearch => self.dispatch_search(),
-            RadioMessage::Preset(preset) => radio_task(self.session.radio.preset(preset)),
+            RadioMessage::Preset(preset) => session_effect(self.session.radio.preset(preset)),
             RadioMessage::PlayResult(uuid) => {
-                radio_task(self.session.radio.play_search_result(&uuid))
+                session_effect(self.session.radio.play_search_result(&uuid))
             }
             RadioMessage::SaveResult(uuid) => {
-                radio_task(self.session.radio.save_search_result(&uuid))
+                session_effect(self.session.radio.save_search_result(&uuid))
             }
 
             // `src/app/view.rs` maps this variant straight to the
@@ -123,42 +130,8 @@ impl AppModel {
         }
     }
 
-    /// Handle an async result dispatched by one of the radio page's tasks.
-    pub(super) fn handle_radio_event(
-        &mut self,
-        event: RadioEvent,
-    ) -> Task<cosmic::Action<Message>> {
-        let update = self.session.radio.apply_event(event);
-        let mut tasks = vec![radio_task(update.effect)];
-        if !update.icon_urls.is_empty() {
-            tasks.push(self.load_online_icons(update.icon_urls));
-        }
-        if let Some(track) = update.play {
-            tasks.push(self.play_track_list(vec![track], 0));
-        }
-        if let Some(notice) = update.notice {
-            let text = match notice {
-                RadioNotice::Saved { name } => {
-                    self.reset_radio_add_form();
-                    fl!("toast-radio-saved", name = name)
-                }
-                RadioNotice::AlreadySaved { name } => {
-                    self.reset_radio_add_form();
-                    fl!("toast-radio-already-saved", name = name)
-                }
-                RadioNotice::SaveFailed { reason } => {
-                    fl!("toast-radio-save-failed", reason = reason)
-                }
-                RadioNotice::PlayFailed { reason } => {
-                    fl!("toast-radio-play-failed", reason = reason)
-                }
-            };
-            tasks.push(self.push_toast(widget::toaster::Toast::new(text)));
-        }
-        Task::batch(tasks)
-    }
-
-    fn reset_radio_add_form(&mut self) {
+    /// A station was saved: the add form has done its job.
+    pub(super) fn reset_radio_form(&mut self) {
         self.radio_add_name.clear();
         self.radio_add_url.clear();
         self.radio_add_open = false;
@@ -171,7 +144,7 @@ impl AppModel {
         match self.session.radio.add_by_url(name, url) {
             Ok(add) => {
                 self.radio_add_error = None;
-                radio_task(add)
+                session_effect(add)
             }
             Err(UrlError::Empty) => {
                 self.radio_add_error = Some(fl!("radio-add-url-required"));
@@ -195,13 +168,13 @@ impl AppModel {
             .action(fl!("radio-undo"), move |_id| {
                 Message::Radio(RadioMessage::UndoRemove(station.clone()))
             });
-        Task::batch([radio_task(remove), self.push_toast(toast)])
+        Task::batch([session_effect(remove), self.push_toast(toast)])
     }
 
     fn commit_rename(&mut self, id: i64) -> Task<cosmic::Action<Message>> {
         let new_name = self.radio_rename_input.trim().to_string();
         self.radio_renaming_id = None;
-        radio_task(self.session.radio.rename(id, new_name))
+        session_effect(self.session.radio.rename(id, new_name))
     }
 
     fn dispatch_search(&mut self) -> Task<cosmic::Action<Message>> {
@@ -212,6 +185,6 @@ impl AppModel {
             order: self.radio_search_sort,
             limit: radio::DISCOVER_LIMIT,
         };
-        radio_task(self.session.radio.search(query))
+        session_effect(self.session.radio.search(query))
     }
 }

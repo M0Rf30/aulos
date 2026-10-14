@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! App-side glue for multi-service scrobbling: settings messages, favorite
-//! → Last.fm "love" mirroring and the loved-track sync.
+//! App-side glue for multi-service scrobbling: settings messages and the
+//! loved-track sync.
 
 use super::{AppModel, Message};
 use aulos_core::fl;
@@ -90,29 +90,6 @@ impl AppModel {
             Task::batch([toast, self.load_home(true)])
         } else {
             toast
-        }
-    }
-
-    /// A track was (un)favorited in Aulos: mirror it to Last.fm if enabled.
-    pub(super) fn scrobble_favorite_changed(&mut self, track_id: &str, loved: bool) {
-        let track = self
-            .session
-            .library
-            .tracks
-            .iter()
-            .find(|t| t.id.to_string() == track_id)
-            .or(self
-                .session
-                .playback
-                .current_track
-                .as_ref()
-                .filter(|t| t.id.to_string() == track_id))
-            .cloned();
-        if let Some(track) = track {
-            self.session
-                .playback
-                .scrobble
-                .on_favorite_changed(track_id, &track, loved);
         }
     }
 

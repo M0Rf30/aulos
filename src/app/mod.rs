@@ -61,13 +61,6 @@ pub struct AppModel {
     /// Toast notifications (e.g. provider connection failures).
     toasts: widget::toaster::Toasts<Message>,
 
-    // Library data
-    /// Cover handles accumulated by a non-destructive library refresh in
-    /// flight, swapped into `cover_images`/`cover_fingerprints` together
-    /// with the staged library data. `Some` exactly while
-    /// `library.is_staging(..)` is true for the running reload.
-    cover_staging: Option<library_glue::CoverStaging>,
-
     // Library search (header search bar)
     /// Whether the header search input is visible/active.
     search_active: bool,
@@ -89,10 +82,8 @@ pub struct AppModel {
     // Podcast discovery (Discover tab)
     podcast_search_query: String,
 
-    // Podcast show detail
-    /// The subscribed podcast's db id currently shown in detail, or `None`
-    /// for the Subscriptions/Discover list.
-    selected_podcast: Option<i64>,
+    // Podcast show detail (the open show itself is
+    // `Session::podcasts.selected`)
     podcast_episode_filter: aulos_core::online::podcast::EpisodeFilter,
     podcast_episode_text_filter: String,
     /// Whether the show detail's description is expanded past its clipped
@@ -164,8 +155,6 @@ pub struct AppModel {
     rename_playlist_input: String,
     /// Currently selected smart playlist index (for detail/editor view).
     selected_smart_playlist: Option<usize>,
-    /// Currently selected genre index (for detail view).
-    selected_genre: Option<usize>,
     /// In-memory directory-hierarchy browse state for the Folders view;
     /// rebuilt from the library tracks whenever the page is opened or the
     /// library reloads (see `FolderTree::build`).
@@ -212,12 +201,6 @@ pub struct AppModel {
     acoustid_user_key_input: String,
 
     // Expanded now-playing view
-    /// Raw cover art bytes keyed by album_key, loaded lazily (blur, detail
-    /// hero, notifications) into a small LRU -- never for the whole library.
-    cover_art_bytes: aulos_core::library::palette::CoverByteCache,
-    /// Content fingerprint per album key of the cover behind the matching
-    /// `cover_images` handle; lets a reload keep unchanged handles.
-    cover_fingerprints: HashMap<String, u64>,
     /// Cached blurred cover art for the current album.
     blurred_cover: Option<widget::icon::Handle>,
     /// Album key for the cached blurred cover.
@@ -274,19 +257,6 @@ pub struct AppModel {
     /// reads them in its `prepare()` method via `queue.write_texture()`.
     #[cfg(feature = "visualizer")]
     viz_frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
-    #[cfg(feature = "visualizer")]
-    pcm_buffer: Option<Arc<Mutex<aulos_core::player::pcm::PcmBuffer>>>,
-    /// Whether MPD itself is currently reporting `Playing` state — set from
-    /// `Message::MpdStatusUpdate`. Read by the MPD PipeWire capture thread
-    /// (`player::pw_capture`) to gate writes made while it's using the
-    /// default-sink-monitor fallback (no MPD stream found on the graph
-    /// yet), so other applications' audio doesn't drive the visualizer
-    /// while MPD itself is paused/stopped. `Arc<AtomicBool>` rather than a
-    /// plain field so the capture thread (spawned fresh by the MPD capture
-    /// subscription each time it (re)activates) can share it without
-    /// touching `AppModel` from off the UI thread.
-    #[cfg(feature = "visualizer")]
-    mpd_playing: Arc<std::sync::atomic::AtomicBool>,
     /// Sender half of the command channel to the render thread (see
     /// `VizCommand`); the `Receiver` lives in `viz_cmd_rx_slot`.
     #[cfg(feature = "visualizer")]
