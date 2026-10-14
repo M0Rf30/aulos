@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{AppFlags, AppModel, Message};
+use aulos_core::session::SessionEvent;
 use cosmic::app::context_drawer;
 use cosmic::iced::Subscription;
 use cosmic::prelude::*;
@@ -63,7 +64,16 @@ impl cosmic::Application for AppModel {
         let label = message_label(&message);
         let start = std::time::Instant::now();
         let before = self.view_signature();
+        // The session decides whether a track change deserves a desktop
+        // notification (only while the window is unfocused).
+        self.session
+            .set_window_focused(self.core.focused_window().is_some());
         let task = self.handle_message(message);
+        // The session runs the capture of a local MPD server's audio only
+        // while a visualizer is on screen.
+        #[cfg(feature = "visualizer")]
+        self.session
+            .set_visualizer_capture(self.visualizer_active && self.expand_progress > 0.0);
         // A page/detail/layout change remounts the virtual lists at the
         // top; put them back where the user left them.
         let task = if self.view_signature() != before {
@@ -127,7 +137,6 @@ fn log_elapsed(kind: &str, label: &str, elapsed: std::time::Duration) {
 /// vectors) on every single `update()` call just to get a label.
 fn message_label(message: &Message) -> &'static str {
     match message {
-        Message::PlaybackTick => "PlaybackTick",
         Message::TogglePlayback => "TogglePlayback",
         Message::NextTrack => "NextTrack",
         Message::PreviousTrack => "PreviousTrack",
@@ -138,19 +147,12 @@ fn message_label(message: &Message) -> &'static str {
         Message::Stop => "Stop",
         Message::ToggleShuffle => "ToggleShuffle",
         Message::CycleRepeat => "CycleRepeat",
-        Message::MpdIdleEvent(..) => "MpdIdleEvent",
-        Message::MpdStatusUpdate(_) => "MpdStatusUpdate",
-        Message::PlaybackEvent(_) => "PlaybackEvent",
-        Message::MpdConnected(_) => "MpdConnected",
-        Message::MpdConnectionFailed(..) => "MpdConnectionFailed",
+        Message::Session(event) => session_event_label(event),
         Message::ScanLibrary => "ScanLibrary",
-        Message::Library(_) => "Library",
-        Message::FilesChanged(_) => "FilesChanged",
         Message::SwitchProvider(_) => "SwitchProvider",
         Message::ToggleContextPage(_) => "ToggleContextPage",
         Message::LibrarySearchChanged(_) => "LibrarySearchChanged",
         Message::BlurReady(..) => "BlurReady",
-        Message::OnlineIconLoaded(..) => "OnlineIconLoaded",
         Message::ExpandAnimTick => "ExpandAnimTick",
         Message::ExpandNowPlaying => "ExpandNowPlaying",
         Message::CollapseNowPlaying => "CollapseNowPlaying",
@@ -163,5 +165,19 @@ fn message_label(message: &Message) -> &'static str {
         Message::Tagger(_) => "Tagger",
         Message::TaggerEvent(_) => "TaggerEvent",
         _ => "Other",
+    }
+}
+
+/// [`message_label`] for the session events that are hot or heavy.
+fn session_event_label(event: &SessionEvent) -> &'static str {
+    match event {
+        SessionEvent::PlaybackTick => "PlaybackTick",
+        SessionEvent::MpdStatus(_) => "MpdStatus",
+        SessionEvent::Mpd(_) => "Mpd",
+        SessionEvent::Playback(_) => "PlaybackEvent",
+        SessionEvent::Library(_) => "Library",
+        SessionEvent::FilesChanged(_) => "FilesChanged",
+        SessionEvent::IconLoaded { .. } => "IconLoaded",
+        _ => "Session",
     }
 }

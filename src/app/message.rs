@@ -4,7 +4,7 @@
 use super::ContextPage;
 use crate::views::radio as radio_view;
 use crate::views::{albums, artists, convert, podcasts};
-use aulos_core::config::{Config, ReplayGainMode};
+use aulos_core::config::ReplayGainMode;
 use aulos_core::library::Track;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -17,8 +17,6 @@ pub enum Message {
     ToggleContextPage(ContextPage),
     /// Open the Properties drawer for a track (see `AppModel::open_track_properties`).
     ShowTrackProperties(Track),
-    /// Off-thread result of opening the Properties drawer.
-    PropertiesProbed(aulos_core::session::PropertiesEvent),
     Properties(crate::views::track_properties::PropertiesMessage),
     /// Set the grid card size multiplier (clamped to `GRID_SCALE_RANGE`).
     SetGridScale(f32),
@@ -41,28 +39,20 @@ pub enum Message {
     // Library search
     /// The library search query changed (live filter as you type).
     LibrarySearchChanged(String),
-    /// Debounce timer for `LibrarySearchChanged`; carries the generation
-    /// it was scheduled for (ignored if a newer keystroke arrived).
-    LibrarySearchDebounced(u64),
     /// Toggle the header search input on/off.
     ToggleLibrarySearch,
     /// Clear the search query and deactivate the search input (Esc / clear icon).
     ClearLibrarySearch,
     // Library
     ScanLibrary,
-    /// Async result of a library workflow (scan, load, batch, genres,
-    /// favourite/rating changes); see `Session::apply_library_event`.
-    Library(aulos_core::session::LibraryEvent),
-    /// Filesystem watcher detected changes in music directories.
-    /// Contains the deduplicated list of changed paths after debounce.
-    FilesChanged(Vec<PathBuf>),
 
-    /// Full-size cover bytes for `key` were loaded on demand (blur, detail
-    /// hero, notification); `None` when the album has no art.
-    CoverBytesLoaded(String, Option<Vec<u8>>),
-    /// Result of a background keyring job (startup credential check,
-    /// AcoustID key probe/save).
-    Keyring(aulos_core::session::ConfigEvent),
+    /// Every asynchronous result and tick of the backend session -- library
+    /// and playback workflows, MPD events, filesystem and config watchers,
+    /// keyring checks, downloads, ... -- handled by one arm of `update`
+    /// (see `AppModel::session_task`). What is *not* a session event is a
+    /// UI-only result: picker dialogs, image decoding, MPRIS, scrobbling
+    /// controls, the tag editor and the animation/visualizer messages.
+    Session(aulos_core::session::SessionEvent),
 
     // Player transport
     TogglePlayback,
@@ -80,7 +70,6 @@ pub enum Message {
     VolumeCommit,
     ToggleShuffle,
     CycleRepeat,
-    PlaybackTick,
     /// Stop playback entirely (transport button, `Stop` shortcut, MPRIS
     /// `Stop`). Keeps the queue so a later play resumes it.
     Stop,
@@ -140,9 +129,6 @@ pub enum Message {
     BackToArtistList,
     /// Expand/collapse the selected artist's clipped biography preview.
     ToggleArtistBioExpanded,
-    /// One lazily-fetched artist's bio/image result landed (see
-    /// `AppModel::load_artist_info_for_visible`).
-    ArtistInfoLoaded(aulos_core::library::artist_info::ArtistInfoOutcome),
 
     // Songs view
     SortSongs(aulos_core::library::state::SortField),
@@ -185,9 +171,6 @@ pub enum Message {
     NewPlaylistNameChanged(String),
     /// The rename input changed (playlist index, new text).
     RenamePlaylistInput(usize, String),
-    /// Async result of a playlist workflow (load, provider mutation, smart
-    /// playlists, file import).
-    PlaylistEvent(aulos_core::session::PlaylistEvent),
 
     // Smart playlists view — a single wrapped variant keeps this feature's
     // full message vocabulary (list/detail/editor) out of the top-level enum.
@@ -195,8 +178,6 @@ pub enum Message {
 
     // Home page (suggested music, play history)
     Home(crate::views::home::HomeMessage),
-    /// Async result of a Home workflow (shelves, decades, play history).
-    HomeEvent(aulos_core::session::HomeEvent),
 
     // Startup preferences (Settings drawer)
     Startup(super::startup::StartupMessage),
@@ -249,8 +230,6 @@ pub enum Message {
     FetchAutoEQIndex,
     /// Select an AutoEQ profile by path from the dropdown.
     EqSelectAutoEQ(String),
-    /// An AutoEQ index/profile download finished.
-    AutoEQEvent(aulos_core::session::EqualizerEvent),
 
     // Settings
     AddMusicDir,
@@ -261,7 +240,6 @@ pub enum Message {
     /// Result from the XDG Desktop Portal directory picker.
     DirPickerResult(Result<PathBuf, String>),
     RemoveMusicDir(usize),
-    UpdateConfig(Config),
     /// Toggle multi-artist tag splitting on/off.
     SetSplitArtistTags(bool),
     /// Live text of the delimiter list editor changed (before submit).
@@ -298,24 +276,6 @@ pub enum Message {
     MpdSaveServer(usize),
     MpdRemoveServer(usize),
     MpdTestConnection(usize),
-    /// Result of a connection test of an MPD or Subsonic card.
-    ProviderEvent(aulos_core::session::ProviderEvent),
-
-    // MPD provider events
-    MpdConnected(String),
-    MpdConnectionFailed(String, String),
-    /// `provider_id`, plus which MPD subsystem changed (only
-    /// `Database`/`Update`/`StoredPlaylist` trigger a reload in
-    /// `update()` — see `mpd_events::idle_action`).
-    MpdIdleEvent(String, aulos_core::provider::mpd_events::IdleSubsystem),
-    /// Polled status from the active MPD backend (position, duration,
-    /// state, volume). `song` is `Some` only on the tick where MPD's
-    /// current song identity changed (including the first tick after the
-    /// subscription starts) — most ticks carry `None`.
-    MpdStatusUpdate(aulos_core::provider::mpd_events::MpdStatusUpdate),
-    /// Result of asynchronous playback work (MPD commands, MPRIS art,
-    /// lyrics, opened files, inhibit and notification requests).
-    PlaybackEvent(aulos_core::session::PlaybackEvent),
 
     // Subsonic provider configuration
     SubsonicAddServer,
@@ -414,20 +374,10 @@ pub enum Message {
     // Podcasts
     /// UI events from the podcasts view (see `views::podcasts::PodcastMessage`).
     Podcast(podcasts::PodcastMessage),
-    /// Async results for the podcasts page.
-    PodcastEvent(aulos_core::session::PodcastEvent),
-    /// A podcast/radio icon (artwork or favicon) finished downloading.
-    /// `Some((width, height, rgba_pixels))` on success (already decoded
-    /// and downscaled off-thread by `load_online_icons`, so the handler
-    /// can build a `widget::icon::from_raster_pixels` handle directly);
-    /// `None` when the fetch or decode failed.
-    OnlineIconLoaded(String, Option<(u32, u32, Vec<u8>)>),
 
     // Radio
     /// UI events from the radio view (see `views::radio::RadioMessage`).
     Radio(radio_view::RadioMessage),
-    /// Async results for the radio page.
-    RadioEvent(aulos_core::session::RadioEvent),
 
     /// A toast notification was dismissed (by timeout or user action).
     CloseToast(widget::toaster::ToastId),
@@ -435,9 +385,10 @@ pub enum Message {
     // Convert / transcode / rip local files
     /// UI actions from the convert view (see `views::convert::ConvertMessage`).
     Convert(convert::ConvertMessage),
-    /// Async results and ticks for the convert page (see
-    /// `app::convert_page::ConvertEvent`).
-    ConvertEvent(super::convert_page::ConvertEvent),
+    /// Results of the convert page's file/directory pickers (see
+    /// `app::convert_page::ConvertPicked`); the queue's own results are
+    /// session events.
+    ConvertPicked(super::convert_page::ConvertPicked),
 
     // Tag editor
     /// UI actions from the tag editor view.

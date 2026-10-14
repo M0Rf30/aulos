@@ -70,11 +70,32 @@ impl<M: Send + 'static> Effect<M> {
     pub fn into_stream(self) -> Option<BoxStream<'static, M>> {
         self.0
     }
+
+    /// Runs the work as a task on `runtime`, handing every message to
+    /// `sink` in order: for UIs that are not built around an executor of
+    /// their own (a sink that pushes into a channel and wakes the UI, say).
+    /// Returns the task, to abort it, or `None` when there was nothing to
+    /// run. Iced-style UIs use [`Self::into_stream`] instead.
+    pub fn spawn(
+        self,
+        runtime: &tokio::runtime::Handle,
+        mut sink: impl FnMut(M) + Send + 'static,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let mut stream = self.0?;
+        Some(runtime.spawn(async move {
+            while let Some(message) = stream.next().await {
+                sink(message);
+            }
+        }))
+    }
 }
 
 /// A stream fed through a bounded channel by the long-running `producer`,
 /// which is driven by polling the stream itself (no separate task). The
 /// stream ends once `producer` returns and every sent item is consumed.
+///
+/// The stream is not necessarily `Unpin`: `.boxed()` it (or `Box::pin`) to
+/// store it or poll it from a hand-written loop.
 pub fn channel_stream<T, F, Fut>(size: usize, producer: F) -> impl Stream<Item = T>
 where
     F: FnOnce(mpsc::Sender<T>) -> Fut,
@@ -87,7 +108,11 @@ where
 
 /// A stream yielding `()` every `period`, the first one immediately, for as
 /// long as it is polled. UIs map it to a "redraw/refresh" message.
-pub fn interval_stream(period: std::time::Duration) -> impl Stream<Item = ()> {
+///
+/// Boxed (and so `Unpin`) because it is built to be stored and driven by
+/// whichever runtime a UI uses; it needs a tokio runtime to be entered
+/// while polled.
+pub fn interval_stream(period: std::time::Duration) -> BoxStream<'static, ()> {
     channel_stream(1, move |mut sender: mpsc::Sender<()>| async move {
         use futures::SinkExt;
         let mut interval = tokio::time::interval(period);
@@ -98,6 +123,7 @@ pub fn interval_stream(period: std::time::Duration) -> impl Stream<Item = ()> {
             }
         }
     })
+    .boxed()
 }
 
 #[cfg(test)]
@@ -123,5 +149,28 @@ mod tests {
             vec![10, 20]
         );
         assert!(Effect::<u8>::none().into_stream().is_none());
+    }
+
+    #[tokio::test]
+    async fn effect_spawn_delivers_every_message_to_the_sink() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = Effect::stream(stream::iter([1, 2, 3]))
+            .spawn(&tokio::runtime::Handle::current(), move |n| {
+                tx.send(n).unwrap();
+            })
+            .expect("work to run");
+        handle.await.unwrap();
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(
+            Effect::<u8>::none()
+                .spawn(&tokio::runtime::Handle::current(), |_| {})
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn interval_stream_is_unpin_and_ticks_immediately() {
+        let mut ticks = interval_stream(std::time::Duration::from_secs(3600));
+        assert_eq!(ticks.next().await, Some(()));
     }
 }

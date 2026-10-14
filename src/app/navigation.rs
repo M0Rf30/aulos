@@ -68,10 +68,10 @@ impl AppModel {
         {
             return Task::none();
         }
-        let Some(bytes) = self.cover_art_bytes.get(&key) else {
-            // Not cached: load the full-size bytes lazily. `CoverBytesLoaded`
+        let Some(bytes) = self.session.cover_bytes.get(&key) else {
+            // Not cached: load the full-size bytes lazily. `SessionEvent::CoverBytes`
             // re-runs this (it is evaluated after every update).
-            if !self.cover_art_bytes.should_load(&key) {
+            if !self.session.cover_bytes.should_load(&key) {
                 return Task::none();
             }
             let hint = self.detail_cover_hint(&key);
@@ -180,7 +180,7 @@ impl AppModel {
                 .unwrap_or(Page::Albums),
             album: self.selected_album,
             artist: self.selected_artist,
-            genre: self.selected_genre,
+            genre: self.session.library.selected_genre,
         }
     }
 

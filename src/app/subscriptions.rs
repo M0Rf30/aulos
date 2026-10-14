@@ -1,30 +1,51 @@
-// SPDX-FileCopyrightText: 2026 Gianluca Boiano
-// SPDX-License-Identifier: GPL-3.0-only
+//! The application's subscriptions.
+//!
+//! The backend's long-running event sources (filesystem watcher, MPD,
+//! playback and housekeeping tickers, MPD audio capture) come from
+//! `Session::background_streams`: each is run under its stable key and its
+//! events go to `Message::Session`. What is built here is UI-only: the
+//! cosmic config watcher, MPRIS, window-close requests, the visualizer
+//! renderer, and the mouse/keyboard listeners.
 
-use super::convert_page::ConvertEvent;
 use super::{AppModel, Message};
 use aulos_core::config::Config;
-use aulos_core::convert::JobState;
-use aulos_core::library::watcher::watch_stream;
-#[cfg(feature = "visualizer")]
-use aulos_core::player::pw_capture::{MpdCaptureKey, capture_stream};
-use aulos_core::player::{ActiveBackend, PlaybackState};
-use aulos_core::provider::mpd_events::{
-    MpdEvent, MpdIdleKey, MpdPollKey, idle_stream, status_stream,
-};
-use aulos_core::task::interval_stream;
+use aulos_core::session::{BackgroundKey, SessionEvent};
 use cosmic::Application;
 use cosmic::iced::Subscription;
+use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
 #[cfg(feature = "visualizer")]
-use futures_util::SinkExt;
-use futures_util::{Stream, StreamExt};
-#[cfg(feature = "visualizer")]
+use futures_util::{SinkExt, Stream};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::sync::Arc;
 #[cfg(feature = "visualizer")]
+use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(feature = "visualizer")]
 use std::time::Duration;
+
+/// One of the session's background streams, as the data of a
+/// `Subscription::run_with`: identified by its key alone (iced keeps the
+/// subscription running while the hash is unchanged), carrying the stream
+/// until the subscription actually starts and takes it. Streams do no work
+/// until polled, so building one that iced then discards costs nothing.
+struct BackgroundSlot {
+    key: BackgroundKey,
+    stream: Mutex<Option<BoxStream<'static, SessionEvent>>>,
+}
+
+impl Hash for BackgroundSlot {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
+}
+
+/// Starts a [`BackgroundSlot`]: its events become `Message::Session`.
+fn background_stream(slot: &BackgroundSlot) -> BoxStream<'static, Message> {
+    match slot.stream.lock().ok().and_then(|mut stream| stream.take()) {
+        Some(stream) => stream.map(Message::Session).boxed(),
+        None => futures_util::stream::empty().boxed(),
+    }
+}
 
 impl AppModel {
     pub(super) fn build_subscription(&self) -> Subscription<Message> {
@@ -32,92 +53,36 @@ impl AppModel {
             // Watch config changes
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
-                .map(|update| Message::UpdateConfig(update.config)),
+                .map(|update| {
+                    Message::Session(SessionEvent::ConfigChanged(Box::new(update.config)))
+                }),
         ];
 
         // MPRIS2 D-Bus server — unconditional and keyed by the zero-argument
         // `mpris_stream` function, so it starts once and never restarts.
         subs.push(Subscription::run(aulos_core::mpris::mpris_stream).map(Message::Mpris));
 
-        // Window-close requests (background playback) and the slow
-        // playback-extras housekeeping tick.
+        // Window-close requests (background playback).
         subs.push(self.playback_extras_subscription());
 
-        // Playback position ticker.
-        let is_playing = self
-            .session
-            .playback
-            .player
-            .as_ref()
-            .is_some_and(|p| p.state() == PlaybackState::Playing);
-
-        // Gate the MPD status subscription on the *presence* of an MPD
-        // backend, not on `is_playing` or `active_backend_type()`: right
-        // after switching to an MPD provider, the freshly-created `Player`
-        // always reports `Stopped` (no status has been polled yet) and
-        // `active_backend_type()` only flips to `Mpd` once Aulos itself has
-        // issued a `play` through it — gating on either would mean Aulos
-        // never polls a server that was already playing before the switch.
-        if let Some(player) = &self.session.playback.player
-            && let Some(mpd) = player.mpd_backend_ref()
-            && let Some(provider) = self.session.active_mpd_provider()
-        {
-            // MPD: poll status from the server — position/duration/state/
-            // volume/current-song all come from the real MPD status.
-            // `mpd_status_stream` adapts its own interval and only fetches
-            // the current song on change.
-            let client = mpd.client();
-            let provider_id = provider.provider_id_arc();
-            subs.push(Subscription::run_with(
-                MpdPollKey::new(client, provider_id),
-                mpd_status_stream,
-            ));
-        }
-
-        // Local/Subsonic tick, independent of the MPD poll above: an MPD
-        // backend can exist (MPD provider active) while playback actually
-        // runs through the local backend — a radio stream or podcast
-        // resolves to `LiveStream`/`HttpStream` regardless of the active
-        // provider — and that playback still needs its position ticked.
-        if is_playing
-            && self
-                .session
-                .playback
-                .player
-                .as_ref()
-                .is_some_and(|p| p.active_backend_type() != ActiveBackend::Mpd)
-        {
-            subs.push(Subscription::run(playback_tick_stream));
-        }
-
-        // MPD idle event subscriptions — one per configured MPD provider.
-        //
-        // Each subscription opens TWO separate TCP connections to the MPD server:
-        // 1. Idle connection — stays in idle mode, streams events via ConnectionEvents
-        // 2. Command connection — stored in MpdProvider for browse/search/playback
-        //
-        // This avoids protocol conflicts between idle mode and command execution.
-        for (idx, provider) in self.session.providers.mpd_providers.iter().enumerate() {
-            let provider = Arc::clone(provider);
-            subs.push(Subscription::run_with(
-                MpdIdleKey::new(idx, provider),
-                mpd_idle_stream,
-            ));
-        }
-
-        // Convert queue progress ticker (every 500ms while jobs are running);
-        // gated on the experimental-converter flag so it never runs while
-        // the feature (and its nav entry) is disabled.
-        if self.session.config.config.experimental_converter
-            && self
-                .session
-                .convert
-                .jobs
-                .iter()
-                .any(|j| j.state == JobState::Running)
-        {
-            subs.push(Subscription::run(convert_tick_stream));
-        }
+        // The backend's own event sources: filesystem watcher, MPD status
+        // and idle events, playback/housekeeping/convert tickers and the
+        // MPD audio capture (see `Session::background_streams` for what
+        // gates each).
+        subs.extend(
+            self.session
+                .background_streams()
+                .into_iter()
+                .map(|(key, stream)| {
+                    Subscription::run_with(
+                        BackgroundSlot {
+                            key,
+                            stream: Mutex::new(Some(stream)),
+                        },
+                        background_stream,
+                    )
+                }),
+        );
 
         // Visualizer render subscription (~30fps, only when active and expanded)
         //
@@ -127,11 +92,8 @@ impl AppModel {
         // subscription channel only relays "frame ready" notifications from
         // that thread back to the UI.
         #[cfg(feature = "visualizer")]
-        if self.visualizer_active
-            && self.expand_progress > 0.0
-            && let Some(ref pcm_buf) = self.pcm_buffer
-        {
-            let pcm = Arc::clone(pcm_buf);
+        if self.visualizer_active && self.expand_progress > 0.0 {
+            let pcm = Arc::clone(&self.session.playback.pcm_buffer);
             let cmd_rx = Arc::clone(&self.viz_cmd_rx_slot);
             let frame_buf = Arc::clone(&self.viz_frame_buf);
             let current_preset = Arc::clone(&self.viz_current_preset_shared);
@@ -145,69 +107,6 @@ impl AppModel {
                 },
                 lactea_render_stream,
             ));
-        }
-
-        // MPD PipeWire capture subscription — feeds the same PCM buffer as
-        // the render subscription above, but from MPD's own PipeWire
-        // playback stream instead of the local engine's tap, since aulos
-        // only remote-controls MPD (no PCM otherwise reaches this
-        // process). Gated on the same active+expanded condition as the
-        // render subscription, further restricted to when MPD is actually
-        // the backend in charge and its server resolves to this machine
-        // (its own audio can only appear on *this* PipeWire graph when
-        // it's local) — see `player::pw_capture` for the capture and
-        // matching rules.
-        #[cfg(feature = "visualizer")]
-        if self.visualizer_active
-            && self.expand_progress > 0.0
-            && let Some(pcm_buf) = &self.pcm_buffer
-            && self
-                .session
-                .playback
-                .player
-                .as_ref()
-                .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd)
-            && let Some(provider) = self.session.active_mpd_provider()
-        {
-            if aulos_core::player::pw_capture::is_local_mpd_host(provider.host()) {
-                let pcm = Arc::clone(pcm_buf);
-                let mpd_playing = Arc::clone(&self.mpd_playing);
-                subs.push(Subscription::run_with(
-                    MpdCaptureKey::new(pcm, mpd_playing),
-                    mpd_capture_stream,
-                ));
-            } else {
-                // Logged at most once per process — this `if`
-                // re-evaluates on every `update()` while a remote MPD
-                // server is active and expanded/visualizing, which
-                // would otherwise spam.
-                static REMOTE_WARNED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !REMOTE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    tracing::info!(
-                        "MPD server '{}' is not local; visualizer audio capture is \
-                         unavailable (MPD's own audio only appears on this machine's \
-                         PipeWire graph when the server itself runs on it)",
-                        provider.host()
-                    );
-                }
-            }
-        }
-
-        // Filesystem watcher subscription — only when the Local provider is active.
-        // Uses notify::RecommendedWatcher to watch music_dirs recursively.
-        // Debounces events with a 2-second quiet timer before emitting
-        // Message::FilesChanged with the collected paths.
-        {
-            let is_local_active =
-                self.session.providers.registry.active().is_some_and(|p| {
-                    p.provider_type() == aulos_core::provider::ProviderType::Local
-                });
-
-            if is_local_active && !self.session.config.config.music_dirs.is_empty() {
-                let music_dirs = self.session.config.config.music_dirs.clone();
-                subs.push(Subscription::run_with(music_dirs, fs_watcher_stream));
-            }
         }
 
         // Mouse movement while the visualizer is fullscreen resets the HUD
@@ -256,44 +155,9 @@ impl AppModel {
     }
 }
 
-/// MPD: forwards the core status poll (see
-/// `aulos_core::provider::mpd_events::status_stream`) as `MpdStatusUpdate`.
-fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
-    status_stream(key).map(Message::MpdStatusUpdate)
-}
-
-/// Local/Subsonic: simple tick for UI updates (no captured state).
-fn playback_tick_stream() -> impl Stream<Item = Message> {
-    interval_stream(Duration::from_millis(500)).map(|()| Message::PlaybackTick)
-}
-
-/// Convert-queue progress ticker: while jobs are running, periodically
-/// triggers a re-render so the UI picks up the latest atomic progress
-/// values written by the background job tasks.
-fn convert_tick_stream() -> impl Stream<Item = Message> {
-    interval_stream(Duration::from_millis(500)).map(|()| Message::ConvertEvent(ConvertEvent::Tick))
-}
-
-/// MPD idle event subscription — one per configured MPD provider (see
-/// `aulos_core::provider::mpd_events::idle_stream`).
-fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
-    idle_stream(key).map(|event| match event {
-        MpdEvent::Connected(pid) => Message::MpdConnected(pid),
-        MpdEvent::ConnectionFailed(pid, error) => Message::MpdConnectionFailed(pid, error),
-        MpdEvent::Idle(pid, subsystem) => Message::MpdIdleEvent(pid, subsystem),
-    })
-}
-
-/// Filesystem watcher subscription — only when the Local provider is active.
-/// Emits `Message::FilesChanged` with the debounced changed paths.
-#[allow(clippy::ptr_arg)] // must match `fn(&D) -> S` where D = Vec<PathBuf> (Subscription::run_with)
-fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
-    watch_stream(music_dirs).map(Message::FilesChanged)
-}
-
 /// Identity key for the lactea visualizer render subscription. Hashes to
 /// a constant so there's only ever one active instance regardless of the
-/// captured Arc contents (mirrors `MpdPollKey`/`MpdIdleKey`).
+/// captured Arc contents.
 #[cfg(feature = "visualizer")]
 struct VizRenderKey {
     pcm: Arc<Mutex<aulos_core::player::pcm::PcmBuffer>>,
@@ -510,13 +374,4 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
             }
         },
     )
-}
-
-/// Captures MPD's own PipeWire playback stream into the shared PCM ring
-/// buffer (see `aulos_core::player::pw_capture::capture_stream`). It never
-/// yields a message; iced dropping this subscription (its gating `if` in
-/// `build_subscription` going false) stops the capture.
-#[cfg(feature = "visualizer")]
-fn mpd_capture_stream(key: &MpdCaptureKey) -> impl Stream<Item = Message> + use<> {
-    capture_stream(key).map(|never| match never {})
 }

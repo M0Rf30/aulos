@@ -4,90 +4,30 @@
 //! Library workflows of a [`Session`]: scanning and (re)loading the active
 //! provider's library, applying the async results (with the staleness rules
 //! that make a provider switch or a newer reload supersede in-flight work),
-//! watcher-triggered rescans, genres, and favourite/rating changes against
-//! the provider.
+//! watcher-triggered rescans, genres, favourite/rating changes against the
+//! provider, and the header search (query, debounce and result refresh).
 //!
-//! The UI keeps what hangs off the library but is not domain state (cover
-//! image handles, folder tree, search-filter caches): the events and
-//! [`LibraryApplied`] outcomes carry the raw cover thumbnails and the
-//! decisions it needs to update those.
+//! The cover thumbnails and the search results live in the library state
+//! ([`crate::library::covers::CoverStore`], `visible_*`); the UI keeps only
+//! what is not domain state (image handles, folder tree). Reloads and
+//! [`LibraryApplied`] outcomes carry a [`CoverDelta`] saying which handles
+//! to rebuild or drop.
 
 use super::Session;
+use crate::library::covers::{CoverDelta, CoverSet, CoverThumb};
+use crate::library::search::SEARCH_DEBOUNCE_MS;
+use crate::library::state::SortField;
 use crate::library::{Album, CoverArt, LibraryScanner, Track};
 use crate::provider::{MusicProvider, ProviderType};
 use crate::task::{Effect, channel_stream};
 use futures::SinkExt;
 use futures::channel::mpsc;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Albums fetched per batch from a remote provider.
 const BATCH_SIZE: usize = 50;
-
-/// A downscaled cover, decoded off the UI thread, ready to become an image
-/// handle.
-#[derive(Clone)]
-pub enum CoverImage {
-    /// Straight RGBA pixels, at most [`CoverArt::GRID_THUMBNAIL_MAX_DIM`]
-    /// per side.
-    Pixels {
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    },
-    /// The original encoded bytes, when decoding failed (a corrupt or
-    /// unusual blob is not silently dropped).
-    Encoded(Vec<u8>),
-}
-
-impl std::fmt::Debug for CoverImage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pixels { width, height, .. } => write!(f, "Pixels({width}x{height})"),
-            Self::Encoded(bytes) => write!(f, "Encoded({} bytes)", bytes.len()),
-        }
-    }
-}
-
-impl CoverImage {
-    /// Prefers a pre-decoded, downscaled thumbnail over the encoded bytes:
-    /// the latter force a full-resolution decode on the UI thread whenever
-    /// its raster cache evicts and re-uploads the image.
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        match CoverArt::decode_thumbnail(bytes, CoverArt::GRID_THUMBNAIL_MAX_DIM) {
-            Some((width, height, rgba)) => Self::Pixels {
-                width,
-                height,
-                rgba,
-            },
-            None => Self::Encoded(bytes.to_vec()),
-        }
-    }
-}
-
-/// One album's cover: the thumbnail and a fingerprint of the full-size
-/// bytes, so a refresh can keep an unchanged cover's existing image handle
-/// (and never re-upload it). The full-size bytes are deliberately not
-/// carried: they are loaded lazily for the album that needs them.
-#[derive(Debug, Clone)]
-pub struct CoverThumb {
-    pub image: CoverImage,
-    pub fingerprint: u64,
-}
-
-impl CoverThumb {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        Self {
-            image: CoverImage::from_bytes(bytes),
-            fingerprint: CoverArt::content_fingerprint(bytes),
-        }
-    }
-}
-
-/// Covers by [`CoverArt::album_key`].
-pub type CoverSet = HashMap<String, CoverThumb>;
 
 /// Async results of the library workflows; feed them to
 /// [`Session::apply_library_event`].
@@ -127,6 +67,9 @@ pub enum LibraryEvent {
         idx: usize,
         tracks: Vec<Track>,
     },
+    /// The debounce of the search-query change that bumped the debounce
+    /// counter to this value elapsed; ignored if a newer change arrived.
+    SearchDebounced(u64),
     /// Result of a favourite toggle; `optimistic` is the state already
     /// applied locally.
     FavoriteToggled {
@@ -142,38 +85,24 @@ pub enum LibraryEvent {
     },
 }
 
-/// What a reload does to the UI's cover handles before its events arrive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoverReset {
-    /// Leave them alone (database-backed single-shot reload, or no reload).
-    Keep,
-    /// A loaded library stays visible: collect the refreshed covers aside
-    /// and swap them in with the data on [`LibraryApplied::Completed`].
-    Stage,
-    /// Nothing was loaded: drop every cover (and cached full-size bytes);
-    /// batches fill them in progressively.
-    Clear,
-}
-
 /// A started (or skipped) reload/scan.
 #[must_use = "the effect does nothing unless the UI runs it, and `covers` must be applied first"]
 pub struct Reload {
-    pub covers: CoverReset,
+    /// What starting the reload did to the covers (a reload with nothing
+    /// loaded drops them all; batches then fill them in progressively).
+    pub covers: CoverDelta,
     pub effect: Effect<LibraryEvent>,
 }
 
 impl Reload {
     /// Nothing started.
     pub fn none() -> Self {
-        Self {
-            covers: CoverReset::Keep,
-            effect: Effect::none(),
-        }
+        Self::effect(Effect::none())
     }
 
     fn effect(effect: Effect<LibraryEvent>) -> Self {
         Self {
-            covers: CoverReset::Keep,
+            covers: CoverDelta::default(),
             effect,
         }
     }
@@ -187,38 +116,15 @@ pub enum LibraryApplied {
     Done,
     /// A scan finished; `reload` re-loads the library when the scan changed
     /// anything.
-    ScanComplete {
-        reload: Reload,
-    },
-    /// The visible lists were replaced wholesale; swap in `covers`.
-    Loaded {
-        covers: CoverSet,
-    },
-    /// A batch arrived. `staged`: it went to the staging buffer (collect
-    /// `covers` aside), otherwise it was appended to the visible lists
-    /// (`needs_refilter`: the search filter must be refreshed).
-    Batch {
-        covers: CoverSet,
-        staged: bool,
-        needs_refilter: bool,
-    },
-    /// The reload finished and the final sort ran; `swapped`: a staged
-    /// refresh replaced the visible data (swap the staged covers in too).
-    Completed {
-        swapped: bool,
-    },
-    GenresLoaded,
-    /// Tracks of genre row `idx`; the UI applies them if that genre is
-    /// still selected.
-    GenreTracks {
-        idx: usize,
-        tracks: Vec<Track>,
-    },
-    /// A favourite toggle succeeded; scrobbling services may want to know.
-    FavoriteChanged {
-        track_id: String,
-        state: bool,
-    },
+    ScanComplete { reload: Reload },
+    /// The visible lists were replaced wholesale.
+    Loaded { covers: CoverDelta },
+    /// A batch arrived. `staged`: it went to the staging buffer (nothing
+    /// visible changed), otherwise it was appended to the visible lists.
+    Batch { covers: CoverDelta, staged: bool },
+    /// The reload finished and the final sort ran; `covers` is the swap of
+    /// a staged refresh into the visible covers (empty without one).
+    Completed { covers: CoverDelta },
     /// A provider action failed and its optimistic local change was undone.
     ActionFailed(String),
 }
@@ -250,6 +156,74 @@ impl Session {
 
     pub fn set_rating_local(&mut self, track_id: &str, rating: Option<u8>) {
         self.for_each_track(track_id, |t| t.rating = rating);
+    }
+
+    /// The header-search query changed (as the user types). A non-empty
+    /// query refreshes the results after [`SEARCH_DEBOUNCE_MS`] of quiet
+    /// (the returned effect; later changes supersede it); an empty one
+    /// refreshes at once. Read the results through
+    /// `LibraryState::visible_*`.
+    pub fn set_search_query(&mut self, query: String) -> Effect<LibraryEvent> {
+        match self.library.begin_search(query) {
+            Some(generation) => Effect::future(async move {
+                tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
+                LibraryEvent::SearchDebounced(generation)
+            }),
+            None => {
+                self.refresh_search();
+                Effect::none()
+            }
+        }
+    }
+
+    /// Drop the header-search query and show everything again.
+    pub fn clear_search(&mut self) {
+        // An empty query never schedules anything.
+        drop(self.set_search_query(String::new()));
+    }
+
+    /// Recompute the search results for the current query, library data,
+    /// playlists and compilation visibility. Done automatically whenever
+    /// one of them changes through the session; call it after changing
+    /// `library`, `playlists` or `config` directly.
+    pub fn refresh_search(&mut self) {
+        self.library.refresh_search(
+            &self.playlists.playlists,
+            !self.config.config.show_compilations_in_artists,
+        );
+    }
+
+    /// Rebuild the artist index with the configured split rules.
+    pub(super) fn rebuild_artists(&mut self) {
+        self.library.rebuild_artists(&self.config.config);
+        self.refresh_search();
+    }
+
+    /// Sort the library's tracks by `field`.
+    pub fn sort_tracks(&mut self, field: SortField) {
+        self.library.sort_tracks(field);
+        self.refresh_search();
+    }
+
+    /// Show or hide "Various Artists" compilations in the Artists view.
+    pub fn set_show_compilations_in_artists(&mut self, show: bool) {
+        self.config.config.show_compilations_in_artists = show;
+        self.config.save();
+        self.refresh_search();
+    }
+
+    /// Split collaboration credits into individual artists, or not.
+    pub fn set_split_artist_tags(&mut self, enabled: bool) {
+        self.config.config.split_artist_tags = enabled;
+        self.config.save();
+        self.rebuild_artists();
+    }
+
+    /// Replace the delimiters credits are split on (when splitting is on).
+    pub fn set_artist_tag_delimiters(&mut self, delimiters: Vec<String>) {
+        self.config.config.artist_tag_delimiters = delimiters;
+        self.config.save();
+        self.rebuild_artists();
     }
 
     /// Startup / "rescan" entry: scans the local library, loads a Subsonic
@@ -349,8 +323,8 @@ impl Session {
 
     /// (Re)load the active provider's library. A database-backed provider
     /// loads in one piece; remote ones stream batches, keeping an already
-    /// loaded library fully visible until the whole reload is staged (see
-    /// [`CoverReset`]).
+    /// loaded library (and its covers) fully visible until the whole reload
+    /// is staged.
     pub fn reload_library(&mut self) -> Reload {
         let Some(provider) = self.providers.registry.active_shared() else {
             return Reload::none();
@@ -372,9 +346,11 @@ impl Session {
                 // there is nothing to flash away from and batches populate
                 // the visible lists progressively.
                 let covers = if self.library.begin_incremental_reload(generation) {
-                    CoverReset::Stage
+                    self.library.covers.begin_staging();
+                    CoverDelta::default()
                 } else {
-                    CoverReset::Clear
+                    self.cover_bytes.clear();
+                    self.library.covers.clear()
                 };
                 let effect = Effect::stream(channel_stream(8, {
                     let mpd = self
@@ -431,6 +407,10 @@ impl Session {
                 self.library.scanning = false;
                 self.library
                     .replace_loaded(tracks, albums, &self.config.config);
+                let covers = self.library.covers.replace(covers);
+                // Full-size bytes are loaded lazily; drop any stale ones.
+                self.cover_bytes.clear();
+                self.refresh_search();
                 LibraryApplied::Loaded { covers }
             }
             LibraryEvent::Batch {
@@ -447,20 +427,22 @@ impl Session {
                     // buffer while the previously loaded library stays
                     // fully visible.
                     self.library.stage_albums(albums);
+                    self.library.covers.stage(covers);
                     return LibraryApplied::Batch {
-                        covers,
+                        covers: CoverDelta::default(),
                         staged: true,
-                        needs_refilter: false,
                     };
                 }
                 // Progressive first-load path: the library was empty when
                 // this reload started, so populate the visible lists
                 // directly as batches arrive.
                 let needs_refilter = self.library.append_batch(&albums, &self.config.config);
+                if needs_refilter {
+                    self.refresh_search();
+                }
                 LibraryApplied::Batch {
-                    covers,
+                    covers: self.library.covers.merge(covers),
                     staged: false,
-                    needs_refilter,
                 }
             }
             LibraryEvent::LoadComplete {
@@ -483,14 +465,29 @@ impl Session {
                     self.library.tracks.len(),
                     self.library.artists.len()
                 );
-                LibraryApplied::Completed { swapped }
+                let covers = self.library.covers.complete_staged(swapped);
+                if swapped {
+                    self.cover_bytes.clear();
+                }
+                self.refresh_search();
+                LibraryApplied::Completed { covers }
             }
             LibraryEvent::GenresLoaded(genres) => {
                 self.library.genres = genres;
-                LibraryApplied::GenresLoaded
+                self.refresh_search();
+                LibraryApplied::Done
+            }
+            LibraryEvent::SearchDebounced(generation) => {
+                if self.library.is_latest_search(generation) {
+                    self.refresh_search();
+                }
+                LibraryApplied::Done
             }
             LibraryEvent::GenreTracksLoaded { idx, tracks } => {
-                LibraryApplied::GenreTracks { idx, tracks }
+                if self.library.selected_genre == Some(idx) {
+                    self.library.genre_tracks = tracks;
+                }
+                LibraryApplied::Done
             }
             LibraryEvent::FavoriteToggled {
                 track_id,
@@ -501,7 +498,8 @@ impl Session {
                     if state != optimistic {
                         self.set_favorite_local(&track_id, state);
                     }
-                    LibraryApplied::FavoriteChanged { track_id, state }
+                    self.scrobble_favorite_changed(&track_id, state);
+                    LibraryApplied::Done
                 }
                 Err(e) => {
                     tracing::warn!("toggle_favorite failed: {e}");
@@ -545,6 +543,7 @@ impl Session {
     /// Load the tracks of genre row `idx` from the active provider; without
     /// one, the library's own tracks of that genre fill in immediately.
     pub fn load_genre_tracks(&mut self, idx: usize) -> Effect<LibraryEvent> {
+        self.library.selected_genre = Some(idx);
         self.library.genre_tracks.clear();
         let Some(genre) = self.library.genres.get(idx).cloned() else {
             return Effect::none();
@@ -618,7 +617,7 @@ impl Session {
 /// Fetch one album's cover through the provider (blocking).
 fn provider_cover(provider: &dyn MusicProvider, album: &Album) -> Option<CoverThumb> {
     let bytes = provider.get_cover_art(album).ok().flatten()?;
-    Some(CoverThumb::from_bytes(&bytes))
+    CoverThumb::from_bytes(&bytes)
 }
 
 /// Single-shot reload of a database-backed provider, with covers extracted
@@ -656,7 +655,7 @@ async fn load_local(
             // notification).
             tokio::task::spawn_blocking(move || {
                 let bytes = CoverArt::get_cover_art(&path)?;
-                Some((key, CoverThumb::from_bytes(&bytes)))
+                Some((key, CoverThumb::from_bytes(&bytes)?))
             })
         })
         .collect();
@@ -815,4 +814,372 @@ async fn load_incremental(
             provider_id,
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{test_session, track};
+    use super::*;
+    use crate::library::Playlist;
+    use bytes::Bytes;
+
+    fn album(name: &str, artist: &str, first_track_id: i64) -> Album {
+        let mut t = track(first_track_id);
+        t.title = format!("{name} song");
+        t.album = name.into();
+        t.artist = artist.into();
+        Album::new(name.into(), artist.into(), 2000, vec![t], None)
+    }
+
+    fn thumb(fingerprint: u64) -> CoverThumb {
+        CoverThumb {
+            width: 1,
+            height: 1,
+            rgba: Bytes::from_static(&[0, 0, 0, 255]),
+            fingerprint,
+        }
+    }
+
+    fn covers(items: &[(&str, u64)]) -> CoverSet {
+        items
+            .iter()
+            .map(|(k, f)| ((*k).to_string(), thumb(*f)))
+            .collect()
+    }
+
+    fn loaded(session: &mut Session, albums: Vec<Album>, covers: CoverSet) -> LibraryApplied {
+        let generation = session.library.begin_reload_generation();
+        let tracks = albums.iter().flat_map(|a| a.tracks.clone()).collect();
+        session.apply_library_event(LibraryEvent::Loaded {
+            generation,
+            provider_id: session.providers.registry.active_id().to_string(),
+            tracks,
+            albums,
+            covers,
+        })
+    }
+
+    fn visible_names(session: &Session) -> Vec<&str> {
+        session
+            .library
+            .visible_albums()
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn search_waits_for_the_debounce_and_the_latest_change_wins() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![
+                album("Abbey Road", "Beatles", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        assert_eq!(visible_names(&session), ["Abbey Road", "Thriller"]);
+
+        let first = session.set_search_query("thr".into());
+        assert!(!first.is_none());
+        let second = session.set_search_query("abbey".into());
+        assert!(!second.is_none());
+        // Nothing is filtered before a debounce lands.
+        assert_eq!(visible_names(&session), ["Abbey Road", "Thriller"]);
+
+        // The superseded debounce (generation 1) is ignored…
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+        assert_eq!(visible_names(&session), ["Abbey Road", "Thriller"]);
+        // …the latest one (2) refreshes.
+        session.apply_library_event(LibraryEvent::SearchDebounced(2));
+        assert_eq!(visible_names(&session), ["Abbey Road"]);
+        assert_eq!(session.library.search_query(), "abbey");
+    }
+
+    #[test]
+    fn debounce_effect_yields_the_generation_it_was_scheduled_for() {
+        use futures::StreamExt;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut session = test_session();
+            let mut stream = session
+                .set_search_query("x".into())
+                .into_stream()
+                .expect("a debounce effect");
+            assert!(matches!(
+                stream.next().await,
+                Some(LibraryEvent::SearchDebounced(1))
+            ));
+        });
+    }
+
+    #[test]
+    fn clearing_the_query_refreshes_at_once_without_an_effect() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![
+                album("Abbey Road", "Beatles", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        let effect = session.set_search_query("thr".into());
+        drop(effect);
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+        assert_eq!(visible_names(&session), ["Thriller"]);
+
+        assert!(session.set_search_query("  ".into()).is_none());
+        assert_eq!(visible_names(&session), ["Abbey Road", "Thriller"]);
+
+        drop(session.set_search_query("thr".into()));
+        session.apply_library_event(LibraryEvent::SearchDebounced(3));
+        assert_eq!(visible_names(&session), ["Thriller"]);
+        session.clear_search();
+        assert_eq!(visible_names(&session), ["Abbey Road", "Thriller"]);
+        assert_eq!(session.library.search_query(), "");
+    }
+
+    #[test]
+    fn visible_indices_map_back_to_the_library() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![
+                album("Abbey Road", "Beatles", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        drop(session.set_search_query("jackson".into()));
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+
+        let lib = &session.library;
+        assert_eq!(lib.visible_albums().len(), 1);
+        assert_eq!(lib.albums[lib.album_index(0)].name, "Thriller");
+        assert_eq!(lib.tracks[lib.track_index(0)].album, "Thriller");
+        assert_eq!(lib.artists[lib.artist_index(0)].name, "Jackson");
+    }
+
+    #[test]
+    fn loading_refreshes_the_active_search() {
+        let mut session = test_session();
+        drop(session.set_search_query("thr".into()));
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+        assert!(session.library.visible_albums().is_empty());
+
+        loaded(
+            &mut session,
+            vec![
+                album("Abbey Road", "Beatles", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        assert_eq!(visible_names(&session), ["Thriller"]);
+    }
+
+    #[test]
+    fn playlists_and_genres_follow_the_query() {
+        let mut session = test_session();
+        session.library.genres = vec!["Rock".into(), "Pop".into()];
+        session.playlists.playlists = ["Road trip", "Focus"]
+            .into_iter()
+            .map(|name| Playlist {
+                id: name.into(),
+                name: name.into(),
+                tracks: Vec::new(),
+                track_count: 0,
+                total_duration: Duration::ZERO,
+            })
+            .collect();
+        drop(session.set_search_query("road".into()));
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+        // Genres only refresh with a genre or query event; the playlist
+        // list is whatever the last refresh saw.
+        session.refresh_search();
+        let lib = &session.library;
+        let playlists = lib.visible_playlists(&session.playlists.playlists);
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name, "Road trip");
+        assert_eq!(lib.playlist_index(0), 0);
+        assert!(lib.visible_genres().is_empty());
+
+        session.apply_library_event(LibraryEvent::GenresLoaded(vec![
+            "Rock".into(),
+            "Roadhouse".into(),
+        ]));
+        assert_eq!(session.library.visible_genres(), ["Roadhouse"]);
+        assert_eq!(session.library.genre_index(0), 1);
+    }
+
+    #[test]
+    fn favorite_changes_reach_the_search_results() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![
+                album("Abbey Road", "Beatles", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        drop(session.set_search_query("thriller".into()));
+        session.apply_library_event(LibraryEvent::SearchDebounced(1));
+        session.set_favorite_local("2", true);
+        assert!(session.library.visible_tracks()[0].is_favorite);
+        assert!(session.library.visible_albums()[0].tracks[0].is_favorite);
+    }
+
+    #[test]
+    fn hiding_compilations_refreshes_the_artist_list() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![
+                album("Hits", "Various Artists", 1),
+                album("Thriller", "Jackson", 2),
+            ],
+            CoverSet::new(),
+        );
+        assert_eq!(session.library.visible_artists().len(), 2);
+        session.set_show_compilations_in_artists(false);
+        let artists = session.library.visible_artists();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "Jackson");
+        assert_eq!(
+            session.library.artists[session.library.artist_index(0)].name,
+            "Jackson"
+        );
+        session.set_show_compilations_in_artists(true);
+        assert_eq!(session.library.visible_artists().len(), 2);
+    }
+
+    #[test]
+    fn single_shot_load_reports_changed_and_removed_covers() {
+        let mut session = test_session();
+        let LibraryApplied::Loaded { covers: delta } = loaded(
+            &mut session,
+            vec![album("A", "x", 1), album("B", "x", 2)],
+            covers(&[("a", 1), ("b", 2)]),
+        ) else {
+            panic!("expected Loaded");
+        };
+        assert_eq!(delta.changed.len(), 2);
+        assert!(session.library.covers.contains("a"));
+
+        let LibraryApplied::Loaded { covers: delta } = loaded(
+            &mut session,
+            vec![album("A", "x", 1)],
+            covers(&[("a", 1), ("c", 3)]),
+        ) else {
+            panic!("expected Loaded");
+        };
+        assert_eq!(delta.changed, ["c"]);
+        assert_eq!(delta.removed, ["b"]);
+    }
+
+    fn batch(
+        session: &mut Session,
+        generation: u64,
+        albums: Vec<Album>,
+        c: CoverSet,
+    ) -> LibraryApplied {
+        session.apply_library_event(LibraryEvent::Batch {
+            generation,
+            provider_id: session.providers.registry.active_id().to_string(),
+            albums,
+            covers: c,
+        })
+    }
+
+    fn complete(session: &mut Session, generation: u64) -> LibraryApplied {
+        session.apply_library_event(LibraryEvent::LoadComplete {
+            generation,
+            provider_id: session.providers.registry.active_id().to_string(),
+        })
+    }
+
+    #[test]
+    fn progressive_first_load_fills_covers_batch_by_batch() {
+        let mut session = test_session();
+        let generation = session.library.begin_reload_generation();
+        assert!(!session.library.begin_incremental_reload(generation));
+
+        let LibraryApplied::Batch { covers, staged } = batch(
+            &mut session,
+            generation,
+            vec![album("A", "x", 1)],
+            covers(&[("a", 1)]),
+        ) else {
+            panic!("expected Batch");
+        };
+        assert!(!staged);
+        assert_eq!(covers.changed, ["a"]);
+        assert!(session.library.covers.contains("a"));
+        assert_eq!(session.library.albums.len(), 1);
+
+        let LibraryApplied::Completed { covers } = complete(&mut session, generation) else {
+            panic!("expected Completed");
+        };
+        assert!(covers.is_empty());
+    }
+
+    #[test]
+    fn staged_refresh_keeps_covers_visible_until_completed() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![album("A", "x", 1), album("B", "x", 2)],
+            covers(&[("a", 1), ("b", 2)]),
+        );
+        let generation = session.library.begin_reload_generation();
+        assert!(session.library.begin_incremental_reload(generation));
+        session.library.covers.begin_staging();
+
+        let LibraryApplied::Batch {
+            covers: delta,
+            staged,
+        } = batch(
+            &mut session,
+            generation,
+            vec![album("A", "x", 1), album("C", "x", 3)],
+            covers(&[("a", 1), ("c", 3)]),
+        )
+        else {
+            panic!("expected Batch");
+        };
+        assert!(staged && delta.is_empty());
+        // Old library and covers still on screen.
+        assert_eq!(session.library.albums.len(), 2);
+        assert!(session.library.covers.contains("b") && !session.library.covers.contains("c"));
+
+        let LibraryApplied::Completed { covers: delta } = complete(&mut session, generation) else {
+            panic!("expected Completed");
+        };
+        assert_eq!(delta.changed, ["c"]);
+        assert_eq!(delta.removed, ["b"]);
+        assert!(!delta.cleared);
+        assert!(session.library.covers.contains("c") && !session.library.covers.contains("b"));
+        assert_eq!(visible_names(&session), ["A", "C"]);
+    }
+
+    #[test]
+    fn stale_events_change_no_covers() {
+        let mut session = test_session();
+        let generation = session.library.begin_reload_generation();
+        session.library.begin_reload_generation();
+        let applied = batch(
+            &mut session,
+            generation,
+            vec![album("A", "x", 1)],
+            covers(&[("a", 1)]),
+        );
+        assert!(matches!(applied, LibraryApplied::Stale));
+        assert!(session.library.covers.is_empty());
+    }
 }

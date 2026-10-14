@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::Message;
-use aulos_core::library::artist_info::ArtistInfoOutcome;
-use aulos_core::session::EqualizerEvent;
+use aulos_core::session::SessionEvent;
 use aulos_core::task::Effect;
 use cosmic::prelude::*;
 
@@ -15,13 +14,10 @@ pub(super) fn effect<M: Send + 'static>(effect: Effect<M>) -> Task<M> {
     }
 }
 
-/// Runs an AutoEQ download, routing its result to `Message::AutoEQEvent`.
-pub(super) fn autoeq_task(autoeq: Effect<EqualizerEvent>) -> Task<cosmic::Action<Message>> {
-    effect(autoeq).map(|event| cosmic::Action::App(Message::AutoEQEvent(event)))
-}
-
-/// Runs artist-info fetches, routing each outcome to
-/// `Message::ArtistInfoLoaded`.
-pub(super) fn artist_info_task(fetch: Effect<ArtistInfoOutcome>) -> Task<cosmic::Action<Message>> {
-    effect(fetch).map(|outcome| cosmic::Action::App(Message::ArtistInfoLoaded(outcome)))
+/// Runs an [`Effect`] of any domain's event type, routing every event to
+/// `Message::Session`.
+pub(super) fn session_effect<E: Into<SessionEvent> + Send + 'static>(
+    session_effect: Effect<E>,
+) -> Task<cosmic::Action<Message>> {
+    effect(session_effect.into_session()).map(|event| cosmic::Action::App(Message::Session(event)))
 }

@@ -18,6 +18,12 @@ pub fn init(requested_languages: &[LanguageIdentifier]) {
     }
 }
 
+/// [`init`] with the desktop's preferred languages (locale environment
+/// variables, or the settings portal where there is one).
+pub fn init_from_system() {
+    init(&i18n_embed::DesktopLanguageRequester::requested_languages());
+}
+
 // Get the `Localizer` to be used for localizing this library.
 #[must_use]
 pub fn localizer() -> Box<dyn Localizer> {

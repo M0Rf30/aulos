@@ -17,6 +17,9 @@ cosmic-config = { workspace = true, features = ["macro"] }
 tokio.workspace = true
 # Channels/sinks for the UI-agnostic streams in `task` (and MPRIS).
 futures = "0.3"
+# Shared, reference-counted cover thumbnail pixels (`library::covers`); the
+# same `Bytes` type iced image handles are built from, so UIs share them.
+bytes = "1"
 
 # Audio playback engine — direct symphonia (DSD-capable fork) + cpal, no
 # rodio. See the removed patch-comment history: rodio's own transitive

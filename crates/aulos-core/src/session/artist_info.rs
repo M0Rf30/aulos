@@ -32,7 +32,8 @@ pub struct ArtistPhoto {
 }
 
 /// Artist biographies and the bookkeeping around fetching them. (The photos
-/// are decoded image handles and stay with the UI.)
+/// are decoded image handles and stay with the UI; it receives each decoded
+/// [`ArtistPhoto`] through the session's change report.)
 pub struct ArtistInfoState {
     /// On-disk cache of photos and bios, see [`ArtistInfoStore`].
     pub store: Arc<ArtistInfoStore>,
@@ -42,6 +43,8 @@ pub struct ArtistInfoState {
     pub semaphore: Arc<Semaphore>,
     /// Cached artist biography text, keyed by artist name.
     pub bios: HashMap<String, String>,
+    /// Artist names whose photo was fetched (and handed to the UI).
+    pub photos: HashSet<String>,
     /// Artist names with an info fetch currently in flight, so opening the
     /// Artists page again (or re-selecting an artist) never double-dispatches
     /// a fetch that's already running.
@@ -58,6 +61,7 @@ impl ArtistInfoState {
             store: Arc::new(ArtistInfoStore::open(&crate::paths::data_dir())),
             semaphore: Arc::new(Semaphore::new(ARTIST_INFO_CONCURRENCY)),
             bios: HashMap::new(),
+            photos: HashSet::new(),
             pending: HashSet::new(),
             negative: HashSet::new(),
         }
@@ -80,17 +84,19 @@ impl ArtistInfoState {
             rgba,
         });
         resolved |= photo.is_some();
+        if photo.is_some() {
+            self.photos.insert(outcome.name.clone());
+        }
         if !resolved && !outcome.name.is_empty() {
             self.negative.insert(outcome.name);
         }
         photo
     }
 
-    /// True when `name` has neither a cached bio nor an in-flight or
-    /// confirmed-negative lookup, and `has_photo` (the UI's photo cache)
-    /// doesn't know it either — i.e. still worth dispatching.
-    fn wanted(&self, name: &str, has_photo: impl Fn(&str) -> bool) -> bool {
-        !has_photo(name)
+    /// True when `name` has neither a cached bio or photo nor an in-flight
+    /// or confirmed-negative lookup — i.e. still worth dispatching.
+    fn wanted(&self, name: &str) -> bool {
+        !self.photos.contains(name)
             && !self.bios.contains_key(name)
             && !self.negative.contains(name)
             && !self.pending.contains(name)
@@ -135,10 +141,12 @@ impl ArtistInfoState {
         Effect::batch(fetches)
     }
 
-    /// Forgets every fetched bio and lookup bookkeeping (the UI drops its
-    /// photos too), e.g. after the artist-info source was reconfigured.
+    /// Forgets every fetched bio, photo and lookup bookkeeping (the UI drops
+    /// its photo handles too: see `SessionChanges::artist_photos_cleared`),
+    /// e.g. after the artist-info source was reconfigured.
     pub fn clear(&mut self) {
         self.bios.clear();
+        self.photos.clear();
         self.pending.clear();
         self.negative.clear();
     }
@@ -156,16 +164,12 @@ impl Session {
     }
 
     /// Lazily fetches artist bio/image for the Artists page. Only artists
-    /// not already resolved (`has_photo` reports the UI's cached photos), not
-    /// already in flight and not confirmed-negative this session are
-    /// considered, capped per visit so opening the page never fires a burst
-    /// of requests for a huge library; the remainder are picked up on a later
-    /// visit, or immediately if individually selected (see
-    /// [`Self::fetch_artist_info_for`]).
-    pub fn fetch_artist_info_for_visible(
-        &mut self,
-        has_photo: impl Fn(&str) -> bool,
-    ) -> Effect<ArtistInfoOutcome> {
+    /// not already resolved, not already in flight and not
+    /// confirmed-negative this session are considered, capped per visit so
+    /// opening the page never fires a burst of requests for a huge library;
+    /// the remainder are picked up on a later visit, or immediately if
+    /// individually selected (see [`Self::fetch_artist_info_for`]).
+    pub fn fetch_artist_info_for_visible(&mut self) -> Effect<ArtistInfoOutcome> {
         let Some((provider, is_subsonic)) = self.artist_info_source() else {
             return Effect::none();
         };
@@ -174,7 +178,7 @@ impl Session {
             .artists
             .iter()
             .map(|a| a.name.as_str())
-            .filter(|name| self.artist_info.wanted(name, &has_photo))
+            .filter(|name| self.artist_info.wanted(name))
             .take(MAX_PER_VISIT)
             .map(str::to_string)
             .collect();
@@ -188,15 +192,11 @@ impl Session {
     /// selected from the detail view), bypassing the per-visit cap so a
     /// deep-linked or scrolled-past artist still gets its info without
     /// waiting for a later page visit.
-    pub fn fetch_artist_info_for(
-        &mut self,
-        name: &str,
-        has_photo: impl Fn(&str) -> bool,
-    ) -> Effect<ArtistInfoOutcome> {
+    pub fn fetch_artist_info_for(&mut self, name: &str) -> Effect<ArtistInfoOutcome> {
         let Some((provider, is_subsonic)) = self.artist_info_source() else {
             return Effect::none();
         };
-        if !self.artist_info.wanted(name, has_photo) {
+        if !self.artist_info.wanted(name) {
             return Effect::none();
         }
         self.artist_info
@@ -227,7 +227,7 @@ mod tests {
         );
         assert!(state.pending.is_empty());
         assert!(state.negative.contains("Nobody"));
-        assert!(!state.wanted("Nobody", |_| false));
+        assert!(!state.wanted("Nobody"));
     }
 
     #[test]
@@ -242,5 +242,6 @@ mod tests {
         );
         assert_eq!(state.bios.get("Band").map(String::as_str), Some("bio"));
         assert!(state.negative.is_empty());
+        assert!(state.photos.contains("Band") && !state.wanted("Band"));
     }
 }

@@ -8,6 +8,7 @@ pub mod artist_info;
 pub mod artist_tags;
 pub mod compilations;
 mod cover_art;
+pub mod covers;
 mod db;
 pub mod display;
 pub mod fingerprint;

@@ -90,8 +90,14 @@ pub struct ScrobbleController {
 
 impl ScrobbleController {
     pub fn new(config: &Config) -> Self {
+        Self::with_queue_path(config, queue::default_path())
+    }
+
+    /// Like [`Self::new`], persisting the pending-scrobble queue at
+    /// `queue_path`.
+    pub fn with_queue_path(config: &Config, queue_path: std::path::PathBuf) -> Self {
         let mut c = Self {
-            handle: WorkerHandle::spawn(queue::default_path()),
+            handle: WorkerHandle::spawn(queue_path),
             tracker: PlayTracker::new(),
             stream_clock: None,
             lb_token_input: String::new(),
@@ -231,6 +237,14 @@ impl ScrobbleController {
     /// Mark `track_id` as about to be toggled by the sync (see `suppress_love`).
     pub fn suppress_next_love(&mut self, track_id: String) {
         self.suppress_love.insert(track_id);
+    }
+
+    /// Whether the next favorite toggle of `track_id` is still marked as
+    /// coming from the loved-track sync (consumed by
+    /// [`Self::on_favorite_changed`]).
+    #[cfg(test)]
+    pub(crate) fn is_love_suppressed(&self, track_id: &str) -> bool {
+        self.suppress_love.contains(track_id)
     }
 
     /// Love `(artist, title)` on Last.fm as part of a bulk sync.

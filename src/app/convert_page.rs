@@ -7,10 +7,11 @@
 //! message families dispatched from `update.rs`:
 //! - [`crate::views::convert::ConvertMessage`] — direct UI actions (button
 //!   presses, dropdown selections), wrapped in `Message::Convert`.
-//! - [`ConvertEvent`] — results of async work (file/dir pickers, and the
-//!   queue results of [`aulos_core::session::ConvertState`]: output-dir
-//!   validation, job completion) and the progress ticker, wrapped in
-//!   `Message::ConvertEvent`.
+//! - [`ConvertPicked`] — results of the file/directory pickers, wrapped in
+//!   `Message::ConvertPicked`.
+//!
+//! The queue's own results (output-dir validation, job completion) and the
+//! progress ticker are session events (`Message::Session`).
 //!
 //! Output format/sample-rate/directory live in [`aulos_core::config::Config`]
 //! (persisted across restarts) rather than duplicated on `AppModel`; a
@@ -19,7 +20,7 @@
 //! (see [`aulos_core::convert::ConvertJob::start`]), so changing the dropdowns
 //! after adding files does affect not-yet-started jobs — unlike before.
 
-use super::tasks::effect;
+use super::tasks::session_effect;
 use super::{AppModel, Message};
 use crate::views::convert::ConvertMessage;
 use aulos_core::convert::options::{
@@ -27,35 +28,17 @@ use aulos_core::convert::options::{
     SAMPLE_RATE_OPTIONS, VORBIS_QUALITY_OPTIONS,
 };
 use aulos_core::convert::{self, OutputFormat};
-use aulos_core::fl;
-use aulos_core::session::{ConvertNotice, ConvertState};
-use aulos_core::task::Effect;
+use aulos_core::session::ConvertState;
 use cosmic::prelude::*;
-use cosmic::widget;
 use std::path::PathBuf;
 
-/// Async results and ticks for the convert page — see the module docs.
+/// Results of the convert page's portal pickers — see the module docs.
 #[derive(Debug, Clone)]
-pub enum ConvertEvent {
+pub enum ConvertPicked {
     /// The "Add files" portal picker finished.
     FilesPicked(Result<Vec<PathBuf>, String>),
     /// The "Change output folder" portal picker finished.
     OutputDirPicked(Result<PathBuf, String>),
-    /// Result of work the session's convert queue started.
-    Queue(aulos_core::session::ConvertEvent),
-    /// Progress ticker while any job is running (see
-    /// `subscriptions::convert_tick_stream`) — just triggers a redraw so
-    /// the view picks up the latest atomic progress values.
-    Tick,
-}
-
-/// Runs a convert-queue [`Effect`], routing its events to
-/// `Message::ConvertEvent`.
-fn convert_task(
-    convert_effect: Effect<aulos_core::session::ConvertEvent>,
-) -> Task<cosmic::Action<Message>> {
-    effect(convert_effect)
-        .map(|event| cosmic::Action::App(Message::ConvertEvent(ConvertEvent::Queue(event))))
 }
 
 impl AppModel {
@@ -111,7 +94,7 @@ impl AppModel {
                     }
                 }
                 .await;
-                cosmic::Action::App(Message::ConvertEvent(ConvertEvent::FilesPicked(result)))
+                cosmic::Action::App(Message::ConvertPicked(ConvertPicked::FilesPicked(result)))
             }),
 
             ConvertMessage::ChangeOutputDir => cosmic::task::future(async {
@@ -144,7 +127,9 @@ impl AppModel {
                     }
                 }
                 .await;
-                cosmic::Action::App(Message::ConvertEvent(ConvertEvent::OutputDirPicked(result)))
+                cosmic::Action::App(Message::ConvertPicked(ConvertPicked::OutputDirPicked(
+                    result,
+                )))
             }),
 
             ConvertMessage::OpenOutputDir => {
@@ -254,7 +239,7 @@ impl AppModel {
                 Task::none()
             }
 
-            ConvertMessage::StartQueue => convert_task(
+            ConvertMessage::StartQueue => session_effect(
                 self.session
                     .convert
                     .start_queue(&self.session.config.config),
@@ -296,68 +281,40 @@ impl AppModel {
         }
     }
 
-    /// Handles async results and ticks for the convert page.
-    pub(super) fn update_convert_event(
+    /// Handles the results of the convert page's pickers.
+    pub(super) fn update_convert_picked(
         &mut self,
-        event: ConvertEvent,
+        picked: ConvertPicked,
     ) -> Task<cosmic::Action<Message>> {
-        match event {
-            ConvertEvent::FilesPicked(result) => {
-                match result {
-                    Ok(paths) => self.session.convert.enqueue(paths),
-                    Err(e) => tracing::warn!("convert: file picker failed: {e}"),
-                }
-                Task::none()
-            }
+        match picked {
+            ConvertPicked::FilesPicked(result) => match result {
+                Ok(paths) => self.session.convert.enqueue(paths),
+                Err(e) => tracing::warn!("convert: file picker failed: {e}"),
+            },
 
-            ConvertEvent::OutputDirPicked(result) => {
-                match result {
-                    Ok(path) => {
-                        self.session.convert.dir_error = None;
-                        if let Some(ctx) = &self.session.config.context
-                            && let Err(e) = self
-                                .session
-                                .config
-                                .config
-                                .set_convert_out_dir(ctx, Some(path))
-                        {
-                            tracing::error!("Failed to persist convert output dir: {e}");
-                        }
+            ConvertPicked::OutputDirPicked(result) => match result {
+                Ok(path) => {
+                    self.session.convert.dir_error = None;
+                    if let Some(ctx) = &self.session.config.context
+                        && let Err(e) = self
+                            .session
+                            .config
+                            .config
+                            .set_convert_out_dir(ctx, Some(path))
+                    {
+                        tracing::error!("Failed to persist convert output dir: {e}");
                     }
-                    Err(e) => tracing::warn!("convert: output directory picker failed: {e}"),
                 }
-                Task::none()
-            }
-
-            ConvertEvent::Queue(event) => {
-                let update = self.session.convert.apply_event(event);
-                let run = convert_task(update.effect);
-                match update.notice {
-                    Some(ConvertNotice::QueueFinished { done, failed }) => {
-                        // Queue just drained: summarize the batch in a toast.
-                        let text = if failed > 0 {
-                            fl!(
-                                "toast-convert-queue-done-with-failures",
-                                done = done,
-                                failed = failed
-                            )
-                        } else {
-                            fl!("toast-convert-queue-done", done = done)
-                        };
-                        Task::batch([run, self.push_toast(widget::toaster::Toast::new(text))])
-                    }
-                    None => run,
-                }
-            }
-
-            ConvertEvent::Tick => Task::none(),
+                Err(e) => tracing::warn!("convert: output directory picker failed: {e}"),
+            },
         }
+        Task::none()
     }
 
     /// Fires the off-thread `ffmpeg` availability probe if it hasn't run
     /// yet this session — safe to call every time the Convert page is
     /// opened, since it's a no-op once the result is cached.
     pub(super) fn detect_ffmpeg_once(&self) -> Task<cosmic::Action<Message>> {
-        convert_task(ConvertState::detect_ffmpeg())
+        session_effect(ConvertState::detect_ffmpeg())
     }
 }

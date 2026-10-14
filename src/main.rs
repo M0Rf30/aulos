@@ -31,15 +31,8 @@ fn main() -> cosmic::iced::Result {
         return Ok(());
     }
 
-    // Carry over data/config/cache from the pre-rename "Lyra" install
-    // before anything opens the library database or reads the config.
-    aulos_core::migrate::migrate_legacy_dirs();
-
-    // Get the system's preferred languages.
-    let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
-
-    // Enable localizations to be applied.
-    aulos_core::i18n::init(&requested_languages);
+    // Enable localizations for the system's preferred languages.
+    aulos_core::i18n::init_from_system();
 
     // Settings for configuring the application window and iced runtime.
     // `exit_on_close(false)`: the window is not destroyed on a close request;

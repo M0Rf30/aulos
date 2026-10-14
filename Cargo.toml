@@ -84,7 +84,6 @@ reqwest.workspace = true
 image.workspace = true
 # `aulos_core::fl!` expands to `i18n_embed_fl::fl!`, which must be resolvable
 # from (and checks message ids against) the calling crate.
-i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

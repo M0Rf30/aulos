@@ -8,7 +8,7 @@
 //! The request-id bookkeeping that drops stale results lives in
 //! [`aulos_core::library::properties::PropertiesState`].
 
-use super::tasks::effect;
+use super::tasks::session_effect;
 use super::{AppModel, ContextPage, Message};
 use crate::views::track_properties::{self, PropertiesMessage};
 use aulos_core::fl;
@@ -17,26 +17,19 @@ use aulos_core::library::{Album, Track};
 use cosmic::prelude::*;
 use cosmic::widget;
 
-/// Runs the off-thread read of the drawer's details as an iced task.
-fn properties_task(
-    probe: aulos_core::task::Effect<aulos_core::session::PropertiesEvent>,
-) -> Task<cosmic::Action<Message>> {
-    effect(probe.map(Message::PropertiesProbed)).map(cosmic::Action::App)
-}
-
 impl AppModel {
     /// Open the Properties drawer on `track` and read its technical details
     /// in the background.
     pub(super) fn open_track_properties(&mut self, track: Track) -> Task<cosmic::Action<Message>> {
         self.show_properties_page(ContextPage::TrackProperties);
-        properties_task(self.session.open_track_properties(track))
+        session_effect(self.session.open_track_properties(track))
     }
 
     /// Open the Properties drawer on `album` and summarise its tracks in the
     /// background.
     pub(super) fn open_album_properties(&mut self, album: Album) -> Task<cosmic::Action<Message>> {
         self.show_properties_page(ContextPage::AlbumProperties);
-        properties_task(self.session.open_album_properties(album))
+        session_effect(self.session.open_album_properties(album))
     }
 
     fn show_properties_page(&mut self, page: ContextPage) {

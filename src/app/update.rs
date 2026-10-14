@@ -1,18 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::tasks::{autoeq_task, effect};
+use super::tasks::session_effect;
 use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID};
 use aulos_core::library::artist_tags::parse_delimiters_input;
-use aulos_core::library::search::{SEARCH_DEBOUNCE_MS, is_latest_generation};
-use aulos_core::session::ConfigUpdate;
-use aulos_core::session::{PlaybackEvent, QueuePlacement, SEEK_STEP, VOLUME_STEP};
+use aulos_core::session::{QueuePlacement, SEEK_STEP, VOLUME_STEP};
 use aulos_core::tagger::taggable_tracks;
 use cosmic::Application;
 use cosmic::prelude::*;
 use cosmic::widget::{self, nav_bar};
 use std::path::PathBuf;
-use std::time::Duration;
 
 impl AppModel {
     pub(super) fn handle_message(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -32,7 +29,6 @@ impl AppModel {
 
             // -- Properties drawer --
             Message::ShowTrackProperties(track) => return self.open_track_properties(track),
-            Message::PropertiesProbed(event) => self.session.apply_properties_event(event),
             Message::Properties(msg) => return self.update_properties(msg),
 
             Message::TextInputFocused(focused) => {
@@ -40,26 +36,7 @@ impl AppModel {
             }
 
             // -- Library search --
-            Message::LibrarySearchChanged(query) => {
-                self.session.library.search_query = query;
-                self.session.library.search_debounce_gen += 1;
-                if self.session.library.search_query.trim().is_empty() {
-                    // Clearing is cheap and should feel instant.
-                    self.refresh_search_filter();
-                } else {
-                    let pending = self.session.library.search_debounce_gen;
-                    return cosmic::task::future(async move {
-                        tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
-                        cosmic::Action::App(Message::LibrarySearchDebounced(pending))
-                    });
-                }
-            }
-
-            Message::LibrarySearchDebounced(pending) => {
-                if is_latest_generation(pending, self.session.library.search_debounce_gen) {
-                    self.refresh_search_filter();
-                }
-            }
+            Message::LibrarySearchChanged(query) => return self.set_library_search(query),
 
             Message::ToggleLibrarySearch => {
                 self.search_active = !self.search_active;
@@ -67,14 +44,12 @@ impl AppModel {
                     return cosmic::widget::text_input::focus(widget::Id::new(SEARCH_INPUT_ID))
                         .map(cosmic::Action::App);
                 }
-                self.session.library.search_query.clear();
-                self.refresh_search_filter();
+                self.session.clear_search();
             }
 
             Message::ClearLibrarySearch => {
-                self.session.library.search_query.clear();
+                self.session.clear_search();
                 self.search_active = false;
-                self.refresh_search_filter();
             }
 
             Message::CloseToast(id) => {
@@ -82,27 +57,31 @@ impl AppModel {
             }
 
             // -- Library --
-            Message::ScanLibrary => return self.scan_library(),
+            Message::ScanLibrary => {
+                let reload = self.session.scan_library();
+                return self.session_task(reload);
+            }
 
-            Message::Library(event) => return self.handle_library_event(event),
-
-            // -- Filesystem watcher --
-            Message::FilesChanged(paths) => return self.files_changed(paths),
+            // -- Everything the backend session reports --
+            Message::Session(event) => {
+                let update = self.session.apply_session_event(event);
+                return self.session_task(update);
+            }
 
             // -- Playback --
             Message::TogglePlayback => {
                 let update = self.session.toggle_playback();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::NextTrack => {
                 let update = self.session.next_track();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::PreviousTrack => {
                 let update = self.session.previous_track();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::SeekPreview(fraction) => {
@@ -111,13 +90,15 @@ impl AppModel {
                 // audio backend. This avoids the rapid seek storm that
                 // causes stuttering, snapback, and restarts.
                 self.seeking_preview = Some(fraction);
+                self.session.set_seeking(true);
             }
 
             Message::SeekCommit => {
                 // Mouse released on the seek slider — perform the actual seek.
                 if let Some(fraction) = self.seeking_preview.take() {
+                    self.session.set_seeking(false);
                     let update = self.session.seek_fraction(fraction);
-                    return self.playback_task(update);
+                    return self.session_task(update);
                 }
             }
 
@@ -125,7 +106,7 @@ impl AppModel {
             // persisted by `VolumeCommit` once the gesture settles.
             Message::SetVolume(vol) => {
                 let update = self.session.set_volume(vol);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             // Persist the master volume. Emitted on slider release.
@@ -133,63 +114,27 @@ impl AppModel {
 
             Message::ToggleShuffle => {
                 let update = self.session.toggle_shuffle();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::CycleRepeat => {
                 let update = self.session.cycle_repeat();
-                return self.playback_task(update);
-            }
-
-            Message::MpdStatusUpdate(status) => {
-                // Real MPD-server playback state (not gated on which
-                // backend Aulos currently considers "active" — see
-                // `AppModel::mpd_playing`'s doc comment): the PipeWire
-                // capture thread's monitor fallback must only feed the
-                // visualizer while MPD itself is actually the one making
-                // sound.
-                #[cfg(feature = "visualizer")]
-                if self.session.playback.player.is_some() {
-                    self.mpd_playing.store(
-                        status.state == aulos_core::player::PlaybackState::Playing,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-                let update = self
-                    .session
-                    .apply_mpd_status(status, self.seeking_preview.is_some());
-                return self.playback_task(update);
-            }
-
-            Message::PlaybackTick => {
-                let update = self.session.playback_tick(self.seeking_preview.is_some());
-                let history_task = self.track_play_history();
-                return Task::batch([self.playback_task(update), history_task]);
-            }
-
-            Message::PlaybackEvent(event) => {
-                // A finished MPD command: the status poll confirms its
-                // effect, but refresh the position right away.
-                if matches!(event, PlaybackEvent::MpdCommand(Ok(()))) {
-                    return self.handle_message(Message::PlaybackTick);
-                }
-                let update = self.session.apply_playback_event(event);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::Stop => {
                 let update = self.session.stop();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::QueueJump(idx) => {
                 let update = self.session.queue_jump(idx);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::QueueRemove(idx) => {
                 let update = self.session.queue_remove(idx);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::QueueMove { from, to } => self.session.queue_move(from, to),
@@ -198,23 +143,23 @@ impl AppModel {
 
             Message::PlayNext(tracks) => {
                 let update = self.session.queue_tracks(tracks, QueuePlacement::Next);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::AddToQueue(tracks) => {
                 let update = self.session.queue_tracks(tracks, QueuePlacement::End);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::QueueFrom { source, next } => {
                 let update = self.session.queue_from(source, next);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             // -- Track selection --
             Message::PlayTrackIndex(index) => {
                 let update = self.session.play_library_track(index);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::Folders(msg) => match msg {
@@ -249,7 +194,7 @@ impl AppModel {
                 crate::views::folders::FolderMessage::QueueFolder => {
                     let tracks = self.current_folder_tracks();
                     let update = self.session.queue_tracks(tracks, QueuePlacement::End);
-                    return self.playback_task(update);
+                    return self.session_task(update);
                 }
                 crate::views::folders::FolderMessage::ToggleFavorite(id) => {
                     return self.update(Message::ToggleFavorite(id));
@@ -267,24 +212,24 @@ impl AppModel {
 
             Message::PlayAlbum(album_idx) => {
                 let update = self.session.play_album(album_idx, 0);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::PlayAlbumTrack(album_idx, track_idx) => {
                 let update = self.session.play_album(album_idx, track_idx);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::PlayArtistAlbum(artist_idx, album_idx) => {
                 let update = self.session.play_artist_album(artist_idx, album_idx, 0);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::PlayArtistTrack(artist_idx, album_idx, track_idx) => {
                 let update = self
                     .session
                     .play_artist_album(artist_idx, album_idx, track_idx);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::ShowAlbumProperties(album_idx) => {
@@ -360,16 +305,6 @@ impl AppModel {
                 self.selected_artist = None;
             }
 
-            Message::Keyring(event) => self.session.config.apply_event(event),
-
-            Message::CoverBytesLoaded(key, bytes) => {
-                self.cover_art_bytes.finish_load(key, bytes);
-                // Whoever asked for the bytes (blur / detail hero) retries
-                // now that they are cached; detail art is re-evaluated after
-                // every update anyway.
-                return self.maybe_update_blurred_cover();
-            }
-
             Message::DetailArtReady(key, blurred, accent) => {
                 self.apply_detail_art(key, blurred, accent);
             }
@@ -382,18 +317,9 @@ impl AppModel {
                 self.artist_bio_expanded = !self.artist_bio_expanded;
             }
 
-            Message::ArtistInfoLoaded(outcome) => {
-                if let Some(photo) = self.session.artist_info.apply_outcome(outcome) {
-                    let handle =
-                        widget::image::Handle::from_rgba(photo.width, photo.height, photo.rgba);
-                    self.artist_photos.insert(photo.name, handle);
-                }
-            }
-
             Message::SortSongs(field) => {
                 self.songs_sort = field;
-                self.session.library.sort_tracks(field);
-                self.refresh_search_filter();
+                self.session.sort_tracks(field);
             }
 
             Message::SongsScrolled(offset) => {
@@ -420,9 +346,7 @@ impl AppModel {
             Message::SetRating(track_id, rating) => return self.set_rating(track_id, rating),
 
             Message::AddToPlaylist(track_source_uri, playlist_id) => {
-                return super::playlist_io::run(
-                    self.session.add_to_playlist(playlist_id, track_source_uri),
-                );
+                return session_effect(self.session.add_to_playlist(playlist_id, track_source_uri));
             }
 
             Message::FilterByGenre(genre) => {
@@ -467,7 +391,7 @@ impl AppModel {
 
             Message::FetchLyricsOnline => {
                 let effect = self.session.playback.fetch_lyrics_online();
-                return self.playback_effect(effect);
+                return session_effect(effect);
             }
 
             // -- Equalizer --
@@ -499,14 +423,12 @@ impl AppModel {
             }
 
             Message::FetchAutoEQIndex => {
-                return autoeq_task(self.session.fetch_autoeq_index());
+                return session_effect(self.session.fetch_autoeq_index());
             }
 
             Message::EqSelectAutoEQ(path) => {
-                return autoeq_task(self.session.fetch_autoeq_profile(path));
+                return session_effect(self.session.fetch_autoeq_profile(path));
             }
-
-            Message::AutoEQEvent(event) => self.session.apply_equalizer_event(event),
 
             Message::SetGridScale(scale) => {
                 crate::views::common::set_grid_scale(scale);
@@ -586,25 +508,7 @@ impl AppModel {
                 }
             }
 
-            Message::UpdateConfig(config) => {
-                if let ConfigUpdate::Applied {
-                    artist_split_changed: true,
-                } = self.session.apply_config_update(config)
-                {
-                    self.artist_tag_delimiters_input =
-                        self.session.config.config.artist_tag_delimiters.join(" | ");
-                    self.refresh_search_filter();
-                }
-            }
-
-            Message::SetSplitArtistTags(enabled) => {
-                self.session.config.config.split_artist_tags = enabled;
-                self.session.config.save();
-                self.session
-                    .library
-                    .rebuild_artists(&self.session.config.config);
-                self.refresh_search_filter();
-            }
+            Message::SetSplitArtistTags(enabled) => self.session.set_split_artist_tags(enabled),
 
             Message::SetExperimentalConverter(enabled) => {
                 self.session.config.config.experimental_converter = enabled;
@@ -624,8 +528,7 @@ impl AppModel {
             Message::SaveAcoustidUserKey => {
                 let key = self.acoustid_user_key_input.trim().to_string();
                 self.acoustid_user_key_input.clear();
-                return effect(self.session.config.save_acoustid_user_key(key))
-                    .map(|event| cosmic::Action::App(Message::Keyring(event)));
+                return session_effect(self.session.config.save_acoustid_user_key(key));
             }
 
             Message::SetTaggerUseCaaCover(enabled) => {
@@ -647,27 +550,19 @@ impl AppModel {
 
             Message::SubmitArtistTagDelimiters(text) => {
                 self.artist_tag_delimiters_input = text.clone();
-                self.session.config.config.artist_tag_delimiters = parse_delimiters_input(&text);
-                self.session.config.save();
                 self.session
-                    .library
-                    .rebuild_artists(&self.session.config.config);
-                self.refresh_search_filter();
+                    .set_artist_tag_delimiters(parse_delimiters_input(&text));
             }
 
             Message::ResetArtistTagDelimiters => {
-                self.session.config.config.artist_tag_delimiters =
+                self.session.set_artist_tag_delimiters(
                     aulos_core::library::artist_tags::DEFAULT_DELIMITERS
                         .iter()
                         .map(|s| s.to_string())
-                        .collect();
+                        .collect(),
+                );
                 self.artist_tag_delimiters_input =
                     self.session.config.config.artist_tag_delimiters.join(" | ");
-                self.session.config.save();
-                self.session
-                    .library
-                    .rebuild_artists(&self.session.config.config);
-                self.refresh_search_filter();
             }
 
             // -- Provider switching --
@@ -702,30 +597,16 @@ impl AppModel {
 
             Message::MpdSaveServer(i) => {
                 let reload = self.session.save_mpd_server(i);
-                return self.run_reload(reload);
+                return self.session_task(reload);
             }
 
             Message::MpdRemoveServer(i) => {
                 let reload = self.session.remove_mpd_server(i);
-                return self.run_reload(reload);
+                return self.session_task(reload);
             }
 
             Message::MpdTestConnection(i) => {
-                return effect(self.session.providers.test_mpd_connection(i))
-                    .map(|event| cosmic::Action::App(Message::ProviderEvent(event)));
-            }
-
-            Message::ProviderEvent(event) => self.session.providers.apply_event(event),
-
-            // -- MPD provider events --
-            Message::MpdConnected(provider_id) => return self.handle_mpd_connected(&provider_id),
-
-            Message::MpdConnectionFailed(provider_id, error) => {
-                return self.handle_mpd_connection_failed(&provider_id, &error);
-            }
-
-            Message::MpdIdleEvent(provider_id, subsystem) => {
-                return self.handle_mpd_idle(&provider_id, subsystem);
+                return session_effect(self.session.providers.test_mpd_connection(i));
             }
 
             // -- Subsonic server configuration --
@@ -763,17 +644,16 @@ impl AppModel {
 
             Message::SubsonicSaveServer(i) => {
                 let reinit = self.session.save_subsonic_server(i);
-                return self.finish_provider_reinit(reinit);
+                return self.session_task(reinit);
             }
 
             Message::SubsonicRemoveServer(i) => {
                 let reinit = self.session.remove_subsonic_server(i);
-                return self.finish_provider_reinit(reinit);
+                return self.session_task(reinit);
             }
 
             Message::SubsonicTestConnection(i) => {
-                return effect(self.session.providers.test_subsonic_connection(i))
-                    .map(|event| cosmic::Action::App(Message::ProviderEvent(event)));
+                return session_effect(self.session.providers.test_subsonic_connection(i));
             }
 
             Message::SubsonicTranscodingBitrate(i, bitrate) => {
@@ -790,13 +670,13 @@ impl AppModel {
             // Task 113: Wire crossfade config change to player and MPD
             Message::SetCrossfade(secs) => {
                 let effect = self.session.set_crossfade(secs);
-                return self.playback_effect(effect);
+                return session_effect(effect);
             }
 
             // Task 114: Wire replay gain mode change to player and MPD
             Message::SetReplayGainMode(mode) => {
                 let effect = self.session.set_replay_gain_mode(mode);
-                return self.playback_effect(effect);
+                return session_effect(effect);
             }
 
             Message::ExpandNowPlaying => {
@@ -1101,15 +981,15 @@ impl AppModel {
             }
 
             Message::CreatePlaylist(name) => {
-                return super::playlist_io::run(self.session.create_playlist(name));
+                return session_effect(self.session.create_playlist(name));
             }
 
             Message::DeletePlaylist(idx) => {
-                return super::playlist_io::run(self.session.delete_playlist(idx));
+                return session_effect(self.session.delete_playlist(idx));
             }
 
             Message::RenamePlaylist(idx, new_name) => {
-                return super::playlist_io::run(self.session.rename_playlist(idx, new_name));
+                return session_effect(self.session.rename_playlist(idx, new_name));
             }
 
             Message::PlayPlaylist(idx) => {
@@ -1125,7 +1005,7 @@ impl AppModel {
             }
 
             Message::RemovePlaylistTrack(_pl_idx, _track_idx) => {
-                return super::playlist_io::run(self.session.remove_playlist_track());
+                return session_effect(self.session.remove_playlist_track());
             }
 
             Message::NewPlaylistNameChanged(name) => {
@@ -1136,16 +1016,12 @@ impl AppModel {
                 self.rename_playlist_input = text;
             }
 
-            Message::PlaylistEvent(event) => return self.update_playlist_event(event),
-
             // -- Playlist import/export, mini player, compilations, album filters --
             Message::PlaylistIo(msg) => return self.update_playlist_io(msg),
             Message::Mini(msg) => return self.update_mini_player(msg),
             Message::AlbumFilter(msg) => msg.apply(&mut self.extras.album_filter),
             Message::SetShowCompilationsInArtists(show) => {
-                self.session.config.config.show_compilations_in_artists = show;
-                self.session.config.save();
-                self.refresh_search_filter();
+                self.session.set_show_compilations_in_artists(show);
             }
             Message::SetM3uRelativePaths(relative) => {
                 self.session.config.config.m3u_relative_paths = relative;
@@ -1175,32 +1051,28 @@ impl AppModel {
                         self.session.playlists.cancel_smart_editor();
                     }
                     SmartPlaylistMessage::EditorSave => {
-                        return super::playlist_io::run(self.session.playlists.save_smart_editor());
+                        return session_effect(self.session.playlists.save_smart_editor());
                     }
                     SmartPlaylistMessage::Delete(idx) => {
                         if let Some(effect) = self.session.playlists.delete_smart_playlist(idx) {
                             if self.selected_smart_playlist == Some(idx) {
                                 self.selected_smart_playlist = None;
                             }
-                            return super::playlist_io::run(effect);
+                            return session_effect(effect);
                         }
                     }
 
                     // Selecting / playing a saved smart playlist
                     SmartPlaylistMessage::Select(idx) => {
                         self.selected_smart_playlist = Some(idx);
-                        return super::playlist_io::run(
-                            self.session.playlists.select_smart_playlist(idx),
-                        );
+                        return session_effect(self.session.playlists.select_smart_playlist(idx));
                     }
                     SmartPlaylistMessage::BackToList => {
                         self.selected_smart_playlist = None;
                         self.session.playlists.cancel_smart_editor();
                     }
                     SmartPlaylistMessage::Play(idx) => {
-                        return super::playlist_io::run(
-                            self.session.playlists.resolve_smart_playlist(idx),
-                        );
+                        return session_effect(self.session.playlists.resolve_smart_playlist(idx));
                     }
                     SmartPlaylistMessage::Export(idx) => {
                         return self
@@ -1314,40 +1186,30 @@ impl AppModel {
                 if let Some(task) = self.go_back() {
                     return task;
                 }
-                self.selected_genre = None;
+                self.session.library.selected_genre = None;
             }
 
             Message::PlayGenreTrack(idx) => {
                 let update = self.session.play_genre_track(idx);
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             Message::ShuffleGenre => {
                 let update = self.session.shuffle_genre();
-                return self.playback_task(update);
+                return self.session_task(update);
             }
 
             // -- Podcasts --
             Message::Home(msg) => return self.update_home(msg),
-            Message::HomeEvent(event) => return self.update_home_event(event),
             Message::Startup(msg) => return self.update_startup(msg),
             Message::Podcast(msg) => return self.update_podcast(msg),
-            Message::PodcastEvent(event) => return self.handle_podcast_event(event),
-
-            Message::OnlineIconLoaded(url, decoded) => {
-                if let Some((w, h, pixels)) = decoded {
-                    self.online_icons
-                        .insert(url, widget::icon::from_raster_pixels(w, h, pixels));
-                }
-            }
 
             // -- Radio --
             Message::Radio(msg) => return self.update_radio(msg),
-            Message::RadioEvent(event) => return self.handle_radio_event(event),
 
             // -- Convert / transcode / rip --
             Message::Convert(msg) => return self.update_convert(msg),
-            Message::ConvertEvent(event) => return self.update_convert_event(event),
+            Message::ConvertPicked(picked) => return self.update_convert_picked(picked),
 
             // -- Tag editor --
             Message::Tagger(msg) => return self.update_tagger(msg),
@@ -1383,7 +1245,7 @@ impl AppModel {
                         },
                         cmd => {
                             let update = self.session.apply_mpris_command(cmd);
-                            self.playback_task(update)
+                            self.session_task(update)
                         }
                     };
                     let mpris_task = self.publish_mpris();
@@ -1423,7 +1285,7 @@ impl AppModel {
                         let update = self
                             .session
                             .seek_by(shortcut == Shortcut::SeekForward, SEEK_STEP);
-                        return self.playback_task(update);
+                        return self.session_task(update);
                     }
                     Shortcut::VolumeUp | Shortcut::VolumeDown => {
                         let delta = if shortcut == Shortcut::VolumeUp {
@@ -1432,11 +1294,11 @@ impl AppModel {
                             -VOLUME_STEP
                         };
                         let update = self.session.nudge_volume(delta);
-                        return self.playback_task(update);
+                        return self.session_task(update);
                     }
                     Shortcut::Mute => {
                         let update = self.session.toggle_mute();
-                        return self.playback_task(update);
+                        return self.session_task(update);
                     }
                     Shortcut::ToggleShuffle => return self.update(Message::ToggleShuffle),
                     Shortcut::CycleRepeat => return self.update(Message::CycleRepeat),
@@ -1503,10 +1365,10 @@ impl AppModel {
         self.selected_album = None;
         self.selected_artist = None;
         self.selected_playlist = None;
-        self.selected_genre = None;
+        self.session.library.selected_genre = None;
         self.selected_smart_playlist = None;
         self.session.playlists.cancel_smart_editor();
-        self.selected_podcast = None;
+        self.session.podcasts.close_show();
 
         // Collapse expanded now-playing view when navigating
         let collapse_task = if self.expand_progress > 0.0 || self.expand_target.is_some() {
@@ -1524,7 +1386,7 @@ impl AppModel {
         let page_task = match page {
             Some(Page::Playlists) => self.load_playlists(),
             Some(Page::SmartPlaylists) => {
-                super::playlist_io::run(self.session.playlists.load_smart_playlists())
+                session_effect(self.session.playlists.load_smart_playlists())
             }
             Some(Page::Home) => self.enter_home(),
             Some(Page::Genres) => self.load_genres(),

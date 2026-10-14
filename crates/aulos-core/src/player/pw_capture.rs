@@ -154,28 +154,6 @@ impl Drop for PwCapture {
     }
 }
 
-/// Identity key for the MPD PipeWire capture stream. Hashes to a constant so
-/// there's only ever one active instance; starting/stopping is entirely
-/// driven by whether the UI includes the stream at all, never by the key's
-/// contents changing.
-pub struct MpdCaptureKey {
-    pcm: Arc<Mutex<PcmBuffer>>,
-    mpd_playing: Arc<AtomicBool>,
-}
-
-impl MpdCaptureKey {
-    #[must_use]
-    pub fn new(pcm: Arc<Mutex<PcmBuffer>>, mpd_playing: Arc<AtomicBool>) -> Self {
-        Self { pcm, mpd_playing }
-    }
-}
-
-impl std::hash::Hash for MpdCaptureKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        "mpd-pw-capture".hash(state);
-    }
-}
-
 /// Captures MPD's own PipeWire playback stream into the shared PCM ring
 /// buffer, so the visualizer reacts to audio while MPD (not the in-process
 /// local engine) is the active backend — see the module docs for the
@@ -187,10 +165,10 @@ impl std::hash::Hash for MpdCaptureKey {
 /// capture starts and stops exactly when the consumer subscribes to and
 /// unsubscribes from it.
 pub fn capture_stream(
-    key: &MpdCaptureKey,
-) -> impl futures::Stream<Item = std::convert::Infallible> + use<> {
-    let pcm = Arc::clone(&key.pcm);
-    let mpd_playing = Arc::clone(&key.mpd_playing);
+    pcm: Arc<Mutex<PcmBuffer>>,
+    mpd_playing: Arc<AtomicBool>,
+) -> futures::stream::BoxStream<'static, std::convert::Infallible> {
+    use futures::StreamExt;
     crate::task::channel_stream(1, move |_emitter| async move {
         let _capture = match PwCapture::spawn(pcm, mpd_playing) {
             Ok(capture) => capture,
@@ -203,6 +181,7 @@ pub fn capture_stream(
         // comment above) — never resolves on its own.
         std::future::pending::<()>().await;
     })
+    .boxed()
 }
 
 /// Runs entirely on the dedicated capture thread: connects to PipeWire,

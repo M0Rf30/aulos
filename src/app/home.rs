@@ -4,20 +4,14 @@
 //! App-side glue for the Home page: mapping Home messages to the session's
 //! Home workflows (`aulos_core::session::home`) and resolving card clicks.
 
+use super::tasks::session_effect;
 use super::{AppModel, ContextPage, Message, Page};
 use crate::views::Route;
 use crate::views::home::{HomeMessage, album_route};
 use aulos_core::library::Track;
 use aulos_core::library::home::artist_tracks;
-use aulos_core::session::HomeEvent;
-use aulos_core::task::Effect;
 use cosmic::Application;
 use cosmic::prelude::*;
-
-/// Wraps a Home workflow's effect as an iced task.
-fn run(effect: Effect<HomeEvent>) -> Task<cosmic::Action<Message>> {
-    super::tasks::effect(effect).map(|event| cosmic::Action::App(Message::HomeEvent(event)))
-}
 
 impl AppModel {
     /// Switch the sidebar to `page` (no-op if it isn't in the nav).
@@ -61,8 +55,12 @@ impl AppModel {
                 }
             }
             HomeMessage::Refresh => return self.load_home(false),
-            HomeMessage::ShuffleRandom => return run(self.session.reroll_random_picks()),
-            HomeMessage::OpenDecade(decade) => return run(self.session.open_decade(decade)),
+            HomeMessage::ShuffleRandom => {
+                return session_effect(self.session.reroll_random_picks());
+            }
+            HomeMessage::OpenDecade(decade) => {
+                return session_effect(self.session.open_decade(decade));
+            }
             HomeMessage::CloseDecade => self.session.home.decade = None,
             HomeMessage::PlayDecade => {
                 let tracks = self.session.decade_tracks();
@@ -80,30 +78,20 @@ impl AppModel {
         Task::none()
     }
 
-    /// Applies an async Home result to the session.
-    pub(super) fn update_home_event(&mut self, event: HomeEvent) -> Task<cosmic::Action<Message>> {
-        run(self.session.apply_home_event(event))
-    }
-
     /// (Re)load every Home shelf.
     pub(super) fn load_home(&mut self, keep_picks: bool) -> Task<cosmic::Action<Message>> {
-        run(self.session.load_home(keep_picks))
+        session_effect(self.session.load_home(keep_picks))
     }
 
     /// (Re)load the "Because you listened to …" shelves.
     pub(super) fn load_similar(&mut self) -> Task<cosmic::Action<Message>> {
-        run(self.session.load_similar())
+        session_effect(self.session.load_similar())
     }
 
     /// Called when the Home page is opened from the sidebar (or returned
     /// to).
     pub(super) fn enter_home(&mut self) -> Task<cosmic::Action<Message>> {
-        run(self.session.enter_home())
-    }
-
-    /// Feed the playback tick into the play-history tracker.
-    pub(super) fn track_play_history(&mut self) -> Task<cosmic::Action<Message>> {
-        run(self.session.track_play_history())
+        session_effect(self.session.enter_home())
     }
 
     /// Turn shuffle on and start `tracks` at a random position, like the
