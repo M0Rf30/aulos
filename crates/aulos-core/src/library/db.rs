@@ -120,6 +120,8 @@ impl LibraryDb {
         if foreign_keys != 1 {
             return Err("DB foreign keys could not be enabled".to_string());
         }
+        super::smart_playlist::register_sql_functions(conn)
+            .map_err(|e| format!("DB function registration error: {e}"))?;
         Ok(())
     }
 
@@ -350,6 +352,79 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v8 commit error: {e}"))?;
         }
 
+        if version < 9 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v9 transaction error: {e}"))?;
+            if !self.column_exists("tracks", "bit_depth")? {
+                tx.execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN bit_depth INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(|e| format!("Migration v9 error (bit_depth): {e}"))?;
+            }
+            // Local files are skipped by the scanner while their mtime matches,
+            // so reset it to make the next scan read the bit depth of each.
+            tx.execute_batch("UPDATE tracks SET mtime = 0 WHERE provider = 'local';")
+                .map_err(|e| format!("Migration v9 error (rescan): {e}"))?;
+            tx.execute_batch("PRAGMA user_version=9;")
+                .map_err(|e| format!("Migration v9 error (version): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v9 commit error: {e}"))?;
+        }
+
+        if version < 10 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v10 transaction error: {e}"))?;
+            if !self.column_exists("radio_stations", "codec")? {
+                tx.execute_batch(
+                    "ALTER TABLE radio_stations ADD COLUMN codec TEXT NOT NULL DEFAULT '';",
+                )
+                .map_err(|e| format!("Migration v10 error (codec): {e}"))?;
+            }
+            if !self.column_exists("radio_stations", "bitrate_kbps")? {
+                tx.execute_batch(
+                    "ALTER TABLE radio_stations ADD COLUMN bitrate_kbps INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(|e| format!("Migration v10 error (bitrate): {e}"))?;
+            }
+            tx.execute_batch("PRAGMA user_version=10;")
+                .map_err(|e| format!("Migration v10 error (version): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v10 commit error: {e}"))?;
+        }
+
+        if version < 11 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v11 transaction error: {e}"))?;
+            for (column, definition) in [
+                ("release_type", "TEXT NOT NULL DEFAULT ''"),
+                ("added_at", "INTEGER NOT NULL DEFAULT 0"),
+                ("favorited_at", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                if !self.column_exists("tracks", column)? {
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE tracks ADD COLUMN {column} {definition};"
+                    ))
+                    .map_err(|e| format!("Migration v11 error ({column}): {e}"))?;
+                }
+            }
+            // The file's modification time stands in for the date a known
+            // track was added; the rescan below fills in the rest.
+            tx.execute_batch(
+                "UPDATE tracks SET added_at = mtime WHERE added_at = 0 AND mtime > 0;
+                 UPDATE tracks SET mtime = 0 WHERE provider = 'local';
+                 PRAGMA user_version=11;",
+            )
+            .map_err(|e| format!("Migration v11 error (backfill): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v11 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -389,16 +464,21 @@ impl LibraryDb {
             .execute(
                 "INSERT INTO tracks (path, title, artist, album_artist, album, genre,
                  track_number, disc_number, year, duration_ms, bitrate, sample_rate, mtime,
-                 provider, provider_track_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 provider, provider_track_id, bit_depth, release_type, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18)
                  ON CONFLICT(path) DO UPDATE SET
+                    release_type=excluded.release_type,
+                    added_at=CASE WHEN tracks.added_at = 0 THEN excluded.mtime
+                                  ELSE tracks.added_at END,
                     title=excluded.title, artist=excluded.artist,
                     album_artist=excluded.album_artist, album=excluded.album,
                     genre=excluded.genre, track_number=excluded.track_number,
                     disc_number=excluded.disc_number, year=excluded.year,
                     duration_ms=excluded.duration_ms, bitrate=excluded.bitrate,
                     sample_rate=excluded.sample_rate, mtime=excluded.mtime,
-                    provider=excluded.provider, provider_track_id=excluded.provider_track_id",
+                    provider=excluded.provider, provider_track_id=excluded.provider_track_id,
+                    bit_depth=excluded.bit_depth",
                 params![
                     track.path.to_string_lossy().as_ref(),
                     track.title,
@@ -415,6 +495,13 @@ impl LibraryDb {
                     mtime,
                     &*track.provider_id,
                     track.source_uri,
+                    track.bit_depth,
+                    track.release_type,
+                    if track.added_at > 0 {
+                        track.added_at
+                    } else {
+                        crate::unix_now()
+                    },
                 ],
             )
             .map_err(|e| format!("Upsert error: {e}"))?;
@@ -503,7 +590,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE provider = ?1
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -513,7 +600,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  ORDER BY album_artist, album, disc_number, track_number"
                     .to_string(),
@@ -711,7 +798,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE provider = ?1
                    AND (title LIKE ?2 ESCAPE '\\' OR artist LIKE ?2 ESCAPE '\\'
@@ -728,7 +815,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\'
                     OR album LIKE ?1 ESCAPE '\\' OR genre LIKE ?1 ESCAPE '\\'
@@ -816,7 +903,7 @@ impl LibraryDb {
             .prepare(
                 "SELECT t.id, t.path, t.title, t.artist, t.album_artist, t.album, t.genre,
                         t.track_number, t.disc_number, t.year, t.duration_ms, t.bitrate, t.sample_rate,
-                        t.provider, t.provider_track_id, t.is_favorite, t.rating, t.rg_track_gain, t.rg_album_gain
+                        t.provider, t.provider_track_id, t.is_favorite, t.rating, t.rg_track_gain, t.rg_album_gain, t.bit_depth, t.release_type, t.added_at, t.favorited_at
                  FROM playlist_tracks pt
                  JOIN tracks t ON t.id = pt.track_id
                  WHERE pt.playlist_id = ?1
@@ -934,9 +1021,11 @@ impl LibraryDb {
     pub fn toggle_favorite(&self, track_id: i64) -> Result<bool, String> {
         self.conn
             .execute(
-                "UPDATE tracks SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END
+                "UPDATE tracks SET
+                    favorited_at = CASE WHEN is_favorite = 0 THEN ?2 ELSE 0 END,
+                    is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END
                  WHERE id = ?1",
-                params![track_id],
+                params![track_id, crate::unix_now()],
             )
             .map_err(|e| format!("Toggle favorite error: {e}"))?;
 
@@ -992,7 +1081,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE provider = ?1 AND is_favorite = 1
                  ORDER BY title"
@@ -1002,7 +1091,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE is_favorite = 1
                  ORDER BY title"
@@ -1076,7 +1165,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE provider = ?1 AND genre = ?2
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -1086,7 +1175,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
                  FROM tracks
                  WHERE genre = ?1
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -1231,6 +1320,20 @@ impl LibraryDb {
         Ok(tracks)
     }
 
+    /// How many tracks a smart playlist's rules match, ignoring its row
+    /// limit: the "N songs match" of the editor, and the total a limited
+    /// playlist is cut from.
+    pub fn smart_playlist_match_count(&self, playlist: &SmartPlaylist) -> Result<usize, String> {
+        let (sql, param_values) = playlist.to_count_sql();
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|v| v.as_ref()).collect();
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_ref.as_slice(), |row| row.get(0))
+            .map_err(|e| format!("Smart playlist count error: {e}"))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
     /// Map a database row to a Track struct.
     pub(super) fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         let path_str: String = row.get(1)?;
@@ -1248,12 +1351,16 @@ impl LibraryDb {
             duration: Duration::from_millis(row.get::<_, i64>(10)? as u64),
             bitrate: row.get(11)?,
             sample_rate: row.get(12)?,
+            bit_depth: row.get::<_, u32>(19).unwrap_or(0),
             provider_id: Arc::from(row.get::<_, String>(13)?),
             source_uri: row.get(14)?,
             is_favorite: row.get::<_, i32>(15).unwrap_or(0) != 0,
             rating: row.get::<_, Option<u8>>(16).unwrap_or(None),
             rg_track_gain: row.get::<_, Option<f32>>(17).unwrap_or(None),
             rg_album_gain: row.get::<_, Option<f32>>(18).unwrap_or(None),
+            release_type: row.get::<_, String>(20).unwrap_or_default(),
+            added_at: row.get::<_, i64>(21).unwrap_or(0),
+            favorited_at: row.get::<_, i64>(22).unwrap_or(0),
         })
     }
 }
@@ -1365,11 +1472,15 @@ mod tests {
                 .is_ok()
         );
         assert!(db.column_exists("podcasts", "author").unwrap());
+        assert!(db.column_exists("tracks", "bit_depth").unwrap());
+        assert!(db.column_exists("tracks", "release_type").unwrap());
+        assert!(db.column_exists("tracks", "added_at").unwrap());
+        assert!(db.column_exists("tracks", "favorited_at").unwrap());
         assert_eq!(
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            8
+            11
         );
         assert!(
             db.conn
@@ -1402,7 +1513,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            8
+            11
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
@@ -1490,6 +1601,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         };
         db.upsert_track(&literal, 0).unwrap();
         literal.path = PathBuf::from("/music/wildcard-match.flac");
@@ -1502,6 +1617,56 @@ mod tests {
         let results = db.search_tracks("track_1", None).unwrap();
         assert_eq!(results.len(), 1, "unexpected matches: {results:?}");
         assert_eq!(results[0].title, "track_1");
+    }
+
+    #[test]
+    fn upsert_stores_release_type_and_stamps_added_at_once() {
+        let db = LibraryDb::open_memory().unwrap();
+        // A row from before added_at existed (0): the file's mtime stands in.
+        insert_local(&db, Path::new("/music/old.flac"));
+        let mut track = db.all_tracks(None).unwrap().remove(0);
+        assert_eq!((track.added_at, track.release_type.as_str()), (0, ""));
+        track.release_type = "live".into();
+        db.upsert_track(&track, 777).unwrap();
+        let track = db.all_tracks(None).unwrap().remove(0);
+        assert_eq!((track.added_at, track.release_type.as_str()), (777, "live"));
+
+        // Later rescans keep the date and refresh the tag.
+        let mut again = track.clone();
+        again.release_type = "ep".into();
+        db.upsert_track(&again, 999).unwrap();
+        let track = db.all_tracks(None).unwrap().remove(0);
+        assert_eq!((track.added_at, track.release_type.as_str()), (777, "ep"));
+
+        // A new file is stamped with the time it was added.
+        let mut fresh = track.clone();
+        fresh.path = PathBuf::from("/music/new.flac");
+        fresh.source_uri = "/music/new.flac".into();
+        fresh.added_at = 0;
+        let before = crate::unix_now();
+        db.upsert_track(&fresh, 5).unwrap();
+        let added = db
+            .all_tracks(None)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.path == fresh.path)
+            .unwrap()
+            .added_at;
+        assert!(added >= before, "{added} < {before}");
+    }
+
+    #[test]
+    fn toggling_a_favourite_stamps_and_clears_favorited_at() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = insert_local(&db, Path::new("/music/fav.flac"));
+        let before = crate::unix_now();
+        assert!(db.toggle_favorite(id).unwrap());
+        let track = db.all_tracks(None).unwrap().remove(0);
+        assert!(track.is_favorite && track.favorited_at >= before);
+        assert!(!db.toggle_favorite(id).unwrap());
+        let track = db.all_tracks(None).unwrap().remove(0);
+        assert!(!track.is_favorite);
+        assert_eq!(track.favorited_at, 0);
     }
 
     #[test]

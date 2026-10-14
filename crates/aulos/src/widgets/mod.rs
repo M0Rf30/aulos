@@ -20,7 +20,10 @@ pub use button::{
 pub use cover::{Covers, avatar_tile, cover_image, gradient_fill, seed_colors};
 pub use input::{search_field, text_field};
 pub use states::{empty_state, empty_state_actions, empty_state_tinted, skeleton};
-pub use text::{caps_label, label_text, paint_icon, paint_text, paint_text_spaced, text_width};
+pub use text::{
+    caps_label, label_text, marquee_id, marquee_text, paint_icon, paint_text, paint_text_spaced,
+    text_width,
+};
 pub use track_row::{
     Columns, HEADER_HEIGHT, ROW_HEIGHT, track_header, track_header_sortable, track_row,
 };

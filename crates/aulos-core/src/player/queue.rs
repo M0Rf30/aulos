@@ -68,6 +68,28 @@ pub enum PreviousAction {
     Track(Track),
 }
 
+/// Why a track is in the queue: what the queue sheet groups by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOrigin {
+    /// Part of the list the queue was started from (an album, a playlist…).
+    Context,
+    /// Added with "Play next".
+    PlayNext,
+    /// Added with "Add to queue".
+    Added,
+}
+
+/// A run of consecutive upcoming entries that share one [`QueueOrigin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueGroup {
+    /// What put these entries in the queue.
+    pub origin: QueueOrigin,
+    /// Play-order index of the first entry.
+    pub start: usize,
+    /// Number of entries in the run.
+    pub len: usize,
+}
+
 /// A pure, backend-free playback queue: tracks in play order, the current
 /// position, shuffle state (with the pre-shuffle order preserved for
 /// un-shuffling), and repeat mode.
@@ -77,6 +99,12 @@ pub struct PlayQueue {
     order: Vec<Track>,
     /// `origin[i]` = index into `unshuffled` that `order[i]` came from.
     origin: Vec<usize>,
+    /// `kinds[c]` = why `unshuffled[c]` is queued; same length as
+    /// `unshuffled`, looked up through `origin` for play order.
+    kinds: Vec<QueueOrigin>,
+    /// Album name shared by every [`QueueOrigin::Context`] entry the queue
+    /// was started with (`None` when they come from several albums).
+    context_label: Option<String>,
     index: usize,
     shuffle: bool,
     repeat: RepeatMode,
@@ -96,6 +124,8 @@ impl PlayQueue {
             unshuffled: Vec::new(),
             order: Vec::new(),
             origin: Vec::new(),
+            kinds: Vec::new(),
+            context_label: None,
             index: 0,
             shuffle: false,
             repeat: RepeatMode::None,
@@ -141,6 +171,39 @@ impl PlayQueue {
         self.shuffle
     }
 
+    /// Why the entry at PLAY-order position `play_idx` is queued.
+    pub fn origin_of(&self, play_idx: usize) -> Option<QueueOrigin> {
+        let canonical = *self.origin.get(play_idx)?;
+        self.kinds.get(canonical).copied()
+    }
+
+    /// The album the queue was started from, when all its starting tracks
+    /// share one.
+    pub fn context_label(&self) -> Option<&str> {
+        self.context_label.as_deref()
+    }
+
+    /// The entries after the current one, split into runs of equal origin
+    /// (in play order, so "Play next" items sit before the rest of the
+    /// album and "Add to queue" items after it).
+    pub fn upcoming_groups(&self) -> Vec<QueueGroup> {
+        let mut groups: Vec<QueueGroup> = Vec::new();
+        for idx in (self.index + 1)..self.order.len() {
+            let Some(origin) = self.origin_of(idx) else {
+                continue;
+            };
+            match groups.last_mut() {
+                Some(g) if g.origin == origin => g.len += 1,
+                _ => groups.push(QueueGroup {
+                    origin,
+                    start: idx,
+                    len: 1,
+                }),
+            }
+        }
+        groups
+    }
+
     /// Current repeat mode.
     pub fn repeat(&self) -> RepeatMode {
         self.repeat
@@ -168,6 +231,8 @@ impl PlayQueue {
     /// queue is immediately shuffled with the `start` entry pinned as the
     /// current one.
     pub fn set(&mut self, tracks: Vec<Track>, start: usize) {
+        self.context_label = common_album(&tracks);
+        self.kinds = vec![QueueOrigin::Context; tracks.len()];
         self.unshuffled = tracks.clone();
         self.order = tracks;
         self.origin = (0..self.order.len()).collect();
@@ -190,6 +255,8 @@ impl PlayQueue {
         }
         let base = self.unshuffled.len();
         self.unshuffled.extend(new.iter().cloned());
+        self.kinds
+            .extend(std::iter::repeat_n(QueueOrigin::Added, new.len()));
         self.origin.extend(base..base + new.len());
         self.order.extend(new);
     }
@@ -206,6 +273,8 @@ impl PlayQueue {
         }
         let base = self.unshuffled.len();
         self.unshuffled.extend(new.iter().cloned());
+        self.kinds
+            .extend(std::iter::repeat_n(QueueOrigin::PlayNext, new.len()));
         let insert_at = self.index + 1;
         let origins: Vec<usize> = (base..base + new.len()).collect();
         self.order.splice(insert_at..insert_at, new);
@@ -222,6 +291,7 @@ impl PlayQueue {
         let removed = self.order.remove(play_idx);
         let canonical_idx = self.origin.remove(play_idx);
         self.unshuffled.remove(canonical_idx);
+        self.kinds.remove(canonical_idx);
         for o in &mut self.origin {
             if *o > canonical_idx {
                 *o -= 1;
@@ -275,6 +345,7 @@ impl PlayQueue {
         self.unshuffled = vec![current.clone()];
         self.order = vec![current];
         self.origin = vec![0];
+        self.kinds = vec![QueueOrigin::Context];
         self.index = 0;
     }
 
@@ -415,6 +486,12 @@ impl PlayQueue {
     }
 }
 
+/// The album every non-empty-album track of `tracks` shares, if any.
+fn common_album(tracks: &[Track]) -> Option<String> {
+    let first = tracks.first()?.album.as_str();
+    (!first.is_empty() && tracks.iter().all(|t| t.album == first)).then(|| first.to_owned())
+}
+
 /// Tiny xorshift64* PRNG — avoids pulling in the `rand` crate for the one
 /// place aulos needs randomness (queue shuffling).
 #[derive(Debug, Clone)]
@@ -537,6 +614,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 
@@ -973,5 +1054,77 @@ mod tests {
         // Defensive: a stale/out-of-range index (e.g. mid-mutation) must
         // never panic on the `queue_len - 1` subtraction.
         assert_eq!(visible_window(10, 999), 0..10);
+    }
+
+    // -- origins --
+
+    #[test]
+    fn origins_group_play_next_context_and_added() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2, 3, 4]), 0);
+        q.insert_next(tracks(&[10]));
+        q.append(tracks(&[20, 21]));
+        assert_eq!(ids(&q), [1, 10, 2, 3, 4, 20, 21]);
+        assert_eq!(q.context_label(), Some("Album"));
+        assert_eq!(
+            q.upcoming_groups(),
+            [
+                QueueGroup {
+                    origin: QueueOrigin::PlayNext,
+                    start: 1,
+                    len: 1
+                },
+                QueueGroup {
+                    origin: QueueOrigin::Context,
+                    start: 2,
+                    len: 3
+                },
+                QueueGroup {
+                    origin: QueueOrigin::Added,
+                    start: 5,
+                    len: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn origins_follow_entries_through_shuffle_remove_and_move() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2, 3]), 0);
+        q.append(tracks(&[20]));
+        q.set_shuffle(true);
+        let added = q.order().iter().position(|t| t.id == 20).unwrap();
+        assert_eq!(q.origin_of(added), Some(QueueOrigin::Added));
+        q.move_item(added, q.len() - 1);
+        assert_eq!(q.origin_of(q.len() - 1), Some(QueueOrigin::Added));
+        q.remove(q.len() - 1);
+        assert!(
+            (0..q.len()).all(|i| q.origin_of(i) == Some(QueueOrigin::Context)),
+            "removing the added entry leaves only context entries"
+        );
+        q.set_shuffle(false);
+        assert_eq!(ids(&q), [1, 2, 3]);
+        assert_eq!(q.origin_of(1), Some(QueueOrigin::Context));
+    }
+
+    #[test]
+    fn clear_upcoming_and_set_reset_origins() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2]), 0);
+        q.append(tracks(&[3]));
+        q.clear_upcoming();
+        assert!(q.upcoming_groups().is_empty());
+        q.set(tracks(&[5, 6]), 0);
+        assert_eq!(q.upcoming_groups().len(), 1);
+    }
+
+    #[test]
+    fn context_label_requires_a_shared_album() {
+        let mut mixed = tracks(&[1, 2]);
+        mixed[1].album = "Other".into();
+        let mut q = PlayQueue::new();
+        q.set(mixed, 0);
+        assert_eq!(q.context_label(), None);
     }
 }

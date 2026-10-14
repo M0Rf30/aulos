@@ -33,6 +33,44 @@ pub mod motion {
     pub const HOVER: f32 = 0.08;
     pub const ACCENT: f32 = 0.40;
     pub const TOAST_LIFE: f32 = 5.0;
+    /// Sidebar collapse and queue / properties panel slide.
+    pub const PANEL: f32 = 0.18;
+    /// Expanded-view crossfades (cover, backdrop).
+    pub const CROSSFADE: f32 = 0.24;
+    pub const CROSSFADE_SLOW: f32 = 0.60;
+
+    const REDUCE_KEY: &str = "reduce_motion";
+
+    /// Published once a frame from the config.
+    pub fn set_reduced(ctx: &egui::Context, reduce: bool) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(REDUCE_KEY), reduce));
+    }
+
+    pub fn reduced(ctx: &egui::Context) -> bool {
+        ctx.data(|d| d.get_temp(egui::Id::new(REDUCE_KEY)))
+            .unwrap_or(false)
+    }
+
+    /// 0 → 1 over [`PANEL`] each time the sheet `id` is (re)opened; call with
+    /// `open == false` on frames it is closed to rearm.
+    pub fn slide_in(ctx: &egui::Context, id: egui::Id, open: bool) -> f32 {
+        let armed = ctx
+            .data(|d| d.get_temp::<bool>(id.with("armed")))
+            .unwrap_or(false);
+        if open && !armed {
+            ctx.animate_bool_with_time(id, false, 0.0);
+            ctx.data_mut(|d| d.insert_temp(id.with("armed"), true));
+            ctx.request_repaint();
+        } else if !open && armed {
+            ctx.data_mut(|d| d.insert_temp(id.with("armed"), false));
+        }
+        animate(ctx, id, open, PANEL)
+    }
+
+    /// `animate_bool_with_time` that snaps when reduced motion is on.
+    pub fn animate(ctx: &egui::Context, id: egui::Id, on: bool, secs: f32) -> f32 {
+        ctx.animate_bool_with_time(id, on, if reduced(ctx) { 0.0 } else { secs })
+    }
 }
 
 pub const fn hex(rgb: u32) -> Color32 {

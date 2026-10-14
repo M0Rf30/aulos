@@ -4,7 +4,7 @@
 use crate::theme::{self, Accent, Palette, Quality, Theme};
 use crate::views;
 use crate::widgets::Covers;
-use aulos_core::config::Config;
+use aulos_core::config::{Config, ThemeMode};
 use aulos_core::library::{
     CoverArt, Track, palette,
     quality::{self, AudioQuality},
@@ -166,6 +166,10 @@ pub struct App {
     pub accent: Accent,
     accent_from: Accent,
     accent_to: Accent,
+    /// Dominant colour of the playing cover (None: nothing playing or no
+    /// dominant hue), kept so the accent can be re-derived when the theme
+    /// or the "tint with cover" setting changes.
+    cover_tint: Option<Color32>,
     accent_start: f64,
     /// Cover key of the current track (None: nothing playing).
     pub now_key: Option<String>,
@@ -180,6 +184,8 @@ pub struct App {
     pub backdrop: Option<TextureHandle>,
     /// Large cover of the current track (expanded view).
     pub cover_large: Option<TextureHandle>,
+    /// The previous art, faded out under the new one in the expanded view.
+    pub art_fade: ArtFade,
 
     pub route: Route,
     history: Vec<Route>,
@@ -212,6 +218,29 @@ pub const UI_SCALE_STEPS: [f32; 8] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
 /// The widest the expanded cover is drawn, in points.
 const EXPANDED_COVER_POINTS: f32 = 480.0;
 
+/// The art of the previous track, kept for the expanded-view crossfades.
+#[derive(Default)]
+pub struct ArtFade {
+    pub backdrop: Option<TextureHandle>,
+    pub cover: Option<TextureHandle>,
+    pub started: f64,
+}
+
+impl ArtFade {
+    /// Progress (0 = old art, 1 = new art) of a crossfade lasting `secs`;
+    /// requests repaints while running. Reduced motion snaps to 1.
+    pub fn progress(&self, ctx: &Context, secs: f32) -> f32 {
+        if theme::motion::reduced(ctx) || secs <= 0.0 {
+            return 1.0;
+        }
+        let t = ((ctx.input(|i| i.time) - self.started) as f32 / secs).clamp(0.0, 1.0);
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
+        t
+    }
+}
+
 /// The native window handle the Windows media controls attach to.
 #[cfg(windows)]
 fn native_window(cc: &eframe::CreationContext<'_>) -> Option<NativeWindow> {
@@ -240,7 +269,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let (app_tx, app_rx) = mpsc::channel();
         let (session, init_errors) = Session::bootstrap();
-        let dark = std::env::var_os("AULOS_SMOKE_LIGHT").is_none();
+        let dark = Self::resolve_dark(session.config.config.theme_mode, cc.egui_ctx.system_theme());
         let pal = if dark { theme::DARK } else { theme::LIGHT };
         let accent = Accent::default_for(&pal);
         let mut app = Self {
@@ -259,6 +288,7 @@ impl App {
             accent,
             accent_from: accent,
             accent_to: accent,
+            cover_tint: None,
             accent_start: 0.0,
             now_key: None,
             art_dirty: true,
@@ -268,6 +298,7 @@ impl App {
             art_done: None,
             backdrop: None,
             cover_large: None,
+            art_fade: ArtFade::default(),
             route: Route::Home,
             history: vec![Route::Home],
             history_pos: 0,
@@ -425,9 +456,6 @@ impl App {
             PodcastNotice::Subscribed { name } => self.toast(format!("Subscribed to {name}")),
             PodcastNotice::SubscribeFailed { reason } => {
                 self.toast_error(format!("Could not subscribe: {reason}"))
-            }
-            PodcastNotice::RefreshFailed { reason } => {
-                self.toast_error(format!("Refresh failed: {reason}"))
             }
             PodcastNotice::UnsubscribeFailed { reason } => {
                 self.toast_error(format!("Could not unsubscribe: {reason}"))
@@ -611,9 +639,19 @@ impl App {
         }
         if mini {
             self.saved_size = Some(ctx.content_rect().size());
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(440.0, 190.0)));
-        } else if let Some(size) = self.saved_size.take() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                360.0, 176.0,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(360.0, 176.0)));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                420.0, 190.0,
+            )));
+            if let Some(size) = self.saved_size.take() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
         }
     }
 
@@ -770,6 +808,11 @@ impl App {
                 };
                 let backdrop = backdrop.map(|b| tex("backdrop", b));
                 let large = large.map(|l| tex("cover-large", l));
+                self.art_fade = ArtFade {
+                    backdrop: self.backdrop.take(),
+                    cover: self.cover_large.take(),
+                    started: self.ctx.input(|i| i.time),
+                };
                 self.backdrop = backdrop;
                 self.cover_large = large;
                 let color = accent.map(|a| {
@@ -804,14 +847,44 @@ impl App {
 
     /// Starts easing the accent towards the one of `color` (None: default).
     fn retarget_accent(&mut self, color: Option<Color32>) {
-        let target = Accent::from_cover(color, &self.pal);
+        self.cover_tint = color;
+        self.ease_accent();
+    }
+
+    /// Eases the accent to the one of the remembered cover colour, or to
+    /// the default when "tint with cover" is off. Jumps with reduced motion.
+    fn ease_accent(&mut self) {
+        let tint = self
+            .session
+            .config
+            .config
+            .tint_ui_with_cover
+            .then_some(self.cover_tint)
+            .flatten();
+        let target = Accent::from_cover(tint, &self.pal);
         if target == self.accent_to {
             return;
         }
         self.accent_from = self.accent;
         self.accent_to = target;
+        if theme::motion::reduced(&self.ctx) {
+            self.accent = target;
+        }
         self.accent_start = self.ctx.input(|i| i.time);
         self.ctx.request_repaint();
+    }
+
+    /// Turns the music-folder watcher on or off right away.
+    pub fn set_watch_for_changes(&mut self, on: bool) {
+        self.session.set_watch_for_changes(on);
+        self.streams_dirty = true;
+    }
+
+    /// Re-derives the accent after the "tint with cover" setting changed.
+    pub fn set_tint_ui_with_cover(&mut self, on: bool) {
+        self.session.config.config.tint_ui_with_cover = on;
+        self.session.config.save();
+        self.ease_accent();
     }
 
     fn step_accent(&mut self, now: f64) {
@@ -829,7 +902,6 @@ impl App {
         }
     }
 
-    /// Switches theme (and re-derives the accent for it).
     /// Sets, applies and saves the interface zoom (snapped to the supported range).
     pub fn set_ui_scale(&mut self, scale: f32) {
         let scale = Config::clamp_ui_scale(scale);
@@ -867,14 +939,36 @@ impl App {
         self.set_ui_scale(next);
     }
 
-    pub fn set_dark(&mut self, dark: bool) {
+    /// Whether `mode` is dark given the OS preference. `AULOS_SMOKE_LIGHT`
+    /// forces light for the design comparison shots.
+    fn resolve_dark(mode: ThemeMode, system: Option<egui::Theme>) -> bool {
+        if std::env::var_os("AULOS_SMOKE_LIGHT").is_some() {
+            return false;
+        }
+        mode.is_dark(system.map(|t| t == egui::Theme::Dark))
+    }
+
+    /// Chooses and saves the theme; [`Self::sync_theme`] applies it.
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        if self.session.config.config.theme_mode == mode {
+            return;
+        }
+        self.session.config.config.theme_mode = mode;
+        self.session.config.save();
+        self.ctx.request_repaint();
+    }
+
+    /// Applies the chosen theme, following the OS while it is "System",
+    /// and re-derives the accent for the palette.
+    fn sync_theme(&mut self, ctx: &Context) {
+        let dark = Self::resolve_dark(self.session.config.config.theme_mode, ctx.system_theme());
         if self.dark == dark {
             return;
         }
         self.dark = dark;
         self.pal = if dark { theme::DARK } else { theme::LIGHT };
         theme::apply(&self.ctx, &self.pal);
-        self.accent_to = Accent::default_for(&self.pal);
+        self.ease_accent();
         self.accent = self.accent_to;
         self.art_done = None;
         self.art_dirty = true;
@@ -1052,11 +1146,13 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.sync_theme(&ctx);
         Theme {
             pal: self.pal,
             accent: self.accent,
         }
         .publish(&ctx);
+        theme::motion::set_reduced(&ctx, self.session.config.config.reduce_motion);
         self.narrow = ctx.content_rect().width() < theme::size::COLLAPSE_BELOW;
         self.shortcuts(&ctx);
         // Hero pages announce their tint while drawing; the toolbar, drawn

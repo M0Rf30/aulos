@@ -12,7 +12,8 @@ use crate::widgets::{
     IconBtn, PillKind, avatar_tile, cover_image, empty_state, gradient_fill, paint_icon,
     paint_text, pill_button, seed_colors, skeleton,
 };
-use aulos_core::library::history::{AlbumRef, DecadeCount};
+use aulos_core::library::album_sort::AlbumSort;
+use aulos_core::library::history::{AlbumRef, DecadeCount, HomeData};
 use aulos_core::library::home::artist_tracks;
 use aulos_core::library::home_state::{Greeting, decade_label};
 use aulos_core::library::{CoverArt, Track};
@@ -54,6 +55,12 @@ enum Act {
     PlayArtist(String),
     Reroll,
     OpenDecade(u32),
+    /// Play the Favourites list from this row.
+    PlayFavourites(usize),
+    /// Open the Albums page (ordered by date added when asked).
+    SeeAllAlbums {
+        recently_added: bool,
+    },
     CloseDecade,
     PlayDecade,
     ShuffleAll,
@@ -122,6 +129,25 @@ fn apply(app: &mut App, out: Out) {
         Act::OpenDecade(decade) => {
             let effect = app.session.open_decade(decade);
             app.run(effect);
+        }
+        Act::PlayFavourites(start) => {
+            let tracks = app
+                .session
+                .home
+                .data
+                .as_ref()
+                .map(|d| d.favourites.clone())
+                .unwrap_or_default();
+            if start < tracks.len() {
+                let update = app.session.play_tracks(tracks, start);
+                app.run(update);
+            }
+        }
+        Act::SeeAllAlbums { recently_added } => {
+            if recently_added {
+                app.session.set_albums_sort(AlbumSort::RecentlyAdded);
+            }
+            app.navigate(Route::Albums);
         }
         Act::CloseDecade => app.session.home.decade = None,
         Act::PlayDecade => {
@@ -201,12 +227,16 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         &mut cx,
                         offsets,
                         "recent",
-                        "Continue listening",
+                        "Recently played",
                         None,
+                        Some(Act::SeeAllAlbums {
+                            recently_added: false,
+                        }),
                         &data.recently_played,
                     );
                     ui.add_space(SECTION_GAP);
                 }
+                favourites_and_decades(ui, &mut cx, data);
                 if !data.most_played_month.is_empty() {
                     album_shelf(
                         ui,
@@ -214,6 +244,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         offsets,
                         "most",
                         "Most played this month",
+                        None,
                         None,
                         &data.most_played_month,
                     );
@@ -224,6 +255,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: "Top artists this month",
                         hint: None,
                         action: None,
+                        see_all: false,
                     };
                     shelf(
                         ui,
@@ -252,6 +284,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: &title,
                         hint: Some("Artists you may like"),
                         action: None,
+                        see_all: false,
                     };
                     shelf(
                         ui,
@@ -287,6 +320,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         "added",
                         "Recently added",
                         None,
+                        Some(Act::SeeAllAlbums {
+                            recently_added: true,
+                        }),
                         &data.recently_added,
                     );
                     ui.add_space(SECTION_GAP);
@@ -300,6 +336,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         "rediscover",
                         "Rediscover",
                         hint,
+                        None,
                         &data.rediscover,
                     );
                     ui.add_space(SECTION_GAP);
@@ -309,6 +346,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: "Random picks",
                         hint: None,
                         action: Some((regular::SHUFFLE, "Shuffle picks")),
+                        see_all: false,
                     };
                     let clicked =
                         shelf(ui, offsets, Id::new(("home-shelf", "random")), head, |ui| {
@@ -316,13 +354,10 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                                 album_card(ui, &mut cx, a);
                             }
                         });
-                    if clicked {
+                    if clicked.action {
                         cx.out.act = Some(Act::Reroll);
                     }
                     ui.add_space(SECTION_GAP);
-                }
-                if !data.decades.is_empty() {
-                    decade_tiles(ui, &mut cx, &data.decades);
                 }
             });
     });
@@ -330,13 +365,20 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
 
 fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
     let pal = app.pal;
-    let text = Greeting::for_hour(chrono::Local::now().hour()).text();
+    let text = Greeting::for_hour(chrono::Local::now().hour())
+        .text_for(&app.session.config.config.user_name);
     ui.label(
         RichText::new(text)
             .font(theme::semibold(30.0))
             .color(pal.text),
     );
     ui.add_space(4.0);
+    let resume = app
+        .session
+        .home
+        .data
+        .as_ref()
+        .and_then(|data| data.resume.as_ref());
     match &app.session.playback.current_track {
         Some(track) if !track.is_live_stream() => {
             ui.horizontal(|ui| {
@@ -361,18 +403,43 @@ fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
                 }
             });
         }
-        _ => {
-            let text = if library_albums == 1 {
-                "1 album in your library".to_owned()
-            } else {
-                format!("{library_albums} albums in your library")
-            };
-            ui.label(
-                RichText::new(text)
-                    .font(theme::regular(14.0))
-                    .color(pal.text_2),
-            );
-        }
+        _ => match resume {
+            Some(resume) => {
+                let label = resume.label();
+                // The album is emphasised in the sentence.
+                let (before, album, after) = match label.find(&resume.album) {
+                    Some(at) => (
+                        &label[..at],
+                        &label[at..at + resume.album.len()],
+                        &label[at + resume.album.len()..],
+                    ),
+                    None => (label.as_str(), "", ""),
+                };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let font = theme::regular(14.0);
+                    ui.label(RichText::new(before).font(font.clone()).color(pal.text_2));
+                    ui.label(
+                        RichText::new(album)
+                            .font(theme::medium(14.0))
+                            .color(pal.text),
+                    );
+                    ui.label(RichText::new(after).font(font).color(pal.text_2));
+                });
+            }
+            None => {
+                let text = if library_albums == 1 {
+                    "1 album in your library".to_owned()
+                } else {
+                    format!("{library_albums} albums in your library")
+                };
+                ui.label(
+                    RichText::new(text)
+                        .font(theme::regular(14.0))
+                        .color(pal.text_2),
+                );
+            }
+        },
     }
 }
 
@@ -530,19 +597,28 @@ struct Head<'a> {
     hint: Option<&'a str>,
     /// An icon button at the right of the title: glyph and tooltip.
     action: Option<(&'a str, &'a str)>,
+    /// Show a "See all" link before the scroll arrows.
+    see_all: bool,
+}
+
+/// What the header of a [`shelf`] reported.
+#[derive(Default)]
+struct Clicks {
+    action: bool,
+    see_all: bool,
 }
 
 /// A titled, horizontally scrolling row; `body` draws the cards. Returns
-/// true when the header action was clicked.
+/// which header controls were clicked.
 fn shelf(
     ui: &mut Ui,
     offsets: &mut HashMap<Id, f32>,
     id: Id,
     head: Head,
     body: impl FnOnce(&mut Ui),
-) -> bool {
+) -> Clicks {
     let pal = Theme::get(ui.ctx()).pal;
-    let mut action = false;
+    let mut clicks = Clicks::default();
     let mut step = 0.0_f32;
     ui.horizontal(|ui| {
         ui.label(
@@ -583,7 +659,11 @@ fn shelf(
                     .show(ui)
                     .clicked()
             {
-                action = true;
+                clicks.action = true;
+            }
+            if head.see_all {
+                ui.add_space(4.0);
+                clicks.see_all = see_all_link(ui, pal.text_2);
             }
         });
     });
@@ -602,9 +682,24 @@ fn shelf(
             });
         });
     *off = out.state.offset.x;
-    action
+    clicks
 }
 
+/// A text link ("See all", "Play all"); true when clicked.
+fn link(ui: &mut Ui, text: &str, color: Color32) -> bool {
+    ui.add(
+        egui::Label::new(RichText::new(text).font(theme::regular(13.0)).color(color))
+            .sense(Sense::click()),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .clicked()
+}
+
+fn see_all_link(ui: &mut Ui, color: Color32) -> bool {
+    link(ui, "See all", color)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn album_shelf(
     ui: &mut Ui,
     cx: &mut Cx,
@@ -612,18 +707,23 @@ fn album_shelf(
     id: &str,
     title: &str,
     hint: Option<&str>,
+    see_all: Option<Act>,
     albums: &[AlbumRef],
 ) {
     let head = Head {
         title,
         hint,
         action: None,
+        see_all: see_all.is_some(),
     };
-    shelf(ui, offsets, Id::new(("home-shelf", id)), head, |ui| {
+    let clicks = shelf(ui, offsets, Id::new(("home-shelf", id)), head, |ui| {
         for a in albums {
             album_card(ui, cx, a);
         }
     });
+    if clicks.see_all {
+        cx.out.act = see_all;
+    }
 }
 
 /// A shelf album card (allocates its own slot).
@@ -816,19 +916,148 @@ fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind
 // Decades
 // ---------------------------------------------------------------------------
 
+/// Favourites of the month and the decade tiles: side by side when there is
+/// room (each at least 300px wide), stacked otherwise.
+fn favourites_and_decades(ui: &mut Ui, cx: &mut Cx, data: &HomeData) {
+    let favourites = !data.favourites.is_empty();
+    let decades = !data.decades.is_empty();
+    if !favourites && !decades {
+        return;
+    }
+    const COLUMN_GAP: f32 = 32.0;
+    if favourites && decades && ui.available_width() >= 2.0 * 300.0 + COLUMN_GAP {
+        ui.spacing_mut().item_spacing.x = COLUMN_GAP;
+        ui.columns(2, |cols| {
+            favourites_list(&mut cols[0], cx, data);
+            decade_tiles(&mut cols[1], cx, &data.decades);
+        });
+    } else {
+        if favourites {
+            favourites_list(ui, cx, data);
+            if decades {
+                ui.add_space(SECTION_GAP);
+            }
+        }
+        if decades {
+            decade_tiles(ui, cx, &data.decades);
+        }
+    }
+    ui.add_space(SECTION_GAP);
+}
+
+/// "Favourites of October · 12 songs · Play all" over a grid of 48px rows
+/// (36px cover, title, artist), as many 200px+ columns as fit.
+fn favourites_list(ui: &mut Ui, cx: &mut Cx, data: &HomeData) {
+    const ROW_H: f32 = 48.0;
+    const COL_GAP: f32 = 16.0;
+    let pal = cx.app.pal;
+    let title = if data.favourites_this_month {
+        format!("Favourites of {}", chrono::Local::now().format("%B"))
+    } else {
+        "Favourites".to_owned()
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(title)
+                .font(theme::semibold(17.0))
+                .color(pal.text),
+        );
+        ui.add_space(2.0);
+        let songs = data.favourites_total;
+        ui.label(
+            RichText::new(if songs == 1 {
+                "1 song".to_owned()
+            } else {
+                format!("{songs} songs")
+            })
+            .font(theme::regular(13.0))
+            .color(pal.text_3),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if link(ui, "Play all", pal.text_2) {
+                cx.out.act = Some(Act::PlayFavourites(0));
+            }
+        });
+    });
+    ui.add_space(8.0);
+
+    let width = ui.available_width();
+    let cols = (((width + COL_GAP) / (200.0 + COL_GAP)).floor() as usize).max(1);
+    let col_w = (width - COL_GAP * (cols as f32 - 1.0)) / cols as f32;
+    let rows = data.favourites.len().div_ceil(cols);
+    let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * ROW_H), Sense::hover());
+    for (i, track) in data.favourites.iter().enumerate() {
+        let (r, c) = (i / cols, i % cols);
+        let rect = Rect::from_min_size(
+            pos2(
+                area.left() + c as f32 * (col_w + COL_GAP),
+                area.top() + r as f32 * ROW_H,
+            ),
+            vec2(col_w, ROW_H),
+        );
+        if !ui.is_rect_visible(rect) {
+            continue;
+        }
+        let resp = ui.interact(rect, ui.id().with(("favourite", track.id)), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), pal.text.alpha(0.06));
+        }
+        let cover = Rect::from_min_size(
+            pos2(rect.left() + 6.0, rect.center().y - 18.0),
+            vec2(36.0, 36.0),
+        );
+        let key = track.cover_key();
+        cover_image(
+            ui,
+            &cx.app.covers,
+            cover,
+            cx.app.covers.thumb(&key),
+            &key,
+            4,
+        );
+        let x = cover.right() + 10.0;
+        let text_w = (rect.right() - 6.0 - x).max(0.0);
+        paint_text(
+            ui.painter(),
+            Rect::from_min_size(pos2(x, rect.center().y - 17.0), vec2(text_w, 17.0)),
+            Align::Min,
+            &track.title,
+            theme::semibold(13.5),
+            pal.text,
+        );
+        paint_text(
+            ui.painter(),
+            Rect::from_min_size(pos2(x, rect.center().y + 1.0), vec2(text_w, 15.0)),
+            Align::Min,
+            &track.artist,
+            theme::regular(12.0),
+            pal.text_2,
+        );
+        if resp.clicked() {
+            cx.out.act = Some(Act::PlayFavourites(i));
+        }
+        if (resp.secondary_clicked() || resp.context_menu_opened())
+            && let Some(menu) = menus::track_menu(&resp, track, &cx.app.session.playlists.playlists)
+        {
+            cx.out.menu = Some(menu);
+        }
+    }
+}
+
+/// The "Decades" heading over a fixed three-column grid of 64px tiles.
 fn decade_tiles(ui: &mut Ui, cx: &mut Cx, decades: &[DecadeCount]) {
     let pal = cx.app.pal;
     ui.label(
-        RichText::new("Browse by decade")
+        RichText::new("Decades")
             .font(theme::semibold(17.0))
             .color(pal.text),
     );
     ui.add_space(10.0);
     let gap = 8.0;
     let width = ui.available_width();
-    let cols = (((width + gap) / (168.0 + gap)).floor() as usize).clamp(2, 8);
-    let tile_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).floor();
-    for row in decades.chunks(cols) {
+    let tile_w = ((width - gap * 2.0) / 3.0).floor();
+    for row in decades.chunks(3) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for d in row {

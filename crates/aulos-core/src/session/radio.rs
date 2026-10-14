@@ -5,7 +5,7 @@ use crate::library::Track;
 use crate::online::radio::{
     self, DiscoverPreset, StationQuery, StationSearchResult, locale_country_code,
 };
-use crate::online::store::RadioStation;
+use crate::online::store::{NewStation, RadioStation};
 use crate::online::{UrlError, validate_http_url};
 use crate::task::Effect;
 use std::path::PathBuf;
@@ -35,6 +35,10 @@ pub enum RadioEvent {
         key: String,
         result: Result<String, String>,
     },
+    /// The codec/bitrate of a saved station was read from its stream
+    /// headers; `Ok(Some)` carries the reloaded list, `Ok(None)` means
+    /// nothing changed.
+    FormatLearned(Result<Option<Vec<RadioStation>>, String>),
 }
 
 /// Something the user should be told about after applying a [`RadioEvent`].
@@ -154,24 +158,16 @@ impl RadioState {
     pub fn add_by_url(&self, name: String, url: String) -> Result<Effect<RadioEvent>, UrlError> {
         validate_http_url(&url)?;
         let display_name = if name.is_empty() { url.clone() } else { name };
-        Ok(Self::save(
-            display_name,
-            url,
-            String::new(),
-            String::new(),
-            String::new(),
-        ))
+        Ok(Self::save(NewStation {
+            name: display_name,
+            stream_url: url,
+            ..NewStation::default()
+        }))
     }
 
     /// Re-saves a station exactly as it was (Undo of a removal).
     pub fn restore(&self, station: RadioStation) -> Effect<RadioEvent> {
-        Self::save(
-            station.name,
-            station.stream_url,
-            station.homepage,
-            station.favicon_url,
-            station.tags,
-        )
+        Self::save(station.into())
     }
 
     /// Saves the directory search result `uuid`. A no-op for an unknown one.
@@ -184,31 +180,25 @@ impl RadioState {
         else {
             return Effect::none();
         };
-        Self::save(
-            result.name,
-            result.url,
-            result.homepage,
-            result.favicon,
-            result.tags,
-        )
+        Self::save(NewStation {
+            name: result.name,
+            stream_url: result.url,
+            homepage: result.homepage,
+            favicon_url: result.favicon,
+            tags: result.tags,
+            codec: result.codec,
+            bitrate_kbps: result.bitrate,
+        })
     }
 
     /// Runs the blocking DB upsert and reports `RadioEvent::Added` with the
     /// outcome (including whether the station already existed).
-    fn save(
-        name: String,
-        stream_url: String,
-        homepage: String,
-        favicon_url: String,
-        tags: String,
-    ) -> Effect<RadioEvent> {
+    fn save(station: NewStation) -> Effect<RadioEvent> {
         Effect::future(async move {
-            let event_name = name.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                radio::save_station(&name, &stream_url, &homepage, &favicon_url, &tags)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let event_name = station.name.clone();
+            let outcome = tokio::task::spawn_blocking(move || radio::save_station(station))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
             let (result, already_existed) = match outcome {
                 Ok((id, existed)) => (Ok(id), existed),
                 Err(e) => (Err(e), false),
@@ -397,7 +387,15 @@ impl RadioState {
                     } else {
                         vec![favicon]
                     };
+                    let learn = self
+                        .stations
+                        .iter()
+                        .find(|s| s.stream_url == self.now_playing_key)
+                        .filter(|s| s.codec.is_empty() && s.bitrate_kbps == 0)
+                        .map(|s| Self::learn_format(s.stream_url.clone()))
+                        .unwrap_or_else(Effect::none);
                     RadioUpdate {
+                        effect: learn,
                         icon_urls,
                         play: Some(stream_track(name, resolved_url)),
                         ..RadioUpdate::none()
@@ -405,7 +403,24 @@ impl RadioState {
                 }
                 Err(reason) => RadioUpdate::notice(RadioNotice::PlayFailed { reason }),
             },
+            RadioEvent::FormatLearned(result) => match result {
+                Ok(Some(stations)) => self.apply_event(RadioEvent::StationsLoaded(stations)),
+                Ok(None) => RadioUpdate::none(),
+                Err(e) => {
+                    tracing::debug!("radio format probe failed: {e}");
+                    RadioUpdate::none()
+                }
+            },
         }
+    }
+
+    /// Reads the codec/bitrate of the saved station `key` from its stream
+    /// headers, for stations saved without them.
+    fn learn_format(key: String) -> Effect<RadioEvent> {
+        Effect::blocking(
+            move || radio::learn_station_format(&key),
+            RadioEvent::FormatLearned,
+        )
     }
 }
 
@@ -431,6 +446,10 @@ fn stream_track(name: String, stream_url: String) -> Track {
         rating: None,
         rg_track_gain: None,
         rg_album_gain: None,
+        bit_depth: 0,
+        release_type: String::new(),
+        added_at: 0,
+        favorited_at: 0,
     }
 }
 
@@ -471,5 +490,52 @@ mod tests {
         let track = update.play.expect("track to play");
         assert_eq!(&*track.provider_id, "radio");
         assert_eq!(track.source_uri, "http://real/stream");
+    }
+
+    fn saved(url: &str, codec: &str, bitrate_kbps: u32) -> RadioStation {
+        RadioStation {
+            id: 1,
+            name: "FM".into(),
+            stream_url: url.into(),
+            homepage: String::new(),
+            favicon_url: String::new(),
+            tags: String::new(),
+            codec: codec.into(),
+            bitrate_kbps,
+        }
+    }
+
+    fn resolve(state: &mut RadioState, key: &str) -> RadioUpdate {
+        state.apply_event(RadioEvent::StreamResolved {
+            name: "FM".into(),
+            favicon: String::new(),
+            key: key.into(),
+            result: Ok("http://real/stream".into()),
+        })
+    }
+
+    #[test]
+    fn playing_a_saved_station_without_format_learns_it() {
+        let mut state = RadioState::new();
+        state.stations = vec![saved("http://x/a", "", 0)];
+        assert!(!resolve(&mut state, "http://x/a").effect.is_none());
+        // Not a saved station, or one whose format is already known.
+        assert!(resolve(&mut state, "http://x/other").effect.is_none());
+        state.stations = vec![saved("http://x/a", "MP3", 0)];
+        assert!(resolve(&mut state, "http://x/a").effect.is_none());
+    }
+
+    #[test]
+    fn learned_format_replaces_the_saved_list() {
+        let mut state = RadioState::new();
+        state.stations = vec![saved("http://x/a", "", 0)];
+        let _ = state.apply_event(RadioEvent::FormatLearned(Ok(Some(vec![saved(
+            "http://x/a",
+            "AAC",
+            64,
+        )]))));
+        assert_eq!(state.stations[0].codec, "AAC");
+        let _ = state.apply_event(RadioEvent::FormatLearned(Ok(None)));
+        assert_eq!(state.stations[0].bitrate_kbps, 64);
     }
 }

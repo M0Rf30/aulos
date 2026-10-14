@@ -1032,6 +1032,7 @@ impl Session {
                 }
 
                 p.set_fade_secs(self.config.config.fade_duration_secs);
+                super::preferences::apply_playback_settings(&mut p, &self.config.config);
                 self.playback.player = Some(p);
             }
             Err(e) => {

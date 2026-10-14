@@ -2,6 +2,7 @@
 
 use crate::app::{App, Route};
 use crate::theme::{self, ColorExt, Quality, Theme};
+use crate::views::artists::scanning_banner;
 use crate::views::menus::{self, MenuAction};
 use crate::widgets::{
     Columns, PillKind, chip, cover_image, empty_state, keycap, paint_icon, paint_text,
@@ -10,9 +11,10 @@ use crate::widgets::{
 use aulos_core::config::ViewMode;
 use aulos_core::format::format_duration;
 use aulos_core::library::Album;
-use aulos_core::library::album_filter::{AlbumFilter, AlbumFilterCache, AlbumKind};
+use aulos_core::library::album_filter::{AlbumFilter, AlbumFilterCache};
 use aulos_core::library::quality::AudioQuality;
 use aulos_core::library::queue_source::QueueSource;
+use aulos_core::library::release_kind::ReleaseKind;
 use egui::{
     Align, CornerRadius, Layout, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
@@ -179,7 +181,7 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 
     // Chips need the decades present; the cache memoises the derived data.
-    let (visible, decades) = {
+    let (visible, decades, genres) = {
         let lib = &app.session.library;
         app.views.albums.cache.get(
             lib.visible_epoch(),
@@ -191,7 +193,7 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.spacing_mut().item_spacing.y = 0.0;
         title_row(ui, "Albums", &visible.len().to_string());
         ui.add_space(17.0);
-        filter_chips(app, ui, &decades);
+        filter_chips(app, ui, &decades, &genres);
         if searching {
             ui.add_space(10.0);
             search_banner(app, ui, visible.len(), total, actions);
@@ -214,7 +216,7 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
             } else {
                 (
                     "No albums match these filters",
-                    "Try a different kind or decade.",
+                    "Try a different kind, decade or genre.",
                     "Clear filters",
                 )
             };
@@ -235,24 +237,30 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 }
 
-fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32]) {
+fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) {
     let pal = app.pal;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         let kinds = [
-            ("All", AlbumKind::All),
-            ("Albums", AlbumKind::Albums),
-            ("Compilations", AlbumKind::Compilations),
+            ("All", None),
+            ("Albums", Some(ReleaseKind::Album)),
+            ("EPs", Some(ReleaseKind::Ep)),
+            ("Singles", Some(ReleaseKind::Single)),
+            ("Compilations", Some(ReleaseKind::Compilation)),
+            ("Live", Some(ReleaseKind::Live)),
         ];
         for (label, kind) in kinds {
             if chip(ui, label, app.views.albums.filter.kind == kind, None).clicked() {
                 app.views.albums.filter.set_kind(kind);
             }
         }
-        if !decades.is_empty() {
+        let separator = |ui: &mut Ui| {
             let (sep, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
             ui.painter()
                 .vline(sep.center().x, sep.y_range(), Stroke::new(1.0, pal.stroke));
+        };
+        if !decades.is_empty() {
+            separator(ui);
             let current = app.views.albums.filter.decade;
             let label = match current {
                 Some(d) => format!("{d}s"),
@@ -282,6 +290,42 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32]) {
             if let Some(d) = chosen {
                 app.views.albums.filter.set_decade(d);
             }
+        }
+        if !genres.is_empty() {
+            let current = app.views.albums.filter.genre.clone();
+            let label = current.clone().unwrap_or_else(|| "Genre".to_owned());
+            let resp = chip(ui, &label, current.is_some(), Some(regular::CARET_DOWN));
+            let mut chosen: Option<Option<String>> = None;
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(160.0);
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        if ui
+                            .selectable_label(current.is_none(), "Any genre")
+                            .clicked()
+                        {
+                            chosen = Some(None);
+                            ui.close();
+                        }
+                        for genre in genres {
+                            let on = current
+                                .as_deref()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(genre));
+                            if ui.selectable_label(on, genre).clicked() {
+                                chosen = Some(Some(genre.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+            if let Some(g) = chosen {
+                app.views.albums.filter.set_genre(g);
+            }
+        }
+        let favourites = app.views.albums.filter.favourites;
+        if chip(ui, "Favourites", favourites, None).clicked() {
+            app.views.albums.filter.set_favourites(!favourites);
         }
     });
 }
@@ -334,54 +378,16 @@ fn search_banner(app: &App, ui: &mut Ui, matches: usize, total: usize, actions: 
     });
 }
 
-/// The slim "library is being scanned" banner with an indeterminate bar.
+/// The slim "library is being scanned" banner: folder, progress bar and
+/// `done / total` counter.
 fn scan_banner(app: &App, ui: &mut Ui) {
-    let pal = app.pal;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(8), pal.surface_1);
-    p.rect_stroke(
-        rect,
-        CornerRadius::same(8),
-        Stroke::new(1.0, pal.stroke),
-        StrokeKind::Inside,
+    let lib = &app.session.library;
+    scanning_banner(
+        ui,
+        &app.pal,
+        &lib.scan_progress.snapshot(),
+        "Scanning your library…",
     );
-    paint_icon(
-        p,
-        pos2(rect.left() + 24.0, rect.center().y),
-        regular::ARROWS_CLOCKWISE,
-        15.0,
-        pal.reed,
-        false,
-    );
-    let label = "Scanning your library…";
-    let w = paint_text(
-        p,
-        Rect::from_min_max(
-            pos2(rect.left() + 42.0, rect.top()),
-            pos2(rect.right() - 12.0, rect.bottom()),
-        ),
-        Align::Min,
-        label,
-        theme::regular(13.0),
-        pal.text_1,
-    );
-    let bar_l = rect.left() + 42.0 + w + 14.0;
-    let bar = Rect::from_min_max(
-        pos2(bar_l, rect.center().y - 2.0),
-        pos2((rect.right() - 14.0).max(bar_l), rect.center().y + 2.0),
-    );
-    p.rect_filled(bar, CornerRadius::same(2), pal.track);
-    let t = ui.input(|i| i.time) as f32;
-    let seg = bar.width() * 0.25;
-    let x = bar.left() + (bar.width() - seg) * (0.5 + 0.5 * (t * 1.8).sin());
-    ui.painter().rect_filled(
-        Rect::from_min_size(pos2(x, bar.top()), vec2(seg, bar.height())),
-        CornerRadius::same(2),
-        pal.reed,
-    );
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn loading_state(app: &App, ui: &mut Ui, pad: f32) {
@@ -546,6 +552,27 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                         );
                         play_clicked = pr.clicked();
                     }
+                    // Hover-only "…" circle (top right) opening the album menu.
+                    let more_rect = Rect::from_center_size(
+                        pos2(cover.right() - 22.0, cover.top() + 22.0),
+                        vec2(28.0, 28.0),
+                    );
+                    let more = ui.interact(more_rect, id.with("more"), Sense::click());
+                    if hovered || more.hovered() {
+                        ui.painter().circle_filled(
+                            more_rect.center(),
+                            14.0,
+                            egui::Color32::from_black_alpha(if more.hovered() { 170 } else { 120 }),
+                        );
+                        paint_icon(
+                            ui.painter(),
+                            more_rect.center(),
+                            regular::DOTS_THREE,
+                            17.0,
+                            egui::Color32::WHITE,
+                            false,
+                        );
+                    }
                     if playing {
                         let badge = Rect::from_min_size(
                             pos2(cover.left() + 8.0, cover.bottom() - 32.0),
@@ -621,8 +648,9 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                         );
                     }
 
-                    if let Some(m) =
-                        menus::album_menu(&resp, album, &app.session.playlists.playlists)
+                    let playlists = &app.session.playlists.playlists;
+                    if let Some(m) = menus::album_menu(&resp, album, playlists)
+                        .or_else(|| menus::album_menu_click(&more, album, playlists))
                     {
                         actions.push(Action::Menu(m));
                     }
@@ -1024,7 +1052,9 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                             stars,
                         });
                     }
-                    if let Some(m) = menus::track_menu(&out.response, track, playlists) {
+                    if let Some(m) = menus::track_menu(&out.response, track, playlists)
+                        .or_else(|| menus::track_menu_click(&out.more, track, playlists))
+                    {
                         actions.push(Action::Menu(m));
                     }
                 }

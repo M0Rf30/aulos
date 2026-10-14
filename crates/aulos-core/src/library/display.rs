@@ -9,6 +9,7 @@
 
 use super::Playlist;
 use super::history::AlbumRef;
+use super::release_kind::ReleaseKind;
 use super::{Album, Artist, Track};
 use crate::fl;
 use crate::format::format_duration_coarse;
@@ -122,6 +123,17 @@ impl Album {
         }
     }
 
+    /// Localized "{year} · {kind}" line ("2019 · EP", or just the kind when
+    /// the year is unknown), shown under an album listed on an artist page.
+    #[must_use]
+    pub fn year_kind_label(&self) -> String {
+        if self.year > 0 {
+            format!("{} · {}", self.year, self.kind.label())
+        } else {
+            self.kind.label()
+        }
+    }
+
     /// Whether any track's artist differs from the album artist (compilations
     /// and split albums), i.e. whether a per-track artist column is useful.
     #[must_use]
@@ -146,10 +158,25 @@ impl AlbumRef {
 }
 
 impl Artist {
-    /// English "N albums" label for list rows.
+    /// How many releases of each kind the artist has, in
+    /// [`ReleaseKind::ALL`] order, skipping kinds with none.
+    #[must_use]
+    pub fn release_counts(&self) -> Vec<(ReleaseKind, usize)> {
+        ReleaseKind::ALL
+            .into_iter()
+            .map(|kind| (kind, self.albums.iter().filter(|a| a.kind == kind).count()))
+            .filter(|&(_, n)| n > 0)
+            .collect()
+    }
+
+    /// Localized releases breakdown for list rows: "2 albums · 1 EP".
     #[must_use]
     pub fn albums_label(&self) -> String {
-        counted(self.album_count(), "album")
+        self.release_counts()
+            .into_iter()
+            .map(|(kind, n)| kind.count_label(n))
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// English "N tracks" label for list rows.
@@ -238,6 +265,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 

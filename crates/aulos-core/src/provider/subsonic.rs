@@ -8,6 +8,7 @@
 //! decoded locally by the `LocalBackend`.
 
 use super::{MusicProvider, ProviderError, ProviderType};
+use crate::library::scan_progress::ScanProgress;
 use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track};
 use opensubsonic::{Auth, Client};
 use std::path::PathBuf;
@@ -17,6 +18,13 @@ use std::time::Duration;
 /// Helper to wrap Subsonic errors into `ProviderError::Io` with a labeled context.
 fn subsonic_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError {
     super::wrap_err("Subsonic", op)
+}
+
+/// Unix seconds of a server timestamp (ISO 8601, e.g. `created` and
+/// `starred`); `0` when absent or unparseable.
+fn iso_secs(iso: Option<&str>) -> i64 {
+    iso.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map_or(0, |dt| dt.timestamp())
 }
 
 /// Configuration for connecting to a Subsonic-compatible server.
@@ -188,6 +196,12 @@ impl SubsonicProvider {
         let duration = Duration::from_secs(child.duration.unwrap_or(0) as u64);
         let bitrate = child.bit_rate.unwrap_or(0) as u32;
         let sample_rate = child.sampling_rate.unwrap_or(0) as u32;
+        let lossless = super::lossless_from_suffix(child.suffix.as_deref().unwrap_or_default());
+        let bit_depth = if lossless == Some(false) {
+            0
+        } else {
+            child.bit_depth.filter(|b| *b > 0).unwrap_or(0) as u32
+        };
 
         // Pre-build the authenticated stream URL so the player can use it
         // directly without needing access to the Subsonic client.
@@ -233,12 +247,16 @@ impl SubsonicProvider {
             duration,
             bitrate,
             sample_rate,
+            bit_depth,
             provider_id: Arc::clone(&self.provider_id),
             source_uri,
             is_favorite,
             rating,
             rg_track_gain,
             rg_album_gain,
+            release_type: String::new(),
+            added_at: iso_secs(child.created.as_deref()),
+            favorited_at: iso_secs(child.starred.as_deref()),
         }
     }
 
@@ -607,7 +625,7 @@ impl MusicProvider for SubsonicProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn sync_library(&self) -> Result<usize, ProviderError> {
+    fn sync_library(&self, _progress: &ScanProgress) -> Result<usize, ProviderError> {
         // Subsonic servers manage their own library scanning.
         // We can trigger a scan via startScan, but the actual library
         // data is fetched on demand via browse_*() methods.
@@ -1003,6 +1021,19 @@ fn song_to_tech_info(song: &opensubsonic::data::Child) -> crate::library::tech_i
         remote_path: song.path.clone().filter(|p| !p.is_empty()),
         composer: song.display_composer.clone().filter(|c| !c.is_empty()),
         ..TechInfo::default()
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::iso_secs;
+
+    #[test]
+    fn server_timestamps_become_unix_seconds() {
+        assert_eq!(iso_secs(Some("2024-05-01T12:00:00.000Z")), 1_714_564_800);
+        assert_eq!(iso_secs(Some("2024-05-01T14:00:00+02:00")), 1_714_564_800);
+        assert_eq!(iso_secs(Some("garbage")), 0);
+        assert_eq!(iso_secs(None), 0);
     }
 }
 

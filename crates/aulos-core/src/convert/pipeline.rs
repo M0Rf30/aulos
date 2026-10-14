@@ -10,6 +10,17 @@
 //! never touches playback. Because symphonia's probe is content-based, this
 //! transparently "rips" the first audio track out of video containers
 //! (mp4/mkv) too, with no container-specific special-casing.
+//!
+//! # Pausing
+//!
+//! Every packet-sized step of the decode → mix → resample → encode loop
+//! first passes [`checkpoint`], which blocks while the job's shared `pause`
+//! flag is set (and still reacts to cancellation). Pausing therefore needs
+//! no cooperation from the encoder: the pure-Rust sinks simply stop being
+//! fed, and the `ffmpeg` child stops receiving PCM on its stdin, blocks on
+//! the empty pipe and idles at zero CPU until the feed resumes — no
+//! `SIGSTOP`, which would be Unix-only and could leave the child stopped if
+//! Aulos died while paused.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -34,9 +45,15 @@ use crate::player::engine::decoder::{
 };
 use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 
+use super::channels::Mixer;
 use super::cue;
 use super::encoder;
+use super::naming::{self, NameFields};
+use super::source::cue_audio_path;
 use super::{ConvertError, ConvertJob, JobId, JobKind, JobSettings};
+
+/// How often a paused job re-checks its pause/cancel flags.
+const PAUSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The settings `job` is running with. Panics if called before
 /// [`super::ConvertJob::start`] set them — every job passed to `run` here
@@ -47,32 +64,67 @@ fn settings(job: &ConvertJob) -> &JobSettings {
         .expect("pipeline::run called on a job without settings (not yet started)")
 }
 
-/// Runs `job` to completion: decodes, optionally resamples, encodes, and
-/// tags the output(s). Checks `job.cancel` between packets. Encoding
-/// happens on a scratch file next to the real output; on cancellation, a
-/// decode error, or an encode error the scratch file is deleted and the
-/// real output path is never touched, so nothing partial is ever left
-/// behind at the name the caller asked for.
-pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
+/// Runs `job` to completion: decodes, optionally mixes channels and
+/// resamples, encodes, and tags the output(s). Returns the total size in
+/// bytes of the files it produced. Checks `job.cancel` between packets.
+/// Encoding happens on a scratch file next to the real output; on
+/// cancellation, a decode error, or an encode error the scratch file is
+/// deleted and the real output path is never touched, so nothing partial is
+/// ever left behind at the name the caller asked for.
+pub fn run(job: &ConvertJob) -> Result<u64, ConvertError> {
     std::fs::create_dir_all(&settings(job).out_dir)?;
     match job.kind {
-        JobKind::Convert => {
-            let stem = job
-                .source
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("track");
-            let out_path = unique_out_path(
-                &settings(job).out_dir,
-                stem,
-                settings(job).format.extension(),
-            );
-            transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
-            copy_tags(&job.source, &out_path);
-            Ok(())
+        JobKind::Convert => convert_file(job, &job.source),
+        JobKind::CueSplit if settings(job).split_cue => cue_split(job),
+        JobKind::CueSplit => {
+            // Splitting is off: treat the sheet as a pointer to the one
+            // audio file it describes and convert that whole.
+            let cue_text = std::fs::read_to_string(&job.source)?;
+            let audio_path = cue_audio_path(&job.source, &cue_text)
+                .ok_or_else(|| ConvertError::Cue("no FILE line in CUE sheet".to_owned()))?;
+            convert_file(job, &audio_path)
         }
-        JobKind::CueSplit => cue_split(job),
     }
+}
+
+/// Converts the whole of `source` to one output named by the job's file name
+/// pattern; returns its size.
+fn convert_file(job: &ConvertJob, source: &Path) -> Result<u64, ConvertError> {
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("track");
+    let mut tags = read_source_tags(source);
+    let fields = NameFields::from_tags(tags.as_ref(), stem);
+    let out_path = output_path(settings(job), &fields)?;
+    transcode(job, source, &out_path, None, None, 0, 1000)?;
+    if settings(job).copy_tags
+        && let Some(tags) = tags.as_mut()
+    {
+        keep_front_cover(tags);
+        write_output_tags(&out_path, tags);
+    }
+    Ok(file_len(&out_path))
+}
+
+/// Size of `path` in bytes; 0 if it can't be read.
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |m| m.len())
+}
+
+/// The not-yet-existing output path for a file with `fields`: the job's
+/// pattern expanded under the output folder (its folders created), made
+/// unique, with the format's extension.
+fn output_path(settings: &JobSettings, fields: &NameFields) -> Result<PathBuf, ConvertError> {
+    let mut segments = naming::expand(&settings.name_pattern, fields);
+    let stem = segments
+        .pop()
+        .expect("naming::expand always returns at least one segment");
+    let dir = segments
+        .iter()
+        .fold(settings.out_dir.clone(), |dir, segment| dir.join(segment));
+    std::fs::create_dir_all(&dir)?;
+    Ok(unique_out_path(&dir, &stem, settings.format.extension()))
 }
 
 /// Splits the audio file referenced by a `.cue` sheet (`job.source`) into
@@ -81,17 +133,17 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
 /// [`track_progress_range`] (equal-weight per track), so progress climbs
 /// monotonically across the whole rip instead of resetting to ~0 at every
 /// track boundary — `transcode` alone can't know it's one of several calls
-/// sharing a single job's progress bar.
-fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
+/// sharing a single job's progress bar. Returns the total output size.
+fn cue_split(job: &ConvertJob) -> Result<u64, ConvertError> {
     let cue_text = std::fs::read_to_string(&job.source)?;
     let tracks = cue::parse(&cue_text).map_err(|e| ConvertError::Cue(e.to_string()))?;
-    let file_name = cue::parse_file_name(&cue_text)
+    let audio_path = cue_audio_path(&job.source, &cue_text)
         .ok_or_else(|| ConvertError::Cue("no FILE line in CUE sheet".to_owned()))?;
-    let audio_path = job
-        .source
-        .parent()
-        .map(|dir| dir.join(&file_name))
-        .unwrap_or_else(|| PathBuf::from(&file_name));
+    let audio_stem = audio_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("track")
+        .to_owned();
 
     // Read the whole album's tag once so every track can carry over the
     // release-level fields the CUE sheet itself doesn't encode (album,
@@ -100,17 +152,29 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
     let album_tags = album_tags(&audio_path);
 
     let track_count = tracks.len();
+    job.cue_total.store(
+        u32::try_from(track_count).unwrap_or(u32::MAX),
+        Ordering::Relaxed,
+    );
+    let mut total_bytes = 0;
     for (i, track) in tracks.iter().enumerate() {
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err(ConvertError::Cancelled);
-        }
+        checkpoint(job)?;
+        job.cue_track
+            .store(u32::try_from(i + 1).unwrap_or(u32::MAX), Ordering::Relaxed);
 
-        let stem = format!("{:02} - {}", track.number, sanitize_filename(&track.title));
-        let out_path = unique_out_path(
-            &settings(job).out_dir,
-            &stem,
-            settings(job).format.extension(),
-        );
+        // The track's own fields on top of the release-level ones: they
+        // name the file, and are what gets written with it.
+        let cue_tags = cue_track_tags(track, track_count);
+        let mut named = album_tags.clone().unwrap_or_default();
+        for (key, values) in cue_tags.iter() {
+            named.set(key, values.to_vec());
+        }
+        let mut fields = NameFields::from_tags(Some(&named), &audio_stem);
+        if fields.title.is_empty() {
+            fields.title = format!("Track {:02}", track.number);
+        }
+        let out_path = output_path(settings(job), &fields)?;
+
         let start = track.start.as_secs_f64();
         let end = track.end.map(|d| d.as_secs_f64());
         let (progress_base, progress_span) = track_progress_range(i, track_count);
@@ -124,14 +188,27 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
             progress_span,
         )?;
 
-        let mut tags = album_tags.clone().unwrap_or_default();
-        tags.set_one(keys::TITLE, track.title.as_str());
-        tags.set_one(keys::ARTIST, track.performer.as_str());
-        tags.set_one(keys::TRACKNUMBER, track.number.to_string());
-        tags.set_one(keys::TOTALTRACKS, track_count.to_string());
-        write_output_tags(&out_path, &tags);
+        write_output_tags(
+            &out_path,
+            if settings(job).copy_tags {
+                &named
+            } else {
+                &cue_tags
+            },
+        );
+        total_bytes += file_len(&out_path);
     }
-    Ok(())
+    Ok(total_bytes)
+}
+
+/// The tags a CUE sheet itself provides for `track`.
+fn cue_track_tags(track: &cue::CueTrack, track_count: usize) -> TagSet {
+    let mut tags = TagSet::new();
+    tags.set_one(keys::TITLE, track.title.as_str());
+    tags.set_one(keys::ARTIST, track.performer.as_str());
+    tags.set_one(keys::TRACKNUMBER, track.number.to_string());
+    tags.set_one(keys::TOTALTRACKS, track_count.to_string());
+    tags
 }
 
 /// Computes the `(progress_base, progress_span)` permille slice that CUE
@@ -174,7 +251,10 @@ fn transcode(
     }
 
     let src_rate = source.sample_rate;
-    let channels = source.channels;
+    let src_channels = source.channels;
+    let channels = settings(job).channels.output_channels(src_channels);
+    let mixer = Mixer::new(src_channels, channels);
+    let mut mixed = Vec::new();
     let dst_rate = settings(job).target_rate.unwrap_or(src_rate);
     let mut resampler = (dst_rate != src_rate)
         .then(|| {
@@ -204,17 +284,15 @@ fn transcode(
         end.map(|e| ((e - start.unwrap_or(0.0)).max(0.0) * f64::from(src_rate)).round() as u64);
 
     const CHUNK_FRAMES: usize = 8192;
-    let mut buf = vec![0f32; CHUNK_FRAMES * channels.max(1) as usize];
+    let mut buf = vec![0f32; CHUNK_FRAMES * src_channels.max(1) as usize];
     let mut frames_done: u64 = 0;
 
     loop {
-        if job.cancel.load(Ordering::Relaxed) {
-            return Err(ConvertError::Cancelled);
-        }
+        checkpoint(job)?;
 
         let mut want = buf.len();
         if let Some(max) = max_frames {
-            let remaining = max.saturating_sub(frames_done) as usize * channels.max(1) as usize;
+            let remaining = max.saturating_sub(frames_done) as usize * src_channels.max(1) as usize;
             if remaining == 0 {
                 break;
             }
@@ -225,9 +303,15 @@ fn transcode(
         if n == 0 {
             break;
         }
-        frames_done += (n / channels.max(1) as usize) as u64;
+        frames_done += (n / src_channels.max(1) as usize) as u64;
 
-        let chunk = &buf[..n];
+        let chunk: &[f32] = match &mixer {
+            Some(mixer) => {
+                mixer.process(&buf[..n], &mut mixed);
+                &mixed
+            }
+            None => &buf[..n],
+        };
         match resampler.as_mut() {
             Some(rs) => sink.write(&rs.process(chunk))?,
             None => sink.write(chunk)?,
@@ -258,6 +342,20 @@ fn transcode(
     job.progress
         .store(progress_base + progress_span, Ordering::Relaxed);
     Ok(())
+}
+
+/// Blocks while the job is paused; fails with [`ConvertError::Cancelled`]
+/// as soon as cancellation is requested (also while paused).
+fn checkpoint(job: &ConvertJob) -> Result<(), ConvertError> {
+    loop {
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err(ConvertError::Cancelled);
+        }
+        if !job.pause.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        std::thread::sleep(PAUSE_POLL);
+    }
 }
 
 /// Same-directory scratch path for `out_path`'s encode, suffixed with
@@ -299,22 +397,18 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Copies the source file's full tag set (every field `tagio` reads, so
-/// MBIDs, ReplayGain, credits, … survive) plus its front-cover picture to
-/// `dst`, best-effort — an unreadable source or an unwritable output is
-/// logged, never a hard error, since the encoded output is already valid
-/// without it. Only one picture is carried (the front cover, or the first
-/// embedded picture when none is typed as front), as before.
-fn copy_tags(src: &Path, dst: &Path) {
-    let mut tags = match tagio::read(src) {
-        Ok(file) => file.tags,
+/// The source file's full tag set (every field `tagio` reads, so MBIDs,
+/// ReplayGain, credits, … survive a copy), best-effort: an unreadable source
+/// is logged and yields `None`, never a hard error, since the encoded output
+/// is valid without tags.
+fn read_source_tags(src: &Path) -> Option<TagSet> {
+    match tagio::read(src) {
+        Ok(file) => Some(file.tags),
         Err(e) => {
             tracing::warn!("couldn't read tags from {}: {e}", src.display());
-            return;
+            None
         }
-    };
-    keep_front_cover(&mut tags);
-    write_output_tags(dst, &tags);
+    }
 }
 
 /// Reduces `tags.pictures` to the front cover, falling back to the first
@@ -358,13 +452,7 @@ const TRACK_LEVEL_KEYS: &[&str] = &[
 
 /// Release-level tags of an album-wide source, for CUE-split tracks.
 fn album_tags(src: &Path) -> Option<TagSet> {
-    let mut tags = match tagio::read(src) {
-        Ok(file) => file.tags,
-        Err(e) => {
-            tracing::warn!("couldn't read tags from {}: {e}", src.display());
-            return None;
-        }
-    };
+    let mut tags = read_source_tags(src)?;
     for key in TRACK_LEVEL_KEYS {
         tags.remove(key);
     }
@@ -381,40 +469,6 @@ fn write_output_tags(path: &Path, tags: &TagSet) {
     }
     if let Err(e) = tagio::write(path, tags) {
         tracing::warn!("failed to write tags to {}: {e}", path.display());
-    }
-}
-
-/// Strips characters that are awkward, invalid, or path-traversing in
-/// filenames (path separators, NUL, other control characters); strips a
-/// leading `-` that could be misread as a flag by anything that later
-/// shells out on the name; trims surrounding `.`/whitespace so a name
-/// that's entirely dots can't resolve to `.`/`..` as a path component; and
-/// caps the result's byte length so a pathological tag can't exceed
-/// common filesystem name limits.
-fn sanitize_filename(name: &str) -> String {
-    const MAX_BYTES: usize = 150;
-
-    let mut cleaned = String::new();
-    for c in name.trim().chars() {
-        if c == '\0' || c.is_control() {
-            continue;
-        }
-        let c = if "/\\:*?\"<>|".contains(c) { '_' } else { c };
-        if cleaned.len() + c.len_utf8() > MAX_BYTES {
-            break;
-        }
-        cleaned.push(c);
-    }
-
-    while cleaned.starts_with('-') {
-        cleaned.remove(0);
-    }
-    let cleaned = cleaned.trim_matches('.').trim();
-
-    if cleaned.is_empty() {
-        "track".to_owned()
-    } else {
-        cleaned.to_owned()
     }
 }
 
@@ -812,13 +866,11 @@ mod tests {
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
-        job.start(JobSettings {
-            format: encoder::OutputFormat::Flac,
-            target_rate: None,
-            out_dir: out_dir.clone(),
-            flac_options: encoder::FlacOptions::default(),
-            lossy_options: encoder::LossyOptions::default(),
-        });
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Flac,
+            None,
+            out_dir.clone(),
+        ));
 
         run(&job).expect("conversion job should succeed");
 
@@ -867,13 +919,11 @@ mod tests {
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
-        job.start(JobSettings {
-            format: encoder::OutputFormat::Flac,
-            target_rate: None,
-            out_dir: out_dir.clone(),
-            flac_options: encoder::FlacOptions::default(),
-            lossy_options: encoder::LossyOptions::default(),
-        });
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Flac,
+            None,
+            out_dir.clone(),
+        ));
         run(&job).expect("conversion job should succeed");
 
         let probed =
@@ -920,18 +970,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_filename_blocks_traversal_and_dashes_and_caps_length() {
-        assert_eq!(sanitize_filename(".."), "track");
-        assert_eq!(sanitize_filename("..."), "track");
-        assert!(!sanitize_filename("../../.bashrc").contains('/'));
-        assert!(!sanitize_filename("-rf --no-preserve-root").starts_with('-'));
-        assert_eq!(sanitize_filename("a\0b").find('\0'), None);
-
-        let long = "x".repeat(1000);
-        assert!(sanitize_filename(&long).len() <= 150);
-    }
-
-    #[test]
     fn cancelled_conversion_leaves_no_output_file() {
         let dir =
             std::env::temp_dir().join(format!("aulos-pipeline-cancel-test-{}", std::process::id()));
@@ -941,13 +979,11 @@ mod tests {
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
-        job.start(JobSettings {
-            format: encoder::OutputFormat::Wav16,
-            target_rate: None,
-            out_dir: out_dir.clone(),
-            flac_options: encoder::FlacOptions::default(),
-            lossy_options: encoder::LossyOptions::default(),
-        });
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Wav16,
+            None,
+            out_dir.clone(),
+        ));
         job.cancel();
         let result = run(&job);
         assert!(
@@ -981,13 +1017,11 @@ mod tests {
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
-        job.start(JobSettings {
-            format: encoder::OutputFormat::Flac,
-            target_rate: Some(48_000),
-            out_dir: out_dir.clone(),
-            flac_options: encoder::FlacOptions::default(),
-            lossy_options: encoder::LossyOptions::default(),
-        });
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Flac,
+            Some(48_000),
+            out_dir.clone(),
+        ));
         run(&job).expect("resampled conversion job should succeed");
 
         let out_path = out_dir.join("source.flac");
@@ -998,6 +1032,229 @@ mod tests {
             probed.properties.duration
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("aulos-pipeline-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn run_names_the_output_by_pattern_and_reports_its_size() {
+        let dir = temp_dir("pattern");
+        let source = dir.join("source.flac");
+        write_test_flac(&source);
+        tag_source(
+            &source,
+            &[
+                (keys::TITLE, "Salt Glass"),
+                (keys::ARTIST, "Mira Okafor"),
+                (keys::ALBUM, "Low Tide Tapes"),
+                (keys::DATE, "2024-03-01"),
+                (keys::TRACKNUMBER, "6"),
+            ],
+            None,
+        );
+
+        let out_dir = dir.join("out");
+        let mut settings =
+            JobSettings::for_test(encoder::OutputFormat::Flac, None, out_dir.clone());
+        settings.name_pattern = "{artist}/{year} - {album}/{track:02} {title}".to_owned();
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(settings);
+
+        let bytes = run(&job).expect("conversion should succeed");
+
+        let out_path = out_dir
+            .join("Mira Okafor")
+            .join("2024 - Low Tide Tapes")
+            .join("06 Salt Glass.flac");
+        assert!(out_path.exists(), "expected {out_path:?}");
+        assert_eq!(bytes, std::fs::metadata(&out_path).unwrap().len());
+        assert!(bytes > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_falls_back_to_the_source_name_without_tags() {
+        let dir = temp_dir("untagged");
+        let source = dir.join("My Song.wav");
+        write_test_wav(&source);
+        let out_dir = dir.join("out");
+        let mut settings =
+            JobSettings::for_test(encoder::OutputFormat::Wav16, None, out_dir.clone());
+        settings.name_pattern = naming::DEFAULT_PATTERN.to_owned();
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(settings);
+        run(&job).expect("conversion should succeed");
+        assert_eq!(file_names(&out_dir), ["My Song.wav"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_without_copy_tags_leaves_the_output_untagged() {
+        let dir = temp_dir("no-tags");
+        let source = dir.join("source.flac");
+        write_test_flac(&source);
+        tag_source(&source, &[(keys::TITLE, "Should Not Carry Over")], None);
+
+        let out_dir = dir.join("out");
+        let mut settings =
+            JobSettings::for_test(encoder::OutputFormat::Flac, None, out_dir.clone());
+        settings.copy_tags = false;
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(settings);
+        run(&job).expect("conversion should succeed");
+
+        let probed = track_tags::probe(&out_dir.join("source.flac"), false).unwrap();
+        assert_eq!(probed.tags.title, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_upmixes_mono_to_stereo_and_downmixes_back() {
+        let dir = temp_dir("channels");
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+
+        for (mode, expected) in [
+            (super::super::ChannelMode::Stereo, 2),
+            (super::super::ChannelMode::Mono, 1),
+            (super::super::ChannelMode::Source, 1),
+        ] {
+            let out_dir = dir.join(format!("out-{expected}-{mode:?}"));
+            let mut settings =
+                JobSettings::for_test(encoder::OutputFormat::Wav16, None, out_dir.clone());
+            settings.channels = mode;
+            let mut job = ConvertJob::new(1, source.clone(), JobKind::Convert);
+            job.start(settings);
+            run(&job).expect("conversion should succeed");
+
+            let reader = hound::WavReader::open(out_dir.join("source.wav")).unwrap();
+            assert_eq!(reader.spec().channels, expected, "{mode:?}");
+            assert_eq!(reader.duration(), 44_100, "{mode:?} keeps the length");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn write_cue_fixture(dir: &Path) -> PathBuf {
+        write_test_wav(&dir.join("album.wav"));
+        let cue_path = dir.join("album.cue");
+        std::fs::write(
+            &cue_path,
+            "PERFORMER \"Mira\"\nFILE \"album.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:50\n",
+        )
+        .unwrap();
+        cue_path
+    }
+
+    #[test]
+    fn cue_sheet_is_split_into_pattern_named_tracks() {
+        let dir = temp_dir("cue-split");
+        let cue_path = write_cue_fixture(&dir);
+        let out_dir = dir.join("out");
+        let mut settings =
+            JobSettings::for_test(encoder::OutputFormat::Wav16, None, out_dir.clone());
+        settings.name_pattern = naming::DEFAULT_PATTERN.to_owned();
+        let mut job = ConvertJob::new(1, cue_path, JobKind::CueSplit);
+        job.start(settings);
+
+        let bytes = run(&job).expect("cue split should succeed");
+
+        assert_eq!(file_names(&out_dir), ["01 One.wav", "02 Two.wav"]);
+        let sizes: u64 = file_names(&out_dir)
+            .iter()
+            .map(|n| std::fs::metadata(out_dir.join(n)).unwrap().len())
+            .sum();
+        assert_eq!(bytes, sizes);
+        assert_eq!(job.cue_total.load(Ordering::Relaxed), 2);
+        assert_eq!(job.cue_track.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cue_sheet_converts_whole_when_splitting_is_off() {
+        let dir = temp_dir("cue-whole");
+        let cue_path = write_cue_fixture(&dir);
+        let out_dir = dir.join("out");
+        let mut settings =
+            JobSettings::for_test(encoder::OutputFormat::Wav16, None, out_dir.clone());
+        settings.split_cue = false;
+        let mut job = ConvertJob::new(1, cue_path, JobKind::CueSplit);
+        job.start(settings);
+
+        run(&job).expect("whole conversion should succeed");
+
+        assert_eq!(file_names(&out_dir), ["album.wav"]);
+        let reader = hound::WavReader::open(out_dir.join("album.wav")).unwrap();
+        assert_eq!(reader.duration(), 44_100);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn paused_job_holds_until_resumed() {
+        let dir = temp_dir("pause");
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+        let out_dir = dir.join("out");
+
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Wav16,
+            None,
+            out_dir.clone(),
+        ));
+        job.pause.store(true, Ordering::Relaxed);
+        let worker_job = job.clone();
+        let worker = std::thread::spawn(move || run(&worker_job));
+
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        assert!(!worker.is_finished(), "a paused job must not finish");
+        assert_eq!(job.progress_permille(), 0);
+
+        job.pause.store(false, Ordering::Relaxed);
+        worker.join().unwrap().expect("resumed job should finish");
+        assert_eq!(job.progress_permille(), 1000);
+        assert_eq!(file_names(&out_dir), ["source.wav"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelling_a_paused_job_stops_it_without_output() {
+        let dir = temp_dir("pause-cancel");
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+        let out_dir = dir.join("out");
+
+        let mut job = ConvertJob::new(1, source, JobKind::Convert);
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Wav16,
+            None,
+            out_dir.clone(),
+        ));
+        job.pause.store(true, Ordering::Relaxed);
+        let worker_job = job.clone();
+        let worker = std::thread::spawn(move || run(&worker_job));
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        job.cancel();
+        let result = worker.join().unwrap();
+        assert!(matches!(result, Err(ConvertError::Cancelled)), "{result:?}");
+        assert!(file_names(&out_dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1021,13 +1278,11 @@ mod tests {
 
         let out_dir = dir.join("out");
         let mut job = ConvertJob::new(1, source, JobKind::Convert);
-        job.start(JobSettings {
-            format: encoder::OutputFormat::Mp3,
-            target_rate: None,
-            out_dir: out_dir.clone(),
-            flac_options: encoder::FlacOptions::default(),
-            lossy_options: encoder::LossyOptions::default(),
-        });
+        job.start(JobSettings::for_test(
+            encoder::OutputFormat::Mp3,
+            None,
+            out_dir.clone(),
+        ));
 
         run(&job).expect("mp3 conversion job should succeed");
 

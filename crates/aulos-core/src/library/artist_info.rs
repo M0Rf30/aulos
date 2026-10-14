@@ -19,7 +19,7 @@
 //!   MusicBrainz is a reasonable alternative but doesn't carry prose
 //!   bios; Last.fm has good bios but requires a registered API key, so
 //!   it's deliberately not required here (see the module doc on
-//!   `crate::config::Config::fetch_artist_info`).
+//!   `crate::config::Config::fetch_artist_bio`).
 //! - **Caching**: a flat JSON index (`artist_info/index.json` under the
 //!   data dir) of bio text + a "do we have a cached image" flag, TTL'd
 //!   like `crate::autoeq::manager`'s disk cache; images themselves live
@@ -135,6 +135,26 @@ impl ArtistInfoOutcome {
             bio: None,
             image: None,
         }
+    }
+}
+
+/// Which parts of an artist's online info the user allows fetching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtistInfoWanted {
+    pub bio: bool,
+    pub photo: bool,
+}
+
+impl ArtistInfoWanted {
+    /// Everything (what a Subsonic server's own info always is).
+    pub const ALL: Self = Self {
+        bio: true,
+        photo: true,
+    };
+
+    /// Whether anything is wanted at all.
+    pub fn any(self) -> bool {
+        self.bio || self.photo
     }
 }
 
@@ -376,38 +396,58 @@ fn download_image(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u
 /// (Deezer for the image, Wikipedia for the bio), consulting/populating
 /// `store` first. Blocking — call from `tokio::task::spawn_blocking`,
 /// never on the UI thread or an async task's own worker thread.
-pub fn resolve_via_agents(store: &ArtistInfoStore, name: &str, now: i64) -> ArtistInfoOutcome {
+///
+/// Only the parts in `wanted` are returned and fetched. A lookup that
+/// skipped a part is not cached, so allowing it later fetches it.
+pub fn resolve_via_agents(
+    store: &ArtistInfoStore,
+    name: &str,
+    now: i64,
+    wanted: ArtistInfoWanted,
+) -> ArtistInfoOutcome {
     let key = agents_cache_key(name);
 
     if let Some(entry) = store.get_fresh(&key, now) {
-        let image = entry.image_cached.then(|| store.read_image(&key)).flatten();
+        let image = (wanted.photo && entry.image_cached)
+            .then(|| store.read_image(&key))
+            .flatten();
         return ArtistInfoOutcome {
             name: name.to_string(),
-            bio: entry.bio,
+            bio: entry.bio.filter(|_| wanted.bio),
             image,
         };
     }
 
     let client = http_client();
-    let image_url = fetch_deezer_image_url(client, name);
-    let bio = fetch_wikipedia_bio(client, name);
+    let image_url = wanted
+        .photo
+        .then(|| fetch_deezer_image_url(client, name))
+        .flatten();
+    let bio = wanted
+        .bio
+        .then(|| fetch_wikipedia_bio(client, name))
+        .flatten();
     let raw_image = image_url.and_then(|url| download_image(client, &url));
 
     let image = raw_image.as_deref().and_then(|bytes| {
-        store.save_image(&key, bytes);
+        if wanted == ArtistInfoWanted::ALL {
+            store.save_image(&key, bytes);
+        }
         crate::library::CoverArt::decode_thumbnail(bytes, 640)
     });
 
-    let negative = bio.is_none() && image.is_none();
-    store.put(
-        &key,
-        ArtistInfoEntry {
-            bio: bio.clone(),
-            image_cached: image.is_some(),
-            fetched_at: now,
-            negative,
-        },
-    );
+    if wanted == ArtistInfoWanted::ALL {
+        let negative = bio.is_none() && image.is_none();
+        store.put(
+            &key,
+            ArtistInfoEntry {
+                bio: bio.clone(),
+                image_cached: image.is_some(),
+                fetched_at: now,
+                negative,
+            },
+        );
+    }
 
     ArtistInfoOutcome {
         name: name.to_string(),
@@ -476,6 +516,37 @@ mod tests {
             fetched_at,
             negative,
         }
+    }
+
+    #[test]
+    fn a_fresh_cache_hit_only_returns_the_wanted_parts() {
+        let dir = std::env::temp_dir().join(format!("aulos-artist-info-{}", std::process::id()));
+        let store = ArtistInfoStore::open(&dir);
+        store.put(
+            &agents_cache_key("Band"),
+            ArtistInfoEntry {
+                bio: Some("bio".into()),
+                image_cached: false,
+                fetched_at: 1000,
+                negative: false,
+            },
+        );
+        let bio_only = ArtistInfoWanted {
+            bio: true,
+            photo: false,
+        };
+        let hit = resolve_via_agents(&store, "Band", 1001, bio_only);
+        assert_eq!(hit.bio.as_deref(), Some("bio"));
+        let photo_only = ArtistInfoWanted {
+            bio: false,
+            photo: true,
+        };
+        assert!(
+            resolve_via_agents(&store, "Band", 1001, photo_only)
+                .bio
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

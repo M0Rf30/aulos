@@ -71,6 +71,10 @@ pub struct AudioTags {
     /// `true` when the file's compilation flag is set (ID3 `TCMP`, MP4
     /// `cpil`, Vorbis `COMPILATION=1`).
     pub compilation: bool,
+    /// Every `StandardTag::MusicBrainzReleaseType` value (e.g. `"album"`,
+    /// `"live"`), lowercased and joined with `"; "`; empty when untagged.
+    /// See [`crate::library::release_kind::ReleaseKind::from_tag`].
+    pub release_type: String,
     pub pictures: Vec<Picture>,
 }
 
@@ -81,6 +85,8 @@ pub struct AudioTags {
 pub struct AudioProperties {
     pub duration: Duration,
     pub sample_rate: u32,
+    /// Bits per sample of a lossless stream; `0` for lossy or unknown.
+    pub bit_depth: u32,
     /// Average bitrate of the audio payload (file size minus every tag and
     /// metadata block, see [`super::tech_info`]) over duration, in kbps —
     /// symphonia exposes no bitrate field directly. Computed by the same
@@ -122,16 +128,17 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
         )
         .ok()?;
 
-    let (duration, sample_rate, track_id) = {
+    let (duration, sample_rate, bit_depth, track_id) = {
         let track = reader.default_track(TrackType::Audio);
         let audio = track.and_then(|t| match t.codec_params.as_ref() {
             Some(CodecParameters::Audio(a)) => Some(a),
             _ => None,
         });
         let sample_rate = audio.and_then(|a| a.sample_rate);
+        let bit_depth = audio.and_then(super::tech_info::lossless_bit_depth);
         let duration = track_duration(track, reader.media_info(), reader.format_info().format);
         let track_id = track.map(|t| u64::from(t.id));
-        (duration, sample_rate, track_id)
+        (duration, sample_rate, bit_depth, track_id)
     };
 
     // The fork's WAV demuxer reads `id3 ` and `LIST INFO` chunks wherever they sit (including
@@ -152,6 +159,7 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
         properties: AudioProperties {
             duration: duration.unwrap_or_default(),
             sample_rate: sample_rate.unwrap_or(0),
+            bit_depth: bit_depth.unwrap_or(0),
             bitrate: bitrate.unwrap_or(0),
         },
     })
@@ -355,6 +363,16 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
             }
             StandardTag::RecordingYear(y) => {
                 recording_year.get_or_insert(*y);
+                continue;
+            }
+            StandardTag::MusicBrainzReleaseType(v) => {
+                let v = v.trim().to_lowercase();
+                if !v.is_empty() && !out.release_type.split("; ").any(|t| t == v) {
+                    if !out.release_type.is_empty() {
+                        out.release_type.push_str("; ");
+                    }
+                    out.release_type.push_str(&v);
+                }
                 continue;
             }
             StandardTag::CompilationFlag(flag) => {

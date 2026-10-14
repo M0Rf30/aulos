@@ -28,12 +28,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             now_bar::show(app, ui);
         });
 
+    // 180ms collapse; the rail layout takes over at the midpoint.
+    let collapse = theme::motion::animate(
+        ui.ctx(),
+        egui::Id::new("sidebar_collapse"),
+        app.narrow || app.sidebar_collapsed,
+        theme::motion::PANEL,
+    );
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::new("sidebar_rail"), collapse > 0.5));
     Panel::left("sidebar")
-        .exact_size(if app.narrow || app.sidebar_collapsed {
-            size::RAIL
-        } else {
-            size::SIDEBAR
-        })
+        .exact_size(size::SIDEBAR + (size::RAIL - size::SIDEBAR) * collapse)
         .resizable(false)
         .show_separator_line(false)
         .frame(Frame::new().fill(pal.bg_sidebar).inner_margin(Margin::ZERO))

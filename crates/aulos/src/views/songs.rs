@@ -189,11 +189,10 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                         if let Some(n) = out.set_rating {
                             intents.push(Intent::Rate(real, n));
                         }
-                        if let Some(action) = menus::track_menu(
-                            &out.response,
-                            track,
-                            &app.session.playlists.playlists,
-                        ) {
+                        let playlists = &app.session.playlists.playlists;
+                        if let Some(action) = menus::track_menu(&out.response, track, playlists)
+                            .or_else(|| menus::track_menu_click(&out.more, track, playlists))
+                        {
                             intents.push(Intent::Menu(Box::new(action)));
                         }
                     }

@@ -87,6 +87,8 @@ struct Spec<'a> {
     uris: &'a dyn Fn() -> Vec<String>,
     play: &'a dyn Fn(Play) -> MenuAction,
     tail: &'a dyn Fn(&mut Ui, Palette) -> Option<MenuAction>,
+    /// Opens on a primary click (a "…" button) instead of a right click.
+    click: bool,
 }
 
 pub fn track_menu(
@@ -94,9 +96,28 @@ pub fn track_menu(
     track: &Track,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
+    track_menu_with(response, track, playlists, false)
+}
+
+/// track_menu opened by a click on `response` (the "…" trigger).
+pub fn track_menu_click(
+    response: &Response,
+    track: &Track,
+    playlists: &[Playlist],
+) -> Option<MenuAction> {
+    track_menu_with(response, track, playlists, true)
+}
+
+fn track_menu_with(
+    response: &Response,
+    track: &Track,
+    playlists: &[Playlist],
+    click: bool,
+) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: Some(playlists),
             uris: &|| vec![track.source_uri.clone()],
             play: &|play: Play| match play {
@@ -162,9 +183,28 @@ pub fn album_menu(
     album: &Album,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
+    album_menu_with(response, album, playlists, false)
+}
+
+/// album_menu opened by a click on `response` (the "…" trigger).
+pub fn album_menu_click(
+    response: &Response,
+    album: &Album,
+    playlists: &[Playlist],
+) -> Option<MenuAction> {
+    album_menu_with(response, album, playlists, true)
+}
+
+fn album_menu_with(
+    response: &Response,
+    album: &Album,
+    playlists: &[Playlist],
+    click: bool,
+) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: Some(playlists),
             uris: &|| album.tracks.iter().map(|t| t.source_uri.clone()).collect(),
             play: &|play: Play| match play {
@@ -210,9 +250,19 @@ pub fn album_menu(
 }
 
 pub fn artist_menu(response: &Response, name: &str) -> Option<MenuAction> {
+    artist_menu_with(response, name, false)
+}
+
+/// `artist_menu` opened by a click on `response` (the "…" trigger).
+pub fn artist_menu_click(response: &Response, name: &str) -> Option<MenuAction> {
+    artist_menu_with(response, name, true)
+}
+
+fn artist_menu_with(response: &Response, name: &str, click: bool) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: None,
             uris: &|| Vec::new(),
             play: &|play: Play| match play {
@@ -300,7 +350,12 @@ fn show_menu(response: &Response, spec: Spec) -> Option<MenuAction> {
     // Submenu rect from the previous frame, so the pointer can cross into it.
     let last_sub: Option<Rect> = ctx.data(|d| d.get_temp::<Option<Rect>>(sub_key)).flatten();
 
-    Popup::context_menu(response)
+    let popup = if spec.click {
+        Popup::menu(response)
+    } else {
+        Popup::context_menu(response)
+    };
+    popup
         .frame(Frame::NONE)
         .show(|ui| {
             let mut out = None;

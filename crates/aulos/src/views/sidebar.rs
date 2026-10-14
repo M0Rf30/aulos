@@ -199,7 +199,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let current = app.route.root();
     let converter = app.session.config.config.experimental_converter;
 
-    if app.narrow || app.sidebar_collapsed {
+    let rail_mode: bool = ui
+        .ctx()
+        .data(|d| d.get_temp(egui::Id::new("sidebar_rail")))
+        .unwrap_or(app.narrow || app.sidebar_collapsed);
+    if rail_mode {
         rail(app, ui, &pal);
         return;
     }
@@ -479,8 +483,11 @@ fn list_row(ui: &mut Ui, pal: &Palette, icon: &str, label: &str, selected: bool)
 
 /// Provider status dots: one per configured provider (active one green).
 fn status_dots(app: &App, ui: &Ui, pal: &Palette, rect: Rect, corner: bool) {
-    let providers = &app.session.providers;
-    let n = providers.provider_list.len().min(3);
+    let mut statuses = app.session.providers.statuses();
+    // Three dots at most; failing providers win a slot over healthy ones.
+    statuses.sort_by_key(|s| s.error.is_none());
+    statuses.truncate(3);
+    let n = statuses.len();
     let mut x = if corner {
         rect.right() - 8.0 - 3.5
     } else {
@@ -491,14 +498,33 @@ fn status_dots(app: &App, ui: &Ui, pal: &Palette, rect: Rect, corner: bool) {
     } else {
         rect.center().y
     };
-    for i in (0..n).rev() {
-        let active = providers.active_index == Some(i);
-        let color = if active { pal.ok } else { pal.text_5 };
+    let right = x + 3.5;
+    for status in statuses.iter().rev() {
+        let color = if status.error.is_some() {
+            pal.danger
+        } else if status.active {
+            pal.ok
+        } else {
+            pal.text_5
+        };
         if corner {
             ui.painter().circle_filled(pos2(x, y), 5.5, pal.bg_sidebar);
         }
         ui.painter().circle_filled(pos2(x, y), 3.5, color);
         x -= 11.0;
+    }
+    if n > 0 {
+        let strip = Rect::from_min_max(pos2(x + 11.0 - 3.5, y - 6.0), pos2(right, y + 6.0));
+        let tip = statuses
+            .iter()
+            .map(|s| match &s.error {
+                Some(e) => format!("{}: {e}", s.name),
+                None => s.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.interact(strip, ui.id().with("provider-dots"), Sense::hover())
+            .on_hover_text(tip);
     }
 }
 

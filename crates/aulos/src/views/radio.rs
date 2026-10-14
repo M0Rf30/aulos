@@ -9,7 +9,7 @@ use crate::widgets::{
 use aulos_core::online::UrlError;
 use aulos_core::online::radio::{
     DISCOVER_LIMIT, DiscoverPreset, QUICK_TAGS, SortOrder, StationQuery, StationSearchResult,
-    tag_list,
+    format_label, tag_list,
 };
 use aulos_core::online::store::RadioStation;
 use aulos_core::session::RadioState;
@@ -500,7 +500,7 @@ fn saved_row<'a>(s: &'a RadioStation, playing_key: Option<&str>) -> RowData<'a> 
     RowData {
         name: &s.name,
         meta,
-        format: String::new(),
+        format: format_label(&s.codec, s.bitrate_kbps),
         icon_url: &s.favicon_url,
         current: playing_key == Some(s.stream_url.as_str()),
         saved: true,
@@ -590,17 +590,10 @@ fn result_row<'a>(
     if r.votes > 0 {
         parts.push(format!("{} votes", compact(r.votes)));
     }
-    let mut format = r.codec.to_uppercase();
-    if r.bitrate > 0 {
-        if !format.is_empty() {
-            format.push(' ');
-        }
-        format.push_str(&r.bitrate.to_string());
-    }
     RowData {
         name: &r.name,
         meta: parts.join(" · "),
-        format,
+        format: format_label(&r.codec, r.bitrate),
         icon_url: &r.favicon,
         current: playing_key == Some(r.url.as_str()),
         saved: saved.is_some(),

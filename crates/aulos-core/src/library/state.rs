@@ -11,12 +11,16 @@
 //! are *not* here; a UI keeps those next to a [`LibraryState`] and drives
 //! them from the same events.
 
+use super::album_sort::{sort_albums, sort_artists, sort_genres};
 use super::compilations::is_various_artists;
 use super::covers::CoverStore;
+use super::scan_progress::ScanProgress;
 use super::search::{SearchIndex, is_latest_generation};
+use super::top_tracks::ArtistTop;
 use super::{Album, Artist, Playlist, Track};
 use crate::config::Config;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Column the Songs list is sorted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +179,10 @@ pub struct LibraryState {
     pub covers: CoverStore,
     /// Whether a library scan/reload is in flight.
     pub scanning: bool,
+    /// The ranked top tracks of the artist page last loaded.
+    pub artist_top: Option<ArtistTop>,
+    /// How far the running scan is; shared with the scanning thread.
+    pub scan_progress: Arc<ScanProgress>,
     /// [`Self::generation`] the UI's folder tree was last built for.
     pub folder_tree_gen: Option<u64>,
     /// Whether any configured music dir exists (cached; avoids `stat` per frame).
@@ -278,6 +286,7 @@ impl LibraryState {
     pub fn replace_loaded(&mut self, tracks: Vec<Track>, albums: Vec<Album>, config: &Config) {
         self.tracks = tracks;
         self.albums = albums;
+        sort_albums(&mut self.albums, config.albums_sort);
         self.rebuild_artists(config);
     }
 
@@ -301,8 +310,7 @@ impl LibraryState {
         };
 
         self.tracks.sort_by(|a, b| a.title.cmp(&b.title));
-        self.albums.sort_by(|a, b| a.name.cmp(&b.name));
-        self.artists.sort_by(|a, b| a.name.cmp(&b.name));
+        self.sort_browse(config);
         self.generation += 1;
         swapped
     }
@@ -313,6 +321,7 @@ impl LibraryState {
         self.tracks.clear();
         self.albums.clear();
         self.artists.clear();
+        self.artist_top = None;
     }
 
     /// Incrementally merge new albums into `artists`, splitting each
@@ -370,8 +379,27 @@ impl LibraryState {
         self.artists.clear();
         let albums = std::mem::take(&mut self.albums);
         self.merge_artists_from_batch(&albums, config);
-        self.artists.sort_by(|a, b| a.name.cmp(&b.name));
+        sort_artists(&mut self.artists, config.artists_sort);
         self.albums = albums;
+    }
+
+    /// Order the albums, artists and genres as the configured sort orders
+    /// say. Callers that change the lists' order after the fact bump the
+    /// generation and refresh the search results themselves.
+    pub fn sort_browse(&mut self, config: &Config) {
+        sort_albums(&mut self.albums, config.albums_sort);
+        sort_artists(&mut self.artists, config.artists_sort);
+        for artist in &mut self.artists {
+            sort_albums(&mut artist.albums, config.albums_sort);
+        }
+        sort_genres(&mut self.genres, &self.tracks, config.genres_sort);
+    }
+
+    /// [`Self::sort_browse`] after a sort order changed: also invalidates
+    /// everything derived from the lists' order.
+    pub fn resort(&mut self, config: &Config) {
+        self.sort_browse(config);
+        self.generation += 1;
     }
 
     pub fn sort_tracks(&mut self, field: SortField) {

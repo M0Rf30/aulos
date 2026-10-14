@@ -54,7 +54,7 @@ mpd_client.workspace = true
 opensubsonic.workspace = true
 
 # Database for music library
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 
 # Lyrics fetching and AutoEQ profile fetching
 reqwest.workspace = true

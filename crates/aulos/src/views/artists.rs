@@ -10,6 +10,7 @@ use crate::widgets::{
 use aulos_core::config::ViewMode;
 use aulos_core::format::{format_duration, format_duration_coarse};
 use aulos_core::library::display::bio_preview;
+use aulos_core::library::scan_progress::ScanSnapshot;
 use aulos_core::library::{Artist, Track};
 use aulos_core::provider::ProviderType;
 use egui::{
@@ -44,12 +45,12 @@ pub struct State {
     selected: Option<i64>,
 }
 
-/// The cached "Top tracks" block and summary of the open artist.
+/// The cached header summary of the open artist. The ranked "Top tracks"
+/// themselves live in the session (`library.artist_top`), loaded from the
+/// play history when the artist or the library changes.
 struct TopTracks {
     name: String,
     epoch: u64,
-    title: &'static str,
-    tracks: Vec<Track>,
     genres: String,
 }
 
@@ -129,9 +130,29 @@ pub(crate) fn vertical_gradient(painter: &Painter, rect: Rect, top: Color32, bot
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// The "Scanning…" strip of the loading state (indeterminate: the scanner
-/// reports no totals).
-pub(crate) fn scanning_banner(ui: &mut Ui, pal: &Palette, text: &str) {
+/// `1204` → `"1,204"`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The "Scanning ~/Music" strip of the loading state: a determinate bar
+/// with a `done / total` counter once the scan has counted its files,
+/// an indeterminate sweep before that (and for loads that report no
+/// progress, which show `idle_text` instead of a folder).
+pub(crate) fn scanning_banner(
+    ui: &mut Ui,
+    pal: &Palette,
+    progress: &ScanSnapshot,
+    idle_text: &str,
+) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, CornerRadius::same(8), pal.surface_1);
@@ -149,38 +170,83 @@ pub(crate) fn scanning_banner(ui: &mut Ui, pal: &Palette, text: &str) {
         pal.reed,
         false,
     );
-    let text_w = paint_text(
-        &painter,
-        Rect::from_min_max(
-            pos2(rect.left() + 40.0, rect.top()),
-            pos2(rect.right() - 12.0, rect.bottom()),
-        ),
-        Align::Min,
-        text,
-        theme::regular(13.0),
-        pal.text_1,
-    );
-    let bar_left = rect.left() + 40.0 + text_w + 12.0;
-    let bar_right = rect.right() - 12.0;
+    let mut left = rect.left() + 40.0;
+    let right = rect.right() - 12.0;
+    let row = |from: f32| Rect::from_min_max(pos2(from, rect.top()), pos2(right, rect.bottom()));
+    if progress.root.is_empty() {
+        left += paint_text(
+            &painter,
+            row(left),
+            Align::Min,
+            idle_text,
+            theme::regular(13.0),
+            pal.text_1,
+        );
+    } else {
+        left += paint_text(
+            &painter,
+            row(left),
+            Align::Min,
+            "Scanning ",
+            theme::regular(13.0),
+            pal.text_1,
+        );
+        left += paint_text(
+            &painter,
+            row(left),
+            Align::Min,
+            &progress.root,
+            theme::mono(12.0),
+            pal.text_1,
+        );
+    }
+    let fraction = progress.fraction();
+    let mut bar_right = right;
+    if fraction.is_some() {
+        let counter = format!(
+            "{} / {}",
+            thousands(progress.done),
+            thousands(progress.total)
+        );
+        let w = text_width(ui, &counter, theme::mono(12.0));
+        paint_text(
+            &painter,
+            Rect::from_min_max(pos2(right - w, rect.top()), pos2(right, rect.bottom())),
+            Align::Min,
+            &counter,
+            theme::mono(12.0),
+            pal.text_2,
+        );
+        bar_right = right - w - 12.0;
+    }
+    let bar_left = left + 12.0;
     if bar_right - bar_left > 24.0 {
         let bar = Rect::from_min_max(
             pos2(bar_left, rect.center().y - 2.0),
             pos2(bar_right, rect.center().y + 2.0),
         );
         painter.rect_filled(bar, CornerRadius::same(2), pal.track);
-        let phase = (ui.input(|i| i.time) * 0.8).fract() as f32;
-        let seg = bar.width() * 0.25;
-        let x0 = bar.left() + (bar.width() + seg) * phase - seg;
-        let seg_rect = Rect::from_min_max(
-            pos2(x0.max(bar.left()), bar.top()),
-            pos2((x0 + seg).min(bar.right()), bar.bottom()),
-        );
-        if seg_rect.width() > 0.0 {
-            painter.rect_filled(seg_rect, CornerRadius::same(2), pal.reed);
+        if let Some(fraction) = fraction {
+            painter.rect_filled(
+                Rect::from_min_size(bar.min, vec2(bar.width() * fraction, bar.height())),
+                CornerRadius::same(2),
+                pal.reed,
+            );
+        } else {
+            let phase = (ui.input(|i| i.time) * 0.8).fract() as f32;
+            let seg = bar.width() * 0.25;
+            let x0 = bar.left() + (bar.width() + seg) * phase - seg;
+            let seg_rect = Rect::from_min_max(
+                pos2(x0.max(bar.left()), bar.top()),
+                pos2((x0 + seg).min(bar.right()), bar.bottom()),
+            );
+            if seg_rect.width() > 0.0 {
+                painter.rect_filled(seg_rect, CornerRadius::same(2), pal.reed);
+            }
         }
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(33));
     }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 /// What a cover track row shows.
@@ -322,19 +388,45 @@ pub(crate) fn cover_track_row(
         pal.text_2,
     );
 
-    let action = menus::track_menu(&resp, track, &app.session.playlists.playlists);
+    let more_rect = Rect::from_center_size(pos2(dur.left() - 18.0, cy), vec2(24.0, 24.0));
+    let more = ui.interact(more_rect, resp.id.with("more"), Sense::click());
+    if resp.hovered() || more.hovered() || more.has_focus() {
+        if more.hovered() {
+            painter.rect_filled(more_rect, CornerRadius::same(255), pal.text.alpha(0.1));
+        }
+        paint_icon(
+            &painter,
+            more_rect.center(),
+            regular::DOTS_THREE,
+            16.0,
+            if more.hovered() { pal.text } else { pal.text_3 },
+            false,
+        );
+    }
+    let playlists = &app.session.playlists.playlists;
+    let action = menus::track_menu(&resp, track, playlists)
+        .or_else(|| menus::track_menu_click(&more, track, playlists));
     (resp, action)
 }
 
-/// Whether artist photos / biographies can be fetched for the active source.
-fn online_info_enabled(app: &App) -> bool {
-    app.session.config.config.fetch_artist_info
-        || app
-            .session
-            .providers
-            .registry
-            .active_shared()
-            .is_some_and(|p| p.provider_type() == ProviderType::Subsonic)
+/// Whether the active source is a Subsonic server, which supplies artist
+/// info itself.
+fn server_info(app: &App) -> bool {
+    app.session
+        .providers
+        .registry
+        .active_shared()
+        .is_some_and(|p| p.provider_type() == ProviderType::Subsonic)
+}
+
+/// Whether artist photos can be fetched for the active source.
+fn photos_enabled(app: &App) -> bool {
+    app.session.config.config.fetch_artist_photos || server_info(app)
+}
+
+/// Whether artist biographies can be fetched for the active source.
+fn bio_enabled(app: &App) -> bool {
+    app.session.config.config.fetch_artist_bio || server_info(app)
 }
 
 // -- browse (grid / list) ---------------------------------------------------------
@@ -404,7 +496,7 @@ fn browse(app: &mut App, ui: &mut Ui) {
         let count = rows.map_or(artists.len(), <[usize]>::len);
         let split = a.session.config.config.split_artist_tags;
         let favourites_only = a.views.artists.favourites_only;
-        let online = online_info_enabled(a);
+        let online = photos_enabled(a);
 
         egui::ScrollArea::vertical()
             .id_salt("artists_scroll")
@@ -431,7 +523,7 @@ fn browse(app: &mut App, ui: &mut Ui) {
                     ui.add_space(16.0);
 
                     if lib.scanning && lib.artists.is_empty() {
-                        scanning_banner(ui, &pal, "Scanning your library…");
+                        scanning_banner(ui, &pal, &lib.scan_progress.snapshot(), "Scanning your library…");
                         ui.add_space(16.0);
                         skeleton_grid(ui);
                     } else if count == 0 {
@@ -757,7 +849,8 @@ struct DetailOut {
     action: Option<MenuAction>,
 }
 
-/// (Re)builds the top-tracks block when the artist or the library changed.
+/// (Re)builds the artist's genre summary and asks the session to rank the
+/// "Top tracks" by play count when the artist or the library changed.
 fn refresh_top(app: &mut App, idx: usize) {
     let epoch = app.session.library.generation();
     let artist = &app.session.library.artists[idx];
@@ -771,20 +864,6 @@ fn refresh_top(app: &mut App, idx: usize) {
         return;
     }
     let all = || artist.albums.iter().flat_map(|album| album.tracks.iter());
-    let mut ranked: Vec<&Track> = all()
-        .filter(|t| t.rating.is_some() || t.is_favorite)
-        .collect();
-    let (title, tracks): (&'static str, Vec<Track>) = if ranked.is_empty() {
-        ("Top tracks", all().take(5).cloned().collect())
-    } else {
-        ranked.sort_by(|a, b| {
-            b.rating
-                .unwrap_or(0)
-                .cmp(&a.rating.unwrap_or(0))
-                .then(b.is_favorite.cmp(&a.is_favorite))
-        });
-        ("Top tracks", ranked.into_iter().take(5).cloned().collect())
-    };
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for track in all() {
         if track.genre.is_empty() {
@@ -805,13 +884,14 @@ fn refresh_top(app: &mut App, idx: usize) {
         .map(|(g, _)| *g)
         .collect::<Vec<_>>()
         .join(", ");
+    let name = artist.name.clone();
     app.views.artists.top = Some(TopTracks {
-        name: artist.name.clone(),
+        name,
         epoch,
-        title,
-        tracks,
         genres,
     });
+    let effect = app.session.load_artist_top(idx);
+    app.run(effect);
 }
 
 fn artist_tracks(app: &App, idx: usize) -> Vec<Track> {
@@ -846,7 +926,12 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
             Frame::NONE
                 .inner_margin(Margin::symmetric(pad as i8, 0))
                 .show(ui, |ui| {
-                    scanning_banner(ui, &pal, "Loading your library…");
+                    scanning_banner(
+                        ui,
+                        &pal,
+                        &lib.scan_progress.snapshot(),
+                        "Loading your library…",
+                    );
                 });
         } else if empty_state(
             ui,
@@ -987,7 +1072,7 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
         .unwrap_or("");
     let mut summary = format!(
         "{} · {} · {}",
-        plural(artist.album_count(), "album"),
+        artist.albums_label(),
         plural(artist.track_count(), "song"),
         format_duration_coarse(artist.total_secs)
     );
@@ -1030,13 +1115,16 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
                 {
                     out.shuffle = true;
                 }
+                let circle = Rect::from_min_size(ui.cursor().min, vec2(34.0, 34.0));
+                ui.painter()
+                    .circle_filled(circle.center(), 17.0, egui::Color32::WHITE.alpha(0.12));
                 let more = IconBtn::new(regular::DOTS_THREE)
                     .size(34.0)
                     .icon_size(17.0)
                     .round(true)
                     .tip("More")
                     .show(ui);
-                if let Some(action) = menus::artist_menu(&more, &artist.name) {
+                if let Some(action) = menus::artist_menu_click(&more, &artist.name) {
                     out.action = Some(action);
                 }
             });
@@ -1057,13 +1145,17 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
     let Some(top) = a.views.artists.top.as_ref() else {
         return;
     };
-    if top.tracks.is_empty() {
+    let ranked = match &a.session.library.artist_top {
+        Some(t) if t.artist == top.name => t.tracks.as_slice(),
+        _ => &[],
+    };
+    if ranked.is_empty() {
         return;
     }
-    label_text(ui, top.title, theme::semibold(17.0), a.pal.text);
+    label_text(ui, "Top tracks", theme::semibold(17.0), a.pal.text);
     ui.add_space(10.0);
     let current = a.session.playback.current_track.as_ref().map(|t| t.id);
-    for (i, track) in top.tracks.iter().enumerate() {
+    for (i, track) in ranked.iter().enumerate() {
         let (rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), COVER_ROW_HEIGHT), Sense::hover());
         let number = (i + 1).to_string();
@@ -1120,7 +1212,7 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
         }
     });
     ui.add_space(10.0);
-    let online = online_info_enabled(a);
+    let online = bio_enabled(a);
     if let Some(bio) = bio {
         let expanded = a.views.artists.bio_expanded;
         let preview = bio_preview(bio, expanded);
@@ -1228,12 +1320,7 @@ fn discography(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
                 theme::semibold(13.5),
                 pal.text,
             );
-            let tracks = plural(album.tracks.len(), "track");
-            let meta_text = if album.year > 0 {
-                format!("{} · {tracks}", album.year)
-            } else {
-                tracks
-            };
+            let meta_text = album.year_kind_label();
             paint_text(
                 &painter,
                 meta,

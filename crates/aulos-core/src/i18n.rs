@@ -16,6 +16,8 @@ pub fn init(requested_languages: &[LanguageIdentifier]) {
     if let Err(why) = localizer().select(requested_languages) {
         eprintln!("error while loading fluent localizations: {why}");
     }
+    // Newly loaded bundles start with isolation marks; see `LANGUAGE_LOADER`.
+    LANGUAGE_LOADER.set_use_isolating(false);
 }
 
 /// [`init`] with the desktop's preferred languages (locale environment
@@ -40,6 +42,10 @@ pub static LANGUAGE_LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
     loader
         .load_fallback_language(&Localizations)
         .expect("Error while loading fallback language");
+    // Interpolated values (counts, names, paths) go straight into labels
+    // that are painted as plain text, where Unicode isolation marks would
+    // show up as stray glyphs.
+    loader.set_use_isolating(false);
 
     loader
 });

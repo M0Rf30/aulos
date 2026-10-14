@@ -15,7 +15,7 @@ use crate::widgets::{
 use aulos_core::format::format_duration;
 use aulos_core::library::playlist_io::{ExportOutcome, ExportSource};
 use aulos_core::library::smart_playlist::{
-    EditorState, MatchMode, OrderField, RuleField, RuleOp, SmartPlaylist,
+    EditorState, MatchMode, OrderField, QualityTier, RuleField, RuleOp, SmartPlaylist,
 };
 use aulos_core::library::{Playlist, Track};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -270,6 +270,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     app.session.playlists.smart_playlist_editor = editor;
     app.views.playlists = st;
     apply(app, out);
+    // The editor's "N songs match": a no-op unless the rules changed.
+    let effect = app.session.playlists.request_match_count();
+    app.run(effect);
 }
 
 /// Reacts to what changed under the page: reloaded smart playlists, a freshly
@@ -703,10 +706,17 @@ fn detail_header(
             } else {
                 tracks.len()
             };
-            let meta = if secs > 0 {
-                format!("{} · {} · updates live", songs(n), duration_long(secs))
+            // A limit that cuts the matches reads "50 of 118 matching songs".
+            let total = app.session.playlists.smart_playlist_total;
+            let count = if total > n && !tracks.is_empty() {
+                format!("{n} of {total} matching songs")
             } else {
-                format!("{} · updates live", songs(n))
+                songs(n)
+            };
+            let meta = if secs > 0 {
+                format!("{count} · {} · updates live", duration_long(secs))
+            } else {
+                format!("{count} · updates live")
             };
             ("SMART PLAYLIST", fill::SPARKLE, meta)
         }
@@ -1137,6 +1147,29 @@ fn pick(
     (sel != current).then_some(sel)
 }
 
+/// What a smart playlist's rows are "picked" by: random first, then every
+/// other order field ascending and descending.
+fn order_choices() -> Vec<(OrderField, bool)> {
+    let mut choices = vec![(OrderField::Random, false)];
+    for field in OrderField::ALL {
+        if field != OrderField::Random {
+            choices.push((field, false));
+            choices.push((field, true));
+        }
+    }
+    choices
+}
+
+/// The text of an [`order_choices`] entry after "picked": "at random",
+/// "by title, ascending".
+fn order_label((field, desc): (OrderField, bool)) -> String {
+    if field == OrderField::Random {
+        return "at random".to_owned();
+    }
+    let dir = if desc { "descending" } else { "ascending" };
+    format!("by {}, {dir}", field.label().to_lowercase())
+}
+
 fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) {
     Frame::NONE
         .fill(pal.surface_1)
@@ -1196,14 +1229,45 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     ) {
                         ed.set_rule_field(i, n);
                     }
-                    let op_i = RuleOp::ALL.iter().position(|o| *o == op).unwrap_or(0);
-                    if let Some(n) = pick(ui, ("rule-op", i), 150.0, op_i, RuleOp::ALL.len(), |n| {
-                        RuleOp::ALL[n].label()
-                    }) {
-                        ed.set_rule_op(i, n);
+                    if field.is_choice() {
+                        // Only `is` / `is not` apply to a fixed set of choices.
+                        let ops = [RuleOp::Is, RuleOp::IsNot];
+                        let op_i = ops.iter().position(|o| *o == op).unwrap_or(0);
+                        if let Some(n) = pick(ui, ("rule-op", i), 150.0, op_i, ops.len(), |n| {
+                            ops[n].label()
+                        }) && let Some(all) = RuleOp::ALL.iter().position(|o| *o == ops[n])
+                        {
+                            ed.set_rule_op(i, all);
+                        }
+                    } else {
+                        let op_i = RuleOp::ALL.iter().position(|o| *o == op).unwrap_or(0);
+                        if let Some(n) =
+                            pick(ui, ("rule-op", i), 150.0, op_i, RuleOp::ALL.len(), |n| {
+                                RuleOp::ALL[n].label()
+                            })
+                        {
+                            ed.set_rule_op(i, n);
+                        }
                     }
                     let avail = (ui.available_width() - 28.0 - 8.0).max(80.0);
-                    if op == RuleOp::Between {
+                    if field.is_choice() {
+                        let tier = QualityTier::from_code(value.trim());
+                        let current = tier
+                            .and_then(|t| QualityTier::ALL.iter().position(|a| *a == t))
+                            .unwrap_or(0);
+                        if let Some(n) = pick(
+                            ui,
+                            ("rule-value", i),
+                            150.0,
+                            current,
+                            QualityTier::ALL.len(),
+                            |n| QualityTier::ALL[n].label(),
+                        ) {
+                            ed.set_rule_value(i, QualityTier::ALL[n].code().to_owned());
+                        }
+                        // Keep the remove button at the row's right edge.
+                        ui.add_space((ui.available_width() - 28.0 - 8.0).max(0.0));
+                    } else if op == RuleOp::Between {
                         let half = ((avail - 40.0) / 2.0).max(40.0);
                         if text_field(ui, &mut value, "from", half).changed() {
                             ed.set_rule_value(i, value);
@@ -1271,51 +1335,72 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
-            });
-            ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("Order by")
+                    RichText::new("picked")
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
-                let current = OrderField::ALL
+                // One dropdown for what the order has two knobs for: random,
+                // or a field in either direction.
+                let orders = order_choices();
+                let current = orders
                     .iter()
-                    .position(|f| *f == ed.playlist.order_by)
+                    .position(|(f, desc)| {
+                        *f == ed.playlist.order_by
+                            && (*f == OrderField::Random || *desc == ed.playlist.order_desc)
+                    })
                     .unwrap_or(0);
-                if let Some(n) = pick(ui, "order-by", 150.0, current, OrderField::ALL.len(), |n| {
-                    OrderField::ALL[n].label()
+                if let Some(n) = pick(ui, "order-pick", 200.0, current, orders.len(), |n| {
+                    order_label(orders[n])
                 }) {
-                    ed.set_order_by(n);
-                }
-                if ed.playlist.order_by != OrderField::Random {
-                    let dir = usize::from(ed.playlist.order_desc);
-                    if let Some(n) = pick(ui, "order-dir", 120.0, dir, 2, |i| {
-                        if i == 0 {
-                            "ascending".into()
-                        } else {
-                            "descending".into()
-                        }
-                    }) {
-                        ed.set_order_desc(n == 1);
+                    let (field, desc) = orders[n];
+                    if let Some(i) = OrderField::ALL.iter().position(|f| *f == field) {
+                        ed.set_order_by(i);
                     }
+                    ed.set_order_desc(desc);
                 }
             });
-
             ui.horizontal(|ui| {
-                match ed.errors.first() {
-                    Some(err) => {
+                match (ed.match_count, ed.errors.first()) {
+                    (_, Some(err)) if !ed.playlist.rule_errors().is_empty() => {
                         ui.label(
                             RichText::new(err)
                                 .font(theme::regular(12.5))
                                 .color(pal.danger),
                         );
                     }
-                    None => {
+                    (Some(n), err) => {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label(
-                            RichText::new("Songs update as your library changes")
-                                .font(theme::regular(12.5))
-                                .color(pal.text_3),
+                            RichText::new(n.to_string())
+                                .font(theme::semibold(13.0))
+                                .color(pal.text),
                         );
+                        let tail = if n == 1 {
+                            "song matches"
+                        } else {
+                            "songs match"
+                        };
+                        ui.label(
+                            RichText::new(tail)
+                                .font(theme::regular(13.0))
+                                .color(pal.text_2),
+                        );
+                        if let Some(err) = err {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(err)
+                                    .font(theme::regular(12.5))
+                                    .color(pal.danger),
+                            );
+                        }
+                    }
+                    (None, err) => {
+                        let (text, color) = match err {
+                            Some(err) => (err.as_str(), pal.danger),
+                            None => ("Counting matches…", pal.text_3),
+                        };
+                        ui.label(RichText::new(text).font(theme::regular(12.5)).color(color));
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

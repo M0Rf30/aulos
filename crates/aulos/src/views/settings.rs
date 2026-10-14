@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use aulos_core::autoeq;
-use aulos_core::config::{AutoPlayMode, ReplayGainMode};
+use aulos_core::config::{AutoPlayMode, ReplayGainMode, ThemeMode};
 use aulos_core::library::artist_tags::{DEFAULT_DELIMITERS, parse_delimiters_input};
 use aulos_core::online::scrobble::controller::{enabled_of, is_connected, user_of};
 use aulos_core::online::scrobble::import::ImportOutcome;
 use aulos_core::online::scrobble::loved::{LovedSyncPlan, plan_sync};
 use aulos_core::online::scrobble::{ScrobbleMessage, Service};
+use aulos_core::session::SessionUpdate;
 use aulos_core::settings_search::{SearchQuery, keywords};
 use egui::{
     Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, Rect, Sense, Shape, Stroke,
@@ -112,6 +113,7 @@ impl Sec {
                 keywords::artist_tags(),
                 keywords::compilations(),
                 keywords::playlists(),
+                lit(&["Watch for changes", "auto rescan", "file watcher"]),
             ]
             .concat(),
             Sec::Sources => lit(&[
@@ -129,6 +131,11 @@ impl Sec {
             Sec::Playback => [
                 keywords::playback(),
                 keywords::playback_extras().into_iter().take(9).collect(),
+                lit(&[
+                    "Gapless",
+                    "Stop after current track",
+                    "stop after every track",
+                ]),
             ]
             .concat(),
             Sec::Equalizer => lit(&[
@@ -152,6 +159,9 @@ impl Sec {
             Sec::Online => [
                 keywords::artist_info(),
                 lit(&[
+                    "Artist biographies",
+                    "Artist photos",
+                    "Radio station icons",
                     "Online data",
                     "network",
                     "suggestions",
@@ -160,8 +170,32 @@ impl Sec {
             ]
             .concat(),
             Sec::Tagger => [keywords::tagger(), lit(&["AcoustID", "Cover Art Archive"])].concat(),
-            Sec::Appearance => [keywords::appearance(), lit(&["Theme", "Dark", "Light"])].concat(),
-            Sec::Startup => keywords::startup(),
+            Sec::Appearance => [
+                keywords::appearance(),
+                lit(&[
+                    "Theme",
+                    "Dark",
+                    "Light",
+                    "System",
+                    "Tint",
+                    "cover colour",
+                    "Reduce motion",
+                    "animations",
+                ]),
+            ]
+            .concat(),
+            Sec::Startup => [
+                keywords::startup(),
+                lit(&[
+                    "Start playing on launch",
+                    "auto-play",
+                    "autoplay",
+                    "Display name",
+                    "greeting",
+                    "username",
+                ]),
+            ]
+            .concat(),
             Sec::Desktop => [
                 keywords::playback_extras().into_iter().skip(9).collect(),
                 lit(&["Desktop", "tray", "window close"]),
@@ -1183,6 +1217,18 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         None => {}
     }
 
+    let watch = app.session.config.config.watch_for_changes;
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Watch for changes",
+        "Rescan automatically when files in your music folders change.",
+        false,
+        watch,
+    ) {
+        app.set_watch_for_changes(on);
+    }
+
     ui.add_space(SECTION_GAP);
     heading(
         ui,
@@ -1828,7 +1874,9 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
     heading(ui, &pal, "Playback", "");
     ui.add_space(6.0);
     let cfg = &app.session.config.config;
-    let (crossfade, fade, replay, auto, party) = (
+    let (gapless, stop_after, crossfade, fade, replay, auto, party) = (
+        cfg.gapless,
+        cfg.stop_after_current,
         cfg.crossfade_duration_secs,
         cfg.fade_duration_secs,
         cfg.replay_gain_mode,
@@ -1836,6 +1884,27 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
         cfg.party_mode,
     );
     let max_fade = aulos_core::player::engine::fade::MAX_FADE_SECS;
+
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Gapless playback",
+        "Prepare the next track so consecutive tracks follow without a pause.",
+        false,
+        gapless,
+    ) {
+        app.session.set_gapless(on);
+    }
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Stop after current track",
+        "Playback stops at the end of every track instead of continuing with the queue.",
+        false,
+        stop_after,
+    ) {
+        app.session.set_stop_after_each_track(on);
+    }
 
     let label = if crossfade < 0.05 {
         "Off".to_owned()
@@ -2800,17 +2869,44 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     );
     ui.add_space(4.0);
     let cfg = &app.session.config.config;
-    let (info, suggestions) = (cfg.fetch_artist_info, cfg.home_online_suggestions);
+    let (bio, photos, radio_icons, suggestions) = (
+        cfg.fetch_artist_bio,
+        cfg.fetch_artist_photos,
+        cfg.fetch_radio_icons,
+        cfg.home_online_suggestions,
+    );
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Artist photos and biographies",
-        "Deezer images and Wikipedia text for Local and MPD libraries. Subsonic servers use their own.",
+        "Artist biographies",
+        "Wikipedia text for Local and MPD libraries. Subsonic servers use their own.",
         true,
-        info,
+        bio,
     ) {
-        app.session.config.config.fetch_artist_info = on;
-        app.session.config.save();
+        let update = app.session.set_artist_info_fetching(on, photos);
+        app.run(update);
+    }
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Artist photos",
+        "Deezer images for Local and MPD libraries. Subsonic servers use their own.",
+        true,
+        photos,
+    ) {
+        let update = app.session.set_artist_info_fetching(bio, on);
+        app.run(update);
+    }
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Radio station icons",
+        "Downloaded from each station's own server.",
+        true,
+        radio_icons,
+    ) {
+        let effect = app.session.set_fetch_radio_icons(on);
+        app.run(SessionUpdate::from(effect));
     }
     if let Some(on) = toggle_row(
         ui,
@@ -2897,17 +2993,42 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     heading(ui, &pal, "Appearance", "");
     ui.add_space(4.0);
-    let sel = usize::from(!app.dark);
+    let mode = app.session.config.config.theme_mode;
+    let labels = ["System", "Dark", "Light"];
+    let sel = ThemeMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
     if let Some(i) = seg_row(
         ui,
         &pal,
         "theme",
         "Theme",
-        "Dark or light colour scheme.",
-        &["Dark", "Light"],
+        "System follows your desktop's dark or light setting.",
+        &labels,
         sel,
     ) {
-        app.set_dark(i == 0);
+        app.set_theme_mode(ThemeMode::ALL[i]);
+    }
+    let cfg = &app.session.config.config;
+    let (tint, reduce) = (cfg.tint_ui_with_cover, cfg.reduce_motion);
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Tint the interface with cover colour",
+        "The accent follows the dominant colour of the playing album.",
+        false,
+        tint,
+    ) {
+        app.set_tint_ui_with_cover(on);
+    }
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Reduce motion",
+        "Turns off fades, slides and other interface animations.",
+        false,
+        reduce,
+    ) {
+        app.session.config.config.reduce_motion = on;
+        app.session.config.save();
     }
     let zoom = app.session.config.config.ui_scale;
     let sel = crate::app::UI_SCALE_STEPS
@@ -2965,6 +3086,22 @@ fn sec_startup(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     heading(ui, &pal, "Startup page", "");
     ui.add_space(4.0);
+    let mut name = app.session.config.config.user_name.clone();
+    let mut edited = false;
+    row(
+        ui,
+        &pal,
+        "Display name",
+        "Greets you on the Home page (“Good evening, Sam”). Leave empty for no name.",
+        false,
+        250.0,
+        |ui| {
+            edited = input(ui, &pal, &mut name, "Your name", 220.0, false).changed();
+        },
+    );
+    if edited {
+        app.session.set_user_name(&name);
+    }
     let cfg = &app.session.config.config;
     let page = cfg.startup_page.trim().to_owned();
     let page_label = STARTUP_PAGES
@@ -3001,6 +3138,19 @@ fn sec_startup(app: &mut App, ui: &mut Ui) {
         &names,
     ) {
         app.session.config.config.startup_provider = ids[i].0.clone();
+        app.session.config.save();
+    }
+
+    let auto_play = app.session.config.config.auto_play_on_launch;
+    if let Some(on) = toggle_row(
+        ui,
+        &pal,
+        "Start playing on launch",
+        "Plays your library as soon as it has loaded.",
+        false,
+        auto_play,
+    ) {
+        app.session.config.config.auto_play_on_launch = on;
         app.session.config.save();
     }
 }

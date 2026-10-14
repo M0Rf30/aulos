@@ -14,10 +14,12 @@
 //! to rebuild or drop.
 
 use super::Session;
+use crate::library::album_sort::AlbumSort;
 use crate::library::covers::{CoverDelta, CoverSet, CoverThumb};
 use crate::library::search::SEARCH_DEBOUNCE_MS;
 use crate::library::state::SortField;
-use crate::library::{Album, CoverArt, LibraryScanner, Track};
+use crate::library::top_tracks::{ArtistTop, TOP_TRACKS_LEN, rank_top_tracks};
+use crate::library::{Album, CoverArt, LibraryDb, LibraryScanner, Track};
 use crate::provider::{MusicProvider, ProviderType};
 use crate::task::{Effect, channel_stream};
 use futures::SinkExt;
@@ -61,6 +63,12 @@ pub enum LibraryEvent {
     LoadComplete {
         generation: u64,
         provider_id: String,
+    },
+    /// The play-count ranking of an artist's tracks (see
+    /// [`Session::load_artist_top`]).
+    TopTracksLoaded {
+        artist: String,
+        tracks: Vec<Track>,
     },
     GenresLoaded(Vec<String>),
     GenreTracksLoaded {
@@ -151,7 +159,11 @@ impl Session {
     }
 
     pub fn set_favorite_local(&mut self, track_id: &str, state: bool) {
-        self.for_each_track(track_id, |t| t.is_favorite = state);
+        let now = crate::unix_now();
+        self.for_each_track(track_id, |t| {
+            t.is_favorite = state;
+            t.favorited_at = if state { now } else { 0 };
+        });
     }
 
     pub fn set_rating_local(&mut self, track_id: &str, rating: Option<u8>) {
@@ -212,6 +224,33 @@ impl Session {
         self.refresh_search();
     }
 
+    /// Order the Albums page by `sort` (and remember it).
+    pub fn set_albums_sort(&mut self, sort: AlbumSort) {
+        self.config.config.albums_sort = sort;
+        self.config.save();
+        self.resort_library();
+    }
+
+    /// Order the Artists page by `sort` (and remember it).
+    pub fn set_artists_sort(&mut self, sort: AlbumSort) {
+        self.config.config.artists_sort = sort;
+        self.config.save();
+        self.resort_library();
+    }
+
+    /// Order the Genres page by `sort` (and remember it).
+    pub fn set_genres_sort(&mut self, sort: AlbumSort) {
+        self.config.config.genres_sort = sort;
+        self.config.save();
+        self.resort_library();
+    }
+
+    /// Re-order the browse lists after a sort order changed.
+    fn resort_library(&mut self) {
+        self.library.resort(&self.config.config);
+        self.refresh_search();
+    }
+
     /// Split collaboration credits into individual artists, or not.
     pub fn set_split_artist_tags(&mut self, enabled: bool) {
         self.config.config.split_artist_tags = enabled;
@@ -234,16 +273,19 @@ impl Session {
             return Reload::none();
         };
         match provider.provider_type() {
-            ProviderType::Local => Reload::effect(self.scan_with(async move {
-                tokio::task::spawn_blocking(move || {
-                    provider.sync_library().unwrap_or_else(|e| {
-                        tracing::error!("sync_library failed: {e}");
-                        0
+            ProviderType::Local => {
+                let progress = Arc::clone(&self.library.scan_progress);
+                Reload::effect(self.scan_with(async move {
+                    tokio::task::spawn_blocking(move || {
+                        provider.sync_library(&progress).unwrap_or_else(|e| {
+                            tracing::error!("sync_library failed: {e}");
+                            0
+                        })
                     })
-                })
-                .await
-                .unwrap_or(0)
-            })),
+                    .await
+                    .unwrap_or(0)
+                }))
+            }
             // Subsonic providers connect on demand: no idle subscription.
             ProviderType::Subsonic => self.reload_library(),
             ProviderType::Mpd => {
@@ -275,6 +317,7 @@ impl Session {
         work: impl Future<Output = usize> + Send + 'static,
     ) -> Effect<LibraryEvent> {
         self.library.scanning = true;
+        self.library.scan_progress.reset();
         let generation = self.library.begin_reload_generation();
         let provider_id = self.providers.registry.active_id().to_string();
         Effect::future(async move {
@@ -384,6 +427,7 @@ impl Session {
                     return LibraryApplied::Stale;
                 }
                 self.library.scanning = false;
+                self.library.scan_progress.reset();
                 tracing::info!("Library scan complete: {count} tracks updated");
                 // Only reload if tracks actually changed, to avoid
                 // unnecessary view rebuilds (which reset scroll position).
@@ -472,8 +516,13 @@ impl Session {
                 self.refresh_search();
                 LibraryApplied::Completed { covers }
             }
+            LibraryEvent::TopTracksLoaded { artist, tracks } => {
+                self.library.artist_top = Some(ArtistTop { artist, tracks });
+                LibraryApplied::Done
+            }
             LibraryEvent::GenresLoaded(genres) => {
                 self.library.genres = genres;
+                self.library.sort_browse(&self.config.config);
                 self.refresh_search();
                 LibraryApplied::Done
             }
@@ -559,6 +608,44 @@ impl Session {
             .await
             .unwrap_or_default();
             LibraryEvent::GenreTracksLoaded { idx, tracks }
+        })
+    }
+
+    /// Rank the tracks of the artist at `idx` by how often they were played
+    /// (library-database providers; others rank by rating and favourites
+    /// only) and deliver the best as [`LibraryEvent::TopTracksLoaded`].
+    pub fn load_artist_top(&self, idx: usize) -> Effect<LibraryEvent> {
+        let Some(artist) = self.library.artists.get(idx) else {
+            return Effect::none();
+        };
+        let name = artist.name.clone();
+        let tracks: Vec<Track> = artist
+            .albums
+            .iter()
+            .flat_map(|a| a.tracks.iter().cloned())
+            .collect();
+        let uses_database = self.home_uses_database();
+        Effect::future(async move {
+            let top = tokio::task::spawn_blocking(move || {
+                let plays = if uses_database {
+                    let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+                    LibraryDb::open(&crate::paths::library_db_path())
+                        .and_then(|db| db.play_counts(&ids))
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("Play counts failed to load: {e}");
+                            Default::default()
+                        })
+                } else {
+                    Default::default()
+                };
+                rank_top_tracks(&tracks, &plays, TOP_TRACKS_LEN)
+            })
+            .await
+            .unwrap_or_default();
+            LibraryEvent::TopTracksLoaded {
+                artist: name,
+                tracks: top,
+            }
         })
     }
 
@@ -1014,7 +1101,8 @@ mod tests {
             "Roadhouse".into(),
         ]));
         assert_eq!(session.library.visible_genres(), ["Roadhouse"]);
-        assert_eq!(session.library.genre_index(0), 1);
+        // Loading sorts the genres: "Roadhouse" now precedes "Rock".
+        assert_eq!(session.library.genre_index(0), 0);
     }
 
     #[test]

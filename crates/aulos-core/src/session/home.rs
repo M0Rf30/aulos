@@ -50,6 +50,13 @@ pub enum HomeEvent {
 }
 
 impl Session {
+    /// The name the Home greeting addresses (empty: no name). Stored as
+    /// typed; [`crate::library::home_state::Greeting::text_for`] trims it.
+    pub fn set_user_name(&mut self, name: &str) {
+        self.config.config.user_name = name.to_string();
+        self.config.save();
+    }
+
     /// Whether the active provider's library lives in the library database
     /// (and therefore has play history).
     #[must_use]
@@ -75,7 +82,7 @@ impl Session {
         let request = self.home.request;
 
         if !self.home_uses_database() {
-            self.home.data = Some(home_from_albums(&self.library.albums));
+            self.home.data = Some(home_from_albums(&self.library.albums, crate::unix_now()));
             return Effect::none();
         }
 

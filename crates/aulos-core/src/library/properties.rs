@@ -225,6 +225,7 @@ pub fn known_from_track(track: &Track) -> TechInfo {
         .then(|| track.source_uri.clone());
     TechInfo {
         sample_rate: nonzero(track.sample_rate),
+        bits_per_sample: nonzero(track.bit_depth),
         bitrate_kbps: nonzero(track.bitrate),
         duration: (!track.duration.is_zero()).then_some(track.duration),
         replay_gain: ReplayGain {
@@ -244,6 +245,7 @@ pub fn merge(loaded: Option<&TechInfo>, known: TechInfo) -> TechInfo {
     };
     let mut out = loaded.clone();
     out.sample_rate = out.sample_rate.or(known.sample_rate);
+    out.bits_per_sample = out.bits_per_sample.or(known.bits_per_sample);
     out.bitrate_kbps = out.bitrate_kbps.or(known.bitrate_kbps);
     out.duration = out.duration.or(known.duration);
     out.remote_path = out.remote_path.or(known.remote_path);
@@ -393,6 +395,10 @@ mod state_tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 

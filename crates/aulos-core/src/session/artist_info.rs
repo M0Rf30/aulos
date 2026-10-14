@@ -3,7 +3,7 @@
 
 use super::Session;
 use crate::library::artist_info::{
-    ArtistInfoOutcome, ArtistInfoStore, resolve_via_agents, resolve_via_provider,
+    ArtistInfoOutcome, ArtistInfoStore, ArtistInfoWanted, resolve_via_agents, resolve_via_provider,
 };
 use crate::provider::{MusicProvider, ProviderType};
 use crate::task::Effect;
@@ -104,14 +104,13 @@ impl ArtistInfoState {
 
     /// Marks `names` pending and returns one fetch per artist, each
     /// acquiring the shared semaphore before its blocking resolve (cache hit
-    /// or network fetch) — mirroring [`crate::convert::run_job`]'s
-    /// acquire-then-`spawn_blocking` pattern — so the actual concurrency
-    /// bound lives in one place rather than in how many futures happen to be
-    /// dispatched at once.
+    /// or network fetch), so the actual concurrency bound lives in one place
+    /// rather than in how many futures happen to be dispatched at once.
     fn dispatch(
         &mut self,
         provider: &Arc<dyn MusicProvider>,
         is_subsonic: bool,
+        wanted: ArtistInfoWanted,
         names: Vec<String>,
     ) -> Effect<ArtistInfoOutcome> {
         let provider_id = provider.id().to_string();
@@ -131,7 +130,7 @@ impl ArtistInfoState {
                     if is_subsonic {
                         resolve_via_provider(&store, provider.as_ref(), &provider_id, &name, now)
                     } else {
-                        resolve_via_agents(&store, &name, now)
+                        resolve_via_agents(&store, &name, now, wanted)
                     }
                 })
                 .await
@@ -153,14 +152,29 @@ impl ArtistInfoState {
 }
 
 impl Session {
+    /// What the user allows fetching online for artists: the bio and photo
+    /// toggles of the settings.
+    pub fn artist_info_wanted(&self) -> ArtistInfoWanted {
+        ArtistInfoWanted {
+            bio: self.config.config.fetch_artist_bio,
+            photo: self.config.config.fetch_artist_photos,
+        }
+    }
+
     /// The active provider for an artist-info fetch, with whether it is
-    /// Subsonic. `None` when there is no provider, or in Local/MPD mode when
-    /// `Config::fetch_artist_info` is off; Subsonic always runs, as its data
-    /// comes from the server, not the network toggle.
-    fn artist_info_source(&self) -> Option<(Arc<dyn MusicProvider>, bool)> {
+    /// Subsonic and what to fetch. `None` when there is no provider, or in
+    /// Local/MPD mode when neither `Config::fetch_artist_bio` nor
+    /// `Config::fetch_artist_photos` is on; Subsonic always runs, as its
+    /// data comes from the server, not the network toggles.
+    fn artist_info_source(&self) -> Option<(Arc<dyn MusicProvider>, bool, ArtistInfoWanted)> {
         let provider = self.providers.registry.active_shared()?;
         let is_subsonic = provider.provider_type() == ProviderType::Subsonic;
-        (is_subsonic || self.config.config.fetch_artist_info).then_some((provider, is_subsonic))
+        let wanted = if is_subsonic {
+            ArtistInfoWanted::ALL
+        } else {
+            self.artist_info_wanted()
+        };
+        wanted.any().then_some((provider, is_subsonic, wanted))
     }
 
     /// Lazily fetches artist bio/image for the Artists page. Only artists
@@ -170,7 +184,7 @@ impl Session {
     /// the remainder are picked up on a later visit, or immediately if
     /// individually selected (see [`Self::fetch_artist_info_for`]).
     pub fn fetch_artist_info_for_visible(&mut self) -> Effect<ArtistInfoOutcome> {
-        let Some((provider, is_subsonic)) = self.artist_info_source() else {
+        let Some((provider, is_subsonic, wanted)) = self.artist_info_source() else {
             return Effect::none();
         };
         let names: Vec<String> = self
@@ -185,7 +199,8 @@ impl Session {
         if names.is_empty() {
             return Effect::none();
         }
-        self.artist_info.dispatch(&provider, is_subsonic, names)
+        self.artist_info
+            .dispatch(&provider, is_subsonic, wanted, names)
     }
 
     /// Fetches artist info for a single artist immediately (e.g. when
@@ -193,14 +208,14 @@ impl Session {
     /// deep-linked or scrolled-past artist still gets its info without
     /// waiting for a later page visit.
     pub fn fetch_artist_info_for(&mut self, name: &str) -> Effect<ArtistInfoOutcome> {
-        let Some((provider, is_subsonic)) = self.artist_info_source() else {
+        let Some((provider, is_subsonic, wanted)) = self.artist_info_source() else {
             return Effect::none();
         };
         if !self.artist_info.wanted(name) {
             return Effect::none();
         }
         self.artist_info
-            .dispatch(&provider, is_subsonic, vec![name.to_string()])
+            .dispatch(&provider, is_subsonic, wanted, vec![name.to_string()])
     }
 }
 

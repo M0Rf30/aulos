@@ -4,6 +4,19 @@ use egui::{
     Align2, Color32, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+/// Keyboard focus ring: a 2px accent outline just outside `rect`.
+pub fn focus_ring(ui: &Ui, resp: &Response, rect: Rect, radius: CornerRadius) {
+    if resp.has_focus() && ui.input(|i| i.any_touches() || !i.pointer.any_down()) {
+        let t = Theme::get(ui.ctx());
+        ui.painter().rect_stroke(
+            rect.expand(1.0),
+            radius,
+            Stroke::new(2.0, t.accent.fill),
+            StrokeKind::Outside,
+        );
+    }
+}
+
 /// A square icon button: transparent, tinted on hover, accent when `active`.
 pub struct IconBtn<'a> {
     glyph: &'a str,
@@ -120,6 +133,9 @@ impl<'a> IconBtn<'a> {
                 1.75,
                 t.accent.fill,
             );
+        }
+        if self.enabled {
+            focus_ring(ui, &resp, rect, radius);
         }
         if let Some(tip) = self.tip {
             resp = resp.on_hover_text(tip);
@@ -255,6 +271,9 @@ pub fn pill_button_enabled(
     let galley = layout(ui.painter(), label, font, fg, 400.0, 0.0);
     ui.painter()
         .galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, fg);
+    if enabled {
+        focus_ring(ui, &resp, rect, r);
+    }
     resp
 }
 
@@ -289,6 +308,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool, trailing: Option<&str>) ->
         Stroke::new(1.0, bd),
         StrokeKind::Inside,
     );
+    focus_ring(ui, &resp, rect, CornerRadius::same(14));
     let galley = layout(ui.painter(), label, font, fg, 400.0, 0.0);
     ui.painter().galley(
         pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),

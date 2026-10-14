@@ -168,7 +168,12 @@ fn browse(app: &mut App, ui: &mut Ui) {
                         if loading {
                             ui.ctx().request_repaint_after(Duration::from_millis(100));
                             if lib.scanning {
-                                scanning_banner(ui, &pal, "Scanning your library…");
+                                scanning_banner(
+                                    ui,
+                                    &pal,
+                                    &lib.scan_progress.snapshot(),
+                                    "Scanning your library…",
+                                );
                                 ui.add_space(14.0);
                             }
                             skeleton_grid(ui);

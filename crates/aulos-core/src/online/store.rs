@@ -14,7 +14,7 @@
 use rusqlite::{Connection, params};
 use std::path::Path;
 
-use super::podcast::{EpisodeMeta, PodcastMeta};
+use super::podcast::{CADENCE_SAMPLE, Cadence, EpisodeMeta, PodcastMeta};
 
 /// A subscribed podcast feed.
 #[derive(Debug, Clone)]
@@ -30,6 +30,9 @@ pub struct Podcast {
     /// query rather than stored — always in sync, never a separate write
     /// path to keep consistent with `podcast_episodes.played`.
     pub unplayed_count: i64,
+    /// How often the show publishes, derived from its episode dates by
+    /// `list_podcasts`; `None` when irregular or too few episodes.
+    pub cadence: Option<Cadence>,
 }
 
 /// A single episode of a subscribed podcast.
@@ -58,6 +61,37 @@ pub struct RadioStation {
     pub homepage: String,
     pub favicon_url: String,
     pub tags: String,
+    /// Stream codec as the directory or the stream headers named it
+    /// ("MP3", "AAC", …); empty when unknown.
+    pub codec: String,
+    /// Stream bitrate in kbit/s; `0` when unknown.
+    pub bitrate_kbps: u32,
+}
+
+/// A station to save with [`OnlineStore::add_radio_station`].
+#[derive(Debug, Clone, Default)]
+pub struct NewStation {
+    pub name: String,
+    pub stream_url: String,
+    pub homepage: String,
+    pub favicon_url: String,
+    pub tags: String,
+    pub codec: String,
+    pub bitrate_kbps: u32,
+}
+
+impl From<RadioStation> for NewStation {
+    fn from(s: RadioStation) -> Self {
+        Self {
+            name: s.name,
+            stream_url: s.stream_url,
+            homepage: s.homepage,
+            favicon_url: s.favicon_url,
+            tags: s.tags,
+            codec: s.codec,
+            bitrate_kbps: s.bitrate_kbps,
+        }
+    }
 }
 
 /// Database access for podcasts and radio stations.
@@ -144,10 +178,30 @@ impl OnlineStore {
                     author: row.get(5)?,
                     last_refreshed: row.get(6)?,
                     unplayed_count: row.get(7)?,
+                    cadence: None,
                 })
             })
             .map_err(|e| format!("List podcasts error: {e}"))?
             .filter_map(|r| r.ok())
+            .collect::<Vec<Podcast>>();
+        let mut dates = self
+            .conn
+            .prepare(
+                "SELECT pub_date FROM podcast_episodes
+                 WHERE podcast_id = ?1 AND pub_date > 0
+                 ORDER BY pub_date DESC LIMIT ?2",
+            )
+            .map_err(|e| format!("List podcast cadence error: {e}"))?;
+        let podcasts = podcasts
+            .into_iter()
+            .map(|mut podcast| {
+                let pub_dates: Vec<i64> = dates
+                    .query_map(params![podcast.id, CADENCE_SAMPLE as i64], |row| row.get(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default();
+                podcast.cadence = Cadence::from_pub_dates(&pub_dates);
+                podcast
+            })
             .collect();
         Ok(podcasts)
     }
@@ -289,32 +343,41 @@ impl OnlineStore {
     /// whether it already existed, so callers can tell a fresh save from
     /// a duplicate save-of-an-already-saved station apart (e.g. to show
     /// "Saved" vs "Already saved").
-    pub fn add_radio_station(
-        &self,
-        name: &str,
-        stream_url: &str,
-        homepage: &str,
-        favicon_url: &str,
-        tags: &str,
-    ) -> Result<(i64, bool), String> {
+    ///
+    /// A known codec/bitrate is never overwritten by an unknown one.
+    pub fn add_radio_station(&self, station: &NewStation) -> Result<(i64, bool), String> {
         use rusqlite::OptionalExtension;
         let existing_id: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM radio_stations WHERE stream_url = ?1",
-                params![stream_url],
+                params![station.stream_url],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|e| format!("Add radio station lookup error: {e}"))?;
         self.conn
             .execute(
-                "INSERT INTO radio_stations (name, stream_url, homepage, favicon_url, tags)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO radio_stations
+                     (name, stream_url, homepage, favicon_url, tags, codec, bitrate_kbps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(stream_url) DO UPDATE SET
                     name=excluded.name, homepage=excluded.homepage,
-                    favicon_url=excluded.favicon_url, tags=excluded.tags",
-                params![name, stream_url, homepage, favicon_url, tags],
+                    favicon_url=excluded.favicon_url, tags=excluded.tags,
+                    codec=CASE WHEN excluded.codec <> '' THEN excluded.codec
+                               ELSE radio_stations.codec END,
+                    bitrate_kbps=CASE WHEN excluded.bitrate_kbps > 0
+                                      THEN excluded.bitrate_kbps
+                                      ELSE radio_stations.bitrate_kbps END",
+                params![
+                    station.name,
+                    station.stream_url,
+                    station.homepage,
+                    station.favicon_url,
+                    station.tags,
+                    station.codec,
+                    station.bitrate_kbps
+                ],
             )
             .map_err(|e| format!("Add radio station error: {e}"))?;
         let id = match existing_id {
@@ -322,6 +385,29 @@ impl OnlineStore {
             None => self.conn.last_insert_rowid(),
         };
         Ok((id, existing_id.is_some()))
+    }
+
+    /// Records the codec/bitrate learned from a station's stream headers,
+    /// for the saved station with `stream_url`. Unknown parts (empty codec,
+    /// zero bitrate) leave the stored value alone; returns whether a saved
+    /// station matched.
+    pub fn set_radio_station_format(
+        &self,
+        stream_url: &str,
+        codec: &str,
+        bitrate_kbps: u32,
+    ) -> Result<bool, String> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE radio_stations SET
+                    codec = CASE WHEN ?2 <> '' THEN ?2 ELSE codec END,
+                    bitrate_kbps = CASE WHEN ?3 > 0 THEN ?3 ELSE bitrate_kbps END
+                 WHERE stream_url = ?1",
+                params![stream_url, codec, bitrate_kbps],
+            )
+            .map_err(|e| format!("Set radio station format error: {e}"))?;
+        Ok(changed > 0)
     }
 
     /// Rename a saved station in place, leaving every other field untouched.
@@ -346,7 +432,7 @@ impl OnlineStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, name, stream_url, homepage, favicon_url, tags
+                "SELECT id, name, stream_url, homepage, favicon_url, tags, codec, bitrate_kbps
                  FROM radio_stations ORDER BY name",
             )
             .map_err(|e| format!("List radio stations error: {e}"))?;
@@ -359,6 +445,8 @@ impl OnlineStore {
                     homepage: row.get(3)?,
                     favicon_url: row.get(4)?,
                     tags: row.get(5)?,
+                    codec: row.get(6)?,
+                    bitrate_kbps: row.get(7)?,
                 })
             })
             .map_err(|e| format!("List radio stations error: {e}"))?
@@ -397,11 +485,23 @@ mod tests {
              CREATE TABLE radio_stations (
                  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
                  stream_url TEXT NOT NULL UNIQUE, homepage TEXT NOT NULL DEFAULT '',
-                 favicon_url TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT ''
+                 favicon_url TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '',
+                 codec TEXT NOT NULL DEFAULT '', bitrate_kbps INTEGER NOT NULL DEFAULT 0
              );",
         )
         .unwrap();
         OnlineStore { conn }
+    }
+
+    fn station(name: &str, url: &str, favicon: &str, tags: &str) -> NewStation {
+        NewStation {
+            name: name.to_string(),
+            stream_url: url.to_string(),
+            homepage: "https://example.com".to_string(),
+            favicon_url: favicon.to_string(),
+            tags: tags.to_string(),
+            ..NewStation::default()
+        }
     }
 
     fn meta(title: &str) -> PodcastMeta {
@@ -503,13 +603,12 @@ mod tests {
     fn radio_station_crud_roundtrip() {
         let store = open_migrated_memory();
         let (id, existed) = store
-            .add_radio_station(
+            .add_radio_station(&station(
                 "Test FM",
                 "https://stream.example/live",
-                "https://example.com",
                 "",
                 "jazz",
-            )
+            ))
             .unwrap();
         assert!(!existed);
         assert_eq!(store.list_radio_stations().unwrap().len(), 1);
@@ -522,24 +621,22 @@ mod tests {
     fn add_radio_station_reports_already_existed_and_updates_metadata() {
         let store = open_migrated_memory();
         let (id1, existed1) = store
-            .add_radio_station(
+            .add_radio_station(&station(
                 "Test FM",
                 "https://stream.example/live",
-                "https://example.com",
                 "",
                 "jazz",
-            )
+            ))
             .unwrap();
         assert!(!existed1);
 
         let (id2, existed2) = store
-            .add_radio_station(
+            .add_radio_station(&station(
                 "Test FM Renamed",
                 "https://stream.example/live",
-                "https://example.com",
                 "https://example.com/icon.png",
                 "jazz,chill",
-            )
+            ))
             .unwrap();
         assert!(existed2);
         assert_eq!(id1, id2);
@@ -551,16 +648,90 @@ mod tests {
     }
 
     #[test]
+    fn radio_station_format_is_stored_and_never_blanked() {
+        let store = open_migrated_memory();
+        let mut fm = station("Test FM", "https://stream.example/live", "", "jazz");
+        fm.codec = "MP3".into();
+        fm.bitrate_kbps = 128;
+        store.add_radio_station(&fm).unwrap();
+        let listed = store.list_radio_stations().unwrap();
+        assert_eq!(
+            (listed[0].codec.as_str(), listed[0].bitrate_kbps),
+            ("MP3", 128)
+        );
+
+        // Re-saving without format info (an add-by-URL of the same stream)
+        // keeps what is known.
+        store
+            .add_radio_station(&station(
+                "Test FM",
+                "https://stream.example/live",
+                "",
+                "jazz",
+            ))
+            .unwrap();
+        let listed = store.list_radio_stations().unwrap();
+        assert_eq!(
+            (listed[0].codec.as_str(), listed[0].bitrate_kbps),
+            ("MP3", 128)
+        );
+
+        // Learned from the stream headers later.
+        assert!(
+            store
+                .set_radio_station_format("https://stream.example/live", "AAC", 0)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_radio_station_format("https://nope.example/", "AAC", 64)
+                .unwrap()
+        );
+        let listed = store.list_radio_stations().unwrap();
+        assert_eq!(
+            (listed[0].codec.as_str(), listed[0].bitrate_kbps),
+            ("AAC", 128)
+        );
+    }
+
+    #[test]
+    fn list_podcasts_derives_the_publishing_cadence() {
+        let store = open_migrated_memory();
+        let id = store
+            .add_podcast("https://feed.example/rss", &meta("Show"))
+            .unwrap();
+        let episodes: Vec<EpisodeMeta> = (0..6)
+            .map(|i| EpisodeMeta {
+                pub_date: 1_700_000_000 + i * 7 * 86_400,
+                ..episode(&format!("g{i}"), "Ep")
+            })
+            .collect();
+        store.upsert_episodes(id, &episodes).unwrap();
+        assert_eq!(
+            store.list_podcasts().unwrap()[0].cadence,
+            Some(Cadence::Weekly)
+        );
+
+        let other = store
+            .add_podcast("https://other.example/rss", &meta("Other"))
+            .unwrap();
+        store
+            .upsert_episodes(other, &[episode("only", "One")])
+            .unwrap();
+        let listed = store.list_podcasts().unwrap();
+        assert_eq!(listed.iter().find(|p| p.id == other).unwrap().cadence, None);
+    }
+
+    #[test]
     fn rename_radio_station_updates_only_the_name() {
         let store = open_migrated_memory();
         let (id, _) = store
-            .add_radio_station(
+            .add_radio_station(&station(
                 "Test FM",
                 "https://stream.example/live",
-                "https://example.com",
                 "",
                 "jazz",
-            )
+            ))
             .unwrap();
         store.rename_radio_station(id, "Renamed FM").unwrap();
         let stations = store.list_radio_stations().unwrap();

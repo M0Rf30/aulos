@@ -144,6 +144,9 @@ pub struct PlaybackState {
     /// [`Session::set_seeking`](super::Session::set_seeking)); the displayed
     /// position is left alone meanwhile.
     pub seeking: bool,
+    /// The launch still has to start playback ("auto-play on launch");
+    /// consumed when the library has loaded.
+    pub autoplay_pending: bool,
     /// The PCM tap the audio engine writes the visualizer's samples to (and
     /// the MPD capture thread, `player::pw_capture`); it
     /// follows the player across [`Session::recreate_player`](super::Session::recreate_player).
@@ -278,6 +281,7 @@ impl PlaybackState {
                     tracing::warn!("Failed to apply saved volume: {e}");
                 }
                 p.set_fade_secs(config.fade_duration_secs);
+                super::preferences::apply_playback_settings(&mut p, config);
                 #[cfg(feature = "visualizer")]
                 p.set_pcm_buffer(Arc::clone(&pcm_buffer));
                 Some(p)
@@ -301,6 +305,7 @@ impl PlaybackState {
             extras: PlaybackExtrasState::default(),
             window_focused: false,
             seeking: false,
+            autoplay_pending: config.auto_play_on_launch,
             #[cfg(feature = "visualizer")]
             pcm_buffer,
             #[cfg(feature = "visualizer")]

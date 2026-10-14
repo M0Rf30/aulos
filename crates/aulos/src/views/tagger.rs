@@ -1465,6 +1465,48 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             None => {}
         }
     }
+    // Selected files whose Album artist differs from the selection's majority.
+    let selected = st.selected_files();
+    if selected.len() > 1 {
+        let artist = |f: &TagFile| f.edited.get(keys::ALBUMARTIST).unwrap_or("").to_owned();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for f in &selected {
+            *counts.entry(artist(f)).or_default() += 1;
+        }
+        if let Some((major, _)) = counts
+            .iter()
+            .max_by_key(|(k, n)| (**n, std::cmp::Reverse((*k).clone())))
+        {
+            let odd: Vec<FileId> = selected
+                .iter()
+                .filter(|f| artist(f) != *major)
+                .map(|f| f.id)
+                .collect();
+            if !odd.is_empty() {
+                let text = format!(
+                    "{} {} a different Album artist than the rest of the selection.",
+                    plural(odd.len(), "file", "files"),
+                    if odd.len() == 1 { "has" } else { "have" }
+                );
+                if banner(
+                    ui,
+                    &pal,
+                    pal.warn,
+                    regular::WARNING,
+                    &text,
+                    Bar::None,
+                    &["Show files"],
+                )
+                .is_some()
+                {
+                    acts.push(Act::Msg(TaggerMessage::SelectFile(odd[0])));
+                    for id in &odd[1..] {
+                        acts.push(Act::Msg(TaggerMessage::ToggleFile(*id)));
+                    }
+                }
+            }
+        }
+    }
     let key_set = app.session.config.config.acoustid_key().is_some();
     if !key_set && !st.is_empty() {
         let text = "AcoustID needs an application key. Scanning and submitting fingerprints requires a free AcoustID application key. Add it in Settings.";

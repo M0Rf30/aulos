@@ -10,6 +10,7 @@ use crate::widgets::{
 };
 use aulos_core::format::format_duration_coarse;
 use aulos_core::library::Track;
+use aulos_core::player::queue::{QueueGroup, QueueOrigin};
 use egui::{
     Align, Area, Context, CornerRadius, Frame, Id, Key, Layout, Order, Rect, RichText, ScrollArea,
     Sense, Stroke, Ui, pos2, vec2,
@@ -41,6 +42,7 @@ enum Intent {
 
 pub fn show(app: &mut App, ctx: &Context) {
     if app.sheet != Some(Sheet::Queue) {
+        theme::motion::slide_in(ctx, Id::new("aulos_queue_sheet_slide"), false);
         return;
     }
     let mut st = std::mem::take(&mut app.views.queue);
@@ -65,6 +67,8 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
     let now = has_now.then(|| &queue[idx]);
     let up_start = if has_now { idx + 1 } else { 0 };
     let upcoming = &queue[up_start.min(queue.len())..];
+    let groups = player.map_or_else(Vec::new, |p| p.queue_groups());
+    let context_label = player.and_then(|p| p.queue_context_label());
     let total: u64 = queue.iter().map(|t| t.duration.as_secs()).sum();
     let meta = if queue.is_empty() {
         "Empty".to_owned()
@@ -77,7 +81,12 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
     let top = content.top() + theme::size::TOOLBAR;
     let bottom = content.bottom() - theme::size::NOW_BAR - 8.0;
     let height = (bottom - top).max(0.0);
-    let origin = pos2(content.right() - 8.0 - width, top);
+    // Slides in from the right edge.
+    let slide = theme::motion::slide_in(ctx, Id::new("aulos_queue_sheet_slide"), true);
+    let origin = pos2(
+        content.right() - 8.0 - width + (1.0 - slide) * (width + 16.0),
+        top,
+    );
     let footer_h = if queue.is_empty() { 0.0 } else { FOOTER_H };
     let body_h = (height - 2.0 - HEADER_H - footer_h).max(0.0);
 
@@ -103,7 +112,16 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
                         .max_height(body_h)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            body(ui, app, st, now, upcoming, up_start, &mut out);
+                            body(
+                                ui,
+                                app,
+                                st,
+                                now,
+                                upcoming,
+                                up_start,
+                                (&groups, context_label),
+                                &mut out,
+                            );
                         });
                     if !queue.is_empty() {
                         footer(ui, pal, &mut out);
@@ -173,6 +191,7 @@ fn footer(ui: &mut Ui, pal: Palette, out: &mut Vec<Intent>) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut Ui,
     app: &App,
@@ -180,6 +199,7 @@ fn body(
     now: Option<&Track>,
     upcoming: &[Track],
     up_start: usize,
+    (groups, context_label): (&[QueueGroup], Option<&str>),
     out: &mut Vec<Intent>,
 ) {
     ui.add_space(8.0);
@@ -208,12 +228,16 @@ fn body(
         );
         return;
     }
-    group_label(ui, "UP NEXT");
     let mut rows = Vec::with_capacity(upcoming.len());
-    for (n, track) in upcoming.iter().enumerate() {
-        let abs = up_start + n;
-        let rect = up_row(ui, app, st, track, abs, out);
-        rows.push((abs, rect));
+    for group in groups {
+        group_label(ui, &group_title(group, context_label));
+        for abs in group.start..group.start + group.len {
+            let Some(track) = abs.checked_sub(up_start).and_then(|n| upcoming.get(n)) else {
+                continue;
+            };
+            let rect = up_row(ui, app, st, track, abs, out);
+            rows.push((abs, rect));
+        }
     }
 
     // Drop slot and indicator, from this frame's row rects.
@@ -241,6 +265,20 @@ fn body(
         }
     }
     ui.add_space(8.0);
+}
+
+/// Heading of a run of upcoming rows: `PLAYING NEXT`, `FROM <ALBUM> · 9 LEFT`
+/// (`UP NEXT` when the queue was not started from a single album) or
+/// `ADDED TO QUEUE`.
+fn group_title(group: &QueueGroup, context_label: Option<&str>) -> String {
+    match (group.origin, context_label) {
+        (QueueOrigin::PlayNext, _) => "PLAYING NEXT".to_owned(),
+        (QueueOrigin::Added, _) => "ADDED TO QUEUE".to_owned(),
+        (QueueOrigin::Context, Some(album)) => {
+            format!("FROM {} \u{b7} {} LEFT", album.to_uppercase(), group.len)
+        }
+        (QueueOrigin::Context, None) => "UP NEXT".to_owned(),
+    }
 }
 
 fn group_label(ui: &mut Ui, text: &str) {
@@ -347,15 +385,29 @@ fn up_row(
         cover_image(ui, &app.covers, cover_rect, app.covers.thumb(&key), &key, 4);
 
         let p = ui.painter();
-        paint_icon(
-            p,
-            pos2(rect.left() + 10.0, cy),
-            regular::DOTS_SIX_VERTICAL,
-            14.0,
-            pal.text_3,
-            false,
-        );
-        paint_icon(p, x_rect.center(), regular::X, 13.0, pal.text_3, false);
+        // Grip and remove show on hover only.
+        if hovered || st.dragging == Some(abs) || remove.hovered() {
+            paint_icon(
+                p,
+                pos2(rect.left() + 10.0, cy),
+                regular::DOTS_SIX_VERTICAL,
+                14.0,
+                pal.text_3,
+                false,
+            );
+            paint_icon(
+                p,
+                x_rect.center(),
+                regular::X,
+                13.0,
+                if remove.hovered() {
+                    pal.text
+                } else {
+                    pal.text_3
+                },
+                false,
+            );
+        }
         paint_text(
             p,
             Rect::from_min_max(

@@ -14,6 +14,9 @@ use crate::library::{LibraryDb, Playlist, Track};
 use crate::task::Effect;
 use std::path::PathBuf;
 
+/// How long a rule edit settles before its match count is queried.
+const MATCH_COUNT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Which provider playlist mutation a [`PlaylistEvent::OpDone`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaylistOp {
@@ -35,8 +38,12 @@ pub enum PlaylistEvent {
     },
     /// Saved smart playlists (with resolved track counts).
     SmartLoaded(Vec<SmartPlaylist>),
-    /// Resolved tracks of the selected smart playlist (detail view).
-    SmartTracksLoaded(Vec<Track>),
+    /// Resolved tracks of the selected smart playlist (detail view), and
+    /// how many tracks its rules match before the row limit cuts them.
+    SmartTracksLoaded { tracks: Vec<Track>, total: usize },
+    /// How many tracks the in-editor rules at `revision` match (limit
+    /// ignored); `None` when the query failed or a newer edit superseded it.
+    SmartMatchCount { revision: u64, count: Option<usize> },
     /// Resolved tracks of a smart playlist, to play right away.
     SmartPlayResolved(Vec<Track>),
     /// Playlist files imported, one summary per file.
@@ -92,6 +99,10 @@ pub struct PlaylistsState {
     pub smart_playlists: Vec<SmartPlaylist>,
     /// Resolved tracks for the currently viewed smart playlist.
     pub smart_playlist_tracks: Vec<Track>,
+    /// How many tracks the viewed smart playlist's rules match before its
+    /// row limit applies (equals the track count when it has no limit or
+    /// the limit is not reached); `0` until resolved.
+    pub smart_playlist_total: usize,
     /// The smart-playlist rules editor, while open.
     pub smart_playlist_editor: Option<EditorState>,
 }
@@ -190,10 +201,47 @@ impl PlaylistsState {
     /// playlist at `idx`.
     pub fn select_smart_playlist(&mut self, idx: usize) -> Effect<PlaylistEvent> {
         self.smart_playlist_tracks.clear();
+        self.smart_playlist_total = 0;
         match self.smart_playlists.get(idx).cloned() {
-            Some(playlist) => smart_tracks_effect(playlist, PlaylistEvent::SmartTracksLoaded),
+            Some(playlist) => smart_detail_effect(playlist),
             None => Effect::none(),
         }
+    }
+
+    /// Asks for the match count of the editor's current rules: once per
+    /// edit, after a short pause (an edit that arrives meanwhile cancels
+    /// it), and only while the rules are valid. Its answer is
+    /// [`PlaylistEvent::SmartMatchCount`]; call this every frame the editor
+    /// is open.
+    pub fn request_match_count(&mut self) -> Effect<PlaylistEvent> {
+        let Some(request) = self
+            .smart_playlist_editor
+            .as_mut()
+            .and_then(EditorState::take_match_request)
+        else {
+            return Effect::none();
+        };
+        let db_path = crate::paths::library_db_path();
+        Effect::future(async move {
+            let revision = request.revision;
+            tokio::time::sleep(MATCH_COUNT_DEBOUNCE).await;
+            if request.is_superseded() {
+                return PlaylistEvent::SmartMatchCount {
+                    revision,
+                    count: None,
+                };
+            }
+            let count = tokio::task::spawn_blocking(move || {
+                LibraryDb::open(&db_path)
+                    .and_then(|db| db.smart_playlist_match_count(&request.playlist))
+                    .inspect_err(|e| tracing::warn!("smart_playlist_match_count failed: {e}"))
+                    .ok()
+            })
+            .await
+            .ok()
+            .flatten();
+            PlaylistEvent::SmartMatchCount { revision, count }
+        })
     }
 
     /// Resolves the smart playlist at `idx` for immediate playback.
@@ -334,8 +382,17 @@ impl Session {
                 self.playlists.smart_playlists = playlists;
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
-            PlaylistEvent::SmartTracksLoaded(tracks) => {
+            PlaylistEvent::SmartTracksLoaded { tracks, total } => {
                 self.playlists.smart_playlist_tracks = tracks;
+                self.playlists.smart_playlist_total = total;
+                PlaylistUpdate::outcome(PlaylistOutcome::None)
+            }
+            PlaylistEvent::SmartMatchCount { revision, count } => {
+                if let (Some(editor), Some(count)) =
+                    (self.playlists.smart_playlist_editor.as_mut(), count)
+                {
+                    editor.set_match_count(revision, count);
+                }
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
             PlaylistEvent::SmartPlayResolved(tracks) => {
@@ -371,6 +428,30 @@ fn smart_list_effect(
         .await
         .unwrap_or_default();
         PlaylistEvent::SmartLoaded(playlists)
+    })
+}
+
+/// Resolves `playlist` for the detail view: its tracks (limit applied) and
+/// the number of tracks its rules match before the limit. Failures log and
+/// yield nothing.
+fn smart_detail_effect(playlist: SmartPlaylist) -> Effect<PlaylistEvent> {
+    let db_path = crate::paths::library_db_path();
+    Effect::future(async move {
+        let (tracks, total) = tokio::task::spawn_blocking(move || {
+            LibraryDb::open(&db_path)
+                .and_then(|db| {
+                    let tracks = db.smart_playlist_tracks(&playlist, None)?;
+                    let total = db.smart_playlist_match_count(&playlist)?;
+                    Ok((tracks, total))
+                })
+                .unwrap_or_else(|e| {
+                    tracing::warn!("smart playlist detail failed: {e}");
+                    (Vec::new(), 0)
+                })
+        })
+        .await
+        .unwrap_or_default();
+        PlaylistEvent::SmartTracksLoaded { tracks, total }
     })
 }
 
@@ -449,6 +530,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 
@@ -518,6 +603,72 @@ mod tests {
         let update = session.apply_playlist_event(PlaylistEvent::Loaded(loaded));
         assert!(matches!(update.outcome, PlaylistOutcome::None));
         assert_eq!(names(&session), ["Road Mix"]);
+    }
+
+    #[test]
+    fn smart_detail_event_stores_the_tracks_and_the_total_before_the_limit() {
+        let mut session = test_session();
+        let update = session.apply_playlist_event(PlaylistEvent::SmartTracksLoaded {
+            tracks: vec![track(), track()],
+            total: 118,
+        });
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
+        assert_eq!(session.playlists.smart_playlist_tracks.len(), 2);
+        assert_eq!(session.playlists.smart_playlist_total, 118);
+    }
+
+    #[test]
+    fn selecting_a_smart_playlist_clears_the_previous_total() {
+        let mut state = PlaylistsState {
+            smart_playlist_tracks: vec![track()],
+            smart_playlist_total: 9,
+            ..Default::default()
+        };
+        assert!(state.select_smart_playlist(0).is_none());
+        assert!(state.smart_playlist_tracks.is_empty());
+        assert_eq!(state.smart_playlist_total, 0);
+    }
+
+    #[test]
+    fn match_counts_reach_the_editor_unless_stale() {
+        let mut session = test_session();
+        session.playlists.new_smart_playlist();
+
+        // Once per revision: the first call yields work, the second none.
+        assert!(!session.playlists.request_match_count().is_none());
+        assert!(session.playlists.request_match_count().is_none());
+
+        let _ = session.apply_playlist_event(PlaylistEvent::SmartMatchCount {
+            revision: 0,
+            count: Some(118),
+        });
+        let editor = session.playlists.smart_playlist_editor.as_mut().unwrap();
+        assert_eq!(editor.match_count, Some(118));
+
+        // An edit moves the revision on: the old answer is dropped, a
+        // failed (None) one changes nothing.
+        editor.add_rule();
+        let _ = session.apply_playlist_event(PlaylistEvent::SmartMatchCount {
+            revision: 0,
+            count: Some(5),
+        });
+        let _ = session.apply_playlist_event(PlaylistEvent::SmartMatchCount {
+            revision: 1,
+            count: None,
+        });
+        let editor = session.playlists.smart_playlist_editor.as_ref().unwrap();
+        assert_eq!(editor.match_count, Some(118));
+    }
+
+    #[test]
+    fn match_count_without_an_editor_does_nothing() {
+        let mut session = test_session();
+        assert!(session.playlists.request_match_count().is_none());
+        let update = session.apply_playlist_event(PlaylistEvent::SmartMatchCount {
+            revision: 0,
+            count: Some(3),
+        });
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
     }
 
     #[test]

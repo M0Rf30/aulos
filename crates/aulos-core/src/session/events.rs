@@ -537,13 +537,17 @@ impl Session {
         #[cfg(all(feature = "visualizer", target_os = "linux"))]
         self.push_capture_stream(&mut streams);
 
-        // Filesystem watcher, only while the local provider is active.
+        // Filesystem watcher, only while the local provider is active and
+        // the "watch for changes" setting is on.
         let local_active = self
             .providers
             .registry
             .active()
             .is_some_and(|p| p.provider_type() == ProviderType::Local);
-        if local_active && !self.config.config.music_dirs.is_empty() {
+        if local_active
+            && self.config.config.watch_for_changes
+            && !self.config.config.music_dirs.is_empty()
+        {
             let music_dirs = self.config.config.music_dirs.clone();
             let stream = crate::library::watcher::watch_stream(&music_dirs)
                 .map(SessionEvent::FilesChanged)
@@ -689,7 +693,7 @@ impl Session {
                 update.changes.covers = covers;
                 update.changes.library_loaded = true;
                 update.changes.library_updated = true;
-                update
+                update.also(self.autoplay_on_launch())
             }
             LibraryApplied::Batch { covers, staged } => {
                 let mut update = SessionUpdate::none();
@@ -703,7 +707,7 @@ impl Session {
                 let mut update = SessionUpdate::from(self.load_home(true));
                 update.changes.covers = covers;
                 update.changes.library_updated = true;
-                update
+                update.also(self.autoplay_on_launch())
             }
             LibraryApplied::ActionFailed(reason) => {
                 SessionUpdate::notice(SessionNotice::ProviderActionFailed(reason))
@@ -759,6 +763,13 @@ impl Session {
             notice,
             play,
         } = update;
+        // Station icons come from the stations' own servers: only with the
+        // setting on.
+        let icon_urls = if self.config.config.fetch_radio_icons {
+            icon_urls
+        } else {
+            Vec::new()
+        };
         let mut update = SessionUpdate::from(effect).also(self.fetch_icons(icon_urls));
         update.notices.extend(notice.map(SessionNotice::Radio));
         match play {
@@ -802,7 +813,8 @@ mod tests {
         let update = session.apply_session_event(
             LibraryEvent::GenresLoaded(vec!["Rock".into(), "Jazz".into()]).into(),
         );
-        assert_eq!(session.library.genres, ["Rock", "Jazz"]);
+        // Loading sorts the genres.
+        assert_eq!(session.library.genres, ["Jazz", "Rock"]);
         assert!(update.notices.is_empty());
         assert!(update.effect.is_none());
     }
@@ -995,7 +1007,7 @@ mod tests {
         // The converter ticker needs the flag and a running job.
         session.config.config.experimental_converter = true;
         assert!(session.background_streams().is_empty());
-        session
+        let _ = session
             .convert
             .enqueue(vec![PathBuf::from("/music/a.flac")]);
         if let Some(job) = session.convert.jobs.first_mut() {
@@ -1015,7 +1027,7 @@ mod tests {
     async fn the_convert_tick_stream_emits_convert_ticks() {
         let mut session = test_session();
         session.config.config.experimental_converter = true;
-        session
+        let _ = session
             .convert
             .enqueue(vec![PathBuf::from("/music/a.flac")]);
         if let Some(job) = session.convert.jobs.first_mut() {

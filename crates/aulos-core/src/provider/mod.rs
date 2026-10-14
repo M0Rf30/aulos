@@ -11,6 +11,7 @@ pub mod mpd;
 pub mod mpd_events;
 pub mod subsonic;
 
+use crate::library::scan_progress::ScanProgress;
 use crate::library::{Album, Artist, Lyrics, Track};
 use std::collections::HashMap;
 use std::fmt;
@@ -178,7 +179,10 @@ pub trait MusicProvider: Send + Sync {
 
     /// Synchronize / refresh the provider's library.
     /// Returns the number of tracks added or updated.
-    fn sync_library(&self) -> Result<usize, ProviderError>;
+    ///
+    /// Providers that can tell how far along they are report it through
+    /// `progress`; the others leave it untouched.
+    fn sync_library(&self, progress: &ScanProgress) -> Result<usize, ProviderError>;
 
     // --- Playlist methods (optional, default: NotSupported) ---
 
@@ -272,7 +276,7 @@ pub trait MusicProvider: Send + Sync {
     /// the server's `getArtistInfo2`/cover art). The default
     /// `NotSupported` tells `crate::library::artist_info` callers to fall
     /// back to Aulos's own Deezer/Wikipedia lookup instead, gated by
-    /// `Config::fetch_artist_info`.
+    /// `Config::fetch_artist_bio` / `Config::fetch_artist_photos`.
     fn get_artist_info(
         &self,
         name: &str,

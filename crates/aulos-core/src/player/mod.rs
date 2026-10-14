@@ -126,6 +126,13 @@ pub struct Player {
     /// Stop (and park the queue on the next track) once the current track
     /// finishes on its own. Cleared by any explicit track change.
     stop_after_current: bool,
+    /// Re-arm "stop after the current track" every time a local track
+    /// starts (the persistent form of the setting).
+    stop_after_each: bool,
+    /// Pre-queue the next track so it follows without a gap.
+    gapless: bool,
+    /// Crossfade length in seconds; a crossfade needs the look-ahead too.
+    crossfade_secs: f32,
 }
 
 impl Player {
@@ -145,6 +152,9 @@ impl Player {
             next_pre_queued: false,
             replay_gain_mode: ReplayGainMode::Off,
             stop_after_current: false,
+            stop_after_each: false,
+            gapless: true,
+            crossfade_secs: 0.0,
         })
     }
 
@@ -201,6 +211,9 @@ impl Player {
         }
 
         self.active_mut().play(source).map_err(|e| e.to_string())?;
+        if self.stop_after_each && self.active_backend == ActiveBackend::Local {
+            self.set_stop_after_flag(true);
+        }
         self.volume = self.active().volume();
         self.current_track = Some(NowPlaying {
             track: track.clone(),
@@ -327,6 +340,14 @@ impl Player {
     fn refresh_pre_queue(&mut self) {
         self.invalidate_pre_queue();
         self.pre_queue_next();
+    }
+
+    /// [`Self::refresh_pre_queue`] once a track is playing or paused (a
+    /// stopped player has no look-ahead to maintain).
+    fn refresh_pre_queue_if_playing(&mut self) {
+        if self.state() != PlaybackState::Stopped {
+            self.refresh_pre_queue();
+        }
     }
 
     /// Play whatever the queue's current entry is, without changing queue
@@ -460,6 +481,17 @@ impl Player {
     /// Current position in PLAY order.
     pub fn queue_index(&self) -> usize {
         self.queue.index()
+    }
+
+    /// The entries after the current one, in runs of equal origin
+    /// ("Play next" / the album the queue started from / "Add to queue").
+    pub fn queue_groups(&self) -> Vec<queue::QueueGroup> {
+        self.queue.upcoming_groups()
+    }
+
+    /// The album the queue was started from, when all its tracks share one.
+    pub fn queue_context_label(&self) -> Option<&str> {
+        self.queue.context_label()
     }
 
     /// Whether shuffle is currently enabled.
@@ -625,7 +657,7 @@ impl Player {
         if self.active_backend != ActiveBackend::Local {
             return;
         }
-        if self.stop_after_current {
+        if self.stop_after_current || !(self.gapless || self.crossfade_secs > 0.0) {
             return;
         }
         let Some(next_track) = self.queue.peek_next_auto().cloned() else {
@@ -690,7 +722,40 @@ impl Player {
 
     /// Set crossfade duration on the local backend.
     pub fn set_crossfade(&mut self, secs: f32) {
+        self.crossfade_secs = secs.max(0.0);
         self.local_backend.set_crossfade(secs);
+        self.refresh_pre_queue_if_playing();
+    }
+
+    /// Turn gapless playback (pre-queueing the next track) on or off.
+    pub fn set_gapless(&mut self, on: bool) {
+        if self.gapless == on {
+            return;
+        }
+        self.gapless = on;
+        self.refresh_pre_queue_if_playing();
+    }
+
+    /// Whether gapless playback is on.
+    pub fn gapless(&self) -> bool {
+        self.gapless
+    }
+
+    /// Stop after every local track instead of continuing with the queue
+    /// (the persistent setting; [`Self::set_stop_after_current`] is the
+    /// one-off form). Takes effect from the current track when turned on.
+    pub fn set_stop_after_each(&mut self, on: bool) {
+        self.stop_after_each = on;
+        if on {
+            if self.active_backend == ActiveBackend::Local
+                && self.current_track.is_some()
+                && self.state() != PlaybackState::Stopped
+            {
+                self.set_stop_after_current(true);
+            }
+        } else {
+            self.set_stop_after_current(false);
+        }
     }
 
     /// Set the replay gain mode.
@@ -801,6 +866,10 @@ mod stop_after_tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 

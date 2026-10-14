@@ -7,6 +7,7 @@
 //! library, controls remote playback, and receives real-time idle events.
 
 use super::{MusicProvider, ProviderError, ProviderType};
+use crate::library::scan_progress::ScanProgress;
 use crate::library::{Album, Artist, CoverSource, Playlist, Track};
 use mpd_client::Client;
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
@@ -630,6 +631,10 @@ pub fn song_to_track(provider_id: &Arc<str>, song: &responses::Song) -> Track {
         rating: None,
         rg_track_gain: None,
         rg_album_gain: None,
+        bit_depth: 0,
+        release_type: String::new(),
+        added_at: 0,
+        favorited_at: 0,
     }
 }
 
@@ -965,7 +970,7 @@ impl MusicProvider for MpdProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn sync_library(&self) -> Result<usize, ProviderError> {
+    fn sync_library(&self, _progress: &ScanProgress) -> Result<usize, ProviderError> {
         self.block_on(async {
             let client = self.get_client().await?;
             client

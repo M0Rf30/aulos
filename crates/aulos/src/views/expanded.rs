@@ -70,7 +70,13 @@ pub(super) fn paint_backdrop(ui: &Ui, app: &App, rect: Rect, top: Color32, botto
                 let span = tw / th / target;
                 Rect::from_min_max(pos2(0.0, (1.0 - span) / 2.0), pos2(1.0, (1.0 + span) / 2.0))
             };
-            painter.image(tex.id(), rect, uv, Color32::WHITE);
+            let t = app
+                .art_fade
+                .progress(ui.ctx(), theme::motion::CROSSFADE_SLOW);
+            if let (Some(prev), true) = (app.art_fade.backdrop.as_ref(), t < 1.0) {
+                painter.image(prev.id(), rect, uv_cover(prev.size(), rect), Color32::WHITE);
+            }
+            painter.image(tex.id(), rect, uv, Color32::WHITE.gamma_multiply(t));
         }
         None => {
             painter.rect_filled(rect, 0.0, app.accent.fill.alpha(0.22));
@@ -84,6 +90,18 @@ pub(super) fn paint_backdrop(ui: &Ui, app: &App, rect: Rect, top: Color32, botto
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(Shape::mesh(mesh));
+}
+
+fn uv_cover(size: [usize; 2], rect: Rect) -> Rect {
+    let (tw, th) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    let target = rect.width() / rect.height().max(1.0);
+    if tw / th > target {
+        let span = target * th / tw;
+        Rect::from_min_max(pos2((1.0 - span) / 2.0, 0.0), pos2((1.0 + span) / 2.0, 1.0))
+    } else {
+        let span = tw / th / target;
+        Rect::from_min_max(pos2(0.0, (1.0 - span) / 2.0), pos2(1.0, (1.0 + span) / 2.0))
+    }
 }
 
 /// Seek position labels and fraction of the current track.
@@ -437,10 +455,12 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
     let side = if with_volume {
         20.0 + 32.0 + extra + 8.0 + VOLUME_W + 30.0 + 12.0
     } else {
-        20.0 + 32.0 + extra + 12.0
+        20.0 + 32.0 + extra + 36.0 + 12.0
     };
     if with_volume {
         volume_control(app, ui, buttons_left - 8.0, rect.top() + 28.0);
+    } else {
+        volume_popover(app, ui, buttons_left - 4.0, rect.top() + 28.0);
     }
 
     let mid_w = (rect.width() - 2.0 * side).max(40.0);
@@ -476,6 +496,55 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
 const VOLUME_W: f32 = 96.0;
 
 /// Mute button + volume slider whose right edge is `right`, centred on `cy`.
+/// Narrow layouts: a speaker button opening a volume popover.
+fn volume_popover(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
+    let vol = app.volume();
+    let muted = vol <= 0.001;
+    let glyph = if muted {
+        regular::SPEAKER_X
+    } else if vol < 0.4 {
+        regular::SPEAKER_LOW
+    } else {
+        regular::SPEAKER_HIGH
+    };
+    let t = Theme::get(ui.ctx());
+    let rect = Rect::from_min_size(pos2(right - 32.0, cy - 16.0), vec2(32.0, 32.0));
+    let resp = ui
+        .scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+            IconBtn::new(glyph)
+                .size(32.0)
+                .icon_size(17.0)
+                .color(if muted { t.pal.danger } else { SOFT })
+                .tip("Volume")
+                .show(ui)
+        })
+        .inner;
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(150.0);
+        ui.horizontal(|ui| {
+            if IconBtn::new(glyph)
+                .size(28.0)
+                .icon_size(16.0)
+                .color(if muted { t.pal.danger } else { t.pal.text_2 })
+                .tip(if muted { "Unmute" } else { "Mute" })
+                .show(ui)
+                .clicked()
+            {
+                let u = app.session.toggle_mute();
+                app.run(u);
+            }
+            let (r, new) = slider_bar(ui, app.volume(), vec2(110.0, 20.0), t.pal.text_1);
+            if let Some(v) = new {
+                let u = app.session.set_volume(v);
+                app.run(u);
+            }
+            if r.drag_stopped() || r.clicked() {
+                app.session.commit_volume();
+            }
+        });
+    });
+}
+
 fn volume_control(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
     let vol = app.volume();
     let glyph = if vol <= 0.001 {
@@ -492,7 +561,11 @@ fn volume_control(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
             IconBtn::new(glyph)
                 .size(28.0)
                 .icon_size(16.0)
-                .color(SOFT)
+                .color(if vol <= 0.001 {
+                    Theme::get(ui.ctx()).pal.danger
+                } else {
+                    SOFT
+                })
                 .tip("Mute")
                 .show(ui)
         })
@@ -555,25 +628,6 @@ fn chip(
     w
 }
 
-fn format_chip(track: &Track) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ext) = track
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .filter(|e| !e.is_empty() && e.len() <= 5)
-    {
-        parts.push(ext.to_uppercase());
-    }
-    if track.sample_rate > 0 {
-        parts.push(format!("{} kHz", track.sample_rate as f32 / 1000.0));
-    }
-    if track.bitrate > 0 {
-        parts.push(format!("{} kbps", track.bitrate));
-    }
-    parts.join(" \u{00B7} ")
-}
-
 fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     const INFO_H: f32 = 203.0;
     let t = Theme::get(ui.ctx());
@@ -586,7 +640,19 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
         .max(180.0);
     let cover = w;
     let x0 = col.center().x - w / 2.0;
-    let total = cover + 22.0 + INFO_H;
+    // The title wraps to a second row; everything under it moves down.
+    let mut title_job = egui::text::LayoutJob::simple(
+        track.title.clone(),
+        theme::semibold(26.0),
+        Color32::WHITE,
+        w - 68.0,
+    );
+    title_job.wrap.max_rows = 2;
+    title_job.wrap.overflow_character = Some('\u{2026}');
+    let title_galley = ui.painter().layout_job(title_job);
+    let title_h = title_galley.size().y;
+    let extra = (title_h - 30.0).max(0.0);
+    let total = cover + 22.0 + INFO_H + extra;
     let top = (col.center().y - total / 2.0).max(col.top());
 
     // Cover.
@@ -604,19 +670,26 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     let key = track.cover_key();
     let tex = app.cover_large.as_ref().or_else(|| app.covers.thumb(&key));
     cover_image(ui, &app.covers, cover_rect, tex, &key, 10);
+    let fade = app.art_fade.progress(ui.ctx(), theme::motion::CROSSFADE);
+    if let (Some(prev), true) = (app.art_fade.cover.as_ref(), fade < 1.0) {
+        ui.painter().add(
+            egui::epaint::RectShape::filled(
+                cover_rect,
+                CornerRadius::same(10),
+                Color32::WHITE.gamma_multiply(1.0 - fade),
+            )
+            .with_texture(
+                prev.id(),
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            ),
+        );
+    }
 
     let info = top + cover + 22.0;
 
     // Title, subtitle, heart.
-    let title = Rect::from_min_size(pos2(x0, info), vec2(w - 34.0, 30.0));
-    paint_text(
-        ui.painter(),
-        title,
-        Align::Min,
-        &track.title,
-        theme::semibold(26.0),
-        Color32::WHITE,
-    );
+    ui.painter()
+        .galley(pos2(x0, info), title_galley, Color32::WHITE);
     let year = (track.year > 0).then(|| track.year.to_string());
     let sub = [
         Some(track.artist.as_str()),
@@ -628,14 +701,16 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" \u{00B7} ");
-    let sub_rect = Rect::from_min_size(pos2(x0, info + 33.0), vec2(w - 34.0, 20.0));
-    paint_text(
-        ui.painter(),
+    let sub_rect = Rect::from_min_size(pos2(x0, info + 33.0 + extra), vec2(w - 68.0, 20.0));
+    crate::widgets::marquee_text(
+        ui,
         sub_rect,
-        Align::Min,
+        crate::widgets::marquee_id("expanded-sub", &sub),
         &sub,
         theme::regular(14.0),
         SUB,
+        rgba(6, 14, 18, 0.9),
+        true,
     );
 
     let fav = app
@@ -643,7 +718,24 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
         .library
         .favorite_state(Some(track), &track.id.to_string())
         .unwrap_or(track.is_favorite);
-    let heart = Rect::from_min_size(pos2(x0 + w - 30.0, info + 28.0), vec2(30.0, 30.0));
+    let heart = Rect::from_min_size(pos2(x0 + w - 30.0, info + 28.0 + extra), vec2(30.0, 30.0));
+    // Track menu ("…") left of the heart.
+    let more = Rect::from_min_size(pos2(x0 + w - 64.0, info + 28.0 + extra), vec2(30.0, 30.0));
+    let more_resp = ui
+        .scope_builder(UiBuilder::new().max_rect(more), |ui| {
+            IconBtn::new(regular::DOTS_THREE)
+                .size(30.0)
+                .icon_size(22.0)
+                .color(SUB)
+                .tip("More")
+                .show(ui)
+        })
+        .inner;
+    if let Some(action) =
+        super::menus::track_menu_click(&more_resp, track, &app.session.playlists.playlists)
+    {
+        super::menus::apply(app, action);
+    }
     let hresp = ui.interact(heart, ui.id().with("expanded-heart"), Sense::click());
     let (glyph, color) = if fav {
         (fill::HEART, t.accent.fill)
@@ -666,7 +758,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     }
 
     // Quality chips.
-    let chips_y = info + 67.0;
+    let chips_y = info + 67.0 + extra;
     let mut cx = x0;
     if let Some(q) = App::quality_of(track) {
         let dark = t.pal.dark;
@@ -680,7 +772,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
             Some(q.border(dark)),
         ) + 6.0;
     }
-    let fmt = format_chip(track);
+    let fmt = track.format_chip();
     if !fmt.is_empty() {
         cx += chip(
             ui,
@@ -706,7 +798,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
 
     // Seek bar and times.
     let prog = progress(app);
-    let seek_rect = Rect::from_min_size(pos2(x0, info + 93.0), vec2(w, 18.0));
+    let seek_rect = Rect::from_min_size(pos2(x0, info + 93.0 + extra), vec2(w, 18.0));
     seek_row(
         app,
         ui,
@@ -716,7 +808,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
         prog.frac,
         prog.enabled,
     );
-    let times = Rect::from_min_size(pos2(x0, info + 111.0), vec2(w, 14.0));
+    let times = Rect::from_min_size(pos2(x0, info + 111.0 + extra), vec2(w, 14.0));
     paint_text(
         ui.painter(),
         times,
@@ -735,7 +827,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     );
 
     // Transport.
-    let row = Rect::from_min_size(pos2(x0, info + 139.0), vec2(w, 64.0));
+    let row = Rect::from_min_size(pos2(x0, info + 139.0 + extra), vec2(w, 64.0));
     let style = TransportStyle {
         side: 40.0,
         side_icon: 20.0,
@@ -1075,9 +1167,9 @@ fn lyrics_view(
                     for (i, line) in lines.iter().enumerate() {
                         let is_cur = Some(i) == cur;
                         let (size, color) = if is_cur {
-                            (28.0, Color32::WHITE)
+                            (26.0, Color32::WHITE)
                         } else {
-                            (24.0, Color32::WHITE.alpha(0.45))
+                            (22.0, Color32::WHITE.alpha(0.45))
                         };
                         let text = if line.text.is_empty() {
                             "\u{266A}"

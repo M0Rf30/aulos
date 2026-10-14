@@ -4,7 +4,7 @@
 use super::badge::quality_badge;
 use super::text::{paint_icon, paint_text, paint_text_spaced, text_width};
 use crate::app::App;
-use crate::theme::{self, Theme};
+use crate::theme::{self, ColorExt, Theme};
 use aulos_core::format::format_duration;
 use aulos_core::library::Track;
 use aulos_core::library::state::SortField;
@@ -263,6 +263,8 @@ pub struct RowOutput {
     pub toggle_favorite: bool,
     /// A star was clicked (0 clears the rating).
     pub set_rating: Option<u8>,
+    /// The hover-only "…" trigger (feed it to `menus::track_menu_click`).
+    pub more: Response,
 }
 
 /// One track row. `number` is the text of the first column (track/position
@@ -431,9 +433,31 @@ pub fn track_row(
         pal.text_2,
     );
 
+    // "…" menu trigger, visible while the row is hovered.
+    let more_rect = Rect::from_center_size(
+        pos2(l.time.right() - 56.0, rect.center().y),
+        vec2(24.0, 24.0),
+    );
+    let more = ui.interact(more_rect, response.id.with("more"), Sense::click());
+    if hovered || more.hovered() || more.has_focus() {
+        if more.hovered() {
+            ui.painter()
+                .rect_filled(more_rect, CornerRadius::same(255), pal.text.alpha(0.1));
+        }
+        paint_icon(
+            ui.painter(),
+            more_rect.center(),
+            regular::DOTS_THREE,
+            16.0,
+            if more.hovered() { pal.text } else { pal.text_3 },
+            false,
+        );
+    }
+
     // The badge's child scope moved the cursor; put it back below the row.
     ui.advance_cursor_after_rect(rect);
     RowOutput {
+        more,
         toggle_favorite: heart.clicked(),
         set_rating,
         response,
