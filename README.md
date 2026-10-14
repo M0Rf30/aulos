@@ -148,8 +148,8 @@ The `tokio-console` feature is for debugging the async runtime. It replaces the 
 
 The repository is a Cargo workspace with two crates:
 
-- `crates/aulos-core` is the backend: library and tag I/O, the playback engine, MPD/Subsonic providers, online services (scrobbling, MusicBrainz/AcoustID, podcasts, radio), the tag editor's state, settings, MPRIS and desktop integration. It has no UI toolkit dependency, and CI fails if it gains one.
-- The root crate (`src/`) is the COSMIC user interface built on libcosmic. It turns the backend's data, streams and effects into widgets, iced tasks and subscriptions.
+- `crates/aulos-core` is the backend: library and tag I/O, the playback engine, MPD/Subsonic providers, online services (scrobbling, MusicBrainz/AcoustID, podcasts, radio), the tag editor, settings, MPRIS and desktop integration. Its `Session` type holds the application state and workflows (play, queue, rescan, switch server, subscribe…); background work comes back as events the front end feeds into it. It has no UI toolkit dependency, and CI fails if it gains one.
+- The root crate (`src/`) is the COSMIC user interface built on libcosmic. It maps user input to `Session` calls and turns the results into widgets, iced tasks and subscriptions.
 
 `cargo build`, `cargo test` and `cargo clippy` at the repository root cover both crates.
 
