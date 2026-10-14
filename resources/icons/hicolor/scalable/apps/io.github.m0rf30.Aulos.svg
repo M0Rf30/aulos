@@ -1,73 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Aulos app icon: the "reed mark" from the UI v1 design — two slanted
+       reeds, a nod to the aulos double pipe. Tile in the dark ink of the UI,
+       tall reed in the signature coral, short reed in paper white. -->
   <defs>
-    <!-- Deep night-sky gradient background (kept from the original icon) -->
-    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2d1b69"/>
-      <stop offset="0.5" stop-color="#1a1145"/>
-      <stop offset="1" stop-color="#0f0a2e"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26241F"/>
+      <stop offset="1" stop-color="#151412"/>
     </linearGradient>
-    <!-- Warm gold for the pipes -->
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#b07820"/>
-      <stop offset="0.45" stop-color="#f0d060"/>
-      <stop offset="1" stop-color="#b07820"/>
-    </linearGradient>
-    <linearGradient id="wave" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fffbe8" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#f0d060" stop-opacity="0.2"/>
-    </linearGradient>
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <!-- One pipe, drawn vertically with its mouthpiece at the origin and
-         its bell at y = -78; placed twice, rotated into a V. -->
-    <g id="pipe">
-      <rect x="-3.5" y="-72" width="7" height="72" rx="3" fill="url(#gold)"/>
-      <!-- Flared bell -->
-      <path d="M-3.5 -70 L-7 -80 Q0 -83 7 -80 L3.5 -70 Z" fill="url(#gold)"/>
-      <!-- Decorative bands -->
-      <rect x="-4.5" y="-10" width="9" height="3" rx="1" fill="#8a5a14"/>
-      <rect x="-4.5" y="-68" width="9" height="2.5" rx="1" fill="#8a5a14"/>
-      <!-- Finger holes -->
-      <circle cx="0" cy="-26" r="1.6" fill="#1a1145"/>
-      <circle cx="0" cy="-36" r="1.6" fill="#1a1145"/>
-      <circle cx="0" cy="-46" r="1.6" fill="#1a1145"/>
-      <circle cx="0" cy="-56" r="1.6" fill="#1a1145"/>
-    </g>
   </defs>
-
-  <!-- Background -->
-  <rect width="128" height="128" rx="26" fill="url(#bg)"/>
-
-  <!-- Faint ambient stars -->
-  <g fill="#c8d8ff" opacity="0.5">
-    <circle cx="20" cy="22" r="0.8"/>
-    <circle cx="108" cy="18" r="0.7"/>
-    <circle cx="64" cy="14" r="0.6"/>
-    <circle cx="14" cy="70" r="0.6"/>
-    <circle cx="114" cy="64" r="0.8"/>
-    <circle cx="96" cy="104" r="0.6"/>
-    <circle cx="30" cy="106" r="0.7"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <rect x="8.5" y="8.5" width="111" height="111" rx="25.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
+  <g transform="translate(56 96) skewX(-14) translate(-64 -96)">
+    <rect x="45" y="30" width="15" height="66" rx="7.5" fill="#E07A5F"/>
+    <rect x="68" y="48" width="15" height="48" rx="7.5" fill="#F4F1EC"/>
   </g>
-
-  <!-- Sound waves rising between the bells -->
-  <g fill="none" stroke="url(#wave)" stroke-width="2.4" stroke-linecap="round" filter="url(#glow)">
-    <path d="M52 40 Q64 32 76 40"/>
-    <path d="M46 30 Q64 19 82 30" opacity="0.7"/>
-    <path d="M40 20 Q64 6 88 20" opacity="0.4"/>
-  </g>
-
-  <!-- The double pipe, splayed from a shared mouthpiece -->
-  <g filter="url(#glow)">
-    <use href="#pipe" transform="translate(64 108) rotate(-22)"/>
-    <use href="#pipe" transform="translate(64 108) rotate(22)"/>
-  </g>
-
-  <!-- Shared mouthpiece (phorbeia band) -->
-  <rect x="56" y="104" width="16" height="9" rx="4" fill="url(#gold)"/>
-  <rect x="56" y="107" width="16" height="2.5" fill="#8a5a14"/>
 </svg>

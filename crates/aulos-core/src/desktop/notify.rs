@@ -1,23 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Desktop notifications on track change, with cover art
-//! (`org.freedesktop.Notifications` over the session bus; Lollypop's
+//! Desktop notifications on track change, with cover art (Lollypop's
 //! `notification.py`).
 //!
+//! Linux talks `org.freedesktop.Notifications` over the session bus itself;
+//! Windows (toasts) and macOS (notification center) go through `notify-rust`;
+//! other targets (the web build) have none and [`send`] fails.
+//!
 //! Only shown while the Aulos window isn't focused — see
-//! [`should_notify`]. Successive notifications replace the previous one
-//! (`replaces_id`) instead of stacking up.
+//! [`should_notify`]. On Linux successive notifications replace the previous
+//! one (`replaces_id`) instead of stacking up; Windows and macOS stack them
+//! like any other toast.
 
 use crate::library::Track;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use zbus::zvariant::Value;
 
 const APP_NAME: &str = "Aulos";
-const DESKTOP_ENTRY: &str = "io.github.m0rf30.Aulos";
-/// How long the bubble stays up (ms); the server may override.
-const EXPIRE_MS: i32 = 5000;
 
 /// Whether to pop a notification for a track change.
 ///
@@ -59,9 +58,10 @@ pub fn notification_text(track: &Track) -> (String, String) {
     (summary, body)
 }
 
-/// Escape the characters the notification spec's body markup treats
+/// Escape the characters the Linux notification spec's body markup treats
 /// specially (servers may render a markup subset).
-pub fn escape_markup(text: &str) -> String {
+#[cfg(any(target_os = "linux", test))]
+fn escape_markup(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -82,7 +82,7 @@ fn image_ext(bytes: &[u8]) -> &'static str {
 /// Blocking file I/O — call from `spawn_blocking`.
 pub fn prepare_cover(track: &Track, cover_bytes: Option<&[u8]>) -> Option<PathBuf> {
     if let Some(bytes) = cover_bytes.filter(|b| !b.is_empty()) {
-        let dir = dirs::cache_dir()?.join("aulos").join("notify");
+        let dir = crate::paths::cache_dir().join("notify");
         std::fs::create_dir_all(&dir).ok()?;
         // Keyed by content so the file can be reused and never half-read:
         // a different cover is simply a different file.
@@ -97,45 +97,120 @@ pub fn prepare_cover(track: &Track, cover_bytes: Option<&[u8]>) -> Option<PathBu
     crate::file_uri_to_path(&url)
 }
 
-/// Send (or replace, when `replaces_id != 0`) a track notification.
-/// Returns the server-assigned id to pass as `replaces_id` next time.
+/// Send (or replace, when `replaces_id != 0` and the platform supports it) a
+/// track notification. Returns the server-assigned id to pass as
+/// `replaces_id` next time (always `0` where notifications cannot be
+/// replaced).
 pub async fn send(
     summary: &str,
     body: &str,
     image: Option<&std::path::Path>,
     replaces_id: u32,
-) -> zbus::Result<u32> {
-    let conn = zbus::Connection::session().await?;
+) -> Result<u32, String> {
+    backend::send(summary, body, image, replaces_id).await
+}
 
-    let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
-    hints.insert("desktop-entry", Value::from(DESKTOP_ENTRY));
-    // Don't pile into the notification history/tray for every track.
-    hints.insert("transient", Value::from(true));
-    hints.insert("category", Value::from("x-gnome.music"));
-    let image_path = image.map(|p| p.to_string_lossy().into_owned());
-    if let Some(path) = image_path.as_deref() {
-        hints.insert("image-path", Value::from(path));
+#[cfg(target_os = "linux")]
+mod backend {
+    use super::{APP_NAME, escape_markup};
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+
+    const DESKTOP_ENTRY: &str = crate::config::APP_ID;
+    /// How long the bubble stays up (ms); the server may override.
+    const EXPIRE_MS: i32 = 5000;
+
+    pub async fn send(
+        summary: &str,
+        body: &str,
+        image: Option<&std::path::Path>,
+        replaces_id: u32,
+    ) -> Result<u32, String> {
+        notify(summary, body, image, replaces_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &(
-                APP_NAME,
-                replaces_id,
-                DESKTOP_ENTRY, // app_icon: falls back to the app's own icon
-                summary,
-                escape_markup(body),
-                Vec::<&str>::new(),
-                hints,
-                EXPIRE_MS,
-            ),
-        )
-        .await?;
-    reply.body().deserialize::<u32>()
+    async fn notify(
+        summary: &str,
+        body: &str,
+        image: Option<&std::path::Path>,
+        replaces_id: u32,
+    ) -> zbus::Result<u32> {
+        let conn = zbus::Connection::session().await?;
+
+        let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
+        hints.insert("desktop-entry", Value::from(DESKTOP_ENTRY));
+        // Don't pile into the notification history/tray for every track.
+        hints.insert("transient", Value::from(true));
+        hints.insert("category", Value::from("x-gnome.music"));
+        let image_path = image.map(|p| p.to_string_lossy().into_owned());
+        if let Some(path) = image_path.as_deref() {
+            hints.insert("image-path", Value::from(path));
+        }
+
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &(
+                    APP_NAME,
+                    replaces_id,
+                    DESKTOP_ENTRY, // app_icon: falls back to the app's own icon
+                    summary,
+                    escape_markup(body),
+                    Vec::<&str>::new(),
+                    hints,
+                    EXPIRE_MS,
+                ),
+            )
+            .await?;
+        reply.body().deserialize::<u32>()
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod backend {
+    use super::APP_NAME;
+
+    pub async fn send(
+        summary: &str,
+        body: &str,
+        image: Option<&std::path::Path>,
+        _replaces_id: u32,
+    ) -> Result<u32, String> {
+        let (summary, body) = (summary.to_owned(), body.to_owned());
+        let image = image.map(|p| p.to_string_lossy().into_owned());
+        // Showing a notification talks to the OS synchronously.
+        tokio::task::spawn_blocking(move || {
+            let mut notification = notify_rust::Notification::new();
+            notification
+                .appname(APP_NAME)
+                .summary(&summary)
+                .body(&body)
+                .timeout(notify_rust::Timeout::Milliseconds(5000));
+            if let Some(path) = image.as_deref() {
+                notification.image_path(path);
+            }
+            notification.show().map(|_| 0).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+mod backend {
+    pub async fn send(
+        _summary: &str,
+        _body: &str,
+        _image: Option<&std::path::Path>,
+        _replaces_id: u32,
+    ) -> Result<u32, String> {
+        Err("desktop notifications are not available on this platform".to_owned())
+    }
 }
 
 #[cfg(test)]

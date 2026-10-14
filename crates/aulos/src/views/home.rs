@@ -1,0 +1,985 @@
+//! The home page: a time-of-day greeting over shelves of albums and artists
+//! built from the play history (`session.home`), the decade tiles and the
+//! decade grid.
+//!
+//! Cards carry only `(artist, name)`; the library is searched for the album
+//! when a card is clicked (or its context menu opened), never per frame.
+
+use crate::app::{App, Route};
+use crate::theme::{self, ColorExt, Theme};
+use crate::views::menus;
+use crate::widgets::{
+    IconBtn, PillKind, avatar_tile, cover_image, empty_state, gradient_fill, paint_icon,
+    paint_text, pill_button, seed_colors, skeleton,
+};
+use aulos_core::library::history::{AlbumRef, DecadeCount};
+use aulos_core::library::home::artist_tracks;
+use aulos_core::library::home_state::{Greeting, decade_label};
+use aulos_core::library::{CoverArt, Track};
+use chrono::Timelike;
+use egui::scroll_area::ScrollBarVisibility;
+use egui::{
+    Align, Color32, CornerRadius, Frame, Id, Layout, Margin, Rect, RichText, ScrollArea, Sense,
+    Shape, Ui, pos2, vec2,
+};
+use egui_phosphor::{fill, regular};
+use std::collections::{HashMap, HashSet};
+
+const CARD: f32 = 148.0;
+const CARD_GAP: f32 = 20.0;
+/// 8px gap plus the two text rows under a cover.
+const CARD_TEXT: f32 = 44.0;
+const SECTION_GAP: f32 = 28.0;
+
+#[derive(Default)]
+pub struct State {
+    /// Horizontal scroll offset of every shelf, by shelf id.
+    offsets: HashMap<Id, f32>,
+    /// Artists whose photo was already asked for this visit.
+    asked: HashSet<String>,
+}
+
+/// Called when the route is entered: start loading what the page needs.
+pub fn enter(app: &mut App) {
+    app.views.home.asked.clear();
+    let effect = app.session.enter_home();
+    app.run(effect);
+}
+
+/// What a click on the page asked for; applied once drawing is done.
+enum Act {
+    OpenAlbum(String, String),
+    PlayAlbum(String, String),
+    OpenArtist(String),
+    PlayArtist(String),
+    Reroll,
+    OpenDecade(u32),
+    CloseDecade,
+    PlayDecade,
+    ShuffleAll,
+    Goto(Route),
+    OpenUrl(String),
+}
+
+/// Everything drawing collects for after the library borrow ends.
+#[derive(Default)]
+struct Out {
+    act: Option<Act>,
+    photos: Vec<String>,
+    menu: Option<menus::MenuAction>,
+}
+
+/// Drawing context shared by the card helpers.
+struct Cx<'a> {
+    app: &'a App,
+    out: &'a mut Out,
+    asked: &'a mut HashSet<String>,
+}
+
+pub fn show(app: &mut App, ui: &mut Ui) {
+    let mut st = std::mem::take(&mut app.views.home);
+    let mut out = Out::default();
+    if app.session.home.decade.is_some() {
+        decade_page(app, ui, &mut out);
+    } else {
+        home_page(app, ui, &mut st, &mut out);
+    }
+    app.views.home = st;
+    apply(app, out);
+}
+
+fn apply(app: &mut App, out: Out) {
+    for name in out.photos {
+        let effect = app.session.fetch_artist_info_for(&name);
+        app.run(effect);
+    }
+    if let Some(menu) = out.menu {
+        menus::apply(app, menu);
+    }
+    let Some(act) = out.act else { return };
+    match act {
+        Act::OpenAlbum(artist, name) => {
+            app.navigate(Route::Album(CoverArt::album_key(&artist, &name)))
+        }
+        Act::PlayAlbum(artist, name) => {
+            if let Some(idx) = app.session.library.find_album_exact(&artist, &name) {
+                let update = app.session.play_album(idx, 0);
+                app.run(update);
+            }
+        }
+        Act::OpenArtist(name) => app.navigate(Route::Artist(name)),
+        Act::PlayArtist(name) => {
+            let tracks = artist_tracks(&app.session.library.albums, &name);
+            if !tracks.is_empty() {
+                let update = app.session.play_tracks(tracks, 0);
+                app.run(update);
+            }
+        }
+        Act::Reroll => {
+            let effect = app.session.reroll_random_picks();
+            app.run(effect);
+        }
+        Act::OpenDecade(decade) => {
+            let effect = app.session.open_decade(decade);
+            app.run(effect);
+        }
+        Act::CloseDecade => app.session.home.decade = None,
+        Act::PlayDecade => {
+            let tracks = app.session.decade_tracks();
+            play_shuffled(app, tracks);
+        }
+        Act::ShuffleAll => {
+            let tracks = app.session.library.tracks.clone();
+            play_shuffled(app, tracks);
+        }
+        Act::Goto(route) => app.navigate(route),
+        Act::OpenUrl(url) => {
+            if url.starts_with("https://") {
+                app.ctx.open_url(egui::OpenUrl::new_tab(url));
+            }
+        }
+    }
+}
+
+/// Turns shuffle on and starts `tracks` at a random position.
+pub fn play_shuffled(app: &mut App, tracks: Vec<Track>) {
+    if tracks.is_empty() {
+        return;
+    }
+    if !app.session.config.config.shuffle {
+        let update = app.session.toggle_shuffle();
+        app.run(update);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    let start = nanos % tracks.len();
+    let update = app.session.play_tracks(tracks, start);
+    app.run(update);
+}
+
+// ---------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------
+
+fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
+    let library_albums = app.session.library.albums.len();
+    let data = app.session.home.data.as_ref();
+    let nothing = library_albums == 0 && data.is_none_or(|d| d.total_albums == 0);
+    if nothing {
+        welcome(app, ui, out);
+        return;
+    }
+    let State { offsets, asked } = st;
+    let pad = app.page_pad() as i8;
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        Frame::NONE
+            .inner_margin(Margin {
+                left: pad,
+                right: pad,
+                top: 6,
+                bottom: 32,
+            })
+            .show(ui, |ui| {
+                greeting(app, ui, library_albums);
+                ui.add_space(SECTION_GAP);
+
+                let Some(data) = data else {
+                    loading_shelves(ui);
+                    return;
+                };
+                let mut cx = Cx { app, out, asked };
+
+                if data.history_available && data.total_plays == 0 {
+                    no_history(ui, &mut cx);
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.recently_played.is_empty() {
+                    album_shelf(
+                        ui,
+                        &mut cx,
+                        offsets,
+                        "recent",
+                        "Continue listening",
+                        None,
+                        &data.recently_played,
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.most_played_month.is_empty() {
+                    album_shelf(
+                        ui,
+                        &mut cx,
+                        offsets,
+                        "most",
+                        "Most played this month",
+                        None,
+                        &data.most_played_month,
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.top_artists_month.is_empty() {
+                    let head = Head {
+                        title: "Top artists this month",
+                        hint: None,
+                        action: None,
+                    };
+                    shelf(
+                        ui,
+                        offsets,
+                        Id::new(("home-shelf", "top-artists")),
+                        head,
+                        |ui| {
+                            for a in &data.top_artists_month {
+                                let sub = if a.plays == 1 {
+                                    "1 play".to_owned()
+                                } else {
+                                    format!("{} plays", a.plays)
+                                };
+                                artist_card(ui, &mut cx, &a.name, &sub, ArtistKind::Library);
+                            }
+                        },
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                for s in &app.session.home.similar {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    let title = format!("Because you listened to {}", s.seed);
+                    let head = Head {
+                        title: &title,
+                        hint: Some("Artists you may like"),
+                        action: None,
+                    };
+                    shelf(
+                        ui,
+                        offsets,
+                        Id::new(("home-shelf", "similar", &s.seed)),
+                        head,
+                        |ui| {
+                            for name in &s.in_library {
+                                artist_card(
+                                    ui,
+                                    &mut cx,
+                                    name,
+                                    "In your library",
+                                    ArtistKind::Library,
+                                );
+                            }
+                            for d in &s.discover {
+                                let kind = ArtistKind::Discover {
+                                    url: &d.url,
+                                    site: d.site,
+                                };
+                                artist_card(ui, &mut cx, &d.name, "Not in your library", kind);
+                            }
+                        },
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.recently_added.is_empty() {
+                    album_shelf(
+                        ui,
+                        &mut cx,
+                        offsets,
+                        "added",
+                        "Recently added",
+                        None,
+                        &data.recently_added,
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.rediscover.is_empty() {
+                    let hint = Some("Albums you haven't played in a while");
+                    album_shelf(
+                        ui,
+                        &mut cx,
+                        offsets,
+                        "rediscover",
+                        "Rediscover",
+                        hint,
+                        &data.rediscover,
+                    );
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.random.is_empty() {
+                    let head = Head {
+                        title: "Random picks",
+                        hint: None,
+                        action: Some((regular::SHUFFLE, "Shuffle picks")),
+                    };
+                    let clicked =
+                        shelf(ui, offsets, Id::new(("home-shelf", "random")), head, |ui| {
+                            for a in &data.random {
+                                album_card(ui, &mut cx, a);
+                            }
+                        });
+                    if clicked {
+                        cx.out.act = Some(Act::Reroll);
+                    }
+                    ui.add_space(SECTION_GAP);
+                }
+                if !data.decades.is_empty() {
+                    decade_tiles(ui, &mut cx, &data.decades);
+                }
+            });
+    });
+}
+
+fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
+    let pal = app.pal;
+    let text = Greeting::for_hour(chrono::Local::now().hour()).text();
+    ui.label(
+        RichText::new(text)
+            .font(theme::semibold(30.0))
+            .color(pal.text),
+    );
+    ui.add_space(4.0);
+    match &app.session.playback.current_track {
+        Some(track) if !track.is_live_stream() => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let font = theme::regular(14.0);
+                ui.label(
+                    RichText::new("Now playing ")
+                        .font(font.clone())
+                        .color(pal.text_2),
+                );
+                ui.label(
+                    RichText::new(&track.title)
+                        .font(theme::medium(14.0))
+                        .color(pal.text),
+                );
+                if !track.artist.is_empty() {
+                    ui.label(
+                        RichText::new(format!(" · {}", track.artist))
+                            .font(font)
+                            .color(pal.text_2),
+                    );
+                }
+            });
+        }
+        _ => {
+            let text = if library_albums == 1 {
+                "1 album in your library".to_owned()
+            } else {
+                format!("{library_albums} albums in your library")
+            };
+            ui.label(
+                RichText::new(text)
+                    .font(theme::regular(14.0))
+                    .color(pal.text_2),
+            );
+        }
+    }
+}
+
+/// The two skewed bars of the brand mark, centred on `center`.
+fn brand_mark(ui: &Ui, center: egui::Pos2, pal: &theme::Palette) {
+    let skew = -14.0_f32.to_radians().tan();
+    let bars = [
+        (10.0_f32, 52.0_f32, pal.reed, -8.5),
+        (10.0, 38.0, pal.stroke_strong, 8.5),
+    ];
+    for (w, h, color, dx) in bars {
+        let bottom = 26.0;
+        let pts = [
+            (-w / 2.0, bottom - h),
+            (w / 2.0, bottom - h),
+            (w / 2.0, bottom),
+            (-w / 2.0, bottom),
+        ]
+        .into_iter()
+        .map(|(x, y)| pos2(center.x + dx + x + skew * y, center.y + y))
+        .collect();
+        ui.painter()
+            .add(Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+    }
+}
+
+/// The empty library: the welcome block (no shelves can exist yet).
+fn welcome(app: &App, ui: &mut Ui, out: &mut Out) {
+    let pal = app.pal;
+    let scanning = app.session.library.scanning;
+    let avail = ui.available_rect_before_wrap();
+    ui.allocate_ui_with_layout(avail.size(), Layout::top_down(Align::Center), |ui| {
+        ui.add_space((avail.height() * 0.5 - 130.0).max(24.0));
+        let (mark, _) = ui.allocate_exact_size(vec2(60.0, 56.0), Sense::hover());
+        brand_mark(ui, mark.center(), &pal);
+        ui.add_space(14.0);
+        ui.label(RichText::new("Welcome to Aulos").font(theme::semibold(22.0)).color(pal.text));
+        ui.add_space(8.0);
+        let body = if scanning {
+            "Scanning your library… Suggestions will appear as soon as your music is indexed."
+        } else {
+            "Add a music folder or connect a server in Settings. Internet radio and podcasts work without any library."
+        };
+        ui.allocate_ui(vec2(avail.width().min(420.0), 60.0), |ui| {
+            ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                ui.label(RichText::new(body).font(theme::regular(14.0)).color(pal.text_2));
+            });
+        });
+        ui.add_space(8.0);
+        let width = 160.0 + 120.0 + 8.0;
+        ui.allocate_ui_with_layout(vec2(width, 34.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if pill_button(ui, "Open settings", Some(regular::GEAR), PillKind::Accent, 34.0, 0.0).clicked() {
+                out.act = Some(Act::Goto(Route::Settings));
+            }
+            if pill_button(ui, "Browse radio", Some(regular::BROADCAST), PillKind::Secondary, 34.0, 0.0).clicked() {
+                out.act = Some(Act::Goto(Route::Radio));
+            }
+        });
+    });
+}
+
+/// History empty but music present: the design's "this page fills up" block.
+fn no_history(ui: &mut Ui, cx: &mut Cx) {
+    let pal = cx.app.pal;
+    Frame::NONE
+        .fill(pal.surface_1)
+        .stroke(egui::Stroke::new(1.0, pal.stroke))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Nothing played yet").font(theme::semibold(15.0)).color(pal.text));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Start listening and this page fills up — recent plays, this month’s favourites, albums worth another spin.",
+                )
+                .font(theme::regular(13.5))
+                .color(pal.text_2),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if pill_button(ui, "Shuffle everything", Some(regular::SHUFFLE), PillKind::Accent, 34.0, 0.0).clicked() {
+                    cx.out.act = Some(Act::ShuffleAll);
+                }
+                if pill_button(ui, "Browse albums", None, PillKind::Secondary, 34.0, 0.0).clicked() {
+                    cx.out.act = Some(Act::Goto(Route::Albums));
+                }
+            });
+        });
+}
+
+/// Pulsing placeholder shelves while the history is loading.
+fn loading_shelves(ui: &mut Ui) {
+    for _ in 0..2 {
+        let (head, _) = ui.allocate_exact_size(vec2(160.0, 20.0), Sense::hover());
+        skeleton(ui, head, 5);
+        ui.add_space(12.0);
+        let n = ((ui.available_width() + CARD_GAP) / (CARD + CARD_GAP))
+            .floor()
+            .max(1.0) as usize;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = CARD_GAP;
+            for _ in 0..n {
+                let (rect, _) =
+                    ui.allocate_exact_size(vec2(CARD, CARD + CARD_TEXT), Sense::hover());
+                skeleton(ui, Rect::from_min_size(rect.min, vec2(CARD, CARD)), 8);
+                skeleton(
+                    ui,
+                    Rect::from_min_size(rect.min + vec2(0.0, CARD + 8.0), vec2(CARD * 0.8, 14.0)),
+                    4,
+                );
+                skeleton(
+                    ui,
+                    Rect::from_min_size(rect.min + vec2(0.0, CARD + 28.0), vec2(CARD * 0.55, 12.0)),
+                    4,
+                );
+            }
+        });
+        ui.add_space(SECTION_GAP);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shelves
+// ---------------------------------------------------------------------------
+
+struct Head<'a> {
+    title: &'a str,
+    hint: Option<&'a str>,
+    /// An icon button at the right of the title: glyph and tooltip.
+    action: Option<(&'a str, &'a str)>,
+}
+
+/// A titled, horizontally scrolling row; `body` draws the cards. Returns
+/// true when the header action was clicked.
+fn shelf(
+    ui: &mut Ui,
+    offsets: &mut HashMap<Id, f32>,
+    id: Id,
+    head: Head,
+    body: impl FnOnce(&mut Ui),
+) -> bool {
+    let pal = Theme::get(ui.ctx()).pal;
+    let mut action = false;
+    let mut step = 0.0_f32;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(head.title)
+                .font(theme::semibold(17.0))
+                .color(pal.text),
+        );
+        if let Some(h) = head.hint {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(h)
+                    .font(theme::regular(12.5))
+                    .color(pal.text_3),
+            );
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if IconBtn::new(regular::CARET_RIGHT)
+                .size(26.0)
+                .icon_size(14.0)
+                .show(ui)
+                .clicked()
+            {
+                step = 1.0;
+            }
+            if IconBtn::new(regular::CARET_LEFT)
+                .size(26.0)
+                .icon_size(14.0)
+                .show(ui)
+                .clicked()
+            {
+                step = -1.0;
+            }
+            if let Some((glyph, tip)) = head.action
+                && IconBtn::new(glyph)
+                    .size(26.0)
+                    .icon_size(15.0)
+                    .tip(tip)
+                    .show(ui)
+                    .clicked()
+            {
+                action = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+    let off = offsets.entry(id).or_insert(0.0);
+    *off = (*off + step * ui.available_width() * 0.8).max(0.0);
+    let out = ScrollArea::horizontal()
+        .id_salt(id)
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .horizontal_scroll_offset(*off)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = CARD_GAP;
+                body(ui);
+            });
+        });
+    *off = out.state.offset.x;
+    action
+}
+
+fn album_shelf(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    offsets: &mut HashMap<Id, f32>,
+    id: &str,
+    title: &str,
+    hint: Option<&str>,
+    albums: &[AlbumRef],
+) {
+    let head = Head {
+        title,
+        hint,
+        action: None,
+    };
+    shelf(ui, offsets, Id::new(("home-shelf", id)), head, |ui| {
+        for a in albums {
+            album_card(ui, cx, a);
+        }
+    });
+}
+
+/// A shelf album card (allocates its own slot).
+fn album_card(ui: &mut Ui, cx: &mut Cx, a: &AlbumRef) {
+    let (rect, _) = ui.allocate_exact_size(vec2(CARD, CARD + CARD_TEXT), Sense::hover());
+    album_card_at(ui, cx, rect, a);
+}
+
+/// An album card inside `rect` (width = cover size; text below).
+fn album_card_at(ui: &mut Ui, cx: &mut Cx, rect: Rect, a: &AlbumRef) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let pal = cx.app.pal;
+    let w = rect.width();
+    let resp = ui.interact(
+        rect,
+        ui.id().with(("album", &a.artist, &a.name)),
+        Sense::click(),
+    );
+    let art = Rect::from_min_size(rect.min, vec2(w, w));
+    let key = CoverArt::album_key(&a.artist, &a.name);
+    cover_image(ui, &cx.app.covers, art, cx.app.covers.thumb(&key), &key, 8);
+
+    let play_rect = Rect::from_center_size(
+        pos2(art.right() - 30.0, art.bottom() - 30.0),
+        vec2(40.0, 40.0),
+    );
+    let play = ui.interact(play_rect, resp.id.with("play"), Sense::click());
+    if resp.hovered() || play.hovered() {
+        ui.painter()
+            .rect_filled(art, CornerRadius::same(8), Color32::BLACK.alpha(0.28));
+        let bg = if play.hovered() {
+            pal.text
+        } else {
+            pal.text.alpha(0.92)
+        };
+        ui.painter().circle_filled(play_rect.center(), 20.0, bg);
+        paint_icon(
+            ui.painter(),
+            play_rect.center(),
+            fill::PLAY,
+            17.0,
+            pal.bg,
+            true,
+        );
+    }
+
+    let title_rect = Rect::from_min_size(pos2(rect.left(), art.bottom() + 8.0), vec2(w, 18.0));
+    if a.name.trim().is_empty() {
+        paint_text(
+            ui.painter(),
+            title_rect,
+            Align::Min,
+            "Unknown album",
+            theme::semibold(13.5),
+            pal.text_2,
+        );
+    } else {
+        paint_text(
+            ui.painter(),
+            title_rect,
+            Align::Min,
+            &a.name,
+            theme::semibold(13.5),
+            pal.text,
+        );
+    }
+    let sub_rect = Rect::from_min_size(pos2(rect.left(), art.bottom() + 26.0), vec2(w, 16.0));
+    paint_text(
+        ui.painter(),
+        sub_rect,
+        Align::Min,
+        &a.artist,
+        theme::regular(12.5),
+        pal.text_2,
+    );
+
+    if play.clicked() {
+        cx.out.act = Some(Act::PlayAlbum(a.artist.clone(), a.name.clone()));
+    } else if resp.clicked() {
+        cx.out.act = Some(Act::OpenAlbum(a.artist.clone(), a.name.clone()));
+    }
+    if resp.secondary_clicked() || resp.context_menu_opened() {
+        let lib = &cx.app.session.library;
+        if let Some(idx) = lib.find_album_exact(&a.artist, &a.name)
+            && let Some(menu) =
+                menus::album_menu(&resp, &lib.albums[idx], &cx.app.session.playlists.playlists)
+        {
+            cx.out.menu = Some(menu);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArtistKind<'a> {
+    /// An artist of the library: opens the artist page.
+    Library,
+    /// A suggestion not in the library: opens a web page.
+    Discover { url: &'a str, site: &'a str },
+}
+
+/// A round artist card.
+fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind) {
+    let (rect, _) = ui.allocate_exact_size(vec2(CARD, CARD + CARD_TEXT), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let pal = cx.app.pal;
+    let resp = ui.interact(rect, ui.id().with(("artist", name)), Sense::click());
+    let art = Rect::from_min_size(rect.min, vec2(CARD, CARD));
+    let library = matches!(kind, ArtistKind::Library);
+    if library && cx.app.covers.photo(name).is_none() && !cx.asked.contains(name) {
+        cx.asked.insert(name.to_owned());
+        cx.out.photos.push(name.to_owned());
+    }
+    avatar_tile(
+        ui,
+        &cx.app.covers,
+        art,
+        name,
+        cx.app.covers.photo(name),
+        true,
+    );
+
+    let play_rect = Rect::from_center_size(
+        pos2(art.right() - 22.0, art.bottom() - 22.0),
+        vec2(40.0, 40.0),
+    );
+    let play = library.then(|| ui.interact(play_rect, resp.id.with("play"), Sense::click()));
+    let play_hovered = play.as_ref().is_some_and(|p| p.hovered());
+    if library && (resp.hovered() || play_hovered) {
+        let bg = if play_hovered {
+            pal.text
+        } else {
+            pal.text.alpha(0.92)
+        };
+        ui.painter().circle_filled(play_rect.center(), 20.0, bg);
+        paint_icon(
+            ui.painter(),
+            play_rect.center(),
+            fill::PLAY,
+            17.0,
+            pal.bg,
+            true,
+        );
+    }
+    let name_rect = Rect::from_min_size(pos2(rect.left(), art.bottom() + 8.0), vec2(CARD, 18.0));
+    paint_text(
+        ui.painter(),
+        name_rect,
+        Align::Min,
+        name,
+        theme::semibold(13.5),
+        pal.text,
+    );
+    let sub_rect = Rect::from_min_size(pos2(rect.left(), art.bottom() + 26.0), vec2(CARD, 16.0));
+    paint_text(
+        ui.painter(),
+        sub_rect,
+        Align::Min,
+        sub,
+        theme::regular(12.5),
+        pal.text_2,
+    );
+
+    match kind {
+        ArtistKind::Library => {
+            if play.is_some_and(|p| p.clicked()) {
+                cx.out.act = Some(Act::PlayArtist(name.to_owned()));
+            } else if resp.clicked() {
+                cx.out.act = Some(Act::OpenArtist(name.to_owned()));
+            }
+            if (resp.secondary_clicked() || resp.context_menu_opened())
+                && let Some(menu) = menus::artist_menu(&resp, name)
+            {
+                cx.out.menu = Some(menu);
+            }
+        }
+        ArtistKind::Discover { url, site } => {
+            let resp = resp.on_hover_text(format!("Open {name} on {site}"));
+            if resp.clicked() {
+                cx.out.act = Some(Act::OpenUrl(url.to_owned()));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decades
+// ---------------------------------------------------------------------------
+
+fn decade_tiles(ui: &mut Ui, cx: &mut Cx, decades: &[DecadeCount]) {
+    let pal = cx.app.pal;
+    ui.label(
+        RichText::new("Browse by decade")
+            .font(theme::semibold(17.0))
+            .color(pal.text),
+    );
+    ui.add_space(10.0);
+    let gap = 8.0;
+    let width = ui.available_width();
+    let cols = (((width + gap) / (168.0 + gap)).floor() as usize).clamp(2, 8);
+    let tile_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    for row in decades.chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for d in row {
+                let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, 64.0), Sense::click());
+                let label = decade_label(d.decade);
+                let (from, to) = seed_colors(&label);
+                gradient_fill(&cx.app.covers, ui, rect, 8, from, to);
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::same(8),
+                        Color32::WHITE.alpha(0.1),
+                    );
+                }
+                let inner = rect.shrink2(vec2(12.0, 9.0));
+                let count = if d.albums == 1 {
+                    "1 album".to_owned()
+                } else {
+                    format!("{} albums", d.albums)
+                };
+                let top = Rect::from_min_size(
+                    pos2(inner.left(), inner.bottom() - 34.0),
+                    vec2(inner.width(), 19.0),
+                );
+                let bottom = Rect::from_min_size(
+                    pos2(inner.left(), inner.bottom() - 15.0),
+                    vec2(inner.width(), 15.0),
+                );
+                paint_text(
+                    ui.painter(),
+                    top,
+                    Align::Min,
+                    &label,
+                    theme::semibold(15.0),
+                    Color32::WHITE,
+                );
+                paint_text(
+                    ui.painter(),
+                    bottom,
+                    Align::Min,
+                    &count,
+                    theme::regular(11.5),
+                    Color32::WHITE.alpha(0.88),
+                );
+                if resp.clicked() {
+                    cx.out.act = Some(Act::OpenDecade(d.decade));
+                }
+            }
+        });
+        ui.add_space(gap);
+    }
+}
+
+/// The album grid of the open decade, with Back and Shuffle play.
+fn decade_page(app: &App, ui: &mut Ui, out: &mut Out) {
+    let pal = app.pal;
+    let Some(view) = &app.session.home.decade else {
+        return;
+    };
+    let pad = app.page_pad();
+    let ipad = pad as i8;
+    Frame::NONE
+        .inner_margin(Margin {
+            left: ipad,
+            right: ipad,
+            top: 4,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if IconBtn::new(regular::ARROW_LEFT)
+                    .size(30.0)
+                    .icon_size(16.0)
+                    .tip("Back")
+                    .show(ui)
+                    .clicked()
+                {
+                    out.act = Some(Act::CloseDecade);
+                }
+                ui.label(
+                    RichText::new(format!("The {}s", view.decade))
+                        .font(theme::semibold(26.0))
+                        .color(pal.text),
+                );
+                if let Some(albums) = &view.albums {
+                    ui.label(
+                        RichText::new(albums.len().to_string())
+                            .font(theme::mono(13.0))
+                            .color(pal.text_3),
+                    );
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let enabled = view.albums.as_ref().is_some_and(|a| !a.is_empty());
+                    let r = crate::widgets::pill_button_enabled(
+                        ui,
+                        "Shuffle play",
+                        Some(regular::SHUFFLE),
+                        PillKind::Accent,
+                        32.0,
+                        0.0,
+                        enabled,
+                    );
+                    if r.clicked() {
+                        out.act = Some(Act::PlayDecade);
+                    }
+                });
+            });
+            ui.add_space(12.0);
+        });
+
+    let mut asked = HashSet::new();
+    let mut cx = Cx {
+        app,
+        out,
+        asked: &mut asked,
+    };
+    match &view.albums {
+        None => {
+            Frame::NONE
+                .inner_margin(Margin {
+                    left: ipad,
+                    right: ipad,
+                    top: 0,
+                    bottom: 0,
+                })
+                .show(ui, |ui| {
+                    let cols = (((ui.available_width() + CARD_GAP) / (CARD + CARD_GAP)).floor()
+                        as usize)
+                        .max(1);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = CARD_GAP;
+                        for _ in 0..cols {
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(CARD, CARD), Sense::hover());
+                            skeleton(ui, rect, 8);
+                        }
+                    });
+                });
+        }
+        Some(albums) if albums.is_empty() => {
+            empty_state(
+                ui,
+                regular::VINYL_RECORD,
+                "No albums",
+                "No albums from this decade in your library.",
+                None,
+            );
+        }
+        Some(albums) => {
+            ScrollArea::vertical()
+                .auto_shrink(false)
+                .show_viewport(ui, |ui, viewport| {
+                    let width = ui.available_width() - 2.0 * pad;
+                    let cols = (((width + CARD_GAP) / (CARD + CARD_GAP)).floor() as usize).max(1);
+                    let cw = ((width - CARD_GAP * (cols as f32 - 1.0)) / cols as f32)
+                        .floor()
+                        .max(80.0);
+                    let row_h = cw + CARD_TEXT + 24.0;
+                    let rows = albums.len().div_ceil(cols);
+                    let (full, _) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), row_h * rows as f32 + 32.0),
+                        Sense::hover(),
+                    );
+                    let first = (viewport.min.y / row_h).floor().max(0.0) as usize;
+                    let last = ((viewport.max.y / row_h).ceil() as usize + 1).min(rows);
+                    for row in first..last {
+                        let top = full.top() + row as f32 * row_h;
+                        for (i, a) in albums.iter().skip(row * cols).take(cols).enumerate() {
+                            let x = full.left() + pad + i as f32 * (cw + CARD_GAP);
+                            let rect = Rect::from_min_size(pos2(x, top), vec2(cw, cw + CARD_TEXT));
+                            album_card_at(ui, &mut cx, rect, a);
+                        }
+                    }
+                });
+        }
+    }
+}

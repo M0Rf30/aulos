@@ -253,7 +253,7 @@ impl From<crate::config::MpdConfigEntry> for MpdConfig {
 /// MPD music provider backed by the `mpd_client` crate.
 ///
 /// Uses **two separate TCP connections** to the same MPD server:
-/// - **Idle connection**: owned by the COSMIC subscription, used solely
+/// - **Idle connection**: owned by the idle-event stream, used solely
 ///   for receiving idle events via `ConnectionEvents`. This connection
 ///   stays in MPD's "idle" mode permanently.
 /// - **Command connection**: stored in `self.client`, used for all
@@ -317,7 +317,7 @@ impl MpdProvider {
 
     /// Establish the **idle connection** and return its event stream.
     ///
-    /// This connection is used only by the COSMIC subscription for
+    /// This connection is used only by the idle-event stream for
     /// receiving idle events. It does NOT store the client in `self.client`
     /// — that is done by `connect_command()`.
     ///
@@ -395,7 +395,7 @@ impl MpdProvider {
     /// visualizer's MPD PipeWire capture subscription to decide whether
     /// this server can plausibly be found on the local PipeWire graph at
     /// all — see `player::pw_capture::is_local_mpd_host`.
-    #[cfg(feature = "visualizer")]
+    #[cfg(all(feature = "visualizer", target_os = "linux"))]
     pub fn host(&self) -> &str {
         &self.config.host
     }

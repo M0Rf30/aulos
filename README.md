@@ -1,10 +1,11 @@
 <div align="center">
 
-<img src="resources/icons/hicolor/scalable/apps/io.github.m0rf30.Aulos.svg" width="120" height="120" alt="Aulos">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="resources/logo/aulos-wordmark-dark.svg">
+  <img src="resources/logo/aulos-wordmark-light.svg" width="260" alt="Aulos">
+</picture>
 
-# Aulos
-
-**A music player for the COSMIC desktop**
+**A modern music player**
 
 *Aulos: it really pipes the satyr's ass.*
 
@@ -17,9 +18,11 @@
 
 ---
 
-Aulos is a native music player for the [COSMIC desktop](https://github.com/pop-os/cosmic), written in Rust on top of [libcosmic](https://github.com/pop-os/libcosmic). It plays your local library, drives MPD servers, streams from Subsonic/OpenSubsonic servers, and also handles internet radio and podcasts.
+Aulos is a modern music player for Linux, Windows and macOS, written in Rust. It plays your local library, drives MPD servers and streams from Subsonic/OpenSubsonic servers, with internet radio, podcasts, synced lyrics, a 10-band equalizer, a MilkDrop visualizer and a Picard-style tag editor. The interface is a native [egui](https://github.com/emilk/egui) app: dark by default, tinted by the colour of the cover that is playing.
 
-The name comes from the *aulos*, the double pipe of ancient Greece.
+> **Status: preview.** This branch replaces the previous libcosmic interface with egui. Every page of the design is in place (Home, Albums, Artists, Songs, Genres, Folders, Playlists, Podcasts, Radio, Tag editor, Converter, Settings, the expanded now-playing view, the mini player and the visualizer), but some controls are still missing because the backend can't feed them yet, and settings start fresh (nothing is imported from the old COSMIC settings).
+
+The name comes from the *aulos*, the double pipe of ancient Greece; the logo's two slanted reeds are a nod to it.
 
 ## Features
 
@@ -37,7 +40,7 @@ The name comes from the *aulos*, the double pipe of ancient Greece.
 - **Local library**: your music folder (`~/Music` by default) is scanned into an SQLite database at startup. A file watcher then keeps it up to date as files are added, changed or removed.
 - **MPD**: Aulos works as a remote control. Playback happens on the MPD server, and shuffle, repeat, crossfade and ReplayGain settings are sent to it.
 - **Subsonic**: streams over HTTP with seeking. It also works with self-signed certificates, which you have to allow explicitly.
-- **Passwords** for MPD and Subsonic are kept in the system keyring: the kernel keyutils first, falling back to the Secret Service (GNOME Keyring, KWallet).
+- **Passwords** for MPD and Subsonic are kept in the system keyring: on Linux the kernel keyutils first, falling back to the Secret Service (GNOME Keyring, KWallet); on Windows the Credential Manager; on macOS the Keychain.
 
 ### Playback engine
 
@@ -68,15 +71,13 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 
 ### Desktop integration
 
-- **MPRIS**: works with media keys and the COSMIC panel, including cover art and seeking.
+- **Media keys and now playing**: MPRIS on Linux, System Media Transport Controls on Windows, Now Playing on macOS, including cover art and seeking.
 - **Notifications** with cover art on track change, only while the window isn't focused.
-- **Sleep inhibit** while music plays, through the desktop portal (falling back to systemd-logind).
-- **Background playback**: with the setting on, closing the window while music plays minimizes Aulos instead of quitting. libcosmic can't re-create a closed window, so the window stays in the task list; opening Aulos again (or MPRIS `Raise`) restores it.
-- **Opening files**: double-clicking a file, or opening it from a file manager, passes it to the window that's already open instead of starting a second copy of Aulos.
+- **Sleep inhibit** while music plays: through the desktop portal on Linux (falling back to systemd-logind), natively on Windows and macOS.
 
 ### Visualizer
 
-The [lactea](https://github.com/M0Rf30/lactea) visualizer (Milkdrop-style presets) reacts to what is actually playing: the engine's own output for local playback, and MPD's audio output captured through PipeWire. It has a preset browser and search, preset locking and beat sensitivity. Presets (`.milk`, and MilkDrop 3 `.milk2` double presets) are loaded from `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets`; user textures are read from the same directories and their sibling `textures` folders.
+The [lactea](https://github.com/M0Rf30/lactea) visualizer (MilkDrop-style presets) renders on the GPU in a full-window view and reacts to what is actually playing: the engine's own output for local playback, and, on Linux, MPD's audio output captured through PipeWire (on Windows and macOS the MPD capture reports unavailable). A HUD fades in on mouse movement with preset navigation (previous, random, next), preset locking, beat sensitivity, a searchable preset browser and fullscreen. Presets (`.milk`, and MilkDrop 3 `.milk2` double presets) are loaded from `~/.local/share/aulos/presets`, `~/.local/share/lactea/presets`, `/usr/share/lactea/presets`, `/usr/share/projectM/presets`, `/usr/local/share/projectM/presets` and `~/.local/share/projectM/presets` on Linux, and `%APPDATA%\aulos\presets` (Windows) or `~/Library/Application Support/aulos/presets` and Homebrew's `/opt/homebrew/share/projectM/presets` (macOS); user textures are read from the same directories and their sibling `textures` folders.
 
 ### Tag editor
 
@@ -93,6 +94,21 @@ The converter is off by default; turn it on in Settings.
 
 - **Outputs**: converts to FLAC, WAV or AIFF without any external tools, and to MP3, AAC, Opus, Ogg Vorbis or ALAC through the system `ffmpeg`.
 - **Processing**: all tags and the cover are copied to every output format, the sample rate can be changed, and CUE sheets can be split into per-track files.
+
+## Platform support
+
+Aulos runs on Linux, Windows 10+ and macOS 11+ and needs a GPU with Vulkan, DirectX 12 or Metal. Most features are the same everywhere; these differ:
+
+| Feature | Linux | Windows | macOS |
+|---|---|---|---|
+| Media keys / now playing | MPRIS (D-Bus) | System Media Transport Controls | Now Playing |
+| File dialogs | XDG desktop portal | Native | Native |
+| Notifications | D-Bus | Native | Native |
+| Sleep inhibit | Portal / systemd-logind | Native | Native |
+| Password storage | keyutils / Secret Service | Credential Manager | Keychain |
+| Visualizer for MPD audio | ✓ (PipeWire) | Not available | Not available |
+| Visualizer for local playback | ✓ | ✓ | ✓ |
+| `just install`, desktop entry, AppStream metainfo | ✓ | n/a | n/a |
 
 ## Installation
 
@@ -117,19 +133,24 @@ sudo just install
 The archive contains the `aulos` binary, the `justfile` and `resources/` (desktop entry, AppStream metainfo, icon). Without [just](https://github.com/casey/just), copy those into `/usr/bin` and `/usr/share` by hand.
 
 **Runtime requirements:**
-- A Wayland desktop. Aulos is built for COSMIC but runs on other desktops too.
+- A Wayland or X11 desktop, with a Vulkan or GL driver.
 - ALSA (`alsa-lib`).
 - `libpipewire-0.3` and a Vulkan or GL driver, for the visualizer.
 - Optional: `ffmpeg`, for lossy formats in the converter.
 - Optional: MilkDrop (`.milk` / `.milk2`) presets.
 
+Windows releases are a `.zip` (`aulos.exe`, `LICENSE`, `README.md`) and macOS releases a `.tar.gz` per architecture (`aarch64-apple-darwin`, `x86_64-apple-darwin`) with the `aulos` binary, `LICENSE` and `README.md`. Unzip or untar and run it. The macOS binary is not code-signed, so Gatekeeper may ask you to allow it.
+
 ### From source
 
-Aulos runs on Linux only. You need a recent stable Rust toolchain (edition 2024), `just`, and the development packages for xkbcommon, Wayland, fontconfig, freetype, expat and ALSA. On Debian or Ubuntu:
+You need a recent stable Rust toolchain (edition 2024).
+
+#### Linux
+
+You also need `just` and the development packages for xkbcommon, Wayland and ALSA. On Debian or Ubuntu:
 
 ```bash
-sudo apt install pkg-config libxkbcommon-dev libwayland-dev libfontconfig-dev \
-  libfreetype-dev libexpat1-dev libasound2-dev
+sudo apt install pkg-config libxkbcommon-dev libwayland-dev libasound2-dev
 git clone https://github.com/M0Rf30/aulos
 cd aulos
 just build-release
@@ -142,20 +163,48 @@ To build with the visualizer, as the release binaries are, also install `libpipe
 just build-release --features visualizer
 ```
 
-The `tokio-console` feature is for debugging the async runtime. It replaces the normal log output with a [tokio-console](https://github.com/tokio-rs/console) server.
+#### Windows
+
+Install [rustup](https://rustup.rs) with the MSVC toolchain (Visual Studio Build Tools, "Desktop development with C++"), then:
+
+```powershell
+git clone https://github.com/M0Rf30/aulos
+cd aulos
+cargo build --release --features visualizer
+```
+
+The binary is `target\release\aulos.exe`.
+
+#### macOS
+
+Install the Xcode command line tools and a Rust toolchain, then:
+
+```bash
+xcode-select --install
+git clone https://github.com/M0Rf30/aulos
+cd aulos
+cargo build --release --features visualizer
+```
+
+The binary is `target/release/aulos`. To build an `.app` bundle, install [cargo-bundle](https://github.com/burtonageo/cargo-bundle) and run it from the repository root (the bundle metadata is in `crates/aulos/Cargo.toml`):
+
+```bash
+cargo install cargo-bundle
+cargo bundle --release -p aulos
+```
 
 ### Code layout
 
 The repository is a Cargo workspace with two crates:
 
 - `crates/aulos-core` is the backend: library and tag I/O, the playback engine, MPD/Subsonic providers, online services (scrobbling, MusicBrainz/AcoustID, podcasts, radio), the tag editor, settings, MPRIS and desktop integration. Its `Session` type holds the application state and workflows (play, queue, rescan, switch server, subscribe…); background work comes back as events the front end feeds into it. It has no UI toolkit dependency, and CI fails if it gains one.
-- The root crate (`src/`) is the COSMIC user interface built on libcosmic. It maps user input to `Session` calls and turns the results into widgets, iced tasks and subscriptions.
+- `crates/aulos` is the egui/eframe front end (the `aulos` binary). It maps user input to `Session` calls and draws the results.
 
 `cargo build`, `cargo test` and `cargo clippy` at the repository root cover both crates.
 
 ## Usage
 
-Start Aulos from your application menu, or from a terminal with `aulos [FILE…]`. Add MPD and Subsonic servers from the provider menu, and change the music folders and everything else in Settings.
+Start Aulos from your application menu (Start menu or Applications on Windows and macOS), or from a terminal with `aulos`. Add your music folders, MPD and Subsonic servers and everything else in **Settings**. The interface follows your display's scaling; **Settings → Appearance → Interface size** scales it further (75–200%).
 
 On the very first launch Aulos greets you with its intro jingle — a 4-second, 128 kbps MP3 in honour of Winamp's llama — and never again after that.
 
@@ -164,37 +213,27 @@ On the very first launch Aulos greets you with its intro jingle — a 4-second, 
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
-| `s` | Stop |
-| `n` / `>` | Next track |
-| `p` / `<` | Previous track |
-| `←` / `→` | Seek |
-| `↑` / `↓` (or `+` / `-`) | Volume |
-| `m` | Mute |
-| `z` | Shuffle |
-| `r` | Cycle repeat (off → all → one) |
-| `f` | Favorite current track |
-| `l` | Lyrics |
-| `u` | Queue |
-| `/` or `Ctrl+F` | Search |
-| `Ctrl+M` | Toggle the mini player (`Esc` leaves it) |
-| `Tab` | Expanded now-playing view |
+| `/` | Search |
 | `1`–`8` | Jump to a page |
-| `Esc` | Close overlays |
+| `Alt+←` / `Alt+→` | Back / forward |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / reset interface size |
+| `Esc` | Clear search, close sheets and the expanded view |
+
+In the visualizer: `←` / `→` previous / next preset, `L` lock, `P` preset browser, `F` or double-click fullscreen, `Esc` close.
 
 ### Where data lives
 
-| What | Path |
-|---|---|
-| Library database, artist info, podcast downloads | `~/.local/share/aulos/` |
-| AutoEq profiles, MPRIS cover art | `~/.cache/aulos/` |
-| Equalizer presets | `~/.config/aulos/eq_presets/` |
-| Settings | `~/.config/cosmic/io.github.m0rf30.Aulos/` |
+| What | Linux | Windows | macOS |
+|---|---|---|---|
+| Config: settings (`settings.ron`), equalizer presets (`eq_presets/`) | `~/.config/aulos/` | `%APPDATA%\aulos\` | `~/Library/Application Support/aulos/` |
+| Data: library database, artist info, podcast downloads | `~/.local/share/aulos/` | `%LOCALAPPDATA%\aulos\` | `~/Library/Application Support/aulos/` |
+| Cache: AutoEq profiles, cover art for media controls | `~/.cache/aulos/` | `%LOCALAPPDATA%\aulos\cache\` | `~/Library/Caches/aulos/` |
 
-> **Upgrading from Lyra:** Aulos used to be called Lyra. On first launch it moves the old `lyra` data, cache and config folders and the COSMIC settings to the new names. Saved server passwords are moved the first time they are needed.
+On Windows the user MilkDrop preset folder is `%APPDATA%\aulos\presets`; on macOS it is `~/Library/Application Support/aulos/presets`.
 
 ## Building blocks
 
-[libcosmic](https://github.com/pop-os/libcosmic) (UI) · [Symphonia](https://github.com/M0Rf30/Symphonia) and [cpal](https://github.com/RustAudio/cpal) (audio) · [rubato](https://github.com/HEnquist/rubato) (resampling) · [rusqlite](https://github.com/rusqlite/rusqlite) (library) · [mpd_client](https://github.com/elomatreb/mpd_client) (MPD) · [opensubsonic](https://github.com/M0Rf30/opensubsonic-rs) (Subsonic) · [mpris-server](https://github.com/SeaDve/mpris-server) and [zbus](https://github.com/dbus2/zbus) (D-Bus) · [lactea](https://github.com/M0Rf30/lactea) (visualizer) · [tokio](https://tokio.rs) (async)
+[egui](https://github.com/emilk/egui) (UI) · [Symphonia](https://github.com/M0Rf30/Symphonia) and [cpal](https://github.com/RustAudio/cpal) (audio) · [rubato](https://github.com/HEnquist/rubato) (resampling) · [rusqlite](https://github.com/rusqlite/rusqlite) (library) · [mpd_client](https://github.com/elomatreb/mpd_client) (MPD) · [opensubsonic](https://github.com/M0Rf30/opensubsonic-rs) (Subsonic) · [mpris-server](https://github.com/SeaDve/mpris-server) and [zbus](https://github.com/dbus2/zbus) (D-Bus), [souvlaki](https://github.com/Sinono3/souvlaki) (Windows/macOS media controls) · [lactea](https://github.com/M0Rf30/lactea) (visualizer) · [tokio](https://tokio.rs) (async)
 
 ## Support
 

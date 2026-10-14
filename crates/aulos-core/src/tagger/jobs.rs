@@ -54,11 +54,6 @@ pub fn audio_files_under(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// The local path of a `file://` URI returned by the file chooser portal.
-pub fn uri_to_path(uri: &str) -> Result<PathBuf, String> {
-    crate::file_uri_to_path(uri).ok_or_else(|| format!("Not a local file URI: {uri}"))
-}
-
 /// How long to wait before the next AcoustID lookup so lookups start at
 /// least `min_gap` apart.
 pub fn throttle_wait(last: Option<Instant>, now: Instant, min_gap: Duration) -> Duration {
@@ -171,21 +166,14 @@ mod tests {
             .map(|p| {
                 p.strip_prefix(&root)
                     .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
             })
             .collect();
         assert_eq!(names, ["0.opus", "a/1.flac", "b/2.mp3", "b/deep/3.ogg"]);
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn portal_uris_decode_to_paths() {
-        assert_eq!(
-            uri_to_path("file:///home/me/My%20Music/a.flac").unwrap(),
-            PathBuf::from("/home/me/My Music/a.flac")
-        );
-        assert!(uri_to_path("https://x/y").is_err());
     }
 
     #[test]

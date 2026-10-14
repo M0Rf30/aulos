@@ -147,7 +147,7 @@ pub(crate) fn wrap_err<E: fmt::Display>(
 ///
 /// Each provider manages a library of tracks, albums, and artists, and can
 /// resolve audio sources for playback. Implementations must be `Send + Sync`
-/// to work with async runtimes and the COSMIC task system.
+/// to work with async runtimes and the UI task system.
 pub trait MusicProvider: Send + Sync {
     /// Unique identifier for this provider instance (e.g., "local", "mpd-home").
     fn id(&self) -> &str;

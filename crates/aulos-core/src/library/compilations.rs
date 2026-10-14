@@ -139,10 +139,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// `/m/x` made absolute on this platform (Windows needs a drive).
+    fn abs(path: &str) -> String {
+        format!("{}{path}", if cfg!(windows) { "C:" } else { "" })
+    }
+
     fn track(id: i64, dir: &str, artist: &str, album_artist: &str, album: &str, no: u32) -> Track {
         Track {
             id,
-            path: PathBuf::from(format!("{dir}/{id}.flac")),
+            path: PathBuf::from(format!("{}/{id}.flac", abs(dir))),
             title: format!("t{id}"),
             artist: artist.into(),
             album_artist: album_artist.into(),

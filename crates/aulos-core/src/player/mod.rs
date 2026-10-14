@@ -16,7 +16,7 @@ pub mod local_backend;
 pub mod mpd_backend;
 pub mod party;
 pub mod pcm;
-#[cfg(feature = "visualizer")]
+#[cfg(all(feature = "visualizer", target_os = "linux"))]
 pub mod pw_capture;
 pub mod queue;
 

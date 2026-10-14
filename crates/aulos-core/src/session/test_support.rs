@@ -23,8 +23,6 @@ use crate::player::eq_presets::EqPresetManager;
 use crate::player::extras::PlaybackExtrasState;
 use crate::provider::ProviderRegistry;
 use crate::tagger::TaggerState;
-use cosmic_config::Config as ConfigContext;
-use cosmic_config::CosmicConfigEntry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,19 +49,14 @@ pub(super) fn test_session() -> Session {
 }
 
 /// A session whose settings are persisted into a scratch directory (so
-/// `config.save()` really queues a write, visible in
-/// `config.recent_saves`).
+/// `config.save()` really queues a write; after `config.flush()` the file is
+/// at `config.path`).
 pub(super) fn test_session_persisting() -> Session {
-    let context = ConfigContext::with_custom_path(
-        crate::config::APP_ID,
-        Config::VERSION,
-        scratch_dir("config"),
-    )
-    .expect("config context");
-    session_with(Some(context), Config::default())
+    let path = scratch_dir("config").join("settings.ron");
+    session_with(Some(path), Config::default())
 }
 
-fn session_with(context: Option<ConfigContext>, config: Config) -> Session {
+fn session_with(config_path: Option<PathBuf>, config: Config) -> Session {
     let scratch = scratch_dir("state");
     Session {
         providers: ProvidersState {
@@ -129,7 +122,7 @@ fn session_with(context: Option<ConfigContext>, config: Config) -> Session {
         convert: ConvertState::new(),
         tagger: TaggerState::new(),
         properties: PropertiesState::default(),
-        config: ConfigState::new(context, config),
+        config: ConfigState::new(config_path, config),
     }
 }
 

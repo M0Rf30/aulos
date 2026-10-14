@@ -31,15 +31,21 @@ pub mod task;
 #[cfg(feature = "visualizer")]
 pub mod visualizer;
 
-/// Decodes a `file://` URI into a filesystem path. Shared by `main`'s
-/// CLI-argument parsing (`Exec=aulos %U`) and MPRIS's `OpenUri`, which
-/// always receives a URI rather than a bare path. Returns `None` for any
-/// other scheme, which callers should treat as unsupported.
+/// Decodes a `file://` URI into a filesystem path (`file:///C:/Music/a.flac`
+/// becomes `C:\Music\a.flac` on Windows). Shared by `main`'s CLI-argument
+/// parsing (`Exec=aulos %U`) and the media-controls `OpenUri`, which always
+/// receives a URI rather than a bare path. Returns `None` for any other
+/// scheme or a URI naming a remote host, which callers should treat as
+/// unsupported.
 pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    urlencoding::decode(rest)
-        .ok()
-        .map(|decoded| PathBuf::from(decoded.into_owned()))
+    url::Url::parse(uri).ok()?.to_file_path().ok()
+}
+
+/// The `file://` URI of `path` (made absolute first): the inverse of
+/// [`file_uri_to_path`]. `None` when the path cannot be expressed as a URI.
+pub fn path_to_file_uri(path: &std::path::Path) -> Option<String> {
+    let path = std::path::absolute(path).ok()?;
+    url::Url::from_file_path(path).ok().map(String::from)
 }
 
 /// Seconds since the Unix epoch.
@@ -49,4 +55,36 @@ pub fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn file_uris_round_trip_with_paths() {
+        let path = PathBuf::from("/home/me/My Music/a#b.flac");
+        let uri = path_to_file_uri(&path).unwrap();
+        assert_eq!(uri, "file:///home/me/My%20Music/a%23b.flac");
+        assert_eq!(file_uri_to_path(&uri), Some(path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uris_round_trip_with_paths() {
+        let path = PathBuf::from(r"C:\Users\me\My Music\a#b.flac");
+        let uri = path_to_file_uri(&path).unwrap();
+        assert_eq!(uri, "file:///C:/Users/me/My%20Music/a%23b.flac");
+        assert_eq!(file_uri_to_path(&uri), Some(path));
+    }
+
+    #[test]
+    fn only_local_file_uris_become_paths() {
+        assert_eq!(file_uri_to_path("https://x/y"), None);
+        assert_eq!(file_uri_to_path("/plain/path"), None);
+        // A remote host is a UNC share on Windows only.
+        #[cfg(unix)]
+        assert_eq!(file_uri_to_path("file://remote-host/share/a.flac"), None);
+    }
 }

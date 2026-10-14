@@ -1,0 +1,55 @@
+[package]
+name = "aulos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A music player built on the Aulos backend (egui front end, early prototype)"
+repository.workspace = true
+
+# UI-only crate: depends on `aulos-core` (the backend), never the other way round.
+[dependencies]
+aulos-core.workspace = true
+eframe = "0.36.2"
+egui = "0.36.2"
+egui_extras = "0.36.2"
+egui-phosphor = { version = "0.14.0", features = ["fill"] }
+tokio.workspace = true
+futures = "0.3"
+# Native file/folder dialogs (XDG portal on Linux, Win32 / NSOpenPanel
+# elsewhere). The portal backend needs no GTK.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+urlencoding.workspace = true
+# Opens folders and web pages (converter output dir, MusicBrainz pages).
+open.workspace = true
+# Local hour of day for the Home greeting.
+chrono = "0.4"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# MilkDrop visualizer (feature `visualizer`). 0.2 drives the host's own wgpu 30
+# device, the very one eframe renders with, so frames never leave the GPU.
+lactea = { version = "0.2.2", optional = true }
+# Preset texture lookup for the visualizer.
+walkdir = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+
+# Embeds the icon in the Windows executable (see `build.rs`).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[package.metadata.bundle]
+# `cargo bundle` (cargo-bundle) builds the macOS `Aulos.app`.
+name = "Aulos"
+identifier = "io.github.m0rf30.Aulos"
+icon = ["assets/icon-256.png"]
+category = "public.app-category.music"
+short_description = "A modern music player"
+
+[features]
+default = []
+# MilkDrop visualizer: the backend's PCM capture plus the lactea renderer.
+visualizer = ["aulos-core/visualizer", "dep:lactea", "dep:walkdir", "dep:dirs", "dep:image"]
+
+# The `HWND` the Windows media controls (SMTC) attach to.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
