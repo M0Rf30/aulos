@@ -833,7 +833,6 @@ dependencies = [
  "aulos-core",
  "eframe",
  "egui_extras",
- "futures",
  "tokio",
  "tracing",
  "tracing-subscriber",

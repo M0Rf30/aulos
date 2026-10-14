@@ -1,11 +1,9 @@
 //! Views: library panel (Albums / Songs + search), now-playing area and the
 //! transport bar.
 
-use super::{App, Msg};
+use super::App;
 use aulos_core::config::RepeatMode;
-use aulos_core::library::state::unfilter_index;
-use aulos_core::library::{Album, Track};
-use aulos_core::session::PlaybackUpdate;
+use aulos_core::session::SessionUpdate;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 
@@ -48,20 +46,8 @@ impl App {
                 .desired_width(f32::INFINITY),
         );
         if search.changed() {
-            let library = &mut self.session.library;
-            library.search_query = self.search.clone();
-            library.search_debounce_gen += 1;
-            if self.search.trim().is_empty() {
-                // Clearing is cheap and should feel instant.
-                self.refresh_search();
-            } else {
-                let pending = self.session.library.search_debounce_gen;
-                let effect = aulos_core::task::Effect::future(async move {
-                    tokio::time::sleep(super::SEARCH_DEBOUNCE).await;
-                    pending
-                });
-                self.runner.run(effect, Msg::SearchDebounced);
-            }
+            let update = self.session.set_search_query(self.search.clone());
+            self.run(update);
         }
         ui.separator();
 
@@ -77,17 +63,12 @@ impl App {
             Some(Action::PlayTrack(i)) => self.session.play_library_track(i),
             None => return,
         };
-        self.apply_playback(update);
+        self.run(update);
     }
 
     fn album_list(&self, ui: &mut egui::Ui) -> Option<Action> {
         let lib = &self.session.library;
-        // The same "is the filter live" predicate the COSMIC view uses.
-        let (albums, map): (&[Album], Option<&[usize]>) = if lib.search_query.trim().is_empty() {
-            (&lib.albums, None)
-        } else {
-            (&lib.filtered.albums, Some(&lib.filtered.album_map))
-        };
+        let albums = lib.visible_albums();
         if albums.is_empty() {
             ui.label(if lib.scanning { "" } else { "No albums" });
             return None;
@@ -103,10 +84,10 @@ impl App {
                     let response = ui
                         .horizontal(|ui| {
                             ui.set_height(ROW_HEIGHT - 4.0);
-                            match self.covers.get(&album.cover_key) {
+                            match self.textures.get(&album.cover_key) {
                                 Some(cover) => {
                                     ui.add(
-                                        egui::Image::new(&cover.texture)
+                                        egui::Image::new(cover)
                                             .fit_to_exact_size(egui::vec2(46.0, 46.0)),
                                     );
                                 }
@@ -128,7 +109,7 @@ impl App {
                         .interact(egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if response.clicked() {
-                        action = Some(Action::PlayAlbum(unfilter_index(map, i)));
+                        action = Some(Action::PlayAlbum(lib.album_index(i)));
                     }
                 }
             },
@@ -138,11 +119,7 @@ impl App {
 
     fn song_table(&self, ui: &mut egui::Ui) -> Option<Action> {
         let lib = &self.session.library;
-        let (tracks, map): (&[Track], Option<&[usize]>) = if lib.search_query.trim().is_empty() {
-            (&lib.tracks, None)
-        } else {
-            (&lib.filtered.tracks, Some(&lib.filtered.track_map))
-        };
+        let tracks = lib.visible_tracks();
         let current = self.session.playback.current_track.as_ref().map(|t| t.id);
         let mut action = None;
         TableBuilder::new(ui)
@@ -176,7 +153,7 @@ impl App {
                         ui.label(track.duration_string());
                     });
                     if row.response().double_clicked() {
-                        action = Some(Action::PlayTrack(unfilter_index(map, row.index())));
+                        action = Some(Action::PlayTrack(lib.track_index(row.index())));
                     }
                 });
             });
@@ -207,9 +184,9 @@ impl App {
             ui.add_space(24.0);
             let key =
                 aulos_core::library::CoverArt::album_key(track.grouping_artist(), &track.album);
-            if let Some(cover) = self.covers.get(&key) {
+            if let Some(cover) = self.textures.get(&key) {
                 ui.add(
-                    egui::Image::new(&cover.texture)
+                    egui::Image::new(cover)
                         .fit_to_exact_size(egui::vec2(256.0, 256.0))
                         .corner_radius(6.0),
                 );
@@ -231,7 +208,7 @@ impl App {
     // -- Transport bar ----------------------------------------------------
 
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
-        let mut update: Option<PlaybackUpdate> = None;
+        let mut update: Option<SessionUpdate> = None;
         let playing = self.session.playback.is_playing();
         let (title, artist, duration) = match &self.session.playback.current_track {
             Some(t) => (t.title.clone(), t.artist.clone(), t.duration),
@@ -255,22 +232,21 @@ impl App {
 
         ui.horizontal(|ui| {
             if ui.button("Prev").clicked() {
-                update = Some(self.session.previous_track());
+                update = Some(self.session.previous_track().into());
             }
             if ui.button(if playing { "Pause" } else { "Play" }).clicked() {
-                update = Some(self.session.toggle_playback());
+                update = Some(self.session.toggle_playback().into());
             }
             if ui.button("Next").clicked() {
-                update = Some(self.session.next_track());
+                update = Some(self.session.next_track().into());
             }
             if ui.button("Stop").clicked() {
-                update = Some(self.session.stop());
+                update = Some(self.session.stop().into());
             }
 
             let shuffle = self.session.config.config.shuffle;
             if ui.selectable_label(shuffle, "Shuffle").clicked() {
-                update = Some(self.session.toggle_shuffle());
-                self.session.config.save();
+                update = Some(self.session.toggle_shuffle().into());
             }
             let repeat = match self.session.config.config.repeat_mode {
                 RepeatMode::None => "Repeat: off",
@@ -278,8 +254,7 @@ impl App {
                 RepeatMode::One => "Repeat: one",
             };
             if ui.button(repeat).clicked() {
-                update = Some(self.session.cycle_repeat());
-                self.session.config.save();
+                update = Some(self.session.cycle_repeat().into());
             }
 
             // Volume, pinned right.
@@ -296,7 +271,7 @@ impl App {
                         .text("Vol"),
                 );
                 if slider.changed() {
-                    update = Some(self.session.set_volume(volume));
+                    update = Some(self.session.set_volume(volume).into());
                     self.volume_dirty = true;
                 }
                 if self.volume_dirty && !slider.is_pointer_button_down_on() {
@@ -328,13 +303,13 @@ impl App {
                 && !slider.is_pointer_button_down_on()
             {
                 self.seek_preview = None;
-                update = Some(self.session.seek_fraction(target));
+                update = Some(self.session.seek_fraction(target).into());
             }
             ui.monospace(aulos_core::format::format_duration(duration.as_secs()));
         });
 
         if let Some(update) = update {
-            self.apply_playback(update);
+            self.run(update);
         }
     }
 }

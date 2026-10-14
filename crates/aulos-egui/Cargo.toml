@@ -13,6 +13,5 @@ aulos-core.workspace = true
 eframe = "0.36.2"
 egui_extras = "0.36.2"
 tokio.workspace = true
-futures = "0.3.34"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
