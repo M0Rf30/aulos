@@ -395,9 +395,13 @@ fn panel<R>(ui: &mut Ui, pal: Palette, width: f32, body: impl FnOnce(&mut Ui) ->
         .inner_margin(Margin::same(5))
         .shadow(theme::shadow([0, 16], 40, 128))
         .show(ui, |ui| {
-            // Content width = outer width minus padding (2 × 5) and border (2 × 1).
-            ui.set_width(width - 12.0);
-            body(ui)
+            // The frame inherits the caller's horizontal layout; rows stack.
+            ui.vertical(|ui| {
+                // Content width = outer width minus padding (2 × 5) and border (2 × 1).
+                ui.set_width(width - 12.0);
+                body(ui)
+            })
+            .inner
         });
     (frame.response.rect, frame.inner)
 }

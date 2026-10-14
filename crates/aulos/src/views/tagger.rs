@@ -1218,15 +1218,24 @@ fn page(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
 
 // ---------------------------------------------------------------- header & banners
 
+/// Header row height. The right-aligned group is laid out in a box of this
+/// height: a bare `right_to_left(Align::Center)` takes the whole remaining
+/// page height on the first frame, leaving no room for the panes.
+const HEADER_H: f32 = 32.0;
+
 fn header(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
-    let one_row = ui.available_width() >= 900.0;
-    if one_row {
+    let right_aligned = |ui: &mut Ui, acts: &mut Vec<Act>| {
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), HEADER_H),
+            Layout::right_to_left(Align::Center),
+            |ui| header_right(app, ui, facts, acts),
+        );
+    };
+    if ui.available_width() >= 900.0 {
         ui.horizontal(|ui| {
             header_left(app, ui, facts, acts);
             header_scan(app, ui, acts);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                header_right(app, ui, facts, acts)
-            });
+            right_aligned(ui, acts);
         });
     } else {
         ui.horizontal(|ui| header_left(app, ui, facts, acts));
@@ -1238,9 +1247,7 @@ fn header(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         {
             ui.horizontal(|ui| header_scan(app, ui, acts));
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            header_right(app, ui, facts, acts)
-        });
+        right_aligned(ui, acts);
     }
 }
 

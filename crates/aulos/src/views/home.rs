@@ -618,7 +618,7 @@ fn album_card_at(ui: &mut Ui, cx: &mut Cx, rect: Rect, a: &AlbumRef) {
     let w = rect.width();
     let resp = ui.interact(
         rect,
-        ui.id().with(("album", &a.artist, &a.name)),
+        ui.unique_id().with(("album", &a.artist, &a.name)),
         Sense::click(),
     );
     let art = Rect::from_min_size(rect.min, vec2(w, w));

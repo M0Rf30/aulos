@@ -403,7 +403,15 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
             .show(ui)
             .clicked()
         {
-            app.sheet = if open { None } else { Some(Sheet::Properties) };
+            if open {
+                app.sheet = None;
+            } else {
+                if let Some(track) = app.session.playback.current_track.clone() {
+                    let effect = app.session.open_track_properties(track);
+                    app.run(effect);
+                }
+                app.sheet = Some(Sheet::Properties);
+            }
         }
     }
     if IconBtn::new(regular::MICROPHONE_STAGE)
