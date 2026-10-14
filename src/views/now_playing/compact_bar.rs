@@ -9,13 +9,14 @@
 //! other element has a fixed or portioned width. Clicking the cover art or
 //! track info expands into the full now-playing view.
 
-use super::{NowPlayingMessage, format_time};
-use crate::config::RepeatMode;
-use crate::fl;
-use crate::library::Track;
-use crate::library::palette::Accent;
-use crate::player::PlaybackState;
+use super::NowPlayingMessage;
 use crate::views::common;
+use aulos_core::config::RepeatMode;
+use aulos_core::fl;
+use aulos_core::format::format_duration;
+use aulos_core::library::Track;
+use aulos_core::library::palette::Accent;
+use aulos_core::player::PlaybackState;
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
@@ -215,7 +216,7 @@ pub fn playback_bar<'a>(
     // Radio/other zero-duration streams: no seek slider, and shuffle/prev/
     // next/repeat are meaningless (there is nothing to shuffle or skip to)
     // so they render disabled rather than disappearing.
-    let is_live = current_track.is_some_and(super::is_live_stream);
+    let is_live = current_track.is_some_and(Track::is_live_stream);
     let stop_enabled = has_track && state != PlaybackState::Stopped;
 
     // While dragging, show the preview position; otherwise the backend position.
@@ -362,15 +363,17 @@ pub fn playback_bar<'a>(
     let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         live_badge()
     } else {
-        widget::container(common::cell_caption(format_time(display_position)))
-            .width(Length::Fixed(TIME_WIDTH))
-            .align_x(Horizontal::Right)
-            .into()
+        widget::container(common::cell_caption(format_duration(
+            display_position.as_secs(),
+        )))
+        .width(Length::Fixed(TIME_WIDTH))
+        .align_x(Horizontal::Right)
+        .into()
     };
     let time_end_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         widget::Space::new().width(0).height(0).into()
     } else {
-        widget::container(common::cell_caption(format_time(duration)))
+        widget::container(common::cell_caption(format_duration(duration.as_secs())))
             .width(Length::Fixed(TIME_WIDTH))
             .align_x(Horizontal::Left)
             .into()
@@ -445,7 +448,7 @@ pub fn playback_bar<'a>(
         .push(toggle_icon_button(
             "go-last-symbolic",
             20,
-            crate::player::party::stop_after_flag(),
+            aulos_core::player::party::stop_after_flag(),
             has_track && !is_live,
             fl!("stop-after-track"),
             NowPlayingMessage::ToggleStopAfter,

@@ -6,11 +6,15 @@
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::fl;
-use crate::tagger::{Confirm, Notice, ScanPhase, ScanState, TaggerMessage as Msg, TaggerState};
+use aulos_core::fl;
+use aulos_core::tagger::{
+    Confirm, Notice, ScanPhase, ScanState, TaggerMessage as Msg, TaggerState,
+};
 
-use super::style::{self, Tone};
-use super::{Facts, TaggerViewProps};
+use super::TaggerViewProps;
+use super::style;
+use aulos_core::tagger::Facts;
+use aulos_core::tagger::labels::Tone;
 
 type Element<'a> = cosmic::Element<'a, Msg>;
 

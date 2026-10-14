@@ -9,15 +9,15 @@
 //! the current entry, and a capped run of upcoming ones — and only that
 //! slice is rendered, with a trailing caption for whatever's left out.
 
-use crate::fl;
-use crate::library::{CoverArt, Track};
-use crate::player::PlaybackState;
 use crate::views::{common, list_row_button_class};
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::player::PlaybackState;
+use aulos_core::player::queue::{up_next_label, visible_window};
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
 use std::collections::HashMap;
-use std::ops::Range;
 use std::time::Duration;
 
 /// Messages from the queue drawer. Every index is a position in *play
@@ -50,53 +50,6 @@ fn artist_link(track: &Track) -> cosmic::Element<'_, QueueMessage> {
         true,
         QueueMessage::Navigate(crate::views::Route::Artist(track.artist.clone())),
     )
-}
-
-/// How many already-played entries stay visible above the current one, for
-/// context (like "recently played").
-const LOOKBACK: usize = 10;
-/// How many upcoming entries render at most below the current one.
-const MAX_UPCOMING: usize = 200;
-
-/// The `[start, end)` slice of a `queue_len`-long queue to actually render
-/// around `current` — never the whole queue.
-pub fn visible_window(queue_len: usize, current: usize) -> Range<usize> {
-    if queue_len == 0 {
-        return 0..0;
-    }
-    let current = current.min(queue_len - 1);
-    let start = current.saturating_sub(LOOKBACK);
-    let end = (current + 1 + MAX_UPCOMING).min(queue_len);
-    start..end
-}
-
-/// Cover-art cache key for `track`, matching the lookup in `view.rs`'s
-/// `current_cover`: album_artist when present, else artist.
-fn cover_key(track: &Track) -> String {
-    let artist = if track.album_artist.is_empty() {
-        &track.artist
-    } else {
-        &track.album_artist
-    };
-    CoverArt::album_key(artist, &track.album)
-}
-
-/// Localized "Up next · N tracks · duration" section label.
-fn up_next_label(count: usize, duration: Duration) -> String {
-    let duration = common::format_duration_coarse(duration.as_secs());
-    if count == 1 {
-        fl!(
-            "queue-up-next-one",
-            count = count.to_string(),
-            duration = duration
-        )
-    } else {
-        fl!(
-            "queue-up-next-other",
-            count = count.to_string(),
-            duration = duration
-        )
-    }
 }
 
 /// Theme-driven dimmed text colour for already-played entries.
@@ -142,7 +95,7 @@ fn queue_row<'a>(
 ) -> cosmic::Element<'a, QueueMessage> {
     let sp = cosmic::theme::active().cosmic().spacing;
     let art = common::list_art_icon(
-        cover_images.get(&cover_key(track)),
+        cover_images.get(&track.cover_key()),
         40,
         "media-optical-symbolic",
     );
@@ -225,7 +178,7 @@ pub fn queue_header_view<'a>(
         .width(Length::Fill);
 
     if let Some(track) = current_track {
-        let art: cosmic::Element<'a, QueueMessage> = match cover_images.get(&cover_key(track)) {
+        let art: cosmic::Element<'a, QueueMessage> = match cover_images.get(&track.cover_key()) {
             Some(handle) => common::cover_art(
                 handle,
                 56.0,
@@ -292,7 +245,7 @@ pub fn queue_header_view<'a>(
                         .width(Length::Fill),
                 )
                 .push(
-                    widget::toggler(crate::player::party::stop_after_flag())
+                    widget::toggler(aulos_core::player::party::stop_after_flag())
                         .on_toggle(|_| QueueMessage::ToggleStopAfter),
                 )
                 .spacing(sp.space_xs)
@@ -403,46 +356,4 @@ pub fn queue_view<'a>(
     }
 
     rows.into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::visible_window;
-
-    #[test]
-    fn empty_queue_yields_empty_window() {
-        assert_eq!(visible_window(0, 0), 0..0);
-    }
-
-    #[test]
-    fn small_queue_window_covers_the_whole_queue() {
-        assert_eq!(visible_window(5, 2), 0..5);
-    }
-
-    #[test]
-    fn window_clamps_lookback_at_the_start() {
-        // current=3, lookback=10 -> start would be negative; clamps to 0.
-        assert_eq!(visible_window(500, 3), 0..204);
-    }
-
-    #[test]
-    fn window_clamps_upcoming_at_the_end() {
-        // current near the end: end can't exceed queue_len.
-        assert_eq!(visible_window(500, 490), 480..500);
-    }
-
-    #[test]
-    fn large_queue_window_is_bounded_on_both_sides() {
-        // Deep in a huge (whole-library) queue: window stays small.
-        let window = visible_window(50_000, 25_000);
-        assert_eq!(window, 24_990..25_201);
-        assert_eq!(window.len(), 211);
-    }
-
-    #[test]
-    fn current_index_past_queue_end_is_clamped() {
-        // Defensive: a stale/out-of-range index (e.g. mid-mutation) must
-        // never panic on the `queue_len - 1` subtraction.
-        assert_eq!(visible_window(10, 999), 0..10);
-    }
 }

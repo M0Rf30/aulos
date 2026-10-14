@@ -3,13 +3,13 @@
 
 //! Genres view - colourful category tiles; clicking one shows its tracks.
 
-use crate::fl;
-use crate::library::Track;
-use crate::library::palette::Accent;
 use crate::views::card_button_class;
 use crate::views::common;
 use crate::views::list_row_button_class;
 use crate::views::track_row;
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::library::genre;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::gradient::Linear;
@@ -42,7 +42,7 @@ pub enum GenreMessage {
     /// Open the Properties drawer for this track.
     ShowProperties(Track),
     /// Open the tag editor on this (local) track.
-    Tag(Track, crate::tagger::TagAction),
+    Tag(Track, aulos_core::tagger::TagAction),
 }
 
 /// Minimum / maximum outer card width (including button padding).
@@ -55,31 +55,9 @@ const TILE_ASPECT: f32 = 0.64;
 /// Size of the cover-like tile on the detail page.
 const HERO_TILE: f32 = 160.0;
 
-/// Curated gradient pairs (start, end) as sRGB bytes. All are dark enough
-/// for white text to stay legible on top.
-const GRADIENTS: [([u8; 3], [u8; 3]); 12] = [
-    ([214, 40, 70], [130, 20, 70]),
-    ([30, 140, 110], [16, 80, 85]),
-    ([50, 80, 170], [85, 45, 150]),
-    ([200, 100, 20], [140, 50, 25]),
-    ([140, 100, 180], [80, 55, 135]),
-    ([20, 120, 225], [20, 60, 160]),
-    ([180, 45, 145], [110, 30, 125]),
-    ([10, 140, 165], [20, 80, 120]),
-    ([100, 110, 125], [55, 60, 75]),
-    ([205, 65, 35], [130, 30, 45]),
-    ([100, 140, 30], [45, 95, 45]),
-    ([205, 85, 120], [150, 45, 95]),
-];
-
-/// Deterministic gradient for a genre name (case/whitespace-insensitive).
+/// Deterministic gradient for a genre name as iced colours.
 fn genre_gradient(genre: &str) -> (Color, Color) {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in genre.trim().to_lowercase().bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    let (a, b) = GRADIENTS[(hash % GRADIENTS.len() as u64) as usize];
+    let (a, b) = genre::gradient_rgb8(genre);
     (
         Color::from_rgb8(a[0], a[1], a[2]),
         Color::from_rgb8(b[0], b[1], b[2]),
@@ -164,7 +142,7 @@ fn genre_card_tile<'a>(genre: &'a str, width: f32) -> cosmic::Element<'a, GenreM
 /// Render the genres view: tile grid or list, depending on `mode`.
 pub fn genres_view<'a>(
     genres: &'a [String],
-    mode: crate::config::ViewMode,
+    mode: aulos_core::config::ViewMode,
     scroll: &common::ScrollOffsets,
 ) -> cosmic::Element<'a, GenreMessage> {
     if genres.is_empty() {
@@ -175,7 +153,7 @@ pub fn genres_view<'a>(
         );
     }
 
-    use crate::config::ViewMode;
+    use aulos_core::config::ViewMode;
 
     let header = common::view_mode_toggle_header(mode, GenreMessage::ToggleViewMode);
 
@@ -261,11 +239,7 @@ pub fn genre_detail_view<'a>(
     let spacing = cosmic::theme::active().cosmic().spacing;
     let radius = cosmic::theme::active().cosmic().corner_radii.radius_m[0];
 
-    let (start, _) = genre_gradient(genre_name);
-    let accent = Accent {
-        color: [start.r, start.g, start.b],
-        on_color: [1.0, 1.0, 1.0],
-    };
+    let accent = genre::accent(genre_name);
 
     let tile_icon: cosmic::Element<'_, GenreMessage> =
         widget::container(widget::icon::from_name(genre_icon_name(genre_name)).size(72))
@@ -276,16 +250,7 @@ pub fn genre_detail_view<'a>(
             .into();
     let tile = genre_tile(genre_name, HERO_TILE, HERO_TILE, radius, true, tile_icon);
 
-    let total_secs: u64 = tracks.iter().map(|t| t.duration.as_secs()).sum();
-    let summary = if tracks.is_empty() {
-        genre_track_count_label(0)
-    } else {
-        format!(
-            "{} \u{b7} {}",
-            genre_track_count_label(tracks.len()),
-            common::format_duration_coarse(total_secs)
-        )
-    };
+    let summary = genre::summary(tracks);
     let has_tracks = !tracks.is_empty();
 
     let meta = widget::Column::new()
@@ -424,14 +389,5 @@ fn genre_icon_name(genre: &str) -> &'static str {
         "weather-clear-symbolic"
     } else {
         "audio-x-generic-symbolic"
-    }
-}
-
-/// Localized "N tracks" label used in the genre detail header.
-fn genre_track_count_label(count: usize) -> String {
-    if count == 1 {
-        fl!("genre-track-count-one", count = count.to_string())
-    } else {
-        fl!("genre-track-count-other", count = count.to_string())
     }
 }

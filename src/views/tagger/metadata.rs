@@ -8,15 +8,16 @@ use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::fl;
-use crate::library::tagio::model::KNOWN_KEYS;
-use crate::tagger::edit::join_values;
-use crate::tagger::{FieldRow, FieldValue, TaggerMessage as Msg, TaggerState};
 use crate::views::common;
+use aulos_core::fl;
+use aulos_core::library::tagio::model::KNOWN_KEYS;
+use aulos_core::tagger::edit::join_values;
+use aulos_core::tagger::{FieldRow, FieldValue, TaggerMessage as Msg, TaggerState};
 
-use super::Facts;
-use super::labels;
-use super::style::{self, Tone};
+use super::style;
+use aulos_core::tagger::Facts;
+use aulos_core::tagger::labels;
+use aulos_core::tagger::labels::Tone;
 
 type Element<'a> = cosmic::Element<'a, Msg>;
 

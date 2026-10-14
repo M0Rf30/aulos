@@ -1,0 +1,6 @@
+fallback_language = "en"
+
+# Shares the workspace-root translations with the UI crate.
+[fluent]
+assets_dir = "../../i18n"
+domain = "aulos"

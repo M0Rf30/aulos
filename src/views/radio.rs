@@ -14,13 +14,15 @@
 //! tree shape does change, since that's an explicit user navigation, not
 //! incidental reactive state.
 
-use crate::fl;
-use crate::library::{CoverArt, Track};
-use crate::online::radio::{SortOrder, StationSearchResult};
-use crate::online::store::RadioStation;
-use crate::player::PlaybackState;
 use crate::views::common;
 use crate::views::{card_button_class, list_row_button_class};
+use aulos_core::fl;
+use aulos_core::library::{CoverArt, Track};
+use aulos_core::online::radio::{
+    DiscoverPreset, QUICK_TAGS, RadioTab, SortOrder, StationSearchResult, tag_list,
+};
+use aulos_core::online::store::RadioStation;
+use aulos_core::player::PlaybackState;
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
@@ -39,39 +41,6 @@ const CARD_PADDING: f32 = 8.0;
 const CARD_WIDTH: f32 = 148.0;
 const CARD_MAX_WIDTH: f32 = 200.0;
 const CARD_LABEL_HEIGHT: f32 = 40.0;
-
-/// Which of the two Radio tabs is shown. Kept in `AppModel` for the
-/// session (not persisted to disk) so navigating away and back preserves
-/// the tab the user was on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RadioTab {
-    #[default]
-    MyStations,
-    Discover,
-}
-
-/// A one-shot Discover preset that bypasses the free-text/tag/country
-/// query and fetches a globally ranked list instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscoverPreset {
-    Popular,
-    TopVoted,
-}
-
-/// Quick-tag chips offered above the Discover results. A fixed, curated
-/// set rather than a fetched tag cloud -- covers common genres without a
-/// network round trip just to populate the chip row.
-pub const QUICK_TAGS: [&str; 9] = [
-    "Pop",
-    "Rock",
-    "Jazz",
-    "Classical",
-    "Electronic",
-    "News",
-    "Talk",
-    "Ambient",
-    "Lo-fi",
-];
 
 /// Messages from the radio view. Every message that refers to a specific
 /// row carries a stable key (the saved station's db id, or the directory
@@ -307,16 +276,6 @@ fn pad(top: f32, right: f32, bottom: f32, left: f32) -> Padding {
         bottom,
         left,
     }
-}
-
-/// First `n` non-empty comma-separated tags.
-fn tag_list(tags: &str, n: usize) -> Vec<String> {
-    tags.split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .take(n)
-        .map(|t| common::truncate_str(t, 18))
-        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -1208,8 +1167,8 @@ fn discover_tab<'a>(
         ))
         .push(widget::button::suggested(fl!("search")).on_press(RadioMessage::SearchSubmit))
         .push(widget::dropdown(
-            sort_labels(),
-            Some(sort_index(sort)),
+            SortOrder::ALL.iter().map(|o| o.label()).collect::<Vec<_>>(),
+            Some(sort.index()),
             RadioMessage::SortSelected,
         ))
         .spacing(spacing.space_xs)
@@ -1413,18 +1372,4 @@ fn discover_result_row<'a>(
         widget::tooltip::Position::Top,
     )
     .into()
-}
-
-/// Localized labels for the sort dropdown, in `SortOrder::ALL` order.
-fn sort_labels() -> Vec<String> {
-    vec![
-        fl!("radio-sort-most-played"),
-        fl!("radio-sort-most-voted"),
-        fl!("radio-sort-name"),
-        fl!("radio-sort-bitrate"),
-    ]
-}
-
-fn sort_index(order: SortOrder) -> usize {
-    SortOrder::ALL.iter().position(|o| *o == order).unwrap_or(0)
 }

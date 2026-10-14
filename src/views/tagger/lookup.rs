@@ -7,14 +7,15 @@
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::fl;
-use crate::online::musicbrainz::ReleaseCandidate;
-use crate::tagger::{LookupSource, LookupState, Remote, TaggerMessage as Msg, TaggerState};
 use crate::views::common;
+use aulos_core::fl;
+use aulos_core::online::musicbrainz::ReleaseCandidate;
+use aulos_core::tagger::{LookupSource, LookupState, Remote, TaggerMessage as Msg, TaggerState};
 
 use super::TaggerViewProps;
-use super::labels;
-use super::style::{self, Tone};
+use super::style;
+use aulos_core::tagger::labels;
+use aulos_core::tagger::labels::Tone;
 
 type Element<'a> = cosmic::Element<'a, Msg>;
 

@@ -5,24 +5,11 @@
 //! → Last.fm "love" mirroring and the loved-track sync.
 
 use super::{AppModel, Message};
-use crate::fl;
-use crate::online::scrobble::import::ImportOutcome;
-use crate::online::scrobble::{ScrobbleMessage, Service};
+use aulos_core::fl;
+use aulos_core::online::scrobble::import::ImportOutcome;
+use aulos_core::online::scrobble::loved::{LovedSyncPlan, plan_sync};
+use aulos_core::online::scrobble::{ScrobbleMessage, Service};
 use cosmic::prelude::*;
-use std::collections::HashSet;
-
-/// Upper bound on favorites pushed to Last.fm by a single sync.
-const MAX_BULK_LOVES: usize = 500;
-
-/// Case-insensitive `(artist, title)` identity used to match library tracks
-/// against Last.fm's loved list.
-fn loved_key(artist: &str, title: &str) -> String {
-    format!(
-        "{}\u{1}{}",
-        artist.trim().to_lowercase(),
-        title.trim().to_lowercase()
-    )
-}
 
 impl AppModel {
     pub(super) fn handle_scrobble_message(
@@ -46,11 +33,12 @@ impl AppModel {
                 | ScrobbleMessage::Disconnect(_)
                 | ScrobbleMessage::SaveLastFmKeys
         );
-        let (task, changed) = self.scrobble.update(msg, &mut self.config);
+        let (effect, changed) = self.scrobble.update(msg, &mut self.config);
         if changed {
             self.save_config();
         }
-        let mut tasks = vec![task.map(|m| cosmic::Action::App(Message::Scrobble(m)))];
+        let mut tasks =
+            vec![super::tasks::effect(effect).map(|m| cosmic::Action::App(Message::Scrobble(m)))];
         if changed && affects_suggestions {
             tasks.push(self.load_similar());
         }
@@ -104,7 +92,8 @@ impl AppModel {
     /// A track was (un)favorited in Aulos: mirror it to Last.fm if enabled.
     pub(super) fn scrobble_favorite_changed(&mut self, track_id: &str, loved: bool) {
         let track = self
-            .all_tracks
+            .library
+            .tracks
             .iter()
             .find(|t| t.id.to_string() == track_id)
             .or(self
@@ -120,27 +109,10 @@ impl AppModel {
     /// Two-way sync with Last.fm's loved tracks: loved tracks missing from
     /// Aulos' favorites become favorites; favorites Last.fm lacks are loved.
     fn apply_loved_tracks(&mut self, loved: &[(String, String)]) -> Task<cosmic::Action<Message>> {
-        let remote: HashSet<String> = loved.iter().map(|(a, t)| loved_key(a, t)).collect();
-        let mut to_favorite: Vec<String> = Vec::new();
-        let mut to_love: Vec<(String, String)> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for t in &self.all_tracks {
-            if !crate::online::scrobble::source_allowed(&t.provider_id, false) {
-                continue;
-            }
-            let key = loved_key(&t.artist, &t.title);
-            if remote.contains(&key) {
-                if !t.is_favorite {
-                    to_favorite.push(t.id.to_string());
-                }
-            } else if t.is_favorite
-                && to_love.len() < MAX_BULK_LOVES
-                && !t.artist.trim().is_empty()
-                && seen.insert(key)
-            {
-                to_love.push((t.artist.clone(), t.title.clone()));
-            }
-        }
+        let LovedSyncPlan {
+            to_favorite,
+            to_love,
+        } = plan_sync(&self.library.tracks, loved);
 
         let added = to_favorite.len();
         let pushed = to_love.len();
@@ -159,19 +131,5 @@ impl AppModel {
             pushed = pushed.to_string()
         ));
         Task::batch(tasks)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::loved_key;
-
-    #[test]
-    fn loved_key_ignores_case_and_padding() {
-        assert_eq!(
-            loved_key(" Björk ", "Hunter"),
-            loved_key("björk", " hunter")
-        );
-        assert_ne!(loved_key("a", "b"), loved_key("b", "a"));
     }
 }

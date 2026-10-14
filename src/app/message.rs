@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::ContextPage;
-use crate::config::{Config, ReplayGainMode};
-use crate::library::{Album, Artist, Lyrics, Track};
-use crate::player::PlaybackState;
 use crate::views::radio as radio_view;
-use crate::views::{albums, artists, convert, podcasts, songs};
+use crate::views::{albums, artists, convert, podcasts};
+use aulos_core::config::{Config, ReplayGainMode};
+use aulos_core::library::{Album, Artist, Lyrics, Track};
+use aulos_core::player::PlaybackState;
 use cosmic::widget;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,15 +22,15 @@ pub enum Message {
     ShowTrackProperties(Track),
     /// The off-thread technical probe of a track finished. `request_id`
     /// identifies the drawer opening it belongs to; results of an older
-    /// opening are dropped (see `properties::PropertiesState::accepts`).
+    /// opening are dropped (see `aulos_core::library::properties::PropertiesState::accepts`).
     PropertiesLoaded {
         request_id: u64,
-        result: Result<crate::library::tech_info::TechInfo, String>,
+        result: Result<aulos_core::library::tech_info::TechInfo, String>,
     },
     /// The off-thread album summary finished (same `request_id` rule).
     AlbumPropertiesLoaded {
         request_id: u64,
-        summary: crate::library::tech_info::AlbumSummary,
+        summary: aulos_core::library::tech_info::AlbumSummary,
     },
     /// A user action inside the Properties drawer.
     Properties(crate::views::track_properties::PropertiesMessage),
@@ -174,7 +174,7 @@ pub enum Message {
     /// "Play next" (`next`) or "Add to queue" for tracks named by index;
     /// resolved in `update` so views never clone track lists.
     QueueFrom {
-        source: super::queue_source::QueueSource,
+        source: aulos_core::library::queue_source::QueueSource,
         next: bool,
     },
     /// A virtualized album/artist/genre grid or list scrolled.
@@ -186,18 +186,18 @@ pub enum Message {
     PlayAlbumTrack(usize, usize),
     PlayArtistAlbum(usize, usize),
     PlayArtistTrack(usize, usize, usize),
-    /// Open the Properties drawer for album `.0` of `all_albums` (resolved
+    /// Open the Properties drawer for album `.0` of the library albums (resolved
     /// in `update`, so album context menus never clone an album's tracks).
     ShowAlbumProperties(usize),
     /// Open the Properties drawer for album `.1` of artist `.0`.
     ShowArtistAlbumProperties(usize, usize),
     /// Open the tag editor on one (local) track (`AppModel::open_in_tagger`).
-    TagTrack(Track, crate::tagger::TagAction),
-    /// Open the tag editor on album `.0` of `all_albums` (resolved in
+    TagTrack(Track, aulos_core::tagger::TagAction),
+    /// Open the tag editor on album `.0` of the library albums (resolved in
     /// `update`, like `ShowAlbumProperties`).
-    TagAlbum(usize, crate::tagger::TagAction),
+    TagAlbum(usize, aulos_core::tagger::TagAction),
     /// Open the tag editor on album `.1` of artist `.0`.
-    TagArtistAlbum(usize, usize, crate::tagger::TagAction),
+    TagArtistAlbum(usize, usize, aulos_core::tagger::TagAction),
 
     // Albums view
     SelectAlbum(usize),
@@ -210,10 +210,10 @@ pub enum Message {
     ToggleArtistBioExpanded,
     /// One lazily-fetched artist's bio/image result landed (see
     /// `AppModel::load_artist_info_for_visible`).
-    ArtistInfoLoaded(crate::library::artist_info::ArtistInfoOutcome),
+    ArtistInfoLoaded(aulos_core::library::artist_info::ArtistInfoOutcome),
 
     // Songs view
-    SortSongs(songs::SortField),
+    SortSongs(aulos_core::library::state::SortField),
     /// Toggle the favorites-only filter in the Songs view.
     ToggleFavoritesFilter,
     /// The Songs list was scrolled to this vertical offset (px); drives
@@ -254,7 +254,7 @@ pub enum Message {
     /// The rename input changed (playlist index, new text).
     RenamePlaylistInput(usize, String),
     /// Playlists have been loaded from the provider.
-    PlaylistsLoaded(Vec<crate::library::Playlist>),
+    PlaylistsLoaded(Vec<aulos_core::library::Playlist>),
 
     // Smart playlists view — a single wrapped variant keeps this feature's
     // full message vocabulary (list/detail/editor) out of the top-level enum.
@@ -275,7 +275,7 @@ pub enum Message {
     SelectGenre(usize),
     /// Go back from genre detail to the grid.
     BackToGenreGrid,
-    /// Play a track in the genre detail view (index within genre_tracks).
+    /// Play a track in the genre detail view (index within `LibraryState::genre_tracks`).
     PlayGenreTrack(usize),
     /// Play the selected genre's tracks in shuffled order.
     ShuffleGenre,
@@ -300,7 +300,7 @@ pub enum Message {
 
     // Equalizer
     EqSetBand(usize, f32),
-    EqSetPreset(crate::player::equalizer::EqPreset),
+    EqSetPreset(aulos_core::player::equalizer::EqPreset),
     EqToggle(bool),
     EqSetPreamp(f32),
     /// Select a preset by name from the combined preset list.
@@ -322,18 +322,18 @@ pub enum Message {
     /// Fetch AutoEQ index from GitHub (triggered by "Load AutoEQ..." button).
     FetchAutoEQIndex,
     /// AutoEQ index fetched successfully (or error).
-    AutoEQIndexLoaded(Result<Vec<crate::autoeq::AutoEQProfileMetadata>, String>),
+    AutoEQIndexLoaded(Result<Vec<aulos_core::autoeq::AutoEQProfileMetadata>, String>),
     /// Select an AutoEQ profile by path from the dropdown.
     EqSelectAutoEQ(String),
     /// AutoEQ profile fetched and ready to apply (or error).
-    AutoEQProfileLoaded(Result<crate::autoeq::AutoEQProfile, String>),
+    AutoEQProfileLoaded(Result<aulos_core::autoeq::AutoEQProfile, String>),
 
     // Settings
     AddMusicDir,
     /// The Settings drawer's search box changed.
     SettingsSearch(String),
     /// Scrobbling settings / connect-flow message.
-    Scrobble(crate::online::scrobble::ScrobbleMessage),
+    Scrobble(aulos_core::online::scrobble::ScrobbleMessage),
     /// Result from the XDG Desktop Portal directory picker.
     DirPickerResult(Result<PathBuf, String>),
     RemoveMusicDir(usize),
@@ -384,8 +384,8 @@ pub enum Message {
     MpdConnectionFailed(String, String),
     /// `provider_id`, plus which MPD subsystem changed (only
     /// `Database`/`Update`/`StoredPlaylist` trigger a reload in
-    /// `update()` — see `subscriptions::idle_action`).
-    MpdIdleEvent(String, super::subscriptions::IdleSubsystem),
+    /// `update()` — see `mpd_events::idle_action`).
+    MpdIdleEvent(String, aulos_core::provider::mpd_events::IdleSubsystem),
     /// Polled status from the active MPD backend (position, duration,
     /// state, volume). `song` is `Some` only on the tick where MPD's
     /// current song identity changed (including the first tick after the
@@ -432,7 +432,7 @@ pub enum Message {
     DetailArtReady(
         String,
         Option<widget::icon::Handle>,
-        Option<crate::library::palette::Accent>,
+        Option<aulos_core::library::palette::Accent>,
     ),
     /// Blurred cover art, accent colour, and a separately-decoded larger
     /// cover handle (for the expanded now-playing view) are ready for
@@ -442,7 +442,7 @@ pub enum Message {
     BlurReady(
         String,
         Option<widget::icon::Handle>,
-        Option<crate::library::palette::Accent>,
+        Option<aulos_core::library::palette::Accent>,
         Option<widget::icon::Handle>,
     ),
 
@@ -493,7 +493,7 @@ pub enum Message {
     SetVizBeatSensitivity(f32),
     /// Background preset scan finished.
     #[cfg(feature = "visualizer")]
-    VizPresetsScanned(Vec<crate::views::now_playing::visualizer::PresetEntry>),
+    VizPresetsScanned(Vec<aulos_core::visualizer::presets::PresetEntry>),
 
     // Notifications
     // Podcasts
@@ -526,9 +526,9 @@ pub enum Message {
 
     // Tag editor
     /// UI actions from the tag editor view.
-    Tagger(crate::tagger::TaggerMessage),
+    Tagger(aulos_core::tagger::TaggerMessage),
     /// Results of work the tag editor started.
-    TaggerEvent(crate::tagger::TaggerEvent),
+    TaggerEvent(aulos_core::tagger::TaggerEvent),
 
     // Application lifecycle
     Quit,
@@ -537,7 +537,7 @@ pub enum Message {
     Playback(super::playback_extras::PlaybackExtrasMessage),
     /// An MPRIS2 D-Bus event: either the server handle becoming available,
     /// or a command relayed from a media-key/shell-applet D-Bus call.
-    Mpris(crate::mpris::MprisEvent),
+    Mpris(aulos_core::mpris::MprisEvent),
     /// Open ad-hoc audio files outside the library (double-clicked in a
     /// file manager via `Exec=aulos %U`, passed on the command line, or
     /// forwarded from another running instance's MPRIS `OpenUri`).
@@ -577,11 +577,11 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
             albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
             albums::AlbumMessage::PlayNext(album, track) => Message::QueueFrom {
-                source: super::queue_source::QueueSource::Album { album, track },
+                source: aulos_core::library::queue_source::QueueSource::Album { album, track },
                 next: true,
             },
             albums::AlbumMessage::AddToQueue(album, track) => Message::QueueFrom {
-                source: super::queue_source::QueueSource::Album { album, track },
+                source: aulos_core::library::queue_source::QueueSource::Album { album, track },
                 next: false,
             },
             albums::AlbumMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
@@ -607,7 +607,7 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::Navigate(route) => Message::Navigate(route),
             artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
             artists::ArtistMessage::PlayNext(artist, album, track) => Message::QueueFrom {
-                source: super::queue_source::QueueSource::ArtistAlbum {
+                source: aulos_core::library::queue_source::QueueSource::ArtistAlbum {
                     artist,
                     album,
                     track,
@@ -615,7 +615,7 @@ impl From<artists::ArtistMessage> for Message {
                 next: true,
             },
             artists::ArtistMessage::AddToQueue(artist, album, track) => Message::QueueFrom {
-                source: super::queue_source::QueueSource::ArtistAlbum {
+                source: aulos_core::library::queue_source::QueueSource::ArtistAlbum {
                     artist,
                     album,
                     track,

@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::config::Config;
-use crate::convert::ConvertJob;
-use crate::library::{Album, Artist, Lyrics, Track};
-use crate::online::podcast::PodcastSearchResult;
-use crate::online::radio::StationSearchResult;
-use crate::online::store::{Episode, OnlineStore, Podcast, RadioStation};
-use crate::player::Player;
-use crate::provider::ProviderRegistry;
-use crate::provider::mpd::MpdProvider;
-use crate::provider::subsonic::SubsonicProvider;
-use crate::views::radio as radio_view;
-use crate::views::{podcasts, providers, songs};
+use aulos_core::config::Config;
+use aulos_core::convert::ConvertJob;
+use aulos_core::library::home::HomeCache;
+use aulos_core::library::state::{LibraryState, SortField};
+use aulos_core::library::{Lyrics, Track};
+use aulos_core::online::podcast::PodcastSearchResult;
+use aulos_core::online::radio::StationSearchResult;
+use aulos_core::online::store::{Episode, Podcast, RadioStation};
+use aulos_core::player::Player;
+use aulos_core::provider::ProviderRegistry;
+use aulos_core::provider::mpd::MpdProvider;
+use aulos_core::provider::subsonic::SubsonicProvider;
 use cosmic::cosmic_config;
 use cosmic::widget::{self, about::About, menu, nav_bar};
 use std::collections::HashMap;
@@ -23,7 +23,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod application;
-mod config_writer;
 mod convert_page;
 mod helpers;
 mod home;
@@ -35,10 +34,8 @@ mod playlist_io;
 mod podcast_page;
 mod properties;
 mod provider_ops;
-mod queue_source;
 mod radio_page;
 mod scrobble_glue;
-mod search_index;
 pub mod startup;
 mod subscriptions;
 mod tagger_page;
@@ -67,20 +64,6 @@ const ARTIST_INFO_CONCURRENCY: usize = 2;
 #[cfg(feature = "visualizer")]
 const VIZ_HUD_HOLD_FRAMES: u32 = 90;
 
-/// Shared blocking HTTP client for all radio/podcast requests (search,
-/// feed fetch, stream resolution, episode downloads). Built once so
-/// requests reuse the connection pool and TLS session cache instead of
-/// paying a fresh handshake on every call, with an explicit timeout so a
-/// stalled server can't hang the blocking task forever.
-static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
-    std::sync::LazyLock::new(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    });
-
 /// Main application model.
 pub struct AppModel {
     core: cosmic::Core,
@@ -90,17 +73,18 @@ pub struct AppModel {
     config: Config,
     /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
     config_context: Option<cosmic_config::Config>,
-    /// Background, coalescing config persistence (see `config_writer`).
-    config_writer: Option<config_writer::ConfigWriter>,
+    /// Background, coalescing config persistence (see
+    /// `aulos_core::config::writer`).
+    config_writer: Option<aulos_core::config::writer::ConfigWriter>,
     /// Last few configs handed to the writer, to recognise the watcher's
     /// echo of our own (debounced) writes in `UpdateConfig`.
     recent_saves: std::cell::RefCell<std::collections::VecDeque<Config>>,
     context_page: ContextPage,
     /// State of the Track/Album Properties drawer.
-    properties: properties::PropertiesState,
+    properties: aulos_core::library::properties::PropertiesState,
     /// Runtime state of the playback/desktop extras (auto-play RNG,
     /// inhibit lock, notification bookkeeping).
-    playback_extras: playback_extras::PlaybackExtrasState,
+    playback_extras: aulos_core::player::extras::PlaybackExtrasState,
 
     // Notifications
     /// Toast notifications (e.g. provider connection failures).
@@ -121,58 +105,23 @@ pub struct AppModel {
     provider_manually_switched: bool,
 
     // Library data
-    all_tracks: Vec<Track>,
-    all_albums: Vec<Album>,
-    all_artists: Vec<Artist>,
+    /// Tracks/albums/artists/genres, reload bookkeeping and the header
+    /// search's filter results (see `aulos_core::library::state`).
+    library: LibraryState,
+    /// Cover handles accumulated by a non-destructive library refresh in
+    /// flight, swapped into `cover_images`/`cover_fingerprints` together
+    /// with the staged library data. `Some` exactly while
+    /// `library.is_staging(..)` is true for the running reload.
+    cover_staging: Option<helpers::CoverStaging>,
     library_scanning: bool,
-    /// Monotonically increasing generation counter for library
-    /// reloads/scans. Bumped before every new reload/scan so in-flight
-    /// async results tagged with an older generation (or a different
-    /// provider id) can be detected and ignored as stale.
-    reload_generation: u64,
-    /// Staged data for a non-destructive library refresh in flight; see
-    /// `helpers::LibraryReloadStaging`. `None` when no reload is running,
-    /// or the running reload is a first/empty-library load that instead
-    /// populates `all_tracks`/`all_albums`/etc. progressively.
-    library_reload_staging: Option<helpers::LibraryReloadStaging>,
-    /// Bumped whenever `all_tracks`/`all_albums`/`all_artists` change
-    /// (load, batch, sort, artist rebuild); invalidates derived caches.
-    library_gen: u64,
-    /// Pre-lowercased search keys (rebuilt per `library_gen`).
-    search_index: search_index::SearchIndex,
-    /// Latest debounce generation for `LibrarySearchChanged`.
-    search_debounce_gen: u64,
-    /// `library_gen` the folder tree was last built for.
+    /// `LibraryState::generation` the folder tree was last built for.
     folder_tree_gen: Option<u64>,
     /// Whether any configured music dir exists (cached; avoids `stat` per frame).
     music_dirs_present: bool,
-    /// Whether the Artists view must read `filtered_artists` (query active,
-    /// or compilations hidden and at least one such artist exists).
-    artists_filtered: bool,
 
     // Library search (header search bar)
-    /// Current search query (case-insensitive substring match against the
-    /// active page's fields).
-    library_search: String,
     /// Whether the header search input is visible/active.
     search_active: bool,
-    /// Albums matching `library_search`; cached in the model (not built
-    /// fresh inside `view()`) because view functions borrow `&'a [T]`
-    /// slices that must live as long as `&self` — a `Vec` built locally
-    /// inside `view()` would not satisfy that lifetime.
-    filtered_albums: Vec<Album>,
-    /// Maps `filtered_albums[i]` back to its index in `all_albums`, so
-    /// index-carrying view messages (select/play) resolve against the
-    /// real, unfiltered data.
-    filtered_album_map: Vec<usize>,
-    filtered_artists: Vec<Artist>,
-    filtered_artist_map: Vec<usize>,
-    filtered_tracks: Vec<Track>,
-    filtered_track_map: Vec<usize>,
-    filtered_playlists: Vec<crate::library::Playlist>,
-    filtered_playlist_map: Vec<usize>,
-    filtered_genres: Vec<String>,
-    filtered_genre_map: Vec<usize>,
     /// Mini-player mode and album-filter chip state (see `view_extras`).
     extras: view_extras::ViewExtras,
 
@@ -180,7 +129,7 @@ pub struct AppModel {
     podcasts: Vec<Podcast>,
     /// Which of the two Podcasts tabs is shown; kept for the session (not
     /// persisted to disk).
-    podcast_tab: podcasts::PodcastTab,
+    podcast_tab: aulos_core::online::podcast::PodcastTab,
     /// Whether the inline add-by-URL card is open.
     podcast_add_open: bool,
     podcast_add_url: String,
@@ -208,7 +157,7 @@ pub struct AppModel {
     /// for the Subscriptions/Discover list.
     selected_podcast: Option<i64>,
     podcast_episodes: Vec<Episode>,
-    podcast_episode_filter: podcasts::EpisodeFilter,
+    podcast_episode_filter: aulos_core::online::podcast::EpisodeFilter,
     podcast_episode_text_filter: String,
     /// Whether the show detail's description is expanded past its clipped
     /// preview.
@@ -226,7 +175,7 @@ pub struct AppModel {
     radio_stations: Vec<RadioStation>,
     /// Which of the two Radio tabs is shown; kept for the session (not
     /// persisted to disk).
-    radio_tab: radio_view::RadioTab,
+    radio_tab: aulos_core::online::radio::RadioTab,
     /// Live filter text over `radio_stations` in the "My stations" tab.
     radio_filter: String,
     /// Whether the inline add-by-URL card is open.
@@ -247,10 +196,10 @@ pub struct AppModel {
     /// `""` and `radio_locale_country`.
     radio_search_country: String,
     /// Country code derived once from the process locale at startup (see
-    /// `radio_page::locale_country_code`); empty when it can't be
+    /// `aulos_core::online::radio::locale_country_code`); empty when it can't be
     /// determined, in which case the country chip is simply not shown.
     radio_locale_country: String,
-    radio_search_sort: crate::online::radio::SortOrder,
+    radio_search_sort: aulos_core::online::radio::SortOrder,
     radio_search_results: Vec<StationSearchResult>,
     radio_search_loading: bool,
     /// Inline error from the last search/preset fetch, shown in the
@@ -278,9 +227,9 @@ pub struct AppModel {
     playback_position: Duration,
     current_track: Option<Track>,
     /// MPRIS2 D-Bus handle, once the session-bus server has started (see
-    /// `crate::mpris::mpris_stream`). `None` before `Ready` arrives or if no
+    /// `aulos_core::mpris::mpris_stream`). `None` before `Ready` arrives or if no
     /// session bus is available — media-key integration degrades quietly.
-    mpris: Option<crate::mpris::MprisHandle>,
+    mpris: Option<aulos_core::mpris::MprisHandle>,
     /// While the user is dragging the seek slider, holds the preview fraction
     /// (0.0–1.0). `None` when not dragging. The actual backend seek happens
     /// only on release (`SeekCommit`).
@@ -296,14 +245,14 @@ pub struct AppModel {
     /// Whether the current track has been scrobbled (to avoid duplicates).
     scrobble_sent: bool,
     /// Multi-service scrobbling (ListenBrainz / Last.fm / Libre.fm) state.
-    scrobble: crate::online::scrobble::ScrobbleController,
+    scrobble: aulos_core::online::scrobble::ScrobbleController,
     /// Text of the Settings drawer's search box.
     settings_search: String,
 
     // View state
     selected_album: Option<usize>,
     selected_artist: Option<usize>,
-    songs_sort: songs::SortField,
+    songs_sort: SortField,
     /// When true, the Songs list column headers show a descending arrow.
     songs_sort_descending: bool,
     /// Current vertical scroll offset of the Songs list (virtualization).
@@ -317,7 +266,7 @@ pub struct AppModel {
     /// When set, the Songs view shows only tracks matching this genre.
     genre_filter: Option<String>,
     /// Available playlists for the Playlists view.
-    playlists: Vec<crate::library::Playlist>,
+    playlists: Vec<aulos_core::library::Playlist>,
     /// Currently selected playlist index (for detail view).
     selected_playlist: Option<usize>,
     /// Text input for new playlist name.
@@ -326,31 +275,27 @@ pub struct AppModel {
     /// seeded from the playlist's current name when its detail view opens.
     rename_playlist_input: String,
     /// Saved smart (rule-based) playlists.
-    smart_playlists: Vec<crate::library::smart_playlist::SmartPlaylist>,
+    smart_playlists: Vec<aulos_core::library::smart_playlist::SmartPlaylist>,
     /// Currently selected smart playlist index (for detail/editor view).
     selected_smart_playlist: Option<usize>,
     /// Resolved tracks for the currently viewed smart playlist.
     smart_playlist_tracks: Vec<Track>,
     /// In-progress rules-editor state; `Some` shows the editor instead of
     /// the list/detail view.
-    smart_playlist_editor: Option<crate::views::smart_playlists::EditorState>,
-    /// All distinct genres from the active provider.
-    all_genres: Vec<String>,
+    smart_playlist_editor: Option<aulos_core::library::smart_playlist::EditorState>,
     /// Currently selected genre index (for detail view).
     selected_genre: Option<usize>,
-    /// Tracks filtered by the currently selected genre.
-    genre_tracks: Vec<Track>,
     /// In-memory directory-hierarchy browse state for the Folders view;
-    /// rebuilt from `all_tracks` whenever the page is opened or the
+    /// rebuilt from the library tracks whenever the page is opened or the
     /// library reloads (see `FolderTree::build`).
-    folder_state: crate::views::folders::FolderState,
+    folder_state: aulos_core::library::folder_tree::FolderState,
     /// Home page shelves, decade grid and play-history tracker.
-    home: crate::views::home::HomeState,
-    /// What the loaded Home shelves are valid for (see `home::HomeCache`).
-    home_cache: home::HomeCache,
+    home: aulos_core::library::home_state::HomeState,
+    /// What the loaded Home shelves are valid for (see `HomeCache`).
+    home_cache: HomeCache,
     cover_images: HashMap<String, widget::icon::Handle>,
     /// Cached real artist photos (from Subsonic's own artist data or, in
-    /// Local/MPD mode, Deezer via `crate::library::artist_info` when
+    /// Local/MPD mode, Deezer via `aulos_core::library::artist_info` when
     /// `Config::fetch_artist_info` is on), keyed by artist name. Missing
     /// entries fall back to the deterministic-color initials avatar
     /// built entirely from widgets — see `crate::views::common::artist_avatar`.
@@ -370,8 +315,8 @@ pub struct AppModel {
     /// its clipped preview; reset on selection/back navigation.
     artist_bio_expanded: bool,
     /// On-disk cache for `artist_photos`/`artist_bios` — see
-    /// `crate::library::artist_info::ArtistInfoStore`.
-    artist_info_store: Arc<crate::library::artist_info::ArtistInfoStore>,
+    /// `aulos_core::library::artist_info::ArtistInfoStore`.
+    artist_info_store: Arc<aulos_core::library::artist_info::ArtistInfoStore>,
     /// Bounds how many artist-info fetches (Deezer/Wikipedia/Subsonic
     /// requests) run concurrently, mirroring `convert_semaphore`'s
     /// acquire-before-`spawn_blocking` pattern — a small, fixed number of
@@ -394,16 +339,16 @@ pub struct AppModel {
     lyrics_overlay_active: bool,
 
     // Equalizer
-    eq_preset: Option<crate::player::equalizer::EqPreset>,
-    preset_manager: crate::player::eq_presets::EqPresetManager,
-    all_presets: Vec<crate::player::equalizer::EqPresetData>,
+    eq_preset: Option<aulos_core::player::equalizer::EqPreset>,
+    preset_manager: aulos_core::player::eq_presets::EqPresetManager,
+    all_presets: Vec<aulos_core::player::equalizer::EqPresetData>,
     active_preset_name: Option<String>,
     eq_dirty: bool,
     save_as_name: String,
 
     // AutoEQ
     /// AutoEQ profiles loaded from GitHub, available in the preset dropdown.
-    autoeq_profiles: Vec<crate::autoeq::AutoEQProfileMetadata>,
+    autoeq_profiles: Vec<aulos_core::autoeq::AutoEQProfileMetadata>,
     autoeq_loading: bool,
     /// Current search query for filtering AutoEQ profiles in the dropdown.
     autoeq_search: String,
@@ -423,9 +368,9 @@ pub struct AppModel {
     acoustid_user_key_saved: Option<bool>,
 
     // Provider settings (editing state)
-    mpd_edit_states: Vec<providers::MpdEditState>,
+    mpd_edit_states: Vec<aulos_core::config::edit_state::MpdEditState>,
     mpd_connection_status: Vec<Option<String>>,
-    subsonic_edit_states: Vec<providers::SubsonicEditState>,
+    subsonic_edit_states: Vec<aulos_core::config::edit_state::SubsonicEditState>,
     subsonic_connection_status: Vec<Option<String>>,
     /// Shared references to Subsonic providers for scrobbling.
     subsonic_providers: Vec<Arc<SubsonicProvider>>,
@@ -433,7 +378,7 @@ pub struct AppModel {
     // Expanded now-playing view
     /// Raw cover art bytes keyed by album_key, loaded lazily (blur, detail
     /// hero, notifications) into a small LRU -- never for the whole library.
-    cover_art_bytes: crate::library::palette::CoverByteCache,
+    cover_art_bytes: aulos_core::library::palette::CoverByteCache,
     /// Content fingerprint per album key of the cover behind the matching
     /// `cover_images` handle; lets a reload keep unchanged handles.
     cover_fingerprints: HashMap<String, u64>,
@@ -468,7 +413,7 @@ pub struct AppModel {
     /// bytes, same trigger — see `maybe_update_blurred_cover`). `None`
     /// when there is no current cover or extraction found no legible
     /// dominant hue; consumers fall back to the theme accent.
-    accent: Option<crate::library::palette::Accent>,
+    accent: Option<aulos_core::library::palette::Accent>,
     /// Whether the expanded now-playing sheet is mounted: 1.0 while it is
     /// open or animating, 0.0 once a collapse has finished. The slide
     /// itself is animated at draw time by `views::now_playing::sheet`.
@@ -494,7 +439,7 @@ pub struct AppModel {
     #[cfg(feature = "visualizer")]
     viz_frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")]
-    pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
+    pcm_buffer: Option<Arc<Mutex<aulos_core::player::pcm::PcmBuffer>>>,
     /// Whether MPD itself is currently reporting `Playing` state — set from
     /// `Message::MpdStatusUpdate`. Read by the MPD PipeWire capture thread
     /// (`player::pw_capture`) to gate writes made while it's using the
@@ -509,13 +454,12 @@ pub struct AppModel {
     /// Sender half of the command channel to the render thread (see
     /// `VizCommand`); the `Receiver` lives in `viz_cmd_rx_slot`.
     #[cfg(feature = "visualizer")]
-    viz_cmd_tx: std::sync::mpsc::Sender<crate::views::now_playing::visualizer::VizCommand>,
+    viz_cmd_tx: std::sync::mpsc::Sender<aulos_core::visualizer::VizCommand>,
     /// Holds the render thread's command `Receiver` between activations —
     /// see the comment where it's created in `AppModel::init`.
     #[cfg(feature = "visualizer")]
-    viz_cmd_rx_slot: Arc<
-        Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
-    >,
+    viz_cmd_rx_slot:
+        Arc<Mutex<Option<std::sync::mpsc::Receiver<aulos_core::visualizer::VizCommand>>>>,
     /// Preset file the render thread most recently put on screen — set
     /// after manual loads, "next", and automatic timer/beat switches alike.
     /// `None` until the first preset of a render thread is up.
@@ -543,20 +487,22 @@ pub struct AppModel {
     /// Monotonic id source for new jobs.
     convert_next_id: u64,
     /// Caps concurrently-running conversion jobs, shared across every
-    /// in-flight job future — see `crate::convert::concurrency`.
+    /// in-flight job future — see `aulos_core::convert::concurrency`.
     convert_semaphore: Arc<tokio::sync::Semaphore>,
     /// Inline error from the last failed output-directory validation
     /// (shown in the Output settings card); cleared on every new `Start`.
     convert_dir_error: Option<String>,
     /// The tag editor page's files, selection and running jobs.
-    tagger: crate::tagger::TaggerState,
+    tagger: aulos_core::tagger::TaggerState,
+    /// Drawable thumbnails of the tag editor's pictures.
+    tagger_thumbs: crate::views::tagger::Thumbs,
     /// Whether the preset browser overlay is currently open.
     #[cfg(feature = "visualizer")]
     viz_browser_open: bool,
     /// Discovered `.milk` presets, refreshed by a background scan every time
     /// the browser opens (so presets installed meanwhile show up).
     #[cfg(feature = "visualizer")]
-    viz_preset_entries: Vec<crate::views::now_playing::visualizer::PresetEntry>,
+    viz_preset_entries: Vec<aulos_core::visualizer::presets::PresetEntry>,
     /// Live search filter text for the preset browser.
     #[cfg(feature = "visualizer")]
     viz_preset_search: String,
@@ -615,7 +561,7 @@ pub(crate) struct Location {
 pub(crate) struct DetailArt {
     key: String,
     blurred: Option<widget::icon::Handle>,
-    accent: Option<crate::library::palette::Accent>,
+    accent: Option<aulos_core::library::palette::Accent>,
 }
 
 /// Context drawer pages.
@@ -652,7 +598,7 @@ pub enum MenuAction {
     /// Toggle party mode.
     PartyMode,
     /// Pick the auto-play mode (what plays when the queue runs out).
-    AutoPlay(crate::config::AutoPlayMode),
+    AutoPlay(aulos_core::config::AutoPlayMode),
     Quit,
 }
 
@@ -712,71 +658,6 @@ fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
     key_binds
 }
 
-/// Translates a position in a search-filtered list back to its index in
-/// the corresponding unfiltered library vector. Passthrough when `map` is
-/// `None` (search inactive or the query is empty).
-fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
-    map.map_or(i, |m| m[i])
-}
-
-/// Parse the delimiter-list text box (delimiters joined by `" | "`) back
-/// into the `Vec<String>` stored in `Config::artist_tag_delimiters`,
-/// trimming each entry and dropping empties.
-fn parse_delimiters_input(text: &str) -> Vec<String> {
-    text.split(" | ")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// Pure staleness check for an async library reload result.
-///
-/// `true` when the result's `(generation, provider_id)` no longer matches
-/// the currently active reload — i.e. it was superseded by a later
-/// reload/scan or a provider switch — and must be discarded without
-/// mutating library data or `library_scanning`.
-fn reload_result_is_stale(
-    current_generation: u64,
-    current_provider_id: &str,
-    result_generation: u64,
-    result_provider_id: &str,
-) -> bool {
-    result_generation != current_generation || result_provider_id != current_provider_id
-}
-
-/// Path to the shared library database (also used by `OnlineStore` for
-/// podcasts/radio — same file, same schema, opened via its own connection).
-fn online_db_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("aulos")
-        .join("library.db")
-}
-
-/// Data directory the artist-info disk cache lives under (see
-/// `crate::library::artist_info::ArtistInfoStore::open`), sibling to the
-/// library database rather than inside it — it's a bag of JSON + image
-/// files, not SQL rows.
-fn artist_info_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("aulos")
-}
-
-/// Open the online store at the shared library database path.
-fn open_online_store() -> Result<OnlineStore, String> {
-    OnlineStore::open(&online_db_path())
-}
-
-/// Current Unix time in whole seconds.
-fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Flags passed into `AppModel::init` at startup -- currently just the
 /// audio files (if any) the process was launched or handed off to open,
 /// via `Exec=aulos %U`, a bare CLI argument, or another running
@@ -784,28 +665,4 @@ fn now_epoch() -> i64 {
 #[derive(Debug, Clone, Default)]
 pub struct AppFlags {
     pub open_paths: Vec<PathBuf>,
-}
-
-#[cfg(test)]
-mod reload_generation_tests {
-    use super::reload_result_is_stale;
-
-    #[test]
-    fn matching_generation_and_provider_is_not_stale() {
-        assert!(!reload_result_is_stale(3, "mpd-home", 3, "mpd-home"));
-    }
-
-    #[test]
-    fn result_from_a_superseded_reload_is_stale() {
-        // A second reload bumped the generation before this result arrived.
-        assert!(reload_result_is_stale(3, "mpd-home", 2, "mpd-home"));
-    }
-
-    #[test]
-    fn result_from_a_different_provider_is_stale_even_at_current_generation() {
-        // The generation counter alone can't catch a switch back to the
-        // same numeric generation on a different provider, so identity
-        // must be checked independently.
-        assert!(reload_result_is_stale(3, "mpd-home", 3, "subsonic-server"));
-    }
 }

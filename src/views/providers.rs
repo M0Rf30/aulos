@@ -3,167 +3,12 @@
 
 //! Provider settings view — configure MPD and Subsonic servers.
 
-use crate::fl;
+use aulos_core::config::edit_state::{MpdEditState, SubsonicEditState, is_connected_status};
+use aulos_core::fl;
 use cosmic::iced::Alignment;
 use cosmic::iced::Length;
 use cosmic::iced::core::Color;
 use cosmic::widget;
-
-// ── MPD editing state ──────────────────────────────────────────────────────
-
-/// Editing state for a single MPD server entry.
-///
-/// Kept as strings so text inputs can bind directly without
-/// lifetime issues around temporary conversions.
-#[derive(Debug, Clone)]
-pub struct MpdEditState {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: String,
-    pub password: String,
-}
-
-impl MpdEditState {
-    /// Create from a config entry.
-    ///
-    /// When `password_in_keyring` is set the password is fetched from the
-    /// system keyring so the edit form can show (and round-trip) the real value.
-    pub fn from_config(entry: &crate::config::MpdConfigEntry) -> Self {
-        let password = if entry.password_in_keyring {
-            crate::credentials::retrieve_password(&entry.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        } else {
-            entry.password.clone().unwrap_or_default()
-        };
-
-        Self {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            host: entry.host.clone(),
-            port: entry.port.to_string(),
-            password,
-        }
-    }
-
-    /// Convert back to a config entry (port defaults to 6600 on parse failure).
-    ///
-    /// The password is always stored as plaintext here so that the startup
-    /// migration code can move it to the keyring on the next launch.
-    pub fn to_config(&self) -> crate::config::MpdConfigEntry {
-        crate::config::MpdConfigEntry {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            host: self.host.clone(),
-            port: self.port.parse().unwrap_or(6600),
-            password: if self.password.is_empty() {
-                None
-            } else {
-                Some(self.password.clone())
-            },
-            // Always reset to false so the startup migration path stores it in
-            // the keyring (or the plaintext fallback is used if unavailable).
-            password_in_keyring: false,
-        }
-    }
-
-    /// Create a new empty entry with a generated id.
-    pub fn new_default(index: usize) -> Self {
-        Self {
-            id: format!("mpd-{index}"),
-            name: "MPD Server".to_string(),
-            host: "localhost".to_string(),
-            port: "6600".to_string(),
-            password: String::new(),
-        }
-    }
-}
-
-// ── Subsonic editing state ─────────────────────────────────────────────────
-
-/// Editing state for a single Subsonic/Navidrome server entry.
-#[derive(Debug, Clone)]
-pub struct SubsonicEditState {
-    pub id: String,
-    pub name: String,
-    pub url: String,
-    pub username: String,
-    pub password: String,
-    pub accept_invalid_certs: bool,
-    /// Transcoding max bitrate (None = original quality).
-    pub transcoding_max_bitrate: Option<u32>,
-    /// Transcoding format (None = original format).
-    pub transcoding_format: Option<String>,
-}
-
-impl SubsonicEditState {
-    /// Create from a config entry.
-    ///
-    /// When `password_in_keyring` is set the password is fetched from the
-    /// system keyring so the edit form can show (and round-trip) the real value.
-    pub fn from_config(entry: &crate::config::SubsonicConfigEntry) -> Self {
-        let password = if entry.password_in_keyring {
-            crate::credentials::retrieve_password(&entry.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        } else {
-            entry.password.clone().unwrap_or_default()
-        };
-
-        Self {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            url: entry.url.clone(),
-            username: entry.username.clone(),
-            password,
-            accept_invalid_certs: entry.accept_invalid_certs,
-            transcoding_max_bitrate: entry.transcoding_max_bitrate,
-            transcoding_format: entry.transcoding_format.clone(),
-        }
-    }
-
-    /// Convert back to a config entry.
-    ///
-    /// The password is always stored as plaintext here so that the startup
-    /// migration code can move it to the keyring on the next launch (or
-    /// immediately if the keyring is available).
-    pub fn to_config(&self) -> crate::config::SubsonicConfigEntry {
-        crate::config::SubsonicConfigEntry {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            url: self.url.clone(),
-            username: self.username.clone(),
-            password: if self.password.is_empty() {
-                None
-            } else {
-                Some(self.password.clone())
-            },
-            // Always reset to false so the startup migration path stores it in
-            // the keyring (or the plaintext fallback is used if unavailable).
-            password_in_keyring: false,
-            accept_invalid_certs: self.accept_invalid_certs,
-            transcoding_max_bitrate: self.transcoding_max_bitrate,
-            transcoding_format: self.transcoding_format.clone(),
-        }
-    }
-
-    /// Create a new empty entry with a generated id.
-    pub fn new_default(index: usize) -> Self {
-        Self {
-            id: format!("subsonic-{index}"),
-            name: "Subsonic Server".to_string(),
-            url: "https://".to_string(),
-            username: String::new(),
-            password: String::new(),
-            accept_invalid_certs: false,
-            transcoding_max_bitrate: None,
-            transcoding_format: None,
-        }
-    }
-}
 
 // ── Messages ───────────────────────────────────────────────────────────────
 
@@ -513,7 +358,7 @@ fn server_card<'a>(
         .spacing(sp.space_s);
 
     if let Some(status) = connection_status
-        && !is_connected(status)
+        && !is_connected_status(status)
     {
         let failed = fl!("connection-failed");
         let detail = status
@@ -565,17 +410,13 @@ fn destructive_color() -> Color {
     cosmic::theme::active().cosmic().destructive_color().into()
 }
 
-fn is_connected(status: &str) -> bool {
-    status == crate::fl!("connected")
-}
-
 /// Status dot + short label: green "Connected", red "Connection Failed",
 /// or a dim "Not tested" before any attempt.
 fn status_badge<'a>(status: Option<&str>) -> cosmic::Element<'a, ProvidersMessage> {
     let sp = cosmic::theme::active().cosmic().spacing;
     let theme = cosmic::theme::active();
     let (color, label) = match status {
-        Some(s) if is_connected(s) => (
+        Some(s) if is_connected_status(s) => (
             Color::from(theme.cosmic().success_color()),
             fl!("connected"),
         ),

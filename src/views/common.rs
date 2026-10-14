@@ -17,54 +17,15 @@ use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 use cosmic::widget::tooltip::Position as TooltipPosition;
 
-use crate::fl;
-use crate::library::Playlist;
+use aulos_core::fl;
+use aulos_core::format::format_duration;
+use aulos_core::library::Playlist;
 
 /// Concrete text widget type returned by `cosmic::widget::text::*` helpers.
 pub type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::Theme, cosmic::Renderer>;
 
 /// Fixed width for right-aligned duration cells (fits `H:MM:SS`).
 pub const DURATION_WIDTH: f32 = 64.0;
-
-/// Format a duration in whole seconds as `H:MM:SS` when at least an hour,
-/// otherwise `M:SS`.
-#[must_use]
-pub fn format_duration(total_secs: u64) -> String {
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
-/// Coarse human-readable duration for headers: `2h 44m`, `44m`, `12s`.
-#[must_use]
-pub fn format_duration_coarse(total_secs: u64) -> String {
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{total_secs}s")
-    }
-}
-
-/// Truncate on a `char` boundary, appending `…` when the input exceeds
-/// `max_chars`.
-#[must_use]
-pub fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{}…", truncated.trim_end())
-    }
-}
 
 /// Body text pinned to a single line, ending in "…" when it doesn't fit
 /// (the containing cell still clips as a safety net).
@@ -170,7 +131,7 @@ fn link_styled<'a, M: Clone + 'a>(
 /// while matching the current artwork. Hover/pressed/disabled states dim
 /// the same fill via alpha rather than deriving separate colours from the
 /// palette.
-pub fn accent_button_class(accent: &crate::library::palette::Accent) -> cosmic::theme::Button {
+pub fn accent_button_class(accent: &aulos_core::library::palette::Accent) -> cosmic::theme::Button {
     let background = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
     let on = Color::from_rgb(accent.on_color[0], accent.on_color[1], accent.on_color[2]);
     let style = move |theme: &cosmic::Theme, alpha: f32| cosmic::widget::button::Style {
@@ -201,7 +162,7 @@ pub const HERO_HEIGHT: f32 = 280.0;
 /// card — so the layout never changes as artwork finishes loading.
 pub fn hero_header<'a, M: 'a>(
     blurred: Option<&widget::icon::Handle>,
-    accent: Option<&crate::library::palette::Accent>,
+    accent: Option<&aulos_core::library::palette::Accent>,
     back: Option<cosmic::Element<'a, M>>,
     content: cosmic::Element<'a, M>,
 ) -> cosmic::Element<'a, M> {
@@ -491,9 +452,9 @@ pub const QUALITY_BADGE_WIDTH: f32 = 64.0;
 /// Anything else renders a zero-size element; callers still wrap the result
 /// in a fixed-width container so columns never jitter.
 pub fn quality_badge<'a, M: 'static>(
-    quality: crate::library::quality::AudioQuality,
+    quality: aulos_core::library::quality::AudioQuality,
 ) -> cosmic::Element<'a, M> {
-    use crate::library::quality::AudioQuality;
+    use aulos_core::library::quality::AudioQuality;
     if !matches!(quality, AudioQuality::HiRes | AudioQuality::Dsd) {
         return widget::Space::new().into();
     }
@@ -569,10 +530,10 @@ pub fn empty_state<'a, M: 'static>(
 /// mode. Used by every card-grid view (albums, artists, genres) so the
 /// toggle's placement and wording never drift between them.
 pub fn view_mode_toggle_header<'a, M: Clone + 'static>(
-    mode: crate::config::ViewMode,
+    mode: aulos_core::config::ViewMode,
     on_toggle: M,
 ) -> cosmic::Element<'a, M> {
-    use crate::config::ViewMode;
+    use aulos_core::config::ViewMode;
     let toggle_icon = match mode {
         ViewMode::Grid => "view-list-symbolic",
         ViewMode::List => "view-grid-symbolic",
@@ -1077,8 +1038,8 @@ pub fn artist_avatar<'a, M: 'static>(
 /// displays the way the old rasterized-at-64px avatar did. See
 /// `artist_avatar`.
 pub fn initials_avatar<'a, M: 'static>(name: &str, size: f32) -> cosmic::Element<'a, M> {
-    let initials = crate::library::CoverArt::artist_initials(name);
-    let (r, g, b) = crate::library::CoverArt::artist_avatar_color(name);
+    let initials = aulos_core::library::CoverArt::artist_initials(name);
+    let (r, g, b) = aulos_core::library::CoverArt::artist_avatar_color(name);
     let background = Color::from_rgb8(r, g, b);
     let font_size = (size * 0.36).max(11.0);
 
@@ -1176,94 +1137,7 @@ pub fn add_to_playlist_button<'a, M: 'static + Clone>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ScrollArea, ScrollOffsets, format_duration, format_duration_coarse, truncate_str,
-        visible_range,
-    };
-
-    #[test]
-    fn format_duration_sub_minute() {
-        assert_eq!(format_duration(0), "0:00");
-        assert_eq!(format_duration(59), "0:59");
-    }
-
-    #[test]
-    fn format_duration_minutes_only() {
-        assert_eq!(format_duration(60), "1:00");
-        assert_eq!(format_duration(3599), "59:59");
-    }
-
-    #[test]
-    fn format_duration_hour_boundary() {
-        assert_eq!(format_duration(3600), "1:00:00");
-    }
-
-    #[test]
-    fn format_duration_regression_164_minutes() {
-        // 9860s = 2h 44m 20s. Previously rendered as the bogus "164:20"
-        // because minutes were never rolled over into hours.
-        assert_eq!(format_duration(9860), "2:44:20");
-    }
-
-    #[test]
-    fn format_duration_coarse_seconds_only() {
-        assert_eq!(format_duration_coarse(12), "12s");
-    }
-
-    #[test]
-    fn format_duration_coarse_minutes_only() {
-        assert_eq!(format_duration_coarse(300), "5m");
-    }
-
-    #[test]
-    fn format_duration_coarse_hours_and_minutes() {
-        assert_eq!(format_duration_coarse(9860), "2h 44m");
-    }
-
-    #[test]
-    fn format_duration_coarse_hour_boundary_zero_minutes() {
-        assert_eq!(format_duration_coarse(3600), "1h 00m");
-    }
-
-    #[test]
-    fn truncate_str_shorter_than_max_is_unchanged() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_str_exact_max_is_unchanged() {
-        assert_eq!(truncate_str("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_str_over_max_ends_with_ellipsis_and_respects_length() {
-        let result = truncate_str("hello world", 8);
-        assert!(result.ends_with('…'));
-        assert!(result.chars().count() <= 8);
-    }
-
-    #[test]
-    fn truncate_str_trims_trailing_whitespace_before_ellipsis() {
-        // Cutting right after "hello" lands on trailing spaces; they must be
-        // trimmed so the ellipsis doesn't float after visible whitespace.
-        let result = truncate_str("hello   world", 8);
-        assert_eq!(result, "hello…");
-    }
-
-    #[test]
-    fn truncate_str_multibyte_safe_no_panic() {
-        // Multibyte (non-ASCII) chars must be counted and sliced by `char`,
-        // never by byte, or this would panic on a non-boundary split.
-        let cjk = "日本語のテスト";
-        let result = truncate_str(cjk, 4);
-        assert!(result.ends_with('…'));
-        assert!(result.chars().count() <= 4);
-
-        let accented = "ééééééééé";
-        let result = truncate_str(accented, 5);
-        assert!(result.ends_with('…'));
-        assert!(result.chars().count() <= 5);
-    }
+    use super::{ScrollArea, ScrollOffsets, visible_range};
 
     #[test]
     fn visible_range_at_top_covers_viewport_plus_overscan() {

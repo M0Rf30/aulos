@@ -4,11 +4,11 @@
 //! Playlists view - list of playlists with create/delete/rename actions,
 //! and a detail view showing tracks in a selected playlist.
 
-use crate::fl;
-use crate::library::Playlist;
 use crate::views::common;
 use crate::views::list_row_button_class;
 use crate::views::track_row;
+use aulos_core::fl;
+use aulos_core::library::Playlist;
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
@@ -46,9 +46,9 @@ pub enum PlaylistMessage {
     /// Jump to another view (artist page).
     Navigate(crate::views::Route),
     /// Open the Properties drawer for this track.
-    ShowProperties(crate::library::Track),
+    ShowProperties(aulos_core::library::Track),
     /// Open the tag editor on this (local) track.
-    Tag(crate::library::Track, crate::tagger::TagAction),
+    Tag(aulos_core::library::Track, aulos_core::tagger::TagAction),
     /// Export the playlist at this index as an M3U file.
     Export(usize),
     /// Pick M3U/M3U8/PLS files to import as new playlists.
@@ -122,11 +122,7 @@ pub fn playlist_list_view<'a>(
         let track_count = playlist.track_count;
         let info = widget::Column::new()
             .push(common::cell_text(playlist.name.as_str()).font(cosmic::font::semibold()))
-            .push(secondary_caption(format!(
-                "{}  -  {}",
-                playlist_track_count_label(track_count),
-                common::format_duration_coarse(playlist.total_duration.as_secs())
-            )))
+            .push(secondary_caption(playlist.summary()))
             .spacing(2);
 
         let art: cosmic::Element<'_, PlaylistMessage> =
@@ -159,16 +155,14 @@ pub fn playlist_list_view<'a>(
                         .width(Length::FillPortion(5)),
                 )
                 .push(
-                    widget::container(secondary_caption(playlist_track_count_label(track_count)))
+                    widget::container(secondary_caption(playlist.track_count_label()))
                         .width(LIST_TRACKS_WIDTH)
                         .align_x(Horizontal::Right),
                 )
                 .push(
-                    widget::container(secondary_caption(common::format_duration_coarse(
-                        playlist.total_duration.as_secs(),
-                    )))
-                    .width(LIST_DURATION_WIDTH)
-                    .align_x(Horizontal::Right),
+                    widget::container(secondary_caption(playlist.duration_label()))
+                        .width(LIST_DURATION_WIDTH)
+                        .align_x(Horizontal::Right),
                 )
                 .push(play_btn)
                 .push(export_btn)
@@ -272,12 +266,7 @@ pub fn playlist_detail_view<'a>(
                         .into(),
                 ))
                 .push(common::clipped_cell(
-                    common::cell_caption(format!(
-                        "{}  -  {}",
-                        playlist_track_count_label(track_count),
-                        common::format_duration_coarse(playlist.total_duration.as_secs())
-                    ))
-                    .into(),
+                    common::cell_caption(playlist.summary()).into(),
                 ))
                 .push(rename_row)
                 .push(
@@ -368,13 +357,4 @@ pub fn playlist_detail_view<'a>(
     )
     .height(Length::Fill)
     .into()
-}
-
-/// Localized "N tracks" label used in playlist row/header captions.
-fn playlist_track_count_label(count: u32) -> String {
-    if count == 1 {
-        fl!("playlist-track-count-one", count = count.to_string())
-    } else {
-        fl!("playlist-track-count-other", count = count.to_string())
-    }
 }

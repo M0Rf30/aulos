@@ -1,0 +1,136 @@
+[package]
+name = "aulos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Aulos backend: library, playback, providers, online services, tagging and config, independent of any UI toolkit"
+repository.workspace = true
+
+# No UI toolkit here (no libcosmic/iced/egui): the UI crates depend on this
+# one, never the other way round.
+[dependencies]
+# Settings persistence. The standalone COSMIC config store (RON files under
+# `~/.config/cosmic/<app-id>/`), built without its iced subscription support.
+cosmic-config = { workspace = true, features = ["macro"] }
+
+# Async runtime
+tokio.workspace = true
+# Channels/sinks for the UI-agnostic streams in `task` (and MPRIS).
+futures = "0.3"
+
+# Audio playback engine — direct symphonia (DSD-capable fork) + cpal, no
+# rodio. See the removed patch-comment history: rodio's own transitive
+# symphonia dep (crates.io 0.5.5) cannot be patched to this fork in place
+# because the fork tracks the post-0.5.5 `symphonia-core` API redesign
+# (codecs::Decoder split into codecs::audio::AudioDecoder, `probe` moved
+# out of core) that rodio 0.22 doesn't compile against. Depending on the
+# fork directly (not via `[patch.crates-io]`) sidesteps that conflict
+# entirely, matching the working approach in the sibling `rmpd` project.
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "37665b31c580a4c686482a44129bbab599e73431", features = [
+    "all",
+    "dsd",
+] }
+# Tag writing for the built-in tag editor (`src/library/tagio`): the fork's
+# `symphonia-tagging` crate (branch `rmpd-next`) shares its field mapping
+# tables with the readers, so what is written is read back identically. Same
+# rev as `symphonia`, so there is one `symphonia-core` in the graph.
+symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "37665b31c580a4c686482a44129bbab599e73431" }
+# Pure-Rust Chromaprint port: AcoustID fingerprints for the tag editor's
+# acoustic lookup/submission (`src/library/fingerprint.rs`).
+rusty-chromaprint = "0.3"
+cpal = "0.18"
+rubato = "5.0"
+audioadapter-buffers = "5.2"
+# Internal-only locks in the playback engine (e.g. the gapless/crossfade
+# look-ahead slot) that are always locked and immediately unwrapped, never
+# held across an `.await` — parking_lot's non-poisoning guards are the
+# better fit there. Not used for the visualizer's `PcmBuffer` mutex, whose
+# type is fixed by `Player`'s existing `std::sync::Mutex` signature.
+parking_lot = "0.12"
+
+mpd_client.workspace = true
+opensubsonic.workspace = true
+
+# Database for music library
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Lyrics fetching and AutoEQ profile fetching
+reqwest.workspace = true
+icy-metadata = "0.6"
+# Held at 2.x: feed-rs 3.0 drops an item's iTunes media object unless it
+# also carries an itunes title/summary, losing `<itunes:duration>` for
+# many real feeds (and failing podcast::tests). Revisit on 3.x updates.
+feed-rs = "2.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Image handling for cover art
+image.workspace = true
+
+# Internationalization (the translations live in the workspace-root `i18n/`)
+i18n-embed.workspace = true
+i18n-embed-fl.workspace = true
+rust-embed = "8"
+
+tracing.workspace = true
+
+# XDG Desktop Portal (suspend/idle inhibit)
+ashpd.workspace = true
+
+# Credential storage (system keyring)
+# keyring 4 is a thin facade re-exporting keyring-core; on Linux it only wires up
+# the D-Bus secret service backend, not the kernel keyutils one. We depend on
+# keyring-core directly and pick a default store ourselves (see src/credentials.rs),
+# preferring kernel keyutils and falling back to the D-Bus secret service, matching
+# legacy keyring v3 behavior.
+keyring-core = "1"
+linux-keyutils-keyring-store = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
+
+# MPRIS2 D-Bus media player interface (media keys, shell/panel integration).
+# Rides the zbus 5.x already pulled in by ashpd and the secret-service keyring
+# store, so this adds no new transitive D-Bus stack.
+mpris-server = { version = "0.10", features = ["tokio"] }
+zbus.workspace = true
+
+# Misc
+open.workspace = true
+dirs.workspace = true
+walkdir.workspace = true
+urlencoding.workspace = true
+md5 = "0.8"
+notify = "8"
+thiserror = "2"
+# Calendar dates for podcast episode / refresh captions.
+chrono = "0.4"
+regex = "1"
+
+# Local file conversion / transcoding / CUE ripping. Pure Rust — no C
+# bindings/-sys crates here. Lossless formats this converter can't
+# encode without a C dependency (WAV is via `hound` below; AIFF is
+# hand-written, no crate needed). Lossy formats (MP3/AAC/Opus/Ogg
+# Vorbis/ALAC) have no usable pure-Rust encoder as of this writing (see
+# src/convert/encoder.rs's module docs for the crates.io candidates
+# rejected and why) and fall back to shelling out to the system
+# `ffmpeg` binary at runtime instead — no crate/build dependency added
+# for that, so CD-drive ripping (which does need C bindings) is still
+# the one thing out of scope here.
+flacenc = "0.5"
+hound = "3.5"
+
+# MPD visualizer audio: capture MPD's own PipeWire playback stream (aulos only
+# remote-controls MPD, so no PCM passes through the in-app engine tap).
+pipewire = { version = "0.10", optional = true }
+
+[features]
+default = []
+# PCM capture for the visualizer (the MPD PipeWire tap). The rendering side
+# is UI-specific and lives in the UI crate's own `visualizer` feature.
+visualizer = ["dep:pipewire"]
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "db_grouping"
+harness = false

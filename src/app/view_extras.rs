@@ -10,9 +10,9 @@
 //! always-on-top request, so resizing the one window is the robust option.
 
 use super::{AppModel, Message};
-use crate::player::PlaybackState;
-use crate::views::album_filters::AlbumFilter;
 use crate::views::mini_player::{self, MiniMsg};
+use aulos_core::library::album_filter::{AlbumFilter, AlbumFilterCache};
+use aulos_core::player::PlaybackState;
 use cosmic::iced::{Color, Length, Size, window};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -53,7 +53,7 @@ pub struct ViewExtras {
     pub album_filter: AlbumFilter,
     /// Memoized visible-album positions / decades for the Albums page
     /// (recomputed only when albums or the chip selection change).
-    pub album_cache: crate::views::album_filters::AlbumFilterCache,
+    pub album_cache: AlbumFilterCache,
     /// Scroll offsets of the virtualized album/artist/genre grids and lists.
     pub grid_scroll: crate::views::common::ScrollOffsets,
 }
@@ -144,16 +144,7 @@ impl AppModel {
             ),
             None => (0.0, false),
         };
-        let cover = track.and_then(|t| {
-            let artist = if t.album_artist.is_empty() {
-                &t.artist
-            } else {
-                &t.album_artist
-            };
-            self.cover_images
-                .get(&crate::library::CoverArt::album_key(artist, &t.album))
-                .cloned()
-        });
+        let cover = track.and_then(|t| self.cover_images.get(&t.cover_key()).cloned());
 
         let props = mini_player::MiniProps {
             title: track.map(|t| t.title.clone()).unwrap_or_default(),
@@ -168,7 +159,7 @@ impl AppModel {
             track_id: track.map(|t| t.id.to_string()),
             is_favorite: track.is_some_and(|t| t.is_favorite),
             has_track: track.is_some(),
-            is_live: track.is_some_and(crate::views::now_playing::is_live_stream),
+            is_live: track.is_some_and(|t| t.is_live_stream()),
             cover,
             playing: state == PlaybackState::Playing,
             progress,

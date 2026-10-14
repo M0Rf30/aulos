@@ -7,8 +7,8 @@
 //! rules, and the "Startup" block of the Settings drawer.
 
 use super::{AppModel, Page};
-use crate::config::Config;
-use crate::fl;
+use aulos_core::config::Config;
+use aulos_core::fl;
 use cosmic::Task;
 use cosmic::widget;
 

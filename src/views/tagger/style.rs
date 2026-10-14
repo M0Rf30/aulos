@@ -13,17 +13,9 @@ use cosmic::iced::{Alignment, Border, Color, Length};
 use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 
-use crate::views::common;
+use aulos_core::tagger::labels::Tone;
 
-/// Semantic colour of a chip, banner or icon.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Neutral,
-    Accent,
-    Success,
-    Warning,
-    Danger,
-}
+use crate::views::common;
 
 pub fn tone_color(theme: &cosmic::Theme, tone: Tone) -> Color {
     let cosmic = theme.cosmic();

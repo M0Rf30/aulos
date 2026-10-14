@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! "Because you listened to …" shelves: similar artists of the user's top
-//! artists (see `crate::online::similar`). Artists present in the library
+//! artists (see `aulos_core::online::similar`). Artists present in the library
 //! get regular artist cards (avatar, click → artist page, play button);
 //! the rest are quieter "discover" cards that open their Last.fm /
 //! MusicBrainz page in the browser.
@@ -11,9 +11,9 @@ use super::{
     CARD_ART, CARD_LABEL_HEIGHT, CARD_PADDING, HomeMessage, dim_text, secondary_caption, shelf,
     with_play_overlay,
 };
-use crate::fl;
-use crate::online::similar::{DiscoverArtist, SimilarShelf};
 use crate::views::{card_button_class, common};
+use aulos_core::fl;
+use aulos_core::online::similar::{DiscoverArtist, SimilarShelf};
 use cosmic::widget;
 use std::collections::HashMap;
 

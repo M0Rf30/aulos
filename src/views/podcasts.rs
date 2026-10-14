@@ -15,11 +15,14 @@
 //! artists, playlists) — since that's an explicit user navigation, not
 //! incidental reactive state.
 
-use crate::fl;
-use crate::online::podcast::PodcastSearchResult;
-use crate::online::store::{Episode, Podcast};
 use crate::views::common;
 use crate::views::{card_button_class, list_row_button_class};
+use aulos_core::fl;
+use aulos_core::format::{format_duration_coarse, truncate_str};
+use aulos_core::online::podcast::{
+    EpisodeFilter, PodcastSearchResult, PodcastTab, format_last_refreshed, primary_episode,
+};
+use aulos_core::online::store::{Episode, Podcast};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::core::text::Wrapping;
@@ -28,24 +31,6 @@ use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-
-/// Which of the two Podcasts tabs is shown. Kept in `AppModel` for the
-/// session (not persisted to disk).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PodcastTab {
-    #[default]
-    Subscriptions,
-    Discover,
-}
-
-/// Episode-list category filter, applied alongside the free-text filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EpisodeFilter {
-    #[default]
-    All,
-    Unplayed,
-    Downloaded,
-}
 
 /// Messages from the podcasts view. Every message that refers to a
 /// specific show or episode carries its stable db id — never a `Vec`
@@ -712,17 +697,6 @@ fn podcast_detail_view<'a>(
     widget::scrollable(page).height(Length::Fill).into()
 }
 
-/// Pick the episode the hero's primary button acts on: the most recent
-/// partly-played one ("Continue listening"), else the newest episode
-/// ("Play latest").
-fn primary_episode(episodes: &[Episode]) -> Option<(&Episode, bool)> {
-    episodes
-        .iter()
-        .find(|e| should_show_resume(e))
-        .map(|e| (e, true))
-        .or_else(|| episodes.first().map(|e| (e, false)))
-}
-
 fn detail_header<'a>(
     podcast: &'a Podcast,
     props: &PodcastViewProps<'a>,
@@ -848,11 +822,7 @@ fn about_card<'a>(description: &'a str, expanded: bool) -> cosmic::Element<'a, P
     let text: cosmic::Element<'a, PodcastMessage> = if expanded || !long {
         widget::text::body(description).into()
     } else {
-        widget::text::body(common::truncate_str(
-            description,
-            DESCRIPTION_COLLAPSED_CHARS,
-        ))
-        .into()
+        widget::text::body(truncate_str(description, DESCRIPTION_COLLAPSED_CHARS)).into()
     };
 
     let mut col = widget::Column::new()
@@ -945,7 +915,7 @@ fn episodes_section<'a>(
     let filtered: Vec<&Episode> = props
         .episodes
         .iter()
-        .filter(|ep| episode_matches(ep, props.episode_filter, props.episode_text_filter))
+        .filter(|ep| ep.matches(props.episode_filter, props.episode_text_filter))
         .collect();
 
     let mut list = widget::Column::new().spacing(2);
@@ -1033,7 +1003,7 @@ fn episode_row<'a>(
     is_current: bool,
     is_paused: bool,
 ) -> cosmic::Element<'a, PodcastMessage> {
-    let resumable = should_show_resume(episode);
+    let resumable = episode.should_show_resume();
 
     // Title: unplayed/current are emphasised, played episodes recede.
     let title = common::cell_text(episode.title.as_str());
@@ -1045,7 +1015,7 @@ fn episode_row<'a>(
 
     // Meta line: [now playing] date · duration (or time left).
     let mut parts: Vec<String> = Vec::new();
-    let date = format_pub_date(episode.pub_date);
+    let date = episode.formatted_pub_date();
     if !date.is_empty() {
         parts.push(date);
     }
@@ -1054,15 +1024,15 @@ fn episode_row<'a>(
         let left = duration.saturating_sub((episode.position_ms / 1000).max(0) as u64);
         parts.push(fl!(
             "podcast-time-left",
-            time = common::format_duration_coarse(left)
+            time = format_duration_coarse(left)
         ));
     } else if resumable {
         parts.push(fl!(
             "resume-at",
-            position = common::format_duration_coarse((episode.position_ms / 1000).max(0) as u64)
+            position = format_duration_coarse((episode.position_ms / 1000).max(0) as u64)
         ));
     } else if duration > 0 {
-        parts.push(common::format_duration_coarse(duration));
+        parts.push(format_duration_coarse(duration));
     }
     let mut meta = widget::Row::new().spacing(8).align_y(Alignment::Center);
     if is_current {
@@ -1074,7 +1044,7 @@ fn episode_row<'a>(
     if resumable && duration > 0 {
         info = info.push(
             widget::container(
-                widget::progress_bar::determinate_linear(progress_fraction(episode)).girth(4),
+                widget::progress_bar::determinate_linear(episode.progress_fraction()).girth(4),
             )
             .width(Length::Fixed(220.0)),
         );
@@ -1136,180 +1106,4 @@ fn episode_row<'a>(
     .width(Length::Fill)
     .class(list_row_button_class(is_current))
     .into()
-}
-
-/// Pure category + free-text episode filter predicate. Shared by the view
-/// and its tests.
-pub fn episode_matches(episode: &Episode, filter: EpisodeFilter, text: &str) -> bool {
-    let category_ok = match filter {
-        EpisodeFilter::All => true,
-        EpisodeFilter::Unplayed => !episode.played,
-        EpisodeFilter::Downloaded => !episode.downloaded_path.is_empty(),
-    };
-    if !category_ok {
-        return false;
-    }
-    let needle = text.trim().to_lowercase();
-    if needle.is_empty() {
-        return true;
-    }
-    episode.title.to_lowercase().contains(&needle)
-        || episode.description.to_lowercase().contains(&needle)
-}
-
-/// Progress fraction (0.0-1.0) for an episode's playback progress bar.
-/// Fully played episodes always report 1.0 regardless of the last saved
-/// position; an unknown/zero duration (missing feed metadata) always
-/// reports 0.0 rather than dividing by zero.
-pub fn progress_fraction(episode: &Episode) -> f32 {
-    if episode.played {
-        return 1.0;
-    }
-    if episode.duration_secs <= 0 || episode.position_ms <= 0 {
-        return 0.0;
-    }
-    let duration_ms = episode.duration_secs as f64 * 1000.0;
-    ((episode.position_ms as f64) / duration_ms).clamp(0.0, 1.0) as f32
-}
-
-/// Whether an episode has a meaningful saved position to resume from
-/// (partway through, not already marked played).
-pub fn should_show_resume(episode: &Episode) -> bool {
-    !episode.played && episode.position_ms > 0
-}
-
-/// Format an episode's `pub_date` (epoch seconds) as `YYYY-MM-DD`, or an
-/// empty string when unset.
-fn format_pub_date(epoch_secs: i64) -> String {
-    format_epoch_date(epoch_secs).unwrap_or_default()
-}
-
-/// A subscribed show's `last_refreshed` (epoch seconds), formatted as a
-/// localized "Updated <date>" caption, or "Never updated" when it hasn't
-/// been refreshed yet.
-fn format_last_refreshed(epoch_secs: i64) -> String {
-    match format_epoch_date(epoch_secs) {
-        Some(date) => fl!("podcast-updated-at", when = date),
-        None => fl!("podcast-never-updated"),
-    }
-}
-
-/// Pure epoch-seconds-to-`YYYY-MM-DD` formatting shared by
-/// `format_pub_date` and `format_last_refreshed`. Returns `None` for a
-/// non-positive/unset epoch.
-fn format_epoch_date(epoch_secs: i64) -> Option<String> {
-    if epoch_secs <= 0 {
-        return None;
-    }
-    chrono::DateTime::from_timestamp(epoch_secs, 0).map(|dt| dt.format("%Y-%m-%d").to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ep(
-        played: bool,
-        position_ms: i64,
-        duration_secs: i64,
-        downloaded_path: &str,
-        title: &str,
-        description: &str,
-    ) -> Episode {
-        Episode {
-            id: 1,
-            podcast_id: 1,
-            guid: "guid".to_string(),
-            title: title.to_string(),
-            enclosure_url: String::new(),
-            mime: String::new(),
-            duration_secs,
-            pub_date: 0,
-            description: description.to_string(),
-            position_ms,
-            played,
-            downloaded_path: downloaded_path.to_string(),
-        }
-    }
-
-    #[test]
-    fn progress_fraction_is_zero_for_untouched_episode() {
-        assert_eq!(progress_fraction(&ep(false, 0, 600, "", "t", "")), 0.0);
-    }
-
-    #[test]
-    fn progress_fraction_reflects_partial_position() {
-        let e = ep(false, 150_000, 600, "", "t", ""); // 150s of 600s = 25%
-        assert!((progress_fraction(&e) - 0.25).abs() < 0.001);
-    }
-
-    #[test]
-    fn progress_fraction_clamps_when_position_exceeds_duration() {
-        let e = ep(false, 900_000, 600, "", "t", "");
-        assert_eq!(progress_fraction(&e), 1.0);
-    }
-
-    #[test]
-    fn progress_fraction_is_one_when_marked_played_even_with_no_position() {
-        assert_eq!(progress_fraction(&ep(true, 0, 600, "", "t", "")), 1.0);
-    }
-
-    #[test]
-    fn progress_fraction_is_zero_for_unknown_duration() {
-        assert_eq!(progress_fraction(&ep(false, 1000, 0, "", "t", "")), 0.0);
-    }
-
-    #[test]
-    fn should_show_resume_true_only_when_partway_and_not_played() {
-        assert!(should_show_resume(&ep(false, 1000, 600, "", "t", "")));
-        assert!(!should_show_resume(&ep(true, 1000, 600, "", "t", "")));
-        assert!(!should_show_resume(&ep(false, 0, 600, "", "t", "")));
-    }
-
-    #[test]
-    fn episode_matches_filters_by_category() {
-        let unplayed = ep(false, 0, 600, "", "Title", "desc");
-        let played = ep(true, 0, 600, "", "Title", "desc");
-        let downloaded = ep(false, 0, 600, "/tmp/x.mp3", "Title", "desc");
-        assert!(episode_matches(&unplayed, EpisodeFilter::All, ""));
-        assert!(episode_matches(&unplayed, EpisodeFilter::Unplayed, ""));
-        assert!(!episode_matches(&played, EpisodeFilter::Unplayed, ""));
-        assert!(episode_matches(&downloaded, EpisodeFilter::Downloaded, ""));
-        assert!(!episode_matches(&unplayed, EpisodeFilter::Downloaded, ""));
-    }
-
-    #[test]
-    fn episode_matches_filters_by_text_case_insensitively() {
-        let e = ep(false, 0, 600, "", "Rust Talk Show", "About programming");
-        assert!(episode_matches(&e, EpisodeFilter::All, "rust"));
-        assert!(episode_matches(&e, EpisodeFilter::All, "PROGRAMMING"));
-        assert!(!episode_matches(&e, EpisodeFilter::All, "python"));
-    }
-
-    #[test]
-    fn episode_matches_combines_category_and_text_filters() {
-        let played_match = ep(true, 0, 600, "", "Rust Talk", "");
-        assert!(!episode_matches(
-            &played_match,
-            EpisodeFilter::Unplayed,
-            "rust"
-        ));
-    }
-
-    #[test]
-    fn format_pub_date_formats_epoch_seconds_or_empty() {
-        assert_eq!(format_pub_date(1704067200), "2024-01-01");
-        assert_eq!(format_pub_date(0), "");
-        assert_eq!(format_pub_date(-10), "");
-    }
-
-    #[test]
-    fn format_epoch_date_reports_none_when_unset_or_negative() {
-        assert_eq!(format_epoch_date(0), None);
-        assert_eq!(format_epoch_date(-5), None);
-        assert_eq!(
-            format_epoch_date(1704067200),
-            Some("2024-01-01".to_string())
-        );
-    }
 }

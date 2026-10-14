@@ -1,25 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{
-    APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds, radio_page,
-};
-use crate::config::Config;
-use crate::fl;
-use crate::library::LibraryDb;
-use crate::player::Player;
-use crate::provider::local::LocalProvider;
-use crate::provider::mpd::{MpdConfig, MpdProvider};
-use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
-use crate::provider::{MusicProvider, ProviderRegistry};
-use crate::views::radio as radio_view;
-use crate::views::{podcasts, providers, songs};
-use cosmic::Application;
-use cosmic::cosmic_config::{self, CosmicConfigEntry};
+use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds};
+use aulos_core::config::Config;
+use aulos_core::fl;
+use aulos_core::library::LibraryDb;
+use aulos_core::library::state::SortField;
+use aulos_core::player::Player;
+use aulos_core::provider::local::LocalProvider;
+use aulos_core::provider::mpd::{MpdConfig, MpdProvider};
+use aulos_core::provider::subsonic::{SubsonicConfig, SubsonicProvider};
+use aulos_core::provider::{MusicProvider, ProviderRegistry};
 use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, icon, nav_bar};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "visualizer")]
 use std::sync::Mutex;
@@ -99,20 +93,13 @@ impl AppModel {
             .license("GPL-3.0");
 
         // Load config and cache the context to avoid repeated D-Bus watcher creation
-        let config_context = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
-        let mut config = config_context
-            .as_ref()
-            .map(|context| match Config::get_entry(context) {
-                Ok(config) => config,
-                Err((_errors, config)) => config,
-            })
-            .unwrap_or_default();
+        let (config_context, mut config) = Config::load();
         crate::views::common::set_grid_scale(config.grid_scale);
 
         // First launch: play the intro jingle once, Winamp-style, and
         // remember that it has been heard.
         if !config.intro_played {
-            crate::player::intro::play();
+            aulos_core::player::intro::play();
             config.intro_played = true;
             // Single key (one small file), not a full `write_entry`: a
             // full rewrite costs ~0.4 s before the first frame.
@@ -156,13 +143,10 @@ impl AppModel {
         // is exactly what is on disk now (baseline for change detection).
         let config_writer = config_context
             .clone()
-            .and_then(|ctx| super::config_writer::ConfigWriter::spawn(ctx, config.clone()));
+            .and_then(|ctx| aulos_core::config::writer::ConfigWriter::spawn(ctx, config.clone()));
 
         // Open library database and initialize provider registry
-        let db_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aulos")
-            .join("library.db");
+        let db_path = aulos_core::paths::library_db_path();
 
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -215,7 +199,7 @@ impl AppModel {
         // connections themselves complete asynchronously later.
         let registered_ids: Vec<String> =
             registry.list().into_iter().map(|(id, _, _)| id).collect();
-        if let Some(target) = crate::config::resolve_active_provider(
+        if let Some(target) = aulos_core::config::resolve_active_provider(
             config.startup_provider_choice(),
             &registered_ids,
         ) {
@@ -223,18 +207,18 @@ impl AppModel {
         }
 
         // Build editing state for MPD servers
-        let mpd_edit_states: Vec<providers::MpdEditState> = config
+        let mpd_edit_states: Vec<aulos_core::config::edit_state::MpdEditState> = config
             .mpd_servers
             .iter()
-            .map(providers::MpdEditState::from_config)
+            .map(aulos_core::config::edit_state::MpdEditState::from_config)
             .collect();
         let mpd_connection_status: Vec<Option<String>> = vec![None; mpd_edit_states.len()];
 
         // Build editing state for Subsonic servers
-        let subsonic_edit_states: Vec<providers::SubsonicEditState> = config
+        let subsonic_edit_states: Vec<aulos_core::config::edit_state::SubsonicEditState> = config
             .subsonic_servers
             .iter()
-            .map(providers::SubsonicEditState::from_config)
+            .map(aulos_core::config::edit_state::SubsonicEditState::from_config)
             .collect();
         let subsonic_connection_status: Vec<Option<String>> =
             vec![None; subsonic_edit_states.len()];
@@ -260,9 +244,7 @@ impl AppModel {
         // Create shared PCM buffer for visualizer audio tapping
         #[cfg(feature = "visualizer")]
         let pcm_buffer = {
-            let buf = Arc::new(Mutex::new(
-                crate::views::now_playing::visualizer::PcmBuffer::new(8192),
-            ));
+            let buf = Arc::new(Mutex::new(aulos_core::player::pcm::PcmBuffer::new(8192)));
             if let Some(ref mut p) = player {
                 p.set_pcm_buffer(Arc::clone(&buf));
             }
@@ -286,7 +268,7 @@ impl AppModel {
         // created once, here.
         #[cfg(feature = "visualizer")]
         let (viz_cmd_tx, viz_cmd_rx) =
-            std::sync::mpsc::channel::<crate::views::now_playing::visualizer::VizCommand>();
+            std::sync::mpsc::channel::<aulos_core::visualizer::VizCommand>();
         #[cfg(feature = "visualizer")]
         let viz_cmd_rx_slot = Arc::new(Mutex::new(Some(viz_cmd_rx)));
         // Preset file the render thread most recently put on screen;
@@ -298,7 +280,7 @@ impl AppModel {
 
         let artist_tag_delimiters_input = config.artist_tag_delimiters.join(" | ");
         let music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
-        let scrobble = crate::online::scrobble::ScrobbleController::new(&config);
+        let scrobble = aulos_core::online::scrobble::ScrobbleController::new(&config);
 
         let mut app = AppModel {
             core,
@@ -318,34 +300,15 @@ impl AppModel {
             provider_list: Vec::new(),
             active_provider_index: None,
             provider_manually_switched: false,
-            all_tracks: Vec::new(),
-            all_albums: Vec::new(),
-            all_artists: Vec::new(),
+            library: Default::default(),
+            cover_staging: None,
             library_scanning: false,
-            reload_generation: 0,
-            library_reload_staging: None,
-            library_gen: 0,
-            search_index: Default::default(),
-            search_debounce_gen: 0,
             folder_tree_gen: None,
             music_dirs_present,
-            artists_filtered: false,
-
-            library_search: String::new(),
             search_active: false,
-            filtered_albums: Vec::new(),
-            filtered_album_map: Vec::new(),
-            filtered_artists: Vec::new(),
-            filtered_artist_map: Vec::new(),
-            filtered_tracks: Vec::new(),
-            filtered_track_map: Vec::new(),
-            filtered_playlists: Vec::new(),
-            filtered_playlist_map: Vec::new(),
-            filtered_genres: Vec::new(),
-            filtered_genre_map: Vec::new(),
             extras: Default::default(),
             podcasts: Vec::new(),
-            podcast_tab: podcasts::PodcastTab::default(),
+            podcast_tab: aulos_core::online::podcast::PodcastTab::default(),
             podcast_add_open: false,
             podcast_add_url: String::new(),
             podcast_add_error: None,
@@ -358,14 +321,14 @@ impl AppModel {
             podcast_search_generation: 0,
             selected_podcast: None,
             podcast_episodes: Vec::new(),
-            podcast_episode_filter: podcasts::EpisodeFilter::default(),
+            podcast_episode_filter: aulos_core::online::podcast::EpisodeFilter::default(),
             podcast_episode_text_filter: String::new(),
             podcast_description_expanded: false,
             current_podcast_episode_id: None,
             last_saved_podcast_position_secs: 0,
             downloading_episodes: std::collections::HashSet::new(),
             radio_stations: Vec::new(),
-            radio_tab: radio_view::RadioTab::default(),
+            radio_tab: aulos_core::online::radio::RadioTab::default(),
             radio_filter: String::new(),
             radio_add_open: false,
             radio_add_name: String::new(),
@@ -376,8 +339,8 @@ impl AppModel {
             radio_search_query: String::new(),
             radio_search_tag: None,
             radio_search_country: String::new(),
-            radio_locale_country: radio_page::locale_country_code(),
-            radio_search_sort: crate::online::radio::SortOrder::default(),
+            radio_locale_country: aulos_core::online::radio::locale_country_code(),
+            radio_search_sort: aulos_core::online::radio::SortOrder::default(),
             radio_search_results: Vec::new(),
             radio_search_loading: false,
             radio_search_error: None,
@@ -397,7 +360,7 @@ impl AppModel {
             settings_search: String::new(),
             selected_album: None,
             selected_artist: None,
-            songs_sort: songs::SortField::Title,
+            songs_sort: SortField::Title,
             songs_sort_descending: false,
             songs_scroll_offset: 0.0,
             nav_history: Vec::new(),
@@ -411,11 +374,9 @@ impl AppModel {
             selected_smart_playlist: None,
             smart_playlist_tracks: Vec::new(),
             smart_playlist_editor: None,
-            all_genres: Vec::new(),
             selected_genre: None,
-            genre_tracks: Vec::new(),
-            folder_state: crate::views::folders::FolderState::default(),
-            home: crate::views::home::HomeState::default(),
+            folder_state: aulos_core::library::folder_tree::FolderState::default(),
+            home: aulos_core::library::home_state::HomeState::default(),
             home_cache: Default::default(),
             cover_images: HashMap::new(),
             artist_photos: HashMap::new(),
@@ -423,8 +384,8 @@ impl AppModel {
             artist_info_pending: std::collections::HashSet::new(),
             artist_info_negative: std::collections::HashSet::new(),
             artist_bio_expanded: false,
-            artist_info_store: Arc::new(crate::library::artist_info::ArtistInfoStore::open(
-                &super::artist_info_data_dir(),
+            artist_info_store: Arc::new(aulos_core::library::artist_info::ArtistInfoStore::open(
+                &aulos_core::paths::data_dir(),
             )),
             artist_info_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 super::ARTIST_INFO_CONCURRENCY,
@@ -435,11 +396,8 @@ impl AppModel {
             lyrics_overlay_active: false,
             eq_preset: None,
             preset_manager: {
-                let presets_dir = dirs::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("aulos")
-                    .join("eq_presets");
-                crate::player::eq_presets::EqPresetManager::new(presets_dir)
+                let presets_dir = aulos_core::paths::config_dir().join("eq_presets");
+                aulos_core::player::eq_presets::EqPresetManager::new(presets_dir)
                     .expect("Failed to create EQ presets directory")
             },
             all_presets: Vec::new(), // loaded below after construction
@@ -457,7 +415,7 @@ impl AppModel {
             subsonic_edit_states,
             subsonic_connection_status,
             subsonic_providers,
-            cover_art_bytes: crate::library::palette::CoverByteCache::new(),
+            cover_art_bytes: aulos_core::library::palette::CoverByteCache::new(),
             cover_fingerprints: HashMap::new(),
             blurred_cover: None,
             blurred_cover_key: None,
@@ -500,9 +458,12 @@ impl AppModel {
             viz_hud_pointer_over: false,
             convert_jobs: Vec::new(),
             convert_next_id: 0,
-            convert_semaphore: Arc::new(tokio::sync::Semaphore::new(crate::convert::concurrency())),
+            convert_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                aulos_core::convert::concurrency(),
+            )),
             convert_dir_error: None,
-            tagger: crate::tagger::TaggerState::new(),
+            tagger: aulos_core::tagger::TaggerState::new(),
+            tagger_thumbs: crate::views::tagger::Thumbs::default(),
             #[cfg(feature = "visualizer")]
             viz_browser_open: false,
             #[cfg(feature = "visualizer")]
@@ -552,9 +513,9 @@ impl AppModel {
                     run_credential_check(
                         &mpd_servers,
                         &subsonic_servers,
-                        crate::credentials::is_keyring_available,
-                        crate::credentials::retrieve_password,
-                        crate::credentials::store_password,
+                        aulos_core::credentials::is_keyring_available,
+                        aulos_core::credentials::retrieve_password,
+                        aulos_core::credentials::store_password,
                     )
                 })
                 .await
@@ -565,8 +526,10 @@ impl AppModel {
         // Whether the user's AcoustID key is in the keyring (read off the UI thread).
         init_tasks.push(cosmic::task::future(async {
             let present = tokio::task::spawn_blocking(|| {
-                crate::credentials::retrieve_password(crate::tagger::ACOUSTID_USER_KEY_ENTRY)
-                    .map(|key| key.is_some_and(|k| !k.is_empty()))
+                aulos_core::credentials::retrieve_password(
+                    aulos_core::tagger::ACOUSTID_USER_KEY_ENTRY,
+                )
+                .map(|key| key.is_some_and(|k| !k.is_empty()))
             })
             .await
             .map_err(|e| e.to_string())
@@ -702,8 +665,8 @@ fn check_credential(
 /// Run from `spawn_blocking`; the keyring operations are injected so the
 /// logic is testable without a secret service.
 pub(super) fn run_credential_check(
-    mpd_servers: &[crate::config::MpdConfigEntry],
-    subsonic_servers: &[crate::config::SubsonicConfigEntry],
+    mpd_servers: &[aulos_core::config::MpdConfigEntry],
+    subsonic_servers: &[aulos_core::config::SubsonicConfigEntry],
     keyring_available: impl Fn() -> bool,
     retrieve: impl Fn(&str) -> Result<Option<String>, String>,
     store: impl Fn(&str, &str) -> Result<(), String>,
@@ -805,7 +768,7 @@ fn insert_convert_nav_entry(nav: &mut nav_bar::Model) {
 #[cfg(test)]
 mod credential_tests {
     use super::*;
-    use crate::config::{MpdConfigEntry, SubsonicConfigEntry};
+    use aulos_core::config::{MpdConfigEntry, SubsonicConfigEntry};
     use std::cell::RefCell;
 
     fn mpd(id: &str, in_keyring: bool, password: Option<&str>) -> MpdConfigEntry {

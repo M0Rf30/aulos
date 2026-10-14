@@ -20,6 +20,7 @@ pub mod podcasts;
 pub mod providers;
 pub mod queue;
 pub mod radio;
+pub mod scrobble;
 pub mod settings;
 pub mod smart_playlists;
 pub mod songs;
@@ -45,14 +46,9 @@ pub enum Route {
 impl Route {
     /// The album page a track belongs to (keyed by album artist, falling
     /// back to the track artist, as albums are grouped).
-    pub fn album_of(track: &crate::library::Track) -> Self {
-        let artist = if track.album_artist.is_empty() {
-            &track.artist
-        } else {
-            &track.album_artist
-        };
+    pub fn album_of(track: &aulos_core::library::Track) -> Self {
         Route::Album {
-            artist: artist.clone(),
+            artist: track.grouping_artist().to_owned(),
             album: track.album.clone(),
         }
     }

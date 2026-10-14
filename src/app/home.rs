@@ -5,70 +5,22 @@
 //! clicks, and recording plays into the library's play history.
 
 use super::{AppModel, ContextPage, Message, Page};
-use crate::library::history::{
-    AlbumRef, DecadeCount, HomeData, LOCAL_PROVIDER, SHELF_LEN, exclude_albums,
-};
-use crate::library::{Album, LibraryDb, Track};
-use crate::online::scrobble::Service;
-use crate::online::scrobble::controller::is_connected;
-use crate::online::similar::{self, SuggestParams};
-use crate::player::PlaybackState;
 use crate::views::Route;
-use crate::views::home::{DecadeView, HomeMessage, album_route};
+use crate::views::home::{HomeMessage, album_route};
+use aulos_core::library::history::{AlbumRef, HomeData, LOCAL_PROVIDER, SHELF_LEN, exclude_albums};
+use aulos_core::library::home::{
+    artist_tracks, decade_albums, home_from_albums, random_album_refs,
+};
+use aulos_core::library::home_state::DecadeView;
+use aulos_core::library::{LibraryDb, Track};
+use aulos_core::online::scrobble::Service;
+use aulos_core::online::scrobble::controller::is_connected;
+use aulos_core::online::similar::{self, SuggestParams};
+use aulos_core::player::PlaybackState;
 use cosmic::Application;
 use cosmic::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// How long loaded Home shelves are reused before a Home visit reloads them
-/// anyway (the "this month" windows are relative to the wall clock).
-const HOME_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-
-/// What the currently loaded `HomeData` was computed for. A Home visit only
-/// reloads when this no longer matches (a play was recorded, the provider or
-/// the suggestions toggle changed) or the data aged out; library changes and
-/// explicit refreshes always reload via `load_home` directly.
-#[derive(Debug, Default)]
-pub(super) struct HomeCache {
-    /// Bumped whenever a play is written to the history.
-    play_gen: u64,
-    loaded: Option<HomeCacheKey>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HomeCacheKey {
-    provider: String,
-    suggestions: bool,
-    play_gen: u64,
-    loaded_at: std::time::Instant,
-}
-
-impl HomeCache {
-    /// A play was recorded: loaded shelves are out of date.
-    fn invalidate(&mut self) {
-        self.play_gen += 1;
-    }
-
-    /// Record that shelves for `provider` were just loaded.
-    fn mark_loaded(&mut self, provider: &str, suggestions: bool, now: std::time::Instant) {
-        self.loaded = Some(HomeCacheKey {
-            provider: provider.to_string(),
-            suggestions,
-            play_gen: self.play_gen,
-            loaded_at: now,
-        });
-    }
-
-    /// Whether the loaded shelves can be shown again as they are.
-    fn is_fresh(&self, provider: &str, suggestions: bool, now: std::time::Instant) -> bool {
-        self.loaded.as_ref().is_some_and(|k| {
-            k.provider == provider
-                && k.suggestions == suggestions
-                && k.play_gen == self.play_gen
-                && now.saturating_duration_since(k.loaded_at) < HOME_CACHE_TTL
-        })
-    }
-}
 
 impl AppModel {
     /// Whether the active provider's library lives in the library database
@@ -96,8 +48,8 @@ impl AppModel {
             }
             HomeMessage::OpenArtist(name) => return self.navigate(Route::Artist(name)),
             HomeMessage::PlayAlbum { artist, name } => {
-                if let Some(album) = find_album(&self.all_albums, &artist, &name) {
-                    let tracks = album.tracks.clone();
+                if let Some(idx) = self.library.find_album_exact(&artist, &name) {
+                    let tracks = self.library.albums[idx].tracks.clone();
                     return self.play_track_list(tracks, 0);
                 }
             }
@@ -111,7 +63,7 @@ impl AppModel {
             HomeMessage::BrowseRadio => return self.open_page(Page::Radio),
             HomeMessage::DiscoverPodcasts => return self.open_page(Page::Podcasts),
             HomeMessage::PlayArtist(name) => {
-                let tracks = artist_tracks(&self.all_albums, &name);
+                let tracks = artist_tracks(&self.library.albums, &name);
                 if !tracks.is_empty() {
                     return self.play_track_list(tracks, 0);
                 }
@@ -135,8 +87,8 @@ impl AppModel {
                     .map(|albums| {
                         albums
                             .iter()
-                            .filter_map(|a| find_album(&self.all_albums, &a.artist, &a.name))
-                            .flat_map(|album| album.tracks.iter().cloned())
+                            .filter_map(|a| self.library.find_album_exact(&a.artist, &a.name))
+                            .flat_map(|idx| self.library.albums[idx].tracks.iter().cloned())
                             .collect()
                     })
                     .unwrap_or_default();
@@ -231,10 +183,10 @@ impl AppModel {
         let cancel = Arc::new(AtomicBool::new(false));
         self.home.similar_cancel = Arc::clone(&cancel);
         let params = SuggestParams {
-            db_path: super::online_db_path(),
+            db_path: aulos_core::paths::library_db_path(),
             cache_path: similar::cache_path(),
             lastfm_key: self.config.scrobble_lastfm_api_key.clone(),
-            now: super::now_epoch(),
+            now: aulos_core::unix_now(),
         };
         cosmic::task::stream(similar_stream(params, self.home.request, cancel))
     }
@@ -247,15 +199,15 @@ impl AppModel {
         let request = self.home.request;
 
         if !self.home_uses_database() {
-            self.home.data = Some(home_from_albums(&self.all_albums));
+            self.home.data = Some(home_from_albums(&self.library.albums));
             return Task::none();
         }
 
-        let db_path = super::online_db_path();
+        let db_path = aulos_core::paths::library_db_path();
         cosmic::task::future(async move {
             let data = tokio::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path)
-                    .and_then(|db| db.home_data(LOCAL_PROVIDER, super::now_epoch()))
+                    .and_then(|db| db.home_data(LOCAL_PROVIDER, aulos_core::unix_now()))
             })
             .await;
             let data = match data {
@@ -309,7 +261,7 @@ impl AppModel {
             .unwrap_or_default();
 
         if !self.home_uses_database() {
-            let mut picks = random_album_refs(&self.all_albums, SHELF_LEN as usize * 2);
+            let mut picks = random_album_refs(&self.library.albums, SHELF_LEN as usize * 2);
             exclude_albums(&mut picks, &exclude, SHELF_LEN as usize);
             if let Some(data) = &mut self.home.data {
                 data.random = picks;
@@ -318,7 +270,7 @@ impl AppModel {
         }
 
         let request = self.home.request;
-        let db_path = super::online_db_path();
+        let db_path = aulos_core::paths::library_db_path();
         cosmic::task::future(async move {
             let picks = tokio::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path)
@@ -345,12 +297,12 @@ impl AppModel {
     fn load_decade(&mut self, decade: u32) -> Task<cosmic::Action<Message>> {
         if !self.home_uses_database() {
             if let Some(view) = &mut self.home.decade {
-                view.albums = Some(decade_albums(&self.all_albums, decade));
+                view.albums = Some(decade_albums(&self.library.albums, decade));
             }
             return Task::none();
         }
 
-        let db_path = super::online_db_path();
+        let db_path = aulos_core::paths::library_db_path();
         cosmic::task::future(async move {
             let albums = tokio::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path).and_then(|db| db.albums_by_decade(LOCAL_PROVIDER, decade))
@@ -421,10 +373,10 @@ impl AppModel {
             return Task::none();
         }
 
-        let db_path = super::online_db_path();
+        let db_path = aulos_core::paths::library_db_path();
         cosmic::task::future(async move {
             let result = tokio::task::spawn_blocking(move || {
-                LibraryDb::open(&db_path).and_then(|db| db.record_play(id, super::now_epoch()))
+                LibraryDb::open(&db_path).and_then(|db| db.record_play(id, aulos_core::unix_now()))
             })
             .await;
             match result {
@@ -479,241 +431,4 @@ fn similar_stream(
             let _ = worker.await;
         },
     )
-}
-
-fn eq(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
-}
-
-/// The album with this `(artist, name)` identity.
-fn find_album<'a>(albums: &'a [Album], artist: &str, name: &str) -> Option<&'a Album> {
-    albums
-        .iter()
-        .find(|a| eq(&a.name, name) && eq(&a.artist, artist))
-}
-
-/// Every track of every album credited to `artist`, album by album.
-fn artist_tracks(albums: &[Album], artist: &str) -> Vec<Track> {
-    albums
-        .iter()
-        .filter(|a| eq(&a.artist, artist))
-        .flat_map(|a| a.tracks.iter().cloned())
-        .collect()
-}
-
-/// The first year of `year`'s decade, if it is a plausible release year.
-fn decade_of(year: u32) -> Option<u32> {
-    (year >= 1900).then_some(year / 10 * 10)
-}
-
-fn album_ref(album: &Album) -> AlbumRef {
-    AlbumRef {
-        artist: album.artist.clone(),
-        name: album.name.clone(),
-        year: album.year,
-        plays: 0,
-        timestamp: 0,
-    }
-}
-
-/// Fisher–Yates shuffle driven by a time-seeded xorshift: good enough for
-/// "random picks", and avoids a dependency.
-fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
-    let mut state = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15)
-        | 1;
-    for i in (1..items.len()).rev() {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        items.swap(i, (state % (i as u64 + 1)) as usize);
-    }
-    items
-}
-
-fn random_album_refs(albums: &[Album], limit: usize) -> Vec<AlbumRef> {
-    let candidates: Vec<&Album> = albums.iter().filter(|a| !a.name.is_empty()).collect();
-    shuffled(candidates)
-        .into_iter()
-        .take(limit)
-        .map(album_ref)
-        .collect()
-}
-
-/// Albums released in the decade starting at `decade`, by year then artist.
-fn decade_albums(albums: &[Album], decade: u32) -> Vec<AlbumRef> {
-    let mut found: Vec<AlbumRef> = albums
-        .iter()
-        .filter(|a| !a.name.is_empty() && decade_of(a.year) == Some(decade))
-        .map(album_ref)
-        .collect();
-    found.sort_by(|a, b| {
-        a.year
-            .cmp(&b.year)
-            .then_with(|| a.artist.cmp(&b.artist))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    found
-}
-
-/// A history-less Home for providers that don't live in the library
-/// database: random picks and decades from the albums in memory.
-fn home_from_albums(albums: &[Album]) -> HomeData {
-    let mut decades: Vec<DecadeCount> = Vec::new();
-    for album in albums.iter().filter(|a| !a.name.is_empty()) {
-        if let Some(decade) = decade_of(album.year) {
-            match decades.iter_mut().find(|d| d.decade == decade) {
-                Some(entry) => entry.albums += 1,
-                None => decades.push(DecadeCount { decade, albums: 1 }),
-            }
-        }
-    }
-    decades.sort_by_key(|d| d.decade);
-
-    HomeData {
-        random: random_album_refs(albums, SHELF_LEN as usize),
-        decades,
-        total_albums: albums.len() as u32,
-        history_available: false,
-        ..HomeData::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    fn track(album: &str, artist: &str, n: u32) -> Track {
-        Track {
-            id: 0,
-            path: format!("/m/{artist}/{album}/{n}").into(),
-            title: format!("t{n}"),
-            artist: artist.into(),
-            album_artist: artist.into(),
-            album: album.into(),
-            genre: String::new(),
-            track_number: n,
-            disc_number: 1,
-            year: 0,
-            duration: Duration::from_secs(100),
-            bitrate: 0,
-            sample_rate: 0,
-            provider_id: Arc::from("subsonic"),
-            source_uri: String::new(),
-            is_favorite: false,
-            rating: None,
-            rg_track_gain: None,
-            rg_album_gain: None,
-        }
-    }
-
-    fn album(name: &str, artist: &str, year: u32, tracks: u32) -> Album {
-        Album::new(
-            name.into(),
-            artist.into(),
-            year,
-            (1..=tracks).map(|n| track(name, artist, n)).collect(),
-            None,
-        )
-    }
-
-    fn library() -> Vec<Album> {
-        vec![
-            album("A", "Alpha", 1975, 2),
-            album("B", "Beta", 1984, 3),
-            album("C", "Beta", 1989, 1),
-            album("D", "Delta", 0, 1),
-            album("", "Loose", 1990, 1),
-        ]
-    }
-
-    #[test]
-    fn decade_of_rejects_implausible_years() {
-        assert_eq!(decade_of(1984), Some(1980));
-        assert_eq!(decade_of(2000), Some(2000));
-        assert_eq!(decade_of(0), None);
-        assert_eq!(decade_of(1899), None);
-    }
-
-    #[test]
-    fn find_album_matches_case_and_whitespace_insensitively() {
-        let lib = library();
-        assert!(find_album(&lib, " beta ", "b").is_some());
-        assert!(find_album(&lib, "Alpha", "B").is_none());
-    }
-
-    #[test]
-    fn artist_tracks_collects_every_album_in_order() {
-        let tracks = artist_tracks(&library(), "Beta");
-        assert_eq!(tracks.len(), 4);
-        assert_eq!(tracks[0].album, "B");
-        assert_eq!(tracks[3].album, "C");
-        assert!(artist_tracks(&library(), "Nobody").is_empty());
-    }
-
-    #[test]
-    fn decade_albums_filters_and_sorts() {
-        let eighties = decade_albums(&library(), 1980);
-        let names: Vec<_> = eighties.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["B", "C"]);
-        assert!(decade_albums(&library(), 2000).is_empty());
-        // Untitled albums never appear.
-        assert!(decade_albums(&library(), 1990).is_empty());
-    }
-
-    #[test]
-    fn shuffled_is_a_permutation() {
-        let mut out = shuffled((0..50).collect::<Vec<u32>>());
-        out.sort_unstable();
-        assert_eq!(out, (0..50).collect::<Vec<u32>>());
-        assert!(shuffled(Vec::<u32>::new()).is_empty());
-    }
-
-    #[test]
-    fn fallback_home_has_random_picks_and_decades_but_no_history() {
-        let home = home_from_albums(&library());
-        assert!(!home.history_available);
-        assert_eq!(home.total_albums, 5);
-        assert_eq!(home.random.len(), 4, "untitled album is skipped");
-        assert_eq!(
-            home.decades,
-            [
-                DecadeCount {
-                    decade: 1970,
-                    albums: 1
-                },
-                DecadeCount {
-                    decade: 1980,
-                    albums: 2
-                },
-            ]
-        );
-        assert!(home.recently_played.is_empty() && home.recently_added.is_empty());
-    }
-
-    #[test]
-    fn home_cache_is_fresh_until_play_provider_toggle_or_ttl() {
-        use std::time::{Duration, Instant};
-        let t0 = Instant::now();
-        let mut cache = HomeCache::default();
-        assert!(!cache.is_fresh("local", true, t0), "nothing loaded yet");
-
-        cache.mark_loaded("local", true, t0);
-        assert!(cache.is_fresh("local", true, t0 + Duration::from_secs(60)));
-        assert!(!cache.is_fresh("mpd", true, t0), "other provider");
-        assert!(!cache.is_fresh("local", false, t0), "suggestions toggled");
-        assert!(
-            !cache.is_fresh("local", true, t0 + HOME_CACHE_TTL + Duration::from_secs(1)),
-            "aged out"
-        );
-
-        cache.invalidate();
-        assert!(!cache.is_fresh("local", true, t0), "play recorded");
-        cache.mark_loaded("local", true, t0);
-        assert!(cache.is_fresh("local", true, t0));
-    }
 }

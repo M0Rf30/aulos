@@ -3,13 +3,14 @@
 
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
-use crate::config::ViewMode;
-use crate::fl;
-use crate::library::{Album, Playlist};
 use crate::views::common;
-use crate::views::context_menu::{self, AlbumMenuAction};
+use crate::views::context_menu;
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
+use aulos_core::config::ViewMode;
+use aulos_core::fl;
+use aulos_core::library::{Album, Playlist};
+use aulos_core::menu::AlbumMenuAction;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
@@ -49,15 +50,15 @@ pub enum AlbumMessage {
     /// A filter chip (kind / decade) was clicked.
     Filter(crate::views::album_filters::FilterMsg),
     /// Open the Properties drawer for this track.
-    ShowProperties(crate::library::Track),
+    ShowProperties(aulos_core::library::Track),
     /// Open the Properties drawer for the album at this index (in the slice
     /// handed to the view; `update` resolves it, so no tracks are cloned).
     ShowAlbumProperties(usize),
     /// Open the tag editor on this (local) track.
-    Tag(crate::library::Track, crate::tagger::TagAction),
+    Tag(aulos_core::library::Track, aulos_core::tagger::TagAction),
     /// Open the tag editor on the whole album at this index (resolved by
     /// `update`, so no tracks are cloned).
-    TagAlbum(usize, crate::tagger::TagAction),
+    TagAlbum(usize, aulos_core::tagger::TagAction),
 }
 
 /// Minimum cover/label width of a grid card; the fluid grid stretches
@@ -146,8 +147,7 @@ pub fn albums_view<'a>(
                 // A missing or title-echoing artist still reserves the caption
                 // line's height (a non-breaking space) so every card's label
                 // block is exactly two lines tall and rows stay aligned.
-                let has_distinct_artist = !album.artist.trim().is_empty()
-                    && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+                let has_distinct_artist = album.has_distinct_artist();
                 let artist_display = if has_distinct_artist {
                     album.artist.as_str()
                 } else {
@@ -194,7 +194,7 @@ pub fn albums_view<'a>(
                     album.name.clone()
                 };
 
-                let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+                let taggable = album.is_taggable();
                 context_menu::with_menu(
                     widget::tooltip(
                         widget::button::custom(album_card)
@@ -243,8 +243,7 @@ fn list_row<'a>(
         "media-optical-symbolic",
     );
 
-    let has_distinct_artist = !album.artist.trim().is_empty()
-        && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+    let has_distinct_artist = album.has_distinct_artist();
 
     let title: cosmic::Element<'_, AlbumMessage> = if album.name.trim().is_empty() {
         secondary_caption(fl!("unknown-album")).into()
@@ -272,11 +271,7 @@ fn list_row<'a>(
     } else {
         widget::Space::new().into()
     };
-    let track_count = album.track_count();
-    let tracks_label = format!(
-        "{track_count} track{}",
-        if track_count == 1 { "" } else { "s" }
-    );
+    let tracks_label = album.tracks_label();
 
     let play_button = widget::tooltip(
         widget::button::icon(widget::icon::from_name("media-playback-start-symbolic").size(16))
@@ -307,11 +302,9 @@ fn list_row<'a>(
                     .align_x(Horizontal::Right),
             )
             .push(
-                widget::container(secondary_caption(common::format_duration_coarse(
-                    album.total_secs,
-                )))
-                .width(LIST_DURATION_WIDTH)
-                .align_x(Horizontal::Right),
+                widget::container(secondary_caption(album.duration_label()))
+                    .width(LIST_DURATION_WIDTH)
+                    .align_x(Horizontal::Right),
             )
             .push(play_button)
             .spacing(16)
@@ -324,7 +317,7 @@ fn list_row<'a>(
     .height(Length::Fixed(LIST_ROW_HEIGHT))
     .padding(0)
     .class(list_row_button_class(false));
-    let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+    let taggable = album.is_taggable();
     context_menu::with_menu(row, move || album_context_menu(index, taggable))
 }
 
@@ -343,7 +336,7 @@ fn album_context_menu(
         AlbumMenuAction::Properties(AlbumMessage::ShowAlbumProperties(index)),
     ];
     if taggable {
-        use crate::tagger::TagAction;
+        use aulos_core::tagger::TagAction;
         entries.extend([
             AlbumMenuAction::EditTags(AlbumMessage::TagAlbum(index, TagAction::Edit)),
             AlbumMenuAction::LookUpMusicBrainz(AlbumMessage::TagAlbum(index, TagAction::LookUp)),
@@ -369,7 +362,7 @@ pub fn album_detail_view<'a>(
     current_track_id: Option<i64>,
     hero: Option<(
         Option<&'a widget::icon::Handle>,
-        Option<&'a crate::library::palette::Accent>,
+        Option<&'a aulos_core::library::palette::Accent>,
     )>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     let art_widget: cosmic::Element<'_, AlbumMessage> =
@@ -382,28 +375,10 @@ pub fn album_detail_view<'a>(
                 .into()
         };
 
-    // Task 103: Collect distinct genres from album tracks for header chips
-    let genres: Vec<String> = {
-        // Tags often pack several genres into one field ("Trance;
-        // Electronic"): split them so each chip is a single genre.
-        let mut g: Vec<String> = album
-            .tracks
-            .iter()
-            .flat_map(|t| t.genre.split([';', ',', '/']))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        g.sort();
-        g.dedup();
-        g
-    };
+    let genres = album.genres();
 
-    let track_count = album.track_count();
-    let track_label = format!(
-        "{track_count} track{}",
-        if track_count == 1 { "" } else { "s" }
-    );
-    let duration_label = common::format_duration_coarse(album.total_secs);
+    let track_label = album.tracks_label();
+    let duration_label = album.duration_label();
     let spacing = cosmic::theme::active().cosmic().spacing;
 
     let title_line = widget::container(common::clipped_cell(
@@ -481,7 +456,7 @@ pub fn album_detail_view<'a>(
 
     // The artist column only earns its space on compilations / split
     // albums; on a single-artist album it just repeats the hero.
-    let artist_differs = album.tracks.iter().any(|t| t.artist != album.artist);
+    let artist_differs = album.has_varied_artists();
     let columns = track_row::Columns {
         artist: artist_differs,
         favorite: true,
@@ -498,11 +473,7 @@ pub fn album_detail_view<'a>(
             album.tracks.iter().enumerate().map(|(track_idx, track)| {
                 let track_id = track.id.to_string();
                 let rating_track_id = track_id.clone();
-                let number = if track.track_number > 0 {
-                    track.track_number.to_string()
-                } else {
-                    (track_idx + 1).to_string()
-                };
+                let number = track.display_number(track_idx);
                 track_row::TrackRow::new(
                     track,
                     number,
@@ -526,7 +497,7 @@ pub fn album_detail_view<'a>(
         )
     });
 
-    let hero_taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+    let hero_taggable = album.is_taggable();
     widget::scrollable(
         widget::Column::new()
             .push(context_menu::with_menu(

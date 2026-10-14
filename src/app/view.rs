@@ -3,15 +3,16 @@
 
 #[cfg(feature = "visualizer")]
 use super::VIZ_HUD_HOLD_FRAMES;
-use super::{AppModel, ContextPage, MenuAction, Message, Page, SEARCH_INPUT_ID, unfilter_index};
-use crate::fl;
-use crate::library::{Album, Artist, Track};
-use crate::player::PlaybackState;
+use super::{AppModel, ContextPage, MenuAction, Message, Page, SEARCH_INPUT_ID};
 use crate::views::radio as radio_view;
 use crate::views::{
     albums, artists, convert, equalizer, genres, lyrics, now_playing, playlists, podcasts,
     providers, queue, settings, songs,
 };
+use aulos_core::fl;
+use aulos_core::library::state::unfilter_index;
+use aulos_core::library::{Album, Artist, Track};
+use aulos_core::player::PlaybackState;
 use cosmic::app::context_drawer;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -118,7 +119,7 @@ impl AppModel {
                         menu::Item::CheckBox(
                             fl!("stop-after-track"),
                             glyph("go-last-symbolic"),
-                            crate::player::party::stop_after_flag(),
+                            aulos_core::player::party::stop_after_flag(),
                             MenuAction::StopAfterTrack,
                         ),
                         menu::Item::CheckBox(
@@ -130,11 +131,14 @@ impl AppModel {
                         menu::Item::Folder(
                             fl!("auto-play-menu"),
                             [
-                                (fl!("auto-play-off"), crate::config::AutoPlayMode::Off),
-                                (fl!("auto-play-random"), crate::config::AutoPlayMode::Random),
+                                (fl!("auto-play-off"), aulos_core::config::AutoPlayMode::Off),
+                                (
+                                    fl!("auto-play-random"),
+                                    aulos_core::config::AutoPlayMode::Random,
+                                ),
                                 (
                                     fl!("auto-play-similar"),
-                                    crate::config::AutoPlayMode::Similar,
+                                    aulos_core::config::AutoPlayMode::Similar,
                                 ),
                             ]
                             .into_iter()
@@ -170,7 +174,7 @@ impl AppModel {
             return vec![];
         }
 
-        let input = widget::search_input(fl!("search-library"), &self.library_search)
+        let input = widget::search_input(fl!("search-library"), &self.library.search_query)
             .id(widget::Id::new(SEARCH_INPUT_ID))
             .on_input(Message::LibrarySearchChanged)
             .on_clear(Message::ClearLibrarySearch)
@@ -199,15 +203,15 @@ impl AppModel {
         let shows_card_grid = match self.nav.active_data::<Page>() {
             Some(Page::Albums) => {
                 self.selected_album.is_none()
-                    && self.config.albums_view_mode == crate::config::ViewMode::Grid
+                    && self.config.albums_view_mode == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Artists) => {
                 self.selected_artist.is_none()
-                    && self.config.artists_view_mode == crate::config::ViewMode::Grid
+                    && self.config.artists_view_mode == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Genres) => {
                 self.selected_genre.is_none()
-                    && self.config.genres_view_mode == crate::config::ViewMode::Grid
+                    && self.config.genres_view_mode == aulos_core::config::ViewMode::Grid
             }
             Some(Page::Folders | Page::Radio) => true,
             Some(Page::Podcasts) => self.selected_podcast.is_none(),
@@ -413,7 +417,7 @@ impl AppModel {
                     self.config.grid_scale,
                     self.config.show_compilations_in_artists,
                     self.config.m3u_relative_paths,
-                    crate::online::scrobble::view::view(
+                    crate::views::scrobble::view(
                         &self.scrobble,
                         &self.config,
                         &self.settings_search,
@@ -588,13 +592,14 @@ impl AppModel {
             page
         };
 
-        let search_query_active = self.search_active && !self.library_search.trim().is_empty();
+        let search_query_active =
+            self.search_active && !self.library.search_query.trim().is_empty();
 
         let content: Element<'_, Message> = match page {
             Page::Home => crate::views::home::home_view(
                 &self.home,
-                crate::views::home::HomeContext {
-                    library_albums: self.all_albums.len(),
+                aulos_core::library::home_state::HomeContext {
+                    library_albums: self.library.albums.len(),
                     scanning: self.library_scanning,
                     // A configured folder that doesn't exist (e.g. the
                     // default XDG Music dir on a fresh system) isn't "done".
@@ -612,7 +617,7 @@ impl AppModel {
             .map(Message::Home),
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
-                    if let Some(album) = self.all_albums.get(album_idx) {
+                    if let Some(album) = self.library.albums.get(album_idx) {
                         albums::album_detail_view(
                             album,
                             album_idx,
@@ -629,11 +634,11 @@ impl AppModel {
                     let (albums_data, album_map): (&[Album], Option<&[usize]>) =
                         if search_query_active {
                             (
-                                &self.filtered_albums,
-                                Some(self.filtered_album_map.as_slice()),
+                                &self.library.filtered.albums,
+                                Some(self.library.filtered.album_map.as_slice()),
                             )
                         } else {
-                            (&self.all_albums, None)
+                            (&self.library.albums, None)
                         };
                     albums::albums_view(
                         albums_data,
@@ -643,8 +648,9 @@ impl AppModel {
                             filter: &self.extras.album_filter,
                             cache: &self.extras.album_cache,
                             // The slice shown changes with the library
-                            // (`library_gen`) and with the search state.
-                            epoch: (self.library_gen << 1) | u64::from(search_query_active),
+                            // (`LibraryState::generation`) and with the search state.
+                            epoch: (self.library.generation() << 1)
+                                | u64::from(search_query_active),
                         },
                         &self.extras.grid_scroll,
                     )
@@ -681,7 +687,7 @@ impl AppModel {
 
             Page::Artists => {
                 if let Some(artist_idx) = self.selected_artist {
-                    if let Some(artist) = self.all_artists.get(artist_idx) {
+                    if let Some(artist) = self.library.artists.get(artist_idx) {
                         artists::artist_detail_view(
                             artist,
                             artist_idx,
@@ -701,13 +707,13 @@ impl AppModel {
                     }
                 } else {
                     let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
-                        if search_query_active || self.artists_filtered {
+                        if search_query_active || self.library.filtered.artists_filtered {
                             (
-                                &self.filtered_artists,
-                                Some(self.filtered_artist_map.as_slice()),
+                                &self.library.filtered.artists,
+                                Some(self.library.filtered.artist_map.as_slice()),
                             )
                         } else {
-                            (&self.all_artists, None)
+                            (&self.library.artists, None)
                         };
                     artists::artists_view(
                         artists_data,
@@ -743,11 +749,11 @@ impl AppModel {
                 let (tracks_data, track_map): (&[Track], Option<&[usize]>) = if search_query_active
                 {
                     (
-                        &self.filtered_tracks,
-                        Some(self.filtered_track_map.as_slice()),
+                        &self.library.filtered.tracks,
+                        Some(self.library.filtered.track_map.as_slice()),
                     )
                 } else {
-                    (&self.all_tracks, None)
+                    (&self.library.tracks, None)
                 };
                 songs::songs_list_view(
                     tracks_data,
@@ -774,7 +780,7 @@ impl AppModel {
                     songs::SongMessage::Scrolled(y) => Message::SongsScrolled(y),
                     // `i` indexes `tracks_data` (the slice actually shown,
                     // filtered or not), so resolve it there directly —
-                    // `unfilter_index` maps into `all_tracks` instead.
+                    // `unfilter_index` maps into the library tracks instead.
                     songs::SongMessage::PlayNext(i) => {
                         Message::PlayNext(tracks_data.get(i).cloned().into_iter().collect())
                     }
@@ -825,14 +831,14 @@ impl AppModel {
                                 Message::RenamePlaylistInput(i, n)
                             }
                             playlists::PlaylistMessage::PlayNext(pi, ti) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Playlist {
+                                source: aulos_core::library::queue_source::QueueSource::Playlist {
                                     playlist: pi,
                                     track: ti,
                                 },
                                 next: true,
                             },
                             playlists::PlaylistMessage::AddToQueue(pi, ti) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Playlist {
+                                source: aulos_core::library::queue_source::QueueSource::Playlist {
                                     playlist: pi,
                                     track: ti,
                                 },
@@ -856,12 +862,12 @@ impl AppModel {
                     }
                 } else {
                     let (playlists_data, playlist_map): (
-                        &[crate::library::Playlist],
+                        &[aulos_core::library::Playlist],
                         Option<&[usize]>,
                     ) = if search_query_active {
                         (
-                            &self.filtered_playlists,
-                            Some(self.filtered_playlist_map.as_slice()),
+                            &self.library.filtered.playlists,
+                            Some(self.library.filtered.playlist_map.as_slice()),
                         )
                     } else {
                         (&self.playlists, None)
@@ -898,14 +904,14 @@ impl AppModel {
                                 Message::RemovePlaylistTrack(unfilter_index(playlist_map, pi), ti)
                             }
                             playlists::PlaylistMessage::PlayNext(pi, ti) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Playlist {
+                                source: aulos_core::library::queue_source::QueueSource::Playlist {
                                     playlist: unfilter_index(playlist_map, pi),
                                     track: ti,
                                 },
                                 next: true,
                             },
                             playlists::PlaylistMessage::AddToQueue(pi, ti) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Playlist {
+                                source: aulos_core::library::queue_source::QueueSource::Playlist {
                                     playlist: unfilter_index(playlist_map, pi),
                                     track: ti,
                                 },
@@ -953,10 +959,10 @@ impl AppModel {
 
             Page::Genres => {
                 if let Some(genre_idx) = self.selected_genre {
-                    if let Some(genre_name) = self.all_genres.get(genre_idx) {
+                    if let Some(genre_name) = self.library.genres.get(genre_idx) {
                         genres::genre_detail_view(
                             genre_name,
-                            &self.genre_tracks,
+                            &self.library.genre_tracks,
                             self.current_track.as_ref().map(|t| t.id),
                         )
                         .map(|msg| match msg {
@@ -965,11 +971,15 @@ impl AppModel {
                             genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                             genres::GenreMessage::Shuffle => Message::ShuffleGenre,
                             genres::GenreMessage::PlayNext(t) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Genre { track: t },
+                                source: aulos_core::library::queue_source::QueueSource::Genre {
+                                    track: t,
+                                },
                                 next: true,
                             },
                             genres::GenreMessage::AddToQueue(t) => Message::QueueFrom {
-                                source: super::queue_source::QueueSource::Genre { track: t },
+                                source: aulos_core::library::queue_source::QueueSource::Genre {
+                                    track: t,
+                                },
                                 next: false,
                             },
                             genres::GenreMessage::Scrolled(area, y) => {
@@ -991,11 +1001,11 @@ impl AppModel {
                     let (genres_data, genre_map): (&[String], Option<&[usize]>) =
                         if search_query_active {
                             (
-                                &self.filtered_genres,
-                                Some(self.filtered_genre_map.as_slice()),
+                                &self.library.filtered.genres,
+                                Some(self.library.filtered.genre_map.as_slice()),
                             )
                         } else {
-                            (&self.all_genres, None)
+                            (&self.library.genres, None)
                         };
                     genres::genres_view(
                         genres_data,
@@ -1011,11 +1021,15 @@ impl AppModel {
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                         genres::GenreMessage::Shuffle => Message::ShuffleGenre,
                         genres::GenreMessage::PlayNext(t) => Message::QueueFrom {
-                            source: super::queue_source::QueueSource::Genre { track: t },
+                            source: aulos_core::library::queue_source::QueueSource::Genre {
+                                track: t,
+                            },
                             next: true,
                         },
                         genres::GenreMessage::AddToQueue(t) => Message::QueueFrom {
-                            source: super::queue_source::QueueSource::Genre { track: t },
+                            source: aulos_core::library::queue_source::QueueSource::Genre {
+                                track: t,
+                            },
                             next: false,
                         },
                         genres::GenreMessage::Scrolled(area, y) => Message::GridScrolled(area, y),
@@ -1032,7 +1046,7 @@ impl AppModel {
 
             Page::Folders => crate::views::folders::folder_view(
                 &self.folder_state,
-                &self.all_tracks,
+                &self.library.tracks,
                 self.current_track.as_ref(),
                 &self.cover_images,
             )
@@ -1120,13 +1134,14 @@ impl AppModel {
                     dir_error: self.convert_dir_error.as_deref(),
                     flac_options: self.config.flac_options,
                     lossy_options: self.config.lossy_options,
-                    ffmpeg_available: crate::convert::ffmpeg::cached(),
+                    ffmpeg_available: aulos_core::convert::ffmpeg::cached(),
                 })
                 .map(Message::Convert)
             }
 
             Page::Tagger => crate::views::tagger::view(
                 &self.tagger,
+                &self.tagger_thumbs,
                 crate::views::tagger::TaggerViewProps {
                     acoustid_key_set: self.config.acoustid_key().is_some(),
                     acoustid_user_key_saved: self.acoustid_user_key_saved,
@@ -1152,16 +1167,7 @@ impl AppModel {
             .as_ref()
             .map(|p| p.volume())
             .unwrap_or(self.config.volume);
-        let current_cover_key = self.current_track.as_ref().map(|track| {
-            // Use album_artist to match how albums store cover art.
-            // Falls back to track.artist when album_artist is empty.
-            let artist = if track.album_artist.is_empty() {
-                &track.artist
-            } else {
-                &track.album_artist
-            };
-            crate::library::CoverArt::album_key(artist, &track.album)
-        });
+        let current_cover_key = self.current_track.as_ref().map(Track::cover_key);
         let current_cover = current_cover_key
             .as_ref()
             .and_then(|key| self.cover_images.get(key));

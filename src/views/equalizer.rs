@@ -7,11 +7,13 @@
 //! profiles are searched and selected via a separate text input + scrollable
 //! results list below the preset controls.
 
-use crate::autoeq::AutoEQProfileMetadata;
-use crate::fl;
-use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
 use crate::views::common;
 use crate::views::list_row_button_class;
+use aulos_core::autoeq::{AutoEQProfileMetadata, MAX_SEARCH_RESULTS, search_profiles};
+use aulos_core::fl;
+use aulos_core::player::equalizer::{
+    BAND_LABELS, EqPresetData, is_custom_preset_selected, preset_index,
+};
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
@@ -237,16 +239,12 @@ fn preset_section<'a>(
     // --- Preset dropdown (built-in + custom only) ---
     let preset_names_display: Vec<String> = all_presets
         .iter()
-        .map(|p| match p.source {
-            PresetSource::Builtin => p.name.clone(),
-            _ => format!("{} *", p.name),
-        })
+        .map(EqPresetData::dropdown_label)
         .collect();
 
     let preset_names: Vec<String> = all_presets.iter().map(|p| p.name.clone()).collect();
 
-    let selected_index =
-        active_preset_name.and_then(|active| all_presets.iter().position(|p| p.name == active));
+    let selected_index = preset_index(all_presets, active_preset_name);
 
     let preset_dropdown = widget::dropdown(preset_names_display, selected_index, move |idx| {
         if let Some(name) = preset_names.get(idx) {
@@ -283,13 +281,7 @@ fn preset_section<'a>(
         .align_y(Alignment::Center);
 
     // --- Actions: primary save (custom presets), quiet reset/delete ---
-    let is_custom_selected = active_preset_name
-        .map(|name| {
-            all_presets
-                .iter()
-                .any(|p| p.name == name && p.source != PresetSource::Builtin)
-        })
-        .unwrap_or(false);
+    let is_custom_selected = is_custom_preset_selected(all_presets, active_preset_name);
 
     let mut actions = widget::Row::new()
         .spacing(sp.space_xs)
@@ -360,8 +352,6 @@ fn autoeq_section<'a>(
         return col.into();
     }
 
-    let query = autoeq_search.trim().to_lowercase();
-
     let mut search_input =
         widget::search_input(fl!("equalizer-autoeq-search-placeholder"), autoeq_search)
             .on_input(EqualizerMessage::AutoEQSearchChanged);
@@ -375,17 +365,11 @@ fn autoeq_section<'a>(
         count = autoeq_profiles.len().to_string()
     );
 
-    if query.len() >= 2 {
-        let filtered: Vec<&AutoEQProfileMetadata> = autoeq_profiles
-            .iter()
-            .filter(|p| p.name.to_lowercase().contains(&query))
-            .take(50) // cap results for performance
-            .collect();
-
+    if let Some(filtered) = search_profiles(autoeq_profiles, autoeq_search) {
         let count = filtered.len();
         let count_text = if count == 0 {
             fl!("equalizer-autoeq-no-matches")
-        } else if count >= 50 {
+        } else if count >= MAX_SEARCH_RESULTS {
             fl!("equalizer-autoeq-too-many-matches")
         } else {
             fl!("equalizer-autoeq-match-count", count = count.to_string())

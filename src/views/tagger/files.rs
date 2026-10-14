@@ -10,16 +10,18 @@ use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::fl;
-use crate::library::tagio::keys;
-use crate::tagger::{
+use crate::views::common;
+use aulos_core::fl;
+use aulos_core::library::tagio::keys;
+use aulos_core::tagger::{
     Cluster, FileId, FileStatus, SubmissionState, TagFile, TaggerMessage as Msg, TaggerState,
 };
-use crate::views::common;
 
-use super::labels;
-use super::style::{self, Tone};
-use super::{Facts, TaggerViewProps};
+use super::TaggerViewProps;
+use super::style;
+use aulos_core::tagger::Facts;
+use aulos_core::tagger::labels;
+use aulos_core::tagger::labels::Tone;
 
 type Element<'a> = cosmic::Element<'a, Msg>;
 
@@ -68,19 +70,6 @@ fn tooltip<'a>(content: Element<'a>, text: String) -> Element<'a> {
         widget::tooltip::Position::Top,
     )
     .into()
-}
-
-/// The MusicBrainz recording a file is known by: the one AcoustID resolved
-/// to, else the one in its tags.
-fn recording_id(file: &TagFile) -> Option<String> {
-    file.acoustid
-        .as_ref()
-        .and_then(|hit| hit.recording_ids.first().cloned())
-        .or_else(|| {
-            file.edited
-                .get(keys::MUSICBRAINZ_RECORDINGID)
-                .map(str::to_owned)
-        })
 }
 
 fn file_row<'a>(state: &TaggerState, ctx: &RowContext, file: &'a TagFile) -> Element<'a> {
@@ -169,7 +158,7 @@ fn file_row<'a>(state: &TaggerState, ctx: &RowContext, file: &'a TagFile) -> Ele
             fl!("tagger-acoustid-open"),
         ));
     }
-    if let Some(recording) = recording_id(file) {
+    if let Some(recording) = file.known_recording_id() {
         row = row.push(style::icon_button(
             "web-browser-symbolic",
             fl!("tagger-recording-open"),

@@ -18,18 +18,18 @@ impl AppModel {
     fn detail_cover_key(&mut self) -> Option<String> {
         match self.nav.active_data::<Page>()? {
             Page::Albums => {
-                let album = self.all_albums.get(self.selected_album?)?;
-                Some(crate::library::CoverArt::album_key(
+                let album = self.library.albums.get(self.selected_album?)?;
+                Some(aulos_core::library::CoverArt::album_key(
                     &album.artist,
                     &album.name,
                 ))
             }
             Page::Artists => {
-                let artist = self.all_artists.get(self.selected_artist?)?;
+                let artist = self.library.artists.get(self.selected_artist?)?;
                 let keys: Vec<String> = artist
                     .albums
                     .iter()
-                    .map(|a| crate::library::CoverArt::album_key(&artist.name, &a.name))
+                    .map(|a| aulos_core::library::CoverArt::album_key(&artist.name, &a.name))
                     .collect();
                 // `cover_images` holds a handle exactly for the albums that
                 // have art, so it identifies the first one with a cover
@@ -42,19 +42,18 @@ impl AppModel {
 
     /// Lightweight album for the detail page's cover `key` (the selected
     /// album, or the artist's album whose key matches).
-    fn detail_cover_hint(&self, key: &str) -> Option<crate::library::Album> {
+    fn detail_cover_hint(&self, key: &str) -> Option<aulos_core::library::Album> {
         match self.nav.active_data::<Page>()? {
-            Page::Albums => self.all_albums.get(self.selected_album?),
+            Page::Albums => self.library.albums.get(self.selected_album?),
             Page::Artists => {
-                let artist = self.all_artists.get(self.selected_artist?)?;
-                artist
-                    .albums
-                    .iter()
-                    .find(|a| crate::library::CoverArt::album_key(&artist.name, &a.name) == key)
+                let artist = self.library.artists.get(self.selected_artist?)?;
+                artist.albums.iter().find(|a| {
+                    aulos_core::library::CoverArt::album_key(&artist.name, &a.name) == key
+                })
             }
             _ => None,
         }
-        .map(crate::library::Album::cover_hint)
+        .map(aulos_core::library::Album::cover_hint)
     }
 
     /// Kick off (once per album) the blur + accent extraction for the
@@ -82,8 +81,8 @@ impl AppModel {
         cosmic::task::future(async move {
             let (blurred, accent) = tokio::task::spawn_blocking(move || {
                 (
-                    crate::views::now_playing::blur::compute_blurred_cover(&bytes),
-                    crate::library::palette::extract(&bytes),
+                    aulos_core::library::CoverArt::blurred_backdrop(&bytes),
+                    aulos_core::library::palette::extract(&bytes),
                 )
             })
             .await
@@ -97,7 +96,7 @@ impl AppModel {
         &mut self,
         key: String,
         blurred: Option<widget::icon::Handle>,
-        accent: Option<crate::library::palette::Accent>,
+        accent: Option<aulos_core::library::palette::Accent>,
     ) {
         if self.detail_art_pending.as_ref() == Some(&key) {
             self.detail_art_pending = None;
@@ -116,7 +115,7 @@ impl AppModel {
         key: &str,
     ) -> Option<(
         Option<&widget::icon::Handle>,
-        Option<&crate::library::palette::Accent>,
+        Option<&aulos_core::library::palette::Accent>,
     )> {
         self.detail_art
             .as_ref()
@@ -128,7 +127,7 @@ impl AppModel {
 impl AppModel {
     /// What is on screen, for detecting that a page/detail/layout change
     /// remounted the scrollables (see [`Self::restore_scroll_positions`]).
-    pub(super) fn view_signature(&self) -> (Location, [crate::config::ViewMode; 3], bool) {
+    pub(super) fn view_signature(&self) -> (Location, [aulos_core::config::ViewMode; 3], bool) {
         (
             self.current_location(),
             [
@@ -210,14 +209,14 @@ impl AppModel {
     pub(super) fn navigate(&mut self, route: Route) -> Task<cosmic::Action<Message>> {
         let here = self.current_location();
         let task = match route {
-            Route::Artist(name) => match self.find_artist(&name) {
+            Route::Artist(name) => match self.library.find_artist(&name) {
                 Some(idx) => {
                     let show = self.show_page(&Page::Artists);
                     show.chain(self.update(Message::SelectArtist(idx)))
                 }
                 None => return self.not_found(&name),
             },
-            Route::Album { artist, album } => match self.find_album(&artist, &album) {
+            Route::Album { artist, album } => match self.library.find_album(&artist, &album) {
                 Some(idx) => {
                     let show = self.show_page(&Page::Albums);
                     self.selected_album = Some(idx);
@@ -227,7 +226,8 @@ impl AppModel {
             },
             Route::Genre(name) => {
                 match self
-                    .all_genres
+                    .library
+                    .genres
                     .iter()
                     .position(|g| g.eq_ignore_ascii_case(&name))
                 {
@@ -271,67 +271,8 @@ impl AppModel {
         self.nav_history.clear();
     }
 
-    fn find_artist(&self, name: &str) -> Option<usize> {
-        let name = name.trim();
-        let exact = |n: &str| {
-            self.all_artists
-                .iter()
-                .position(|a| a.name.trim().eq_ignore_ascii_case(n))
-        };
-        exact(name).or_else(|| {
-            // "A feat. B", "A & B", "A, B"… → try the primary artist.
-            primary_artist(name).and_then(exact)
-        })
-    }
-
-    fn find_album(&self, artist: &str, album: &str) -> Option<usize> {
-        let eq = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
-        self.all_albums
-            .iter()
-            .position(|a| eq(&a.name, album) && eq(&a.artist, artist))
-            .or_else(|| self.all_albums.iter().position(|a| eq(&a.name, album)))
-    }
-
     fn not_found(&mut self, what: &str) -> Task<cosmic::Action<Message>> {
         tracing::debug!("navigation target not in library: {what}");
         Task::none()
-    }
-}
-
-/// The leading artist of a collaboration credit, if the credit has one.
-fn primary_artist(name: &str) -> Option<&str> {
-    const SEPARATORS: [&str; 8] = [
-        " feat. ",
-        " feat ",
-        " ft. ",
-        " featuring ",
-        " & ",
-        ", ",
-        "; ",
-        " / ",
-    ];
-    // ASCII-only lowering keeps byte offsets valid for slicing `name`.
-    let lower = name.to_ascii_lowercase();
-    SEPARATORS
-        .iter()
-        .filter_map(|sep| lower.find(sep))
-        .min()
-        .map(|pos| name[..pos].trim())
-        .filter(|s| !s.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::primary_artist;
-
-    #[test]
-    fn primary_artist_splits_common_credits() {
-        assert_eq!(
-            primary_artist("Daft Punk feat. Pharrell"),
-            Some("Daft Punk")
-        );
-        assert_eq!(primary_artist("Simon & Garfunkel"), Some("Simon"));
-        assert_eq!(primary_artist("A, B; C"), Some("A"));
-        assert_eq!(primary_artist("Solo"), None);
     }
 }

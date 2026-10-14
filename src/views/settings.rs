@@ -4,9 +4,10 @@
 //! Settings view — library folders, playback defaults, and quick links to
 //! the Equalizer/Providers drawers and the About dialog.
 
-use crate::config::ReplayGainMode;
-use crate::fl;
 use crate::views::common;
+use aulos_core::config::ReplayGainMode;
+use aulos_core::fl;
+use aulos_core::settings_search::{SearchQuery, keywords};
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 use std::path::PathBuf;
@@ -55,8 +56,8 @@ pub enum SettingsMessage {
     SetShowCompilationsInArtists(bool),
     /// Toggle relative paths in exported M3U playlists.
     SetM3uRelativePaths(bool),
-    /// A message from the Scrobbling block (see `crate::online::scrobble`).
-    Scrobble(crate::online::scrobble::ScrobbleMessage),
+    /// A message from the Scrobbling block (see `aulos_core::online::scrobble`).
+    Scrobble(aulos_core::online::scrobble::ScrobbleMessage),
     /// A message from the playback extras sections (fades, auto-play,
     /// party mode, desktop integration) — see `crate::app::playback_extras`.
     PlaybackExtras(crate::app::playback_extras::PlaybackExtrasMessage),
@@ -75,185 +76,6 @@ pub enum SettingsMessage {
     OpenUrl(String),
     /// The settings search box changed (empty = show everything).
     Search(String),
-}
-
-/// All replay gain modes, in the order shown in the dropdown.
-const REPLAY_GAIN_MODES: [ReplayGainMode; 4] = [
-    ReplayGainMode::Off,
-    ReplayGainMode::Track,
-    ReplayGainMode::Album,
-    ReplayGainMode::Auto,
-];
-
-/// A settings search query: whitespace-separated tokens that must all occur
-/// (case, diacritics and punctuation ignored) somewhere in a section's text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SearchQuery {
-    tokens: Vec<String>,
-}
-
-impl SearchQuery {
-    pub fn new(raw: &str) -> Self {
-        let tokens = crate::online::scrobble::import::normalize_text(raw)
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        Self { tokens }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
-    }
-
-    /// Whether a section whose searchable strings are `haystack` matches.
-    /// An empty query matches everything.
-    pub fn matches<S: AsRef<str>>(&self, haystack: &[S]) -> bool {
-        if self.tokens.is_empty() {
-            return true;
-        }
-        let joined: Vec<&str> = haystack.iter().map(AsRef::as_ref).collect();
-        let text = crate::online::scrobble::import::normalize_text(&joined.join(" "));
-        self.tokens.iter().all(|t| text.contains(t.as_str()))
-    }
-}
-
-/// Searchable strings (titles and descriptions) of each settings section.
-mod keywords {
-    use crate::fl;
-
-    pub fn library() -> Vec<String> {
-        vec![
-            fl!("settings-library"),
-            fl!("settings-library-description"),
-            fl!("add-music-folder"),
-        ]
-    }
-
-    pub fn artist_tags() -> Vec<String> {
-        vec![
-            fl!("settings-artist-tags"),
-            fl!("settings-artist-tags-description"),
-            fl!("split-artist-tags"),
-            fl!("split-artist-tags-description"),
-            fl!("artist-tag-delimiters"),
-            fl!("artist-tag-delimiters-description"),
-        ]
-    }
-
-    pub fn compilations() -> Vec<String> {
-        vec![
-            fl!("settings-compilations"),
-            fl!("settings-compilations-description"),
-            fl!("show-compilations-in-artists"),
-            fl!("show-compilations-in-artists-description"),
-        ]
-    }
-
-    pub fn playlists() -> Vec<String> {
-        vec![
-            fl!("settings-playlists"),
-            fl!("settings-playlists-description"),
-            fl!("m3u-relative-paths"),
-            fl!("m3u-relative-paths-description"),
-        ]
-    }
-
-    pub fn playback() -> Vec<String> {
-        vec![
-            fl!("settings-playback"),
-            fl!("settings-playback-description"),
-            fl!("crossfade-duration"),
-            fl!("crossfade-description"),
-            fl!("replay-gain"),
-            fl!("replay-gain-description"),
-            fl!("volume"),
-        ]
-    }
-
-    pub fn playback_extras() -> Vec<String> {
-        vec![
-            fl!("settings-playback-extras"),
-            fl!("settings-playback-extras-description"),
-            fl!("fade-duration"),
-            fl!("fade-description"),
-            fl!("auto-play"),
-            fl!("auto-play-description"),
-            fl!("party-mode"),
-            fl!("party-mode-description"),
-            fl!("party-genres"),
-            fl!("settings-desktop"),
-            fl!("settings-desktop-description"),
-            fl!("notify-track-change"),
-            fl!("notify-track-change-description"),
-            fl!("inhibit-suspend"),
-            fl!("inhibit-suspend-description"),
-            fl!("background-playback"),
-            fl!("background-playback-description"),
-        ]
-    }
-
-    pub fn startup() -> Vec<String> {
-        vec![
-            fl!("settings-startup"),
-            fl!("startup-page"),
-            fl!("startup-page-description"),
-            fl!("startup-provider"),
-            fl!("startup-provider-description"),
-        ]
-    }
-
-    pub fn appearance() -> Vec<String> {
-        vec![
-            fl!("settings-appearance"),
-            fl!("settings-appearance-description"),
-            fl!("grid-size"),
-            fl!("grid-size-description"),
-        ]
-    }
-
-    pub fn artist_info() -> Vec<String> {
-        vec![
-            fl!("settings-artist-info"),
-            fl!("fetch-artist-info"),
-            fl!("fetch-artist-info-description"),
-        ]
-    }
-
-    pub fn experimental() -> Vec<String> {
-        vec![
-            fl!("settings-experimental"),
-            fl!("experimental-converter"),
-            fl!("experimental-converter-description"),
-        ]
-    }
-
-    pub fn tagger() -> Vec<String> {
-        vec![
-            fl!("settings-tagger"),
-            fl!("settings-tagger-description"),
-            fl!("settings-tagger-app-key"),
-            fl!("settings-tagger-user-key"),
-            fl!("settings-tagger-caa-cover"),
-        ]
-    }
-
-    pub fn shortcuts() -> Vec<String> {
-        vec![
-            fl!("settings-shortcuts"),
-            fl!("equalizer"),
-            fl!("settings-equalizer-description"),
-            fl!("providers"),
-            fl!("settings-providers-description"),
-        ]
-    }
-
-    pub fn about() -> Vec<String> {
-        vec![
-            fl!("settings-about"),
-            fl!("about"),
-            fl!("settings-about-description"),
-        ]
-    }
 }
 
 /// Render the Settings page (shown in the context drawer, which already
@@ -313,7 +135,7 @@ pub fn view<'a>(
             keywords::artist_info(),
             artist_info_section(fetch_artist_info),
         ),
-        (crate::online::scrobble::view::keywords(), scrobbling),
+        (crate::views::scrobble::keywords(), scrobbling),
         (
             keywords::tagger(),
             tagger_section(
@@ -562,7 +384,7 @@ fn playback_section<'a>(
         fl!("replay-gain-album"),
         fl!("replay-gain-auto"),
     ];
-    let replay_gain_selected = REPLAY_GAIN_MODES
+    let replay_gain_selected = ReplayGainMode::ALL
         .iter()
         .position(|mode| *mode == replay_gain_mode);
     let replay_gain_item = widget::settings::item::builder(fl!("replay-gain"))
@@ -570,7 +392,7 @@ fn playback_section<'a>(
         .control(widget::dropdown(
             replay_gain_labels,
             replay_gain_selected,
-            |i| SettingsMessage::SetReplayGainMode(REPLAY_GAIN_MODES[i]),
+            |i| SettingsMessage::SetReplayGainMode(ReplayGainMode::ALL[i]),
         ));
 
     let volume_item = slider_item(
@@ -669,7 +491,7 @@ fn tagger_section<'a>(
         .push(
             widget::button::link(fl!("settings-tagger-app-key-get"))
                 .on_press(SettingsMessage::OpenUrl(
-                    crate::tagger::ACOUSTID_NEW_APPLICATION_URL.to_string(),
+                    aulos_core::tagger::ACOUSTID_NEW_APPLICATION_URL.to_string(),
                 ))
                 .padding(0),
         )
@@ -708,7 +530,7 @@ fn tagger_section<'a>(
         .push(
             widget::button::link(fl!("settings-tagger-user-key-find"))
                 .on_press(SettingsMessage::OpenUrl(
-                    crate::tagger::ACOUSTID_USER_KEY_URL.to_string(),
+                    aulos_core::tagger::ACOUSTID_USER_KEY_URL.to_string(),
                 ))
                 .padding(0),
         )
@@ -732,7 +554,7 @@ fn tagger_section<'a>(
 
 /// Experimental section: opt-in toggle for the local file
 /// converter/transcoder/ripper page, disabled by default (see
-/// `crate::config::Config::experimental_converter`). Toggling it
+/// `aulos_core::config::Config::experimental_converter`). Toggling it
 /// live-adds/removes the Convert nav entry — see
 /// `crate::app::AppModel::set_convert_nav_entry`.
 fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a, SettingsMessage> {
@@ -751,7 +573,7 @@ fn experimental_section<'a>(experimental_converter: bool) -> cosmic::Element<'a,
 
 /// Artist info section: opt-in toggle for fetching artist images and
 /// biography text from online sources when browsing in Local or MPD mode
-/// (see `crate::config::Config::fetch_artist_info`). Ignored in Subsonic
+/// (see `aulos_core::config::Config::fetch_artist_info`). Ignored in Subsonic
 /// mode, which always shows the server's own artist info instead.
 fn artist_info_section<'a>(fetch_artist_info: bool) -> cosmic::Element<'a, SettingsMessage> {
     let item = widget::settings::item::builder(fl!("fetch-artist-info"))
@@ -807,34 +629,4 @@ fn drawer_link_row<'a>(
             .control(widget::icon::from_name("go-next-symbolic")),
     )
     .on_press(message)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_query_matches_everything() {
-        let q = SearchQuery::new("   ");
-        assert!(q.is_empty());
-        assert!(q.matches(&["anything"]));
-        assert!(q.matches::<&str>(&[]));
-    }
-
-    #[test]
-    fn query_words_must_all_match_ignoring_case_and_diacritics() {
-        let hay = ["Playback", "Crossfade duration", "Réplay gain"];
-        assert!(SearchQuery::new("cross").matches(&hay));
-        assert!(SearchQuery::new("CROSSFADE gain").matches(&hay));
-        assert!(SearchQuery::new("replay").matches(&hay));
-        assert!(!SearchQuery::new("crossfade scrobble").matches(&hay));
-        assert!(!SearchQuery::new("zzz").matches(&hay));
-    }
-
-    #[test]
-    fn punctuation_in_names_is_ignored() {
-        let hay = ["Last.fm", "Scrobble to Last.fm"];
-        assert!(SearchQuery::new("last.fm").matches(&hay));
-        assert!(SearchQuery::new("fm").matches(&hay));
-    }
 }

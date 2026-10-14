@@ -2,17 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::tasks::resolve_mpris_art_task;
-use super::{AppModel, HTTP_CLIENT, Message, reload_result_is_stale};
-use crate::config::Config;
-use crate::fl;
-use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Track};
-use crate::player::mpd_backend::MpdBackend;
-use crate::player::{ActiveBackend, PlaybackState, Player};
-use crate::provider::MusicProvider;
-use crate::provider::local::LocalProvider;
-use crate::provider::mpd::{MpdConfig, MpdProvider};
-use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
-use crate::views::{providers, songs};
+use super::{AppModel, Message};
+use aulos_core::config::Config;
+use aulos_core::fl;
+use aulos_core::library::{Album, LibraryDb, LibraryScanner, Track};
+use aulos_core::player::mpd_backend::MpdBackend;
+use aulos_core::player::{ActiveBackend, PlaybackState, Player};
+use aulos_core::provider::MusicProvider;
+use aulos_core::provider::local::LocalProvider;
+use aulos_core::provider::mpd::{MpdConfig, MpdProvider};
+use aulos_core::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use cosmic::prelude::*;
 use cosmic::widget;
 use futures_util::SinkExt;
@@ -21,17 +20,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Buffers a non-destructive library refresh: batches accumulate here
-/// while the previously loaded library stays fully visible on screen, so
-/// switching pages, opening a menu, etc. never sees an empty view mid
-/// reload. `Message::LibraryLoadComplete` swaps this into
-/// `all_tracks`/`all_albums`/`cover_images`/`cover_fingerprints` atomically
-/// once the whole reload finishes -- see `AppModel::reload_library` and
-/// the `Message::LibraryBatch`/`LibraryLoadComplete` handlers.
-pub(super) struct LibraryReloadStaging {
-    pub(super) generation: u64,
-    pub(super) tracks: Vec<Track>,
-    pub(super) albums: Vec<Album>,
+/// The UI half of a non-destructive library refresh (the data half is
+/// `LibraryState`'s reload staging): cover handles accumulate here while
+/// the previously loaded covers stay on screen.
+/// `Message::LibraryLoadComplete` swaps this into
+/// `cover_images`/`cover_fingerprints` atomically together with the staged
+/// library data -- see `AppModel::reload_library` and the
+/// `Message::LibraryBatch`/`LibraryLoadComplete` handlers.
+pub(super) struct CoverStaging {
     pub(super) cover_images: HashMap<String, widget::icon::Handle>,
     pub(super) cover_fingerprints: HashMap<String, u64>,
 }
@@ -44,40 +40,12 @@ pub(super) struct LibraryReloadStaging {
 /// switch). Falls back to the encoded bytes if decoding fails, so a
 /// corrupt/unusual cover blob is not silently dropped.
 fn cover_thumbnail_handle(bytes: &[u8]) -> widget::icon::Handle {
-    match crate::library::CoverArt::decode_thumbnail(
+    match aulos_core::library::CoverArt::decode_thumbnail(
         bytes,
-        crate::library::CoverArt::GRID_THUMBNAIL_MAX_DIM,
+        aulos_core::library::CoverArt::GRID_THUMBNAIL_MAX_DIM,
     ) {
         Some((w, h, pixels)) => widget::icon::from_raster_pixels(w, h, pixels),
         None => widget::icon::from_raster_bytes(bytes.to_vec()),
-    }
-}
-
-/// Cheap content fingerprint of an encoded cover blob. Only compared within
-/// one process run (never persisted), so the std hasher is fine. Lets a
-/// library refresh recognise an unchanged cover and keep its existing handle
-/// without the loader having to ship (and the app keep) the full-size bytes.
-pub(super) fn cover_fingerprint(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Clamp a live-updating playback position display value to a track's
-/// known duration. `Duration::ZERO` duration means "unknown/unbounded" —
-/// a live radio track (whose `Track::duration` is always `Duration::ZERO`,
-/// see `radio_page.rs`), or any track whose duration genuinely hasn't been
-/// probed yet — never "the track is zero seconds long", so it must not
-/// clamp in that case: doing so would pin the seek-bar/position display at
-/// zero forever even while a live stream keeps playing indefinitely. Used
-/// by `PlaybackTick`/`MpdStatusUpdate` in `update.rs`, the only two
-/// call sites that update the UI-displayed playback position.
-pub(super) fn clamp_display_position(position: Duration, duration: Duration) -> Duration {
-    if duration > Duration::ZERO && position > duration {
-        duration
-    } else {
-        position
     }
 }
 
@@ -169,7 +137,7 @@ impl AppModel {
     /// Dispatch an async MPD play command for a URI (ClearQueue + Add +
     /// Play).
     ///
-    /// Aulos drives MPD one track at a time from its own [`crate::player`]
+    /// Aulos drives MPD one track at a time from its own [`aulos_core::player`]
     /// queue — shuffle/repeat live entirely in that queue, never in MPD
     /// itself. Forcing `random`/`repeat`/`single` off on every dispatch
     /// guards against a stale `repeat 1` (set by an external MPD client,
@@ -230,25 +198,12 @@ impl AppModel {
         }
     }
 
-    /// Bumps the library reload generation counter, invalidating any
-    /// in-flight async result tagged with an older generation. Call this
-    /// once at the start of every new reload/scan that should supersede
-    /// earlier work.
-    pub(super) fn begin_reload_generation(&mut self) -> u64 {
-        self.reload_generation += 1;
-        self.reload_generation
-    }
-
     /// True when an async library result tagged with `generation`/
     /// `provider_id` is stale — superseded by a later reload/scan or a
     /// provider switch — and must be ignored without mutating state.
     pub(super) fn is_stale_reload(&self, generation: u64, provider_id: &str) -> bool {
-        reload_result_is_stale(
-            self.reload_generation,
-            self.registry.active_id(),
-            generation,
-            provider_id,
-        )
+        self.library
+            .is_stale_reload(self.registry.active_id(), generation, provider_id)
     }
 
     pub(super) fn reload_library(&mut self) -> Task<cosmic::Action<Message>> {
@@ -257,35 +212,34 @@ impl AppModel {
             None => return Task::none(),
         };
         let provider_type = provider.provider_type();
-        let generation = self.begin_reload_generation();
+        let generation = self.library.begin_reload_generation();
 
         match provider_type {
-            crate::provider::ProviderType::Local => self.reload_library_local(provider, generation),
-            crate::provider::ProviderType::Mpd | crate::provider::ProviderType::Subsonic => {
+            aulos_core::provider::ProviderType::Local => {
+                self.reload_library_local(provider, generation)
+            }
+            aulos_core::provider::ProviderType::Mpd
+            | aulos_core::provider::ProviderType::Subsonic => {
                 self.library_scanning = true;
-                if self.all_tracks.is_empty() && self.all_albums.is_empty() {
-                    // First load (or the library is genuinely empty): there
-                    // is nothing on screen to flash away from, so populate
-                    // progressively straight into the visible fields as
-                    // batches arrive, same as before.
-                    self.library_reload_staging = None;
-                    self.all_artists.clear();
-                    self.cover_images.clear();
-                    self.cover_fingerprints.clear();
-                    self.cover_art_bytes.clear();
-                } else {
+                if self.library.begin_incremental_reload(generation) {
                     // A library is already showing: keep it fully visible
                     // and accumulate the refreshed data off to the side.
                     // `Message::LibraryLoadComplete` swaps it in atomically
                     // once the whole reload finishes, so the view never
-                    // goes empty mid-reload (see `LibraryReloadStaging`).
-                    self.library_reload_staging = Some(LibraryReloadStaging {
-                        generation,
-                        tracks: Vec::new(),
-                        albums: Vec::new(),
+                    // goes empty mid-reload (see `CoverStaging`).
+                    self.cover_staging = Some(CoverStaging {
                         cover_images: HashMap::new(),
                         cover_fingerprints: HashMap::new(),
                     });
+                } else {
+                    // First load (or the library is genuinely empty): there
+                    // is nothing on screen to flash away from, so populate
+                    // progressively straight into the visible fields as
+                    // batches arrive, same as before.
+                    self.cover_staging = None;
+                    self.cover_images.clear();
+                    self.cover_fingerprints.clear();
+                    self.cover_art_bytes.clear();
                 }
                 self.reload_library_incremental(provider, provider_type, generation)
             }
@@ -323,13 +277,13 @@ impl AppModel {
             let cover_tasks: Vec<_> = albums
                 .iter()
                 .filter_map(|album| {
-                    let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
+                    let key = aulos_core::library::CoverArt::album_key(&album.artist, &album.name);
                     album.tracks.first().map(|track| (key, track.path.clone()))
                 })
                 .map(|(key, path)| {
                     tokio::task::spawn_blocking(
                         move || -> Option<(String, widget::icon::Handle, u64)> {
-                            let bytes = crate::library::CoverArt::get_cover_art(&path)?;
+                            let bytes = aulos_core::library::CoverArt::get_cover_art(&path)?;
                             // Decode + downscale here too -- this is CPU-bound
                             // work and must stay off the async task (which
                             // runs on a tokio worker thread shared with other
@@ -338,7 +292,11 @@ impl AppModel {
                             // they are re-read lazily for whichever album
                             // actually needs them (blur, hero, notification).
                             let handle = cover_thumbnail_handle(&bytes);
-                            Some((key, handle, cover_fingerprint(&bytes)))
+                            Some((
+                                key,
+                                handle,
+                                aulos_core::library::CoverArt::content_fingerprint(&bytes),
+                            ))
                         },
                     )
                 })
@@ -373,7 +331,7 @@ impl AppModel {
     pub(super) fn reload_library_incremental(
         &self,
         provider: Arc<dyn MusicProvider + Send + Sync>,
-        provider_type: crate::provider::ProviderType,
+        provider_type: aulos_core::provider::ProviderType,
         generation: u64,
     ) -> Task<cosmic::Action<Message>> {
         // Downcast to concrete provider types for paged access.
@@ -390,7 +348,7 @@ impl AppModel {
                 const BATCH_SIZE: usize = 50;
 
                 match provider_type {
-                    crate::provider::ProviderType::Mpd => {
+                    aulos_core::provider::ProviderType::Mpd => {
                         // Find the matching MpdProvider by id.
                         let mpd = match mpd_providers.iter().find(|p| p.id() == active_id) {
                             Some(p) => Arc::clone(p),
@@ -443,7 +401,7 @@ impl AppModel {
                             let cover_tasks: Vec<_> = albums
                                 .iter()
                                 .map(|album| {
-                                    let key = crate::library::CoverArt::album_key(
+                                    let key = aulos_core::library::CoverArt::album_key(
                                         &album.artist,
                                         &album.name,
                                     );
@@ -457,7 +415,7 @@ impl AppModel {
                                         let result = prov2.get_cover_art(&hint).map(|opt| {
                                             opt.map(|bytes| {
                                                 let handle = cover_thumbnail_handle(&bytes);
-                                                (handle, cover_fingerprint(&bytes))
+                                                (handle, aulos_core::library::CoverArt::content_fingerprint(&bytes))
                                             })
                                         });
                                         (key, result)
@@ -493,7 +451,7 @@ impl AppModel {
                         }
                     }
 
-                    crate::provider::ProviderType::Subsonic => {
+                    aulos_core::provider::ProviderType::Subsonic => {
                         // Find the matching SubsonicProvider by id.
                         let subsonic = match subsonic_providers.iter().find(|p| p.id() == active_id)
                         {
@@ -527,7 +485,7 @@ impl AppModel {
                             let cover_tasks: Vec<_> = albums
                                 .iter()
                                 .map(|album| {
-                                    let key = crate::library::CoverArt::album_key(
+                                    let key = aulos_core::library::CoverArt::album_key(
                                         &album.artist,
                                         &album.name,
                                     );
@@ -541,7 +499,7 @@ impl AppModel {
                                         let result = prov2.get_cover_art(&hint).map(|opt| {
                                             opt.map(|bytes| {
                                                 let handle = cover_thumbnail_handle(&bytes);
-                                                (handle, cover_fingerprint(&bytes))
+                                                (handle, aulos_core::library::CoverArt::content_fingerprint(&bytes))
                                             })
                                         });
                                         (key, result)
@@ -579,7 +537,7 @@ impl AppModel {
                         }
                     }
 
-                    crate::provider::ProviderType::Local => {
+                    aulos_core::provider::ProviderType::Local => {
                         // Should not reach here — local uses reload_library_local.
                         unreachable!("Local provider should not use incremental reload");
                     }
@@ -633,7 +591,7 @@ impl AppModel {
     pub(super) fn reinit_mpd_providers(&mut self) -> Task<cosmic::Action<Message>> {
         // Remove existing MPD providers from registry
         self.registry
-            .remove_by_type(crate::provider::ProviderType::Mpd);
+            .remove_by_type(aulos_core::provider::ProviderType::Mpd);
         self.mpd_providers.clear();
 
         // Re-create from config
@@ -653,7 +611,7 @@ impl AppModel {
             .config
             .mpd_servers
             .iter()
-            .map(providers::MpdEditState::from_config)
+            .map(aulos_core::config::edit_state::MpdEditState::from_config)
             .collect();
         self.mpd_connection_status = vec![None; self.mpd_edit_states.len()];
 
@@ -663,7 +621,7 @@ impl AppModel {
         if self
             .registry
             .active()
-            .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local)
+            .is_some_and(|p| p.provider_type() == aulos_core::provider::ProviderType::Local)
         {
             self.reload_library()
         } else {
@@ -678,7 +636,7 @@ impl AppModel {
     pub(super) fn reinit_subsonic_providers(&mut self) -> Task<cosmic::Action<Message>> {
         // Remove existing Subsonic providers from registry
         self.registry
-            .remove_by_type(crate::provider::ProviderType::Subsonic);
+            .remove_by_type(aulos_core::provider::ProviderType::Subsonic);
         self.subsonic_providers.clear();
 
         // Re-create from config (clone first: iterating `&self.config...`
@@ -714,7 +672,7 @@ impl AppModel {
             .config
             .subsonic_servers
             .iter()
-            .map(providers::SubsonicEditState::from_config)
+            .map(aulos_core::config::edit_state::SubsonicEditState::from_config)
             .collect();
         self.subsonic_connection_status = vec![None; self.subsonic_edit_states.len()];
 
@@ -723,7 +681,7 @@ impl AppModel {
         let reload_task = if self
             .registry
             .active()
-            .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Subsonic)
+            .is_some_and(|p| p.provider_type() == aulos_core::provider::ProviderType::Subsonic)
         {
             self.reload_library()
         } else {
@@ -741,12 +699,9 @@ impl AppModel {
     pub(super) fn reinit_local_provider(&mut self) {
         self.music_dirs_present = self.config.music_dirs.iter().any(|d| d.is_dir());
         self.registry
-            .remove_by_type(crate::provider::ProviderType::Local);
+            .remove_by_type(aulos_core::provider::ProviderType::Local);
 
-        let db_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aulos")
-            .join("library.db");
+        let db_path = aulos_core::paths::library_db_path();
 
         if let Ok(db) = LibraryDb::open(&db_path) {
             let local = LocalProvider::new(db, self.config.music_dirs.clone());
@@ -825,7 +780,7 @@ impl AppModel {
         if self
             .player
             .as_ref()
-            .is_some_and(|p| p.state() == crate::player::PlaybackState::Playing)
+            .is_some_and(|p| p.state() == aulos_core::player::PlaybackState::Playing)
         {
             self.scrobble.on_playback(&track, self.playback_position);
         }
@@ -859,69 +814,6 @@ impl AppModel {
                 provider.scrobble(&song_id);
             }
         }
-    }
-
-    /// Incrementally merge new albums into `all_artists`, splitting each
-    /// album's primary-artist tag into individual collaborators when
-    /// `split_artist_tags` is enabled — one album can then contribute to
-    /// several `Artist` entries so browsing by any collaborator finds it.
-    /// Albums keep a single primary attribution (`album.artist`, set by
-    /// the provider) for the Albums view; only the artist index widens.
-    /// Only processes the `new_albums` slice (the batch that just arrived),
-    /// appending to existing artists or creating new ones. Avatars aren't
-    /// generated here at all — the grid/list/detail views build the
-    /// initials placeholder on the fly (see
-    /// `crate::views::common::artist_avatar`), and real photos are fetched
-    /// lazily by `load_artist_info_for_visible` when the Artists page is
-    /// opened or an artist is selected.
-    pub(super) fn merge_artists_from_batch(&mut self, new_albums: &[Album]) {
-        self.library_gen += 1;
-        // Build an index over the current artists list for O(1) lookup.
-        let mut index: HashMap<String, usize> = self
-            .all_artists
-            .iter()
-            .enumerate()
-            .map(|(i, a)| (a.name.clone(), i))
-            .collect();
-
-        let split_enabled = self.config.split_artist_tags;
-        let delimiters = self.config.artist_tag_delimiters.clone();
-
-        for album in new_albums {
-            let names: Vec<String> = if split_enabled {
-                crate::library::artist_tags::split(&album.artist, &delimiters)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            } else {
-                vec![album.artist.clone()]
-            };
-
-            for name in names {
-                if let Some(&idx) = index.get(&name) {
-                    self.all_artists[idx].push_album(album.clone());
-                } else {
-                    let idx = self.all_artists.len();
-                    index.insert(name.clone(), idx);
-                    self.all_artists
-                        .push(Artist::new(name.clone(), vec![album.clone()]));
-                }
-            }
-        }
-    }
-
-    /// Rebuild `all_artists` from scratch by re-running the batch-merge
-    /// aggregation (`merge_artists_from_batch`) over every album currently
-    /// in `all_albums`. This is the single aggregation path — used
-    /// whenever `split_artist_tags` or `artist_tag_delimiters` changes, so
-    /// the artist index picks up the new split rules immediately, without
-    /// a rescan.
-    pub(super) fn rebuild_all_artists(&mut self) {
-        self.all_artists.clear();
-        let albums = std::mem::take(&mut self.all_albums);
-        self.merge_artists_from_batch(&albums);
-        self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
-        self.all_albums = albums;
     }
 
     /// Start playback from the given queue at `start_index`.
@@ -997,15 +889,15 @@ impl AppModel {
         };
 
         let status = match self.player.as_ref().map(|p| p.state()) {
-            Some(PlaybackState::Playing) => crate::mpris::MprisStatus::Playing,
-            Some(PlaybackState::Paused) => crate::mpris::MprisStatus::Paused,
-            Some(PlaybackState::Stopped) | None => crate::mpris::MprisStatus::Stopped,
+            Some(PlaybackState::Playing) => aulos_core::mpris::MprisStatus::Playing,
+            Some(PlaybackState::Paused) => aulos_core::mpris::MprisStatus::Paused,
+            Some(PlaybackState::Stopped) | None => aulos_core::mpris::MprisStatus::Stopped,
         };
 
         let loop_mode = match self.config.repeat_mode {
-            crate::config::RepeatMode::None => crate::mpris::LoopMode::None,
-            crate::config::RepeatMode::All => crate::mpris::LoopMode::Playlist,
-            crate::config::RepeatMode::One => crate::mpris::LoopMode::Track,
+            aulos_core::config::RepeatMode::None => aulos_core::mpris::LoopMode::None,
+            aulos_core::config::RepeatMode::All => aulos_core::mpris::LoopMode::Playlist,
+            aulos_core::config::RepeatMode::One => aulos_core::mpris::LoopMode::Track,
         };
 
         let track = self.current_track.as_ref();
@@ -1019,7 +911,7 @@ impl AppModel {
         let can_go_next = self.player.as_ref().is_some_and(|p| p.has_next());
         let can_go_previous = self.player.as_ref().is_some_and(|p| p.has_previous());
 
-        handle.publish(crate::mpris::MprisSnapshot {
+        handle.publish(aulos_core::mpris::MprisSnapshot {
             status,
             title: track.map(|t| t.title.clone()).unwrap_or_default(),
             artist: track.map(|t| t.artist.clone()).unwrap_or_default(),
@@ -1045,110 +937,13 @@ impl AppModel {
         art_task
     }
 
-    pub(super) fn sort_tracks(&mut self, field: songs::SortField) {
-        self.library_gen += 1;
-        match field {
-            songs::SortField::Title => self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title)),
-            songs::SortField::Artist => self.all_tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            songs::SortField::Album => self.all_tracks.sort_by(|a, b| a.album.cmp(&b.album)),
-            songs::SortField::Duration => self.all_tracks.sort_by_key(|a| a.duration),
-        }
-    }
-
-    /// Recomputes the search-filtered library caches from `library_search`.
-    ///
-    /// Called whenever the query changes and whenever the underlying library
-    /// data is reloaded or re-sorted, so the filtered caches — and the index
-    /// maps that translate a filtered position back to its index in the
-    /// corresponding unfiltered vector — never go stale. When the query is
-    /// empty the caches are cleared; `view()` then reads directly from the
-    /// unfiltered vectors.
+    /// Recomputes the search-filtered library caches (see
+    /// `LibraryState::refresh_search`) and drops the album-filter memo,
+    /// since the albums slice the Albums page shows may have changed.
     pub(super) fn refresh_search_filter(&mut self) {
-        // The albums slice the Albums page shows may change: drop its memo.
         self.extras.album_cache.invalidate();
-        let query = self.library_search.trim().to_lowercase();
-
-        self.filtered_albums.clear();
-        self.filtered_album_map.clear();
-        self.filtered_artists.clear();
-        self.filtered_artist_map.clear();
-        self.filtered_tracks.clear();
-        self.filtered_track_map.clear();
-        self.filtered_playlists.clear();
-        self.filtered_playlist_map.clear();
-        self.filtered_genres.clear();
-        self.filtered_genre_map.clear();
-
-        // "Various Artists" can be hidden from the Artists view; that is
-        // implemented through the same filtered cache the search uses.
-        let hide_compilations = !self.config.show_compilations_in_artists;
-
-        if query.is_empty() {
-            // Only materialise a filtered artist copy when something is
-            // actually hidden; otherwise the view reads `all_artists`.
-            self.artists_filtered = false;
-            if hide_compilations
-                && self
-                    .all_artists
-                    .iter()
-                    .any(|a| crate::library::compilations::is_various_artists(&a.name))
-            {
-                self.artists_filtered = true;
-                for (i, artist) in self.all_artists.iter().enumerate() {
-                    if !crate::library::compilations::is_various_artists(&artist.name) {
-                        self.filtered_artists.push(artist.clone());
-                        self.filtered_artist_map.push(i);
-                    }
-                }
-            }
-            return;
-        }
-        self.artists_filtered = true;
-
-        self.search_index.ensure(
-            self.library_gen,
-            &self.all_albums,
-            &self.all_artists,
-            &self.all_tracks,
-        );
-
-        for (i, album) in self.all_albums.iter().enumerate() {
-            if self.search_index.album_matches(i, &query) {
-                self.filtered_albums.push(album.clone());
-                self.filtered_album_map.push(i);
-            }
-        }
-
-        for (i, artist) in self.all_artists.iter().enumerate() {
-            if self.search_index.artist_matches(i, &query)
-                && !(hide_compilations
-                    && crate::library::compilations::is_various_artists(&artist.name))
-            {
-                self.filtered_artists.push(artist.clone());
-                self.filtered_artist_map.push(i);
-            }
-        }
-
-        for (i, track) in self.all_tracks.iter().enumerate() {
-            if self.search_index.track_matches(i, &query) {
-                self.filtered_tracks.push(track.clone());
-                self.filtered_track_map.push(i);
-            }
-        }
-
-        for (i, playlist) in self.playlists.iter().enumerate() {
-            if playlist.name.to_lowercase().contains(&query) {
-                self.filtered_playlists.push(playlist.clone());
-                self.filtered_playlist_map.push(i);
-            }
-        }
-
-        for (i, genre) in self.all_genres.iter().enumerate() {
-            if genre.to_lowercase().contains(&query) {
-                self.filtered_genres.push(genre.clone());
-                self.filtered_genre_map.push(i);
-            }
-        }
+        self.library
+            .refresh_search(&self.playlists, !self.config.show_compilations_in_artists);
     }
 
     /// Every track under the folder view's current directory, recursively,
@@ -1159,7 +954,7 @@ impl AppModel {
             .tree()
             .tracks_in(&dir, true)
             .into_iter()
-            .filter_map(|i| self.all_tracks.get(i).cloned())
+            .filter_map(|i| self.library.tracks.get(i).cloned())
             .collect()
     }
 
@@ -1207,15 +1002,6 @@ impl AppModel {
         }
     }
 
-    /// Lightweight album clone (cover source + first track) for the album
-    /// whose cover key is built from `artist` and `album_name`.
-    pub(super) fn cover_hint_for(&self, artist: &str, album_name: &str) -> Option<Album> {
-        self.all_albums
-            .iter()
-            .find(|a| a.artist == artist && a.name == album_name)
-            .map(Album::cover_hint)
-    }
-
     /// Load full-size cover bytes for an album key into the LRU on a
     /// blocking thread, unless they are cached / in flight / known absent.
     /// Replies with `Message::CoverBytesLoaded`. `hint` is only evaluated
@@ -1256,8 +1042,8 @@ impl AppModel {
         artist: &str,
         album_name: &str,
     ) -> Task<cosmic::Action<Message>> {
-        let key = crate::library::CoverArt::album_key(artist, album_name);
-        self.request_cover_bytes(key, |m| m.cover_hint_for(artist, album_name))
+        let key = aulos_core::library::CoverArt::album_key(artist, album_name);
+        self.request_cover_bytes(key, |m| m.library.cover_hint_for(artist, album_name))
     }
 
     /// Trigger blur + accent-colour computation for the current track if
@@ -1282,14 +1068,9 @@ impl AppModel {
             }
         };
 
-        // Use album_artist to match how albums store cover art.
-        // Falls back to track.artist when album_artist is empty.
-        let artist = if track.album_artist.is_empty() {
-            &track.artist
-        } else {
-            &track.album_artist
-        };
-        let key = crate::library::CoverArt::album_key(artist, &track.album);
+        // Keyed by album artist (falling back to the track artist) to match
+        // how albums store cover art.
+        let key = track.cover_key();
 
         // Already computed and cached for this album — nothing to do.
         if self.blurred_cover_key.as_ref() == Some(&key) {
@@ -1315,7 +1096,7 @@ impl AppModel {
             None => {
                 self.blurred_cover_key = None; // ensure retry on next bytes-ready event
                 // Do NOT clear blurred_cover — keep the old blur visible.
-                let artist = artist.to_string();
+                let artist = track.grouping_artist().to_string();
                 let album = track.album.clone();
                 return self.request_cover_bytes_for(&artist, &album);
             }
@@ -1339,11 +1120,11 @@ impl AppModel {
             // working set) regardless of source resolution, so it adds no
             // meaningful overhead next to the blur/resize work.
             let (blurred, accent, cover_large) = tokio::task::spawn_blocking(move || {
-                let blurred = crate::views::now_playing::blur::compute_blurred_cover(&bytes);
-                let accent = crate::library::palette::extract(&bytes);
-                let cover_large = crate::library::CoverArt::decode_thumbnail(
+                let blurred = aulos_core::library::CoverArt::blurred_backdrop(&bytes);
+                let accent = aulos_core::library::palette::extract(&bytes);
+                let cover_large = aulos_core::library::CoverArt::decode_thumbnail(
                     &bytes,
-                    crate::library::CoverArt::EXPANDED_COVER_MAX_DIM,
+                    aulos_core::library::CoverArt::EXPANDED_COVER_MAX_DIM,
                 );
                 (blurred, accent, cover_large)
             })
@@ -1393,16 +1174,16 @@ impl AppModel {
                     // them, so there is no reason to hop back to `.await`
                     // in between.
                     let decoded = tokio::task::spawn_blocking(move || {
-                        let bytes = HTTP_CLIENT
+                        let bytes = aulos_core::online::HTTP_CLIENT
                             .clone()
                             .get(&fetch_url)
                             .send()
                             .ok()
                             .and_then(|r| r.bytes().ok())
                             .map(|b| b.to_vec())?;
-                        crate::library::CoverArt::decode_thumbnail(
+                        aulos_core::library::CoverArt::decode_thumbnail(
                             &bytes,
-                            crate::library::CoverArt::ONLINE_ICON_MAX_DIM,
+                            aulos_core::library::CoverArt::ONLINE_ICON_MAX_DIM,
                         )
                     })
                     .await
@@ -1427,7 +1208,7 @@ impl AppModel {
         // instead of being played as audio.
         let (playlist_files, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
             .into_iter()
-            .partition(|p| crate::library::m3u::is_playlist_path(p));
+            .partition(|p| aulos_core::library::m3u::is_playlist_path(p));
         let import_task = self.import_playlist_files(playlist_files);
         if paths.is_empty() {
             return import_task;
@@ -1471,13 +1252,14 @@ impl AppModel {
         let Some(provider) = self.registry.active_shared() else {
             return Task::none();
         };
-        let is_subsonic = provider.provider_type() == crate::provider::ProviderType::Subsonic;
+        let is_subsonic = provider.provider_type() == aulos_core::provider::ProviderType::Subsonic;
         if !is_subsonic && !self.config.fetch_artist_info {
             return Task::none();
         }
 
         let names: Vec<String> = self
-            .all_artists
+            .library
+            .artists
             .iter()
             .map(|a| a.name.clone())
             .filter(|name| self.artist_info_wanted(name))
@@ -1498,7 +1280,7 @@ impl AppModel {
         let Some(provider) = self.registry.active_shared() else {
             return Task::none();
         };
-        let is_subsonic = provider.provider_type() == crate::provider::ProviderType::Subsonic;
+        let is_subsonic = provider.provider_type() == aulos_core::provider::ProviderType::Subsonic;
         if !is_subsonic && !self.config.fetch_artist_info {
             return Task::none();
         }
@@ -1520,7 +1302,7 @@ impl AppModel {
     /// Marks `names` pending and dispatches one `cosmic::task::future`
     /// per artist, each acquiring `artist_info_semaphore` before its
     /// blocking resolve (cache hit or network fetch) — mirroring
-    /// `crate::convert::run_job`'s acquire-then-`spawn_blocking` pattern
+    /// `aulos_core::convert::run_job`'s acquire-then-`spawn_blocking` pattern
     /// — so the actual concurrency bound lives in one shared semaphore
     /// rather than in how many tasks happen to be dispatched at once.
     fn dispatch_artist_info_fetch(
@@ -1546,12 +1328,12 @@ impl AppModel {
                 let provider_id = provider_id.clone();
                 cosmic::task::future(async move {
                     let permit = semaphore.acquire_owned().await.ok();
-                    let now = super::now_epoch();
+                    let now = aulos_core::unix_now();
                     let name_for_panic = name.clone();
                     let outcome = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         if is_subsonic {
-                            crate::library::artist_info::resolve_via_provider(
+                            aulos_core::library::artist_info::resolve_via_provider(
                                 &store,
                                 provider.as_ref(),
                                 &provider_id,
@@ -1559,12 +1341,12 @@ impl AppModel {
                                 now,
                             )
                         } else {
-                            crate::library::artist_info::resolve_via_agents(&store, &name, now)
+                            aulos_core::library::artist_info::resolve_via_agents(&store, &name, now)
                         }
                     })
                     .await
                     .unwrap_or_else(|_| {
-                        crate::library::artist_info::ArtistInfoOutcome::empty(name_for_panic)
+                        aulos_core::library::artist_info::ArtistInfoOutcome::empty(name_for_panic)
                     });
                     cosmic::Action::App(Message::ArtistInfoLoaded(outcome))
                 })
@@ -1572,34 +1354,5 @@ impl AppModel {
             .collect();
 
         Task::batch(tasks)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_duration_live_track_position_is_never_clamped() {
-        // A live radio track always reports `duration: Duration::ZERO`
-        // (see `radio_page.rs`) — its ever-increasing playback position
-        // must never get clamped back down to zero, or the UI would show
-        // 0:00 forever despite the stream actually playing.
-        let position = Duration::from_secs(3600);
-        assert_eq!(clamp_display_position(position, Duration::ZERO), position);
-    }
-
-    #[test]
-    fn known_duration_clamps_overshoot() {
-        let duration = Duration::from_secs(180);
-        let position = Duration::from_secs(181);
-        assert_eq!(clamp_display_position(position, duration), duration);
-    }
-
-    #[test]
-    fn known_duration_leaves_in_range_position_untouched() {
-        let duration = Duration::from_secs(180);
-        let position = Duration::from_secs(90);
-        assert_eq!(clamp_display_position(position, duration), position);
     }
 }

@@ -1,28 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::helpers::clamp_display_position;
 use super::message::PlaylistOp;
-use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID, parse_delimiters_input};
-use crate::config::ReplayGainMode;
-use crate::fl;
-use crate::library::{LibraryScanner, LyricsProvider};
-use crate::player::{ActiveBackend, PlaybackState};
-use crate::views::providers;
+use super::{AppModel, ContextPage, Message, Page, SEARCH_INPUT_ID};
+use aulos_core::config::ReplayGainMode;
+use aulos_core::fl;
+use aulos_core::library::artist_tags::parse_delimiters_input;
+use aulos_core::library::search::{SEARCH_DEBOUNCE_MS, is_latest_generation};
+use aulos_core::library::{LibraryScanner, LyricsProvider};
+use aulos_core::player::{ActiveBackend, PlaybackState, clamp_display_position};
+use aulos_core::tagger::taggable_tracks;
 use cosmic::Application;
 use cosmic::prelude::*;
 use cosmic::widget::{self, nav_bar};
 use std::path::PathBuf;
 use std::time::Duration;
-
-/// The editable (local-file) tracks of an album, cloned for the tag editor.
-fn taggable_tracks(tracks: &[crate::library::Track]) -> Vec<crate::library::Track> {
-    tracks
-        .iter()
-        .filter(|track| crate::tagger::is_taggable(track))
-        .cloned()
-        .collect()
-}
 
 impl AppModel {
     pub(super) fn handle_message(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -59,25 +51,22 @@ impl AppModel {
 
             // -- Library search --
             Message::LibrarySearchChanged(query) => {
-                self.library_search = query;
-                self.search_debounce_gen += 1;
-                if self.library_search.trim().is_empty() {
+                self.library.search_query = query;
+                self.library.search_debounce_gen += 1;
+                if self.library.search_query.trim().is_empty() {
                     // Clearing is cheap and should feel instant.
                     self.refresh_search_filter();
                 } else {
-                    let pending = self.search_debounce_gen;
+                    let pending = self.library.search_debounce_gen;
                     return cosmic::task::future(async move {
-                        tokio::time::sleep(Duration::from_millis(
-                            super::search_index::SEARCH_DEBOUNCE_MS,
-                        ))
-                        .await;
+                        tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
                         cosmic::Action::App(Message::LibrarySearchDebounced(pending))
                     });
                 }
             }
 
             Message::LibrarySearchDebounced(pending) => {
-                if super::search_index::is_latest_generation(pending, self.search_debounce_gen) {
+                if is_latest_generation(pending, self.library.search_debounce_gen) {
                     self.refresh_search_filter();
                 }
             }
@@ -88,12 +77,12 @@ impl AppModel {
                     return cosmic::widget::text_input::focus(widget::Id::new(SEARCH_INPUT_ID))
                         .map(cosmic::Action::App);
                 }
-                self.library_search.clear();
+                self.library.search_query.clear();
                 self.refresh_search_filter();
             }
 
             Message::ClearLibrarySearch => {
-                self.library_search.clear();
+                self.library.search_query.clear();
                 self.search_active = false;
                 self.refresh_search_filter();
             }
@@ -106,9 +95,9 @@ impl AppModel {
             Message::ScanLibrary => {
                 if let Some(provider) = self.registry.active_shared() {
                     match provider.provider_type() {
-                        crate::provider::ProviderType::Local => {
+                        aulos_core::provider::ProviderType::Local => {
                             self.library_scanning = true;
-                            let generation = self.begin_reload_generation();
+                            let generation = self.library.begin_reload_generation();
                             let provider_id = provider.id().to_string();
                             return cosmic::task::future(async move {
                                 let count = tokio::task::spawn_blocking(move || {
@@ -126,12 +115,12 @@ impl AppModel {
                                 })
                             });
                         }
-                        crate::provider::ProviderType::Subsonic => {
+                        aulos_core::provider::ProviderType::Subsonic => {
                             // Subsonic providers connect on demand — no idle subscription.
                             // Trigger a library reload directly (sets library_scanning).
                             return self.reload_library();
                         }
-                        crate::provider::ProviderType::Mpd => {
+                        aulos_core::provider::ProviderType::Mpd => {
                             // MPD providers: don't scan at startup; the idle
                             // subscription fires MpdConnected which triggers reload.
                             tracing::info!(
@@ -155,7 +144,7 @@ impl AppModel {
                 tracing::info!("Library scan complete: {count} tracks updated");
                 // Only reload if tracks actually changed to avoid unnecessary
                 // view rebuilds (which reset scroll position).
-                if count > 0 || self.all_tracks.is_empty() {
+                if count > 0 || self.library.tracks.is_empty() {
                     return self.reload_library();
                 }
             }
@@ -173,14 +162,12 @@ impl AppModel {
                     return Task::none();
                 }
                 self.library_scanning = false;
-                self.all_tracks = tracks;
-                self.all_albums = albums;
+                self.library.replace_loaded(tracks, albums, &self.config);
                 // Keep the existing handle for covers whose content did not
                 // change so iced's raster cache never re-uploads them.
                 self.reuse_unchanged_cover_handles(&mut cover_images, &cover_fingerprints);
                 self.cover_images = cover_images;
                 self.cover_fingerprints = cover_fingerprints;
-                self.rebuild_all_artists();
                 // Full-size bytes are loaded lazily; drop any stale ones.
                 self.cover_art_bytes.clear();
                 // Rebuild the folder tree only if it's already in use —
@@ -188,9 +175,10 @@ impl AppModel {
                 if self.folder_state.is_populated()
                     || self.nav.active_data::<Page>() == Some(&Page::Folders)
                 {
-                    self.folder_state
-                        .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
-                    self.folder_tree_gen = Some(self.library_gen);
+                    self.folder_state.set_tree(
+                        aulos_core::library::folder_tree::FolderTree::build(&self.library.tracks),
+                    );
+                    self.folder_tree_gen = Some(self.library.generation());
                 }
                 self.refresh_search_filter();
                 // Re-trigger blur now that cover art bytes are available
@@ -210,12 +198,7 @@ impl AppModel {
                     return Task::none();
                 }
 
-                let refreshing_loaded_library = self
-                    .library_reload_staging
-                    .as_ref()
-                    .is_some_and(|s| s.generation == generation);
-
-                if refreshing_loaded_library {
+                if self.library.is_staging(generation) {
                     // Non-destructive refresh: accumulate into the staging
                     // buffer while the previously loaded library stays
                     // fully visible. Reuse the currently-displayed handle
@@ -229,21 +212,14 @@ impl AppModel {
                             None
                         };
                         let handle = reused.or_else(|| cover_images.get(&key).cloned());
-                        if let Some(staging) = self.library_reload_staging.as_mut() {
+                        if let Some(staging) = self.cover_staging.as_mut() {
                             if let Some(handle) = handle {
                                 staging.cover_images.insert(key.clone(), handle);
                             }
                             staging.cover_fingerprints.insert(key, fingerprint);
                         }
                     }
-                    if let Some(staging) = self.library_reload_staging.as_mut() {
-                        for album in &albums {
-                            for track in &album.tracks {
-                                staging.tracks.push(track.clone());
-                            }
-                        }
-                        staging.albums.extend(albums);
-                    }
+                    self.library.stage_albums(albums);
                     return Task::none();
                 }
 
@@ -251,21 +227,10 @@ impl AppModel {
                 // this reload started, so there is nothing to flash away
                 // from -- populate the visible fields directly as batches
                 // arrive.
-                for album in &albums {
-                    for track in &album.tracks {
-                        self.all_tracks.push(track.clone());
-                    }
-                    self.all_albums.push(album.clone());
-                }
+                let needs_refilter = self.library.append_batch(&albums, &self.config);
                 self.cover_images.extend(cover_images);
                 self.cover_fingerprints.extend(cover_fingerprints);
-                self.merge_artists_from_batch(&albums);
-                if !self.library_search.trim().is_empty()
-                    || (!self.config.show_compilations_in_artists
-                        && albums
-                            .iter()
-                            .any(|a| crate::library::compilations::is_various_artists(&a.artist)))
-                {
+                if needs_refilter {
                     self.refresh_search_filter();
                 }
 
@@ -283,31 +248,24 @@ impl AppModel {
                 }
                 self.library_scanning = false;
 
-                if let Some(staging) = self.library_reload_staging.take()
-                    && staging.generation == generation
+                // Swaps a staged refresh in atomically (the previously
+                // displayed library was never cleared, so there is no
+                // empty-view flash between old and new data) and runs the
+                // final sort.
+                let staged_cover = self.cover_staging.take();
+                if self.library.complete_reload(generation, &self.config)
+                    && let Some(staging) = staged_cover
                 {
-                    // Swap the staged refresh in atomically -- the
-                    // previously displayed library was never cleared, so
-                    // there is no empty-view flash between old and new data.
-                    self.all_tracks = staging.tracks;
-                    self.all_albums = staging.albums;
                     self.cover_images = staging.cover_images;
                     self.cover_fingerprints = staging.cover_fingerprints;
                     self.cover_art_bytes.clear();
-                    self.rebuild_all_artists();
                 }
-
-                // Final sort
-                self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
-                self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
-                self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
-                self.library_gen += 1;
                 self.refresh_search_filter();
                 tracing::info!(
                     "Library load complete: {} albums, {} tracks, {} artists",
-                    self.all_albums.len(),
-                    self.all_tracks.len(),
-                    self.all_artists.len()
+                    self.library.albums.len(),
+                    self.library.tracks.len(),
+                    self.library.artists.len()
                 );
                 // Re-trigger blur in case the current track's cover
                 // changed as part of a staged refresh swap.
@@ -332,10 +290,10 @@ impl AppModel {
 
                 // Run incremental scan on the changed paths in a background task.
                 if let Some(provider) = self.registry.active_shared()
-                    && provider.provider_type() == crate::provider::ProviderType::Local
+                    && provider.provider_type() == aulos_core::provider::ProviderType::Local
                 {
                     self.library_scanning = true;
-                    let generation = self.begin_reload_generation();
+                    let generation = self.library.begin_reload_generation();
                     let provider_id = provider.id().to_string();
                     return cosmic::task::future(async move {
                         let count = tokio::task::spawn_blocking(move || {
@@ -345,12 +303,9 @@ impl AppModel {
                             // connection for the scan, or re-use the provider's scan.
                             // Since LocalProvider::sync_library calls LibraryScanner::scan,
                             // we open the DB directly for scan_paths.
-                            let db_path = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("aulos")
-                                .join("library.db");
+                            let db_path = aulos_core::paths::library_db_path();
 
-                            match crate::library::LibraryDb::open(&db_path) {
+                            match aulos_core::library::LibraryDb::open(&db_path) {
                                 Ok(db) => {
                                     LibraryScanner::scan_paths(&db, &paths).unwrap_or_else(|e| {
                                         tracing::error!("scan_paths failed: {e}");
@@ -390,8 +345,8 @@ impl AppModel {
                         // still has loaded.
                         let result = if !player.queue_is_empty() {
                             player.resume_queue()
-                        } else if !self.all_tracks.is_empty() {
-                            player.set_queue(self.all_tracks.clone(), 0)
+                        } else if !self.library.tracks.is_empty() {
+                            player.set_queue(self.library.tracks.clone(), 0)
                         } else {
                             Ok(None)
                         };
@@ -440,7 +395,7 @@ impl AppModel {
             Message::PreviousTrack => {
                 if let Some(player) = &mut self.player {
                     match player.previous(self.playback_position) {
-                        Ok(Some(crate::player::PreviousResult::Restarted)) => {
+                        Ok(Some(aulos_core::player::PreviousResult::Restarted)) => {
                             self.playback_position = Duration::ZERO;
                             // The MPD backend's `seek` only updates its cached
                             // position; the server needs the real command.
@@ -459,7 +414,7 @@ impl AppModel {
                             };
                             return Task::batch([seek_task, self.publish_mpris()]);
                         }
-                        Ok(Some(crate::player::PreviousResult::Track(track))) => {
+                        Ok(Some(aulos_core::player::PreviousResult::Track(track))) => {
                             self.current_track = Some(track);
                             self.playback_position = Duration::ZERO;
                             return self.on_track_changed();
@@ -787,17 +742,17 @@ impl AppModel {
             Message::QueueRemove(idx) => {
                 if let Some(player) = &mut self.player {
                     match player.queue_remove(idx) {
-                        Ok(crate::player::QueueEditOutcome::NowPlaying(track)) => {
+                        Ok(aulos_core::player::QueueEditOutcome::NowPlaying(track)) => {
                             self.current_track = Some(track);
                             self.playback_position = Duration::ZERO;
                             return self.on_track_changed();
                         }
-                        Ok(crate::player::QueueEditOutcome::Stopped) => {
+                        Ok(aulos_core::player::QueueEditOutcome::Stopped) => {
                             self.current_track = None;
                             self.playback_position = Duration::ZERO;
                             return self.publish_mpris();
                         }
-                        Ok(crate::player::QueueEditOutcome::Unchanged) => {}
+                        Ok(aulos_core::player::QueueEditOutcome::Unchanged) => {}
                         Err(e) => tracing::error!("Queue remove failed: {e}"),
                     }
                 }
@@ -862,7 +817,7 @@ impl AppModel {
             }
 
             Message::QueueFrom { source, next } => {
-                let tracks = self.queue_source_tracks(source);
+                let tracks = source.resolve(&self.library, &self.playlists);
                 return self.handle_message(if next {
                     Message::PlayNext(tracks)
                 } else {
@@ -872,7 +827,7 @@ impl AppModel {
 
             // -- Track selection --
             Message::PlayTrackIndex(index) => {
-                return self.play_track_list(self.all_tracks.clone(), index);
+                return self.play_track_list(self.library.tracks.clone(), index);
             }
 
             Message::Folders(msg) => match msg {
@@ -892,11 +847,11 @@ impl AppModel {
                     if let Some(position) = direct.iter().position(|&i| i == index) {
                         let tracks: Vec<_> = direct
                             .iter()
-                            .filter_map(|&i| self.all_tracks.get(i).cloned())
+                            .filter_map(|&i| self.library.tracks.get(i).cloned())
                             .collect();
                         return self.play_track_list(tracks, position);
                     }
-                    return self.play_track_list(self.all_tracks.clone(), index);
+                    return self.play_track_list(self.library.tracks.clone(), index);
                 }
                 crate::views::folders::FolderMessage::PlayFolder => {
                     let tracks = self.current_folder_tracks();
@@ -948,19 +903,19 @@ impl AppModel {
             },
 
             Message::PlayAlbum(album_idx) => {
-                if let Some(album) = self.all_albums.get(album_idx) {
+                if let Some(album) = self.library.albums.get(album_idx) {
                     return self.play_track_list(album.tracks.clone(), 0);
                 }
             }
 
             Message::PlayAlbumTrack(album_idx, track_idx) => {
-                if let Some(album) = self.all_albums.get(album_idx) {
+                if let Some(album) = self.library.albums.get(album_idx) {
                     return self.play_track_list(album.tracks.clone(), track_idx);
                 }
             }
 
             Message::PlayArtistAlbum(artist_idx, album_idx) => {
-                if let Some(artist) = self.all_artists.get(artist_idx)
+                if let Some(artist) = self.library.artists.get(artist_idx)
                     && let Some(album) = artist.albums.get(album_idx)
                 {
                     return self.play_track_list(album.tracks.clone(), 0);
@@ -968,7 +923,7 @@ impl AppModel {
             }
 
             Message::PlayArtistTrack(artist_idx, album_idx, track_idx) => {
-                if let Some(artist) = self.all_artists.get(artist_idx)
+                if let Some(artist) = self.library.artists.get(artist_idx)
                     && let Some(album) = artist.albums.get(album_idx)
                 {
                     return self.play_track_list(album.tracks.clone(), track_idx);
@@ -976,14 +931,15 @@ impl AppModel {
             }
 
             Message::ShowAlbumProperties(album_idx) => {
-                if let Some(album) = self.all_albums.get(album_idx).cloned() {
+                if let Some(album) = self.library.albums.get(album_idx).cloned() {
                     return self.open_album_properties(album);
                 }
             }
 
             Message::ShowArtistAlbumProperties(artist_idx, album_idx) => {
                 if let Some(album) = self
-                    .all_artists
+                    .library
+                    .artists
                     .get(artist_idx)
                     .and_then(|artist| artist.albums.get(album_idx))
                     .cloned()
@@ -995,14 +951,15 @@ impl AppModel {
             Message::TagTrack(track, action) => return self.open_in_tagger(vec![track], action),
 
             Message::TagAlbum(album_idx, action) => {
-                if let Some(album) = self.all_albums.get(album_idx) {
+                if let Some(album) = self.library.albums.get(album_idx) {
                     return self.open_in_tagger(taggable_tracks(&album.tracks), action);
                 }
             }
 
             Message::TagArtistAlbum(artist_idx, album_idx, action) => {
                 if let Some(album) = self
-                    .all_artists
+                    .library
+                    .artists
                     .get(artist_idx)
                     .and_then(|artist| artist.albums.get(album_idx))
                 {
@@ -1025,7 +982,7 @@ impl AppModel {
             Message::SelectArtist(idx) => {
                 self.selected_artist = Some(idx);
                 self.artist_bio_expanded = false;
-                if let Some(name) = self.all_artists.get(idx).map(|a| a.name.clone()) {
+                if let Some(name) = self.library.artists.get(idx).map(|a| a.name.clone()) {
                     return self.load_artist_info_for_selected(&name);
                 }
             }
@@ -1083,7 +1040,7 @@ impl AppModel {
 
             Message::SortSongs(field) => {
                 self.songs_sort = field;
-                self.sort_tracks(field);
+                self.library.sort_tracks(field);
                 self.refresh_search_filter();
             }
 
@@ -1277,7 +1234,7 @@ impl AppModel {
                     if self.preset_manager.is_builtin_name(name) {
                         tracing::warn!("Cannot overwrite built-in preset '{}'", name);
                     } else {
-                        let preset = crate::player::equalizer::EqPresetData {
+                        let preset = aulos_core::player::equalizer::EqPresetData {
                             name: name.clone(),
                             bands: {
                                 let mut b = [0.0_f32; 10];
@@ -1289,7 +1246,7 @@ impl AppModel {
                                 b
                             },
                             preamp: self.config.equalizer_preamp,
-                            source: crate::player::equalizer::PresetSource::Custom,
+                            source: aulos_core::player::equalizer::PresetSource::Custom,
                         };
                         if let Err(e) = self.preset_manager.save_preset(&preset) {
                             tracing::error!("Failed to save preset: {}", e);
@@ -1307,7 +1264,7 @@ impl AppModel {
                 } else if self.preset_manager.is_builtin_name(&name) {
                     tracing::warn!("Cannot use the name of a built-in preset: '{}'", name);
                 } else {
-                    let preset = crate::player::equalizer::EqPresetData {
+                    let preset = aulos_core::player::equalizer::EqPresetData {
                         name: name.clone(),
                         bands: {
                             let mut b = [0.0_f32; 10];
@@ -1317,7 +1274,7 @@ impl AppModel {
                             b
                         },
                         preamp: self.config.equalizer_preamp,
-                        source: crate::player::equalizer::PresetSource::Custom,
+                        source: aulos_core::player::equalizer::PresetSource::Custom,
                     };
                     if let Err(e) = self.preset_manager.save_preset(&preset) {
                         tracing::error!("Failed to save preset: {}", e);
@@ -1372,14 +1329,11 @@ impl AppModel {
                 }
                 self.autoeq_loading = true;
 
-                let cache_dir = dirs::cache_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("aulos")
-                    .join("autoeq");
+                let cache_dir = aulos_core::paths::cache_dir().join("autoeq");
                 let timeout = std::time::Duration::from_secs(30);
 
                 return cosmic::task::future(async move {
-                    let result = match crate::autoeq::AutoEQManager::new(cache_dir, timeout) {
+                    let result = match aulos_core::autoeq::AutoEQManager::new(cache_dir, timeout) {
                         Ok(mut manager) => manager.fetch_index().await.map_err(|e| e.to_string()),
                         Err(e) => Err(e.to_string()),
                     };
@@ -1411,14 +1365,11 @@ impl AppModel {
 
                 tracing::info!("Fetching AutoEQ profile: {} ({})", name, path);
 
-                let cache_dir = dirs::cache_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("aulos")
-                    .join("autoeq");
+                let cache_dir = aulos_core::paths::cache_dir().join("autoeq");
                 let timeout = std::time::Duration::from_secs(30);
 
                 return cosmic::task::future(async move {
-                    let result = match crate::autoeq::AutoEQManager::new(cache_dir, timeout) {
+                    let result = match aulos_core::autoeq::AutoEQManager::new(cache_dir, timeout) {
                         Ok(mut manager) => manager
                             .fetch_profile(&path)
                             .await
@@ -1560,7 +1511,7 @@ impl AppModel {
                 if artist_split_changed {
                     self.artist_tag_delimiters_input =
                         self.config.artist_tag_delimiters.join(" | ");
-                    self.rebuild_all_artists();
+                    self.library.rebuild_artists(&self.config);
                     self.refresh_search_filter();
                 }
             }
@@ -1568,7 +1519,7 @@ impl AppModel {
             Message::SetSplitArtistTags(enabled) => {
                 self.config.split_artist_tags = enabled;
                 self.save_config();
-                self.rebuild_all_artists();
+                self.library.rebuild_artists(&self.config);
                 self.refresh_search_filter();
             }
 
@@ -1593,11 +1544,11 @@ impl AppModel {
                 self.acoustid_user_key_saved = None;
                 return cosmic::task::future(async move {
                     let stored = tokio::task::spawn_blocking(move || {
-                        let entry = crate::tagger::ACOUSTID_USER_KEY_ENTRY;
+                        let entry = aulos_core::tagger::ACOUSTID_USER_KEY_ENTRY;
                         if key.is_empty() {
-                            crate::credentials::delete_password(entry).map(|()| false)
+                            aulos_core::credentials::delete_password(entry).map(|()| false)
                         } else {
-                            crate::credentials::store_password(entry, &key).map(|()| true)
+                            aulos_core::credentials::store_password(entry, &key).map(|()| true)
                         }
                     })
                     .await
@@ -1636,18 +1587,19 @@ impl AppModel {
                 self.artist_tag_delimiters_input = text.clone();
                 self.config.artist_tag_delimiters = parse_delimiters_input(&text);
                 self.save_config();
-                self.rebuild_all_artists();
+                self.library.rebuild_artists(&self.config);
                 self.refresh_search_filter();
             }
 
             Message::ResetArtistTagDelimiters => {
-                self.config.artist_tag_delimiters = crate::library::artist_tags::DEFAULT_DELIMITERS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                self.config.artist_tag_delimiters =
+                    aulos_core::library::artist_tags::DEFAULT_DELIMITERS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                 self.artist_tag_delimiters_input = self.config.artist_tag_delimiters.join(" | ");
                 self.save_config();
-                self.rebuild_all_artists();
+                self.library.rebuild_artists(&self.config);
                 self.refresh_search_filter();
             }
 
@@ -1667,9 +1619,9 @@ impl AppModel {
                     self.recreate_player();
 
                     // Clear current library data and reload from new provider
-                    self.all_tracks.clear();
-                    self.all_albums.clear();
-                    self.all_artists.clear();
+                    self.library.tracks.clear();
+                    self.library.albums.clear();
+                    self.library.artists.clear();
                     self.cover_images.clear();
                     self.cover_fingerprints.clear();
                     self.cover_art_bytes.clear();
@@ -1684,8 +1636,9 @@ impl AppModel {
             // -- MPD server configuration --
             Message::MpdAddServer => {
                 let idx = self.mpd_edit_states.len();
-                self.mpd_edit_states
-                    .push(providers::MpdEditState::new_default(idx));
+                self.mpd_edit_states.push(
+                    aulos_core::config::edit_state::MpdEditState::new_default(idx),
+                );
                 self.mpd_connection_status.push(None);
             }
 
@@ -1719,7 +1672,7 @@ impl AppModel {
                     // Store password to keyring immediately on save so it is
                     // never left as plaintext in the config file.
                     if let Some(pw) = entry.password.as_deref().filter(|p| !p.is_empty()) {
-                        match crate::credentials::store_password(&entry.id, pw) {
+                        match aulos_core::credentials::store_password(&entry.id, pw) {
                             Ok(()) => {
                                 entry.password_in_keyring = true;
                                 entry.password = None;
@@ -1887,20 +1840,21 @@ impl AppModel {
                 if self.registry.active_id() != provider_id {
                     return Task::none();
                 }
-                match crate::app::subscriptions::idle_action(subsystem) {
-                    crate::app::subscriptions::IdleAction::ReloadLibrary => {
+                use aulos_core::provider::mpd_events::{IdleAction, idle_action};
+                match idle_action(subsystem) {
+                    IdleAction::ReloadLibrary => {
                         tracing::debug!(
                             "MPD idle event from provider '{provider_id}': reloading library"
                         );
                         return self.reload_library();
                     }
-                    crate::app::subscriptions::IdleAction::ReloadPlaylists => {
+                    IdleAction::ReloadPlaylists => {
                         tracing::debug!(
                             "MPD idle event from provider '{provider_id}': reloading playlists"
                         );
                         return self.load_playlists();
                     }
-                    crate::app::subscriptions::IdleAction::None => {}
+                    IdleAction::None => {}
                 }
             }
 
@@ -1908,7 +1862,7 @@ impl AppModel {
             Message::SubsonicAddServer => {
                 let idx = self.subsonic_edit_states.len();
                 self.subsonic_edit_states
-                    .push(providers::SubsonicEditState::new_default(idx));
+                    .push(aulos_core::config::edit_state::SubsonicEditState::new_default(idx));
                 self.subsonic_connection_status.push(None);
             }
 
@@ -1948,7 +1902,7 @@ impl AppModel {
                     // Store password to keyring immediately on save so it is
                     // never left as plaintext in the config file.
                     if let Some(pw) = entry.password.as_deref().filter(|p| !p.is_empty()) {
-                        match crate::credentials::store_password(&entry.id, pw) {
+                        match aulos_core::credentials::store_password(&entry.id, pw) {
                             Ok(()) => {
                                 entry.password_in_keyring = true;
                                 entry.password = None;
@@ -2129,14 +2083,10 @@ impl AppModel {
                 // Guard against stale results: only apply if this blur is still
                 // for the current track's album. A slow computation may finish
                 // after the user has already moved to a different track.
-                let current_key = self.current_track.as_ref().map(|t| {
-                    let artist = if t.album_artist.is_empty() {
-                        &t.artist
-                    } else {
-                        &t.album_artist
-                    };
-                    crate::library::CoverArt::album_key(artist, &t.album)
-                });
+                let current_key = self
+                    .current_track
+                    .as_ref()
+                    .map(aulos_core::library::Track::cover_key);
                 if current_key.as_ref() == Some(&key) {
                     // Blur only applies on success — a failed decode leaves
                     // the previous blur/black base showing and
@@ -2185,7 +2135,7 @@ impl AppModel {
             Message::NextVisualizerPreset => {
                 let _ = self
                     .viz_cmd_tx
-                    .send(crate::views::now_playing::visualizer::VizCommand::NextPreset);
+                    .send(aulos_core::visualizer::VizCommand::NextPreset);
             }
 
             #[cfg(feature = "visualizer")]
@@ -2289,11 +2239,11 @@ impl AppModel {
                     // installed since the last one. The list on screen stays
                     // as is until the result lands.
                     let scan = cosmic::task::future(async move {
-                        let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
+                        let dirs = aulos_core::visualizer::presets::preset_search_dirs(
                             dirs::data_dir().map(|d| d.join("lactea").join("presets")),
                         );
                         let entries = tokio::task::spawn_blocking(move || {
-                            crate::views::now_playing::visualizer::scan_presets(&dirs)
+                            aulos_core::visualizer::presets::scan_presets(&dirs)
                         })
                         .await
                         .unwrap_or_default();
@@ -2325,7 +2275,7 @@ impl AppModel {
                 // browser highlighting something that isn't playing.
                 let _ = self
                     .viz_cmd_tx
-                    .send(crate::views::now_playing::visualizer::VizCommand::LoadPreset(path));
+                    .send(aulos_core::visualizer::VizCommand::LoadPreset(path));
             }
 
             #[cfg(feature = "visualizer")]
@@ -2333,17 +2283,17 @@ impl AppModel {
                 self.viz_locked = locked;
                 let _ = self
                     .viz_cmd_tx
-                    .send(crate::views::now_playing::visualizer::VizCommand::SetLocked(locked));
+                    .send(aulos_core::visualizer::VizCommand::SetLocked(locked));
             }
 
             #[cfg(feature = "visualizer")]
             Message::SetVizBeatSensitivity(sensitivity) => {
                 self.viz_beat_sensitivity = sensitivity;
-                let _ = self.viz_cmd_tx.send(
-                    crate::views::now_playing::visualizer::VizCommand::SetBeatSensitivity(
-                        sensitivity,
-                    ),
-                );
+                let _ =
+                    self.viz_cmd_tx
+                        .send(aulos_core::visualizer::VizCommand::SetBeatSensitivity(
+                            sensitivity,
+                        ));
             }
 
             #[cfg(feature = "visualizer")]
@@ -2464,7 +2414,7 @@ impl AppModel {
             // -- Playlist import/export, mini player, compilations, album filters --
             Message::PlaylistIo(msg) => return self.update_playlist_io(msg),
             Message::Mini(msg) => return self.update_mini_player(msg),
-            Message::AlbumFilter(msg) => self.extras.album_filter.update(msg),
+            Message::AlbumFilter(msg) => msg.apply(&mut self.extras.album_filter),
             Message::SetShowCompilationsInArtists(show) => {
                 self.config.show_compilations_in_artists = show;
                 self.save_config();
@@ -2492,14 +2442,15 @@ impl AppModel {
                     // List view
                     SmartPlaylistMessage::New => {
                         self.smart_playlist_editor =
-                            Some(crate::views::smart_playlists::EditorState::new());
+                            Some(aulos_core::library::smart_playlist::EditorState::new());
                     }
                     SmartPlaylistMessage::Edit(idx) => {
                         if let Some(playlist) = self.smart_playlists.get(idx) {
-                            self.smart_playlist_editor =
-                                Some(crate::views::smart_playlists::EditorState::from_existing(
+                            self.smart_playlist_editor = Some(
+                                aulos_core::library::smart_playlist::EditorState::from_existing(
                                     playlist.clone(),
-                                ));
+                                ),
+                            );
                         }
                     }
                     SmartPlaylistMessage::EditorCancel => {
@@ -2511,17 +2462,14 @@ impl AppModel {
                         {
                             let playlist = state.playlist.clone();
                             self.smart_playlist_editor = None;
-                            let db_path = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("aulos")
-                                .join("library.db");
+                            let db_path = aulos_core::paths::library_db_path();
                             return cosmic::task::future(async move {
                                 let playlists = tokio::task::spawn_blocking(move || {
                                     let outcome: Result<
-                                        Vec<crate::library::smart_playlist::SmartPlaylist>,
+                                        Vec<aulos_core::library::smart_playlist::SmartPlaylist>,
                                         String,
                                     > = (|| {
-                                        let db = crate::library::LibraryDb::open(&db_path)?;
+                                        let db = aulos_core::library::LibraryDb::open(&db_path)?;
                                         if playlist.id == 0 {
                                             db.create_smart_playlist(&playlist)?;
                                         } else {
@@ -2548,17 +2496,14 @@ impl AppModel {
                             if self.selected_smart_playlist == Some(idx) {
                                 self.selected_smart_playlist = None;
                             }
-                            let db_path = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("aulos")
-                                .join("library.db");
+                            let db_path = aulos_core::paths::library_db_path();
                             return cosmic::task::future(async move {
                                 let playlists = tokio::task::spawn_blocking(move || {
                                     let outcome: Result<
-                                        Vec<crate::library::smart_playlist::SmartPlaylist>,
+                                        Vec<aulos_core::library::smart_playlist::SmartPlaylist>,
                                         String,
                                     > = (|| {
-                                        let db = crate::library::LibraryDb::open(&db_path)?;
+                                        let db = aulos_core::library::LibraryDb::open(&db_path)?;
                                         db.delete_smart_playlist(id)?;
                                         db.list_smart_playlists()
                                     })();
@@ -2584,13 +2529,10 @@ impl AppModel {
                         self.selected_smart_playlist = Some(idx);
                         self.smart_playlist_tracks.clear();
                         if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
-                            let db_path = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("aulos")
-                                .join("library.db");
+                            let db_path = aulos_core::paths::library_db_path();
                             return cosmic::task::future(async move {
                                 let tracks = tokio::task::spawn_blocking(move || {
-                                    crate::library::LibraryDb::open(&db_path)
+                                    aulos_core::library::LibraryDb::open(&db_path)
                                         .and_then(|db| db.smart_playlist_tracks(&playlist, None))
                                         .unwrap_or_else(|e| {
                                             tracing::warn!("smart_playlist_tracks failed: {e}");
@@ -2614,13 +2556,10 @@ impl AppModel {
                     }
                     SmartPlaylistMessage::Play(idx) => {
                         if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
-                            let db_path = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("aulos")
-                                .join("library.db");
+                            let db_path = aulos_core::paths::library_db_path();
                             return cosmic::task::future(async move {
                                 let tracks = tokio::task::spawn_blocking(move || {
-                                    crate::library::LibraryDb::open(&db_path)
+                                    aulos_core::library::LibraryDb::open(&db_path)
                                         .and_then(|db| db.smart_playlist_tracks(&playlist, None))
                                         .unwrap_or_else(|e| {
                                             tracing::warn!("smart_playlist_tracks failed: {e}");
@@ -2741,7 +2680,7 @@ impl AppModel {
             Message::SelectGenre(idx) => return self.select_genre(idx),
 
             Message::BackToGenreGrid => {
-                self.genre_tracks.clear();
+                self.library.genre_tracks.clear();
                 if let Some(task) = self.go_back() {
                     return task;
                 }
@@ -2749,13 +2688,13 @@ impl AppModel {
             }
 
             Message::PlayGenreTrack(idx) => {
-                if !self.genre_tracks.is_empty() {
-                    return self.play_track_list(self.genre_tracks.clone(), idx);
+                if !self.library.genre_tracks.is_empty() {
+                    return self.play_track_list(self.library.genre_tracks.clone(), idx);
                 }
             }
 
             Message::ShuffleGenre => {
-                if !self.genre_tracks.is_empty() {
+                if !self.library.genre_tracks.is_empty() {
                     if !self.config.shuffle {
                         self.config.shuffle = true;
                         if let Some(player) = &mut self.player {
@@ -2766,19 +2705,19 @@ impl AppModel {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.subsec_nanos() as usize)
                         .unwrap_or(0);
-                    let start = nanos % self.genre_tracks.len();
-                    return self.play_track_list(self.genre_tracks.clone(), start);
+                    let start = nanos % self.library.genre_tracks.len();
+                    return self.play_track_list(self.library.genre_tracks.clone(), start);
                 }
             }
 
             Message::GenresLoaded(genres) => {
-                self.all_genres = genres;
+                self.library.genres = genres;
                 self.refresh_search_filter();
             }
 
             Message::GenreTracksLoaded { idx, tracks } => {
                 if self.selected_genre == Some(idx) {
-                    self.genre_tracks = tracks;
+                    self.library.genre_tracks = tracks;
                 }
             }
 
@@ -2812,12 +2751,12 @@ impl AppModel {
             }
             Message::Playback(msg) => return self.update_playback_extras(msg),
             Message::Mpris(event) => match event {
-                crate::mpris::MprisEvent::Ready(handle) => {
+                aulos_core::mpris::MprisEvent::Ready(handle) => {
                     self.mpris = Some(handle);
                     return self.publish_mpris();
                 }
-                crate::mpris::MprisEvent::Command(cmd) => {
-                    use crate::mpris::{LoopMode, MprisCommand};
+                aulos_core::mpris::MprisEvent::Command(cmd) => {
+                    use aulos_core::mpris::{LoopMode, MprisCommand};
 
                     let playing = self
                         .player
@@ -2886,9 +2825,9 @@ impl AppModel {
                         }
                         MprisCommand::Loop(mode) => {
                             let desired = match mode {
-                                LoopMode::None => crate::config::RepeatMode::None,
-                                LoopMode::Playlist => crate::config::RepeatMode::All,
-                                LoopMode::Track => crate::config::RepeatMode::One,
+                                LoopMode::None => aulos_core::config::RepeatMode::None,
+                                LoopMode::Playlist => aulos_core::config::RepeatMode::All,
+                                LoopMode::Track => aulos_core::config::RepeatMode::One,
                             };
                             // `CycleRepeat` only steps one position at a time
                             // around the 3-variant cycle; drive it around
@@ -2905,7 +2844,7 @@ impl AppModel {
                         }
                         MprisCommand::Raise => self.raise_window(),
                         MprisCommand::Quit => self.update(Message::Quit),
-                        MprisCommand::OpenUri(uri) => match crate::file_uri_to_path(&uri) {
+                        MprisCommand::OpenUri(uri) => match aulos_core::file_uri_to_path(&uri) {
                             Some(path) => self.update(Message::OpenFiles(vec![path])),
                             None => {
                                 tracing::warn!("MPRIS OpenUri: unsupported or invalid URI: {uri}");
@@ -3092,13 +3031,10 @@ impl AppModel {
         let page_task = match page {
             Some(Page::Playlists) => self.load_playlists(),
             Some(Page::SmartPlaylists) => {
-                let db_path = dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("aulos")
-                    .join("library.db");
+                let db_path = aulos_core::paths::library_db_path();
                 cosmic::task::future(async move {
                     let playlists = tokio::task::spawn_blocking(move || {
-                        crate::library::LibraryDb::open(&db_path)
+                        aulos_core::library::LibraryDb::open(&db_path)
                             .and_then(|db| db.list_smart_playlists())
                             .unwrap_or_else(|e| {
                                 tracing::warn!("list_smart_playlists failed: {e}");
@@ -3117,11 +3053,12 @@ impl AppModel {
             Some(Page::Artists) => self.load_artist_info_for_visible(),
             Some(Page::Folders) => {
                 if !self.folder_state.is_populated()
-                    || self.folder_tree_gen != Some(self.library_gen)
+                    || self.folder_tree_gen != Some(self.library.generation())
                 {
-                    self.folder_state
-                        .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
-                    self.folder_tree_gen = Some(self.library_gen);
+                    self.folder_state.set_tree(
+                        aulos_core::library::folder_tree::FolderTree::build(&self.library.tracks),
+                    );
+                    self.folder_tree_gen = Some(self.library.generation());
                 }
                 Task::none()
             }
@@ -3155,8 +3092,9 @@ impl AppModel {
     #[cfg(feature = "visualizer")]
     fn scroll_preset_list_to_current(&mut self) -> Task<cosmic::Action<Message>> {
         use crate::views::now_playing::preset_browser as browser;
-        let rows = browser::build_rows(&self.viz_preset_entries, &self.viz_preset_search);
-        let y = browser::current_row(
+        use aulos_core::visualizer::browser as rows_model;
+        let rows = rows_model::build_rows(&self.viz_preset_entries, &self.viz_preset_search);
+        let y = rows_model::current_row(
             &rows,
             &self.viz_preset_entries,
             self.viz_current_preset.as_deref(),

@@ -3,14 +3,22 @@
 
 use super::convert_page::ConvertEvent;
 use super::{AppModel, Message};
-use crate::config::Config;
-use crate::convert::JobState;
-use crate::player::{ActiveBackend, PlaybackState};
-use crate::provider::MusicProvider;
-use crate::provider::mpd::{MpdProvider, song_to_track};
+use aulos_core::config::Config;
+use aulos_core::convert::JobState;
+use aulos_core::library::watcher::watch_stream;
+#[cfg(feature = "visualizer")]
+use aulos_core::player::pw_capture::{MpdCaptureKey, capture_stream};
+use aulos_core::player::{ActiveBackend, PlaybackState};
+use aulos_core::provider::mpd_events::{
+    MpdEvent, MpdIdleKey, MpdPollKey, idle_stream, status_stream,
+};
+use aulos_core::task::interval_stream;
 use cosmic::Application;
 use cosmic::iced::Subscription;
-use futures_util::{SinkExt, Stream};
+#[cfg(feature = "visualizer")]
+use futures_util::SinkExt;
+use futures_util::{Stream, StreamExt};
+#[cfg(feature = "visualizer")]
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +37,7 @@ impl AppModel {
 
         // MPRIS2 D-Bus server — unconditional and keyed by the zero-argument
         // `mpris_stream` function, so it starts once and never restarts.
-        subs.push(Subscription::run(crate::mpris::mpris_stream).map(Message::Mpris));
+        subs.push(Subscription::run(aulos_core::mpris::mpris_stream).map(Message::Mpris));
 
         // Window-close requests (background playback) and the slow
         // playback-extras housekeeping tick.
@@ -59,7 +67,7 @@ impl AppModel {
             let client = mpd.client();
             let provider_id = provider.provider_id_arc();
             subs.push(Subscription::run_with(
-                MpdPollKey(client, provider_id),
+                MpdPollKey::new(client, provider_id),
                 mpd_status_stream,
             ));
         }
@@ -88,7 +96,7 @@ impl AppModel {
         for (idx, provider) in self.mpd_providers.iter().enumerate() {
             let provider = Arc::clone(provider);
             subs.push(Subscription::run_with(
-                MpdIdleKey { idx, provider },
+                MpdIdleKey::new(idx, provider),
                 mpd_idle_stream,
             ));
         }
@@ -153,11 +161,11 @@ impl AppModel {
                 .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd)
             && let Some(provider) = self.active_mpd_provider()
         {
-            if crate::player::pw_capture::is_local_mpd_host(provider.host()) {
+            if aulos_core::player::pw_capture::is_local_mpd_host(provider.host()) {
                 let pcm = Arc::clone(pcm_buf);
                 let mpd_playing = Arc::clone(&self.mpd_playing);
                 subs.push(Subscription::run_with(
-                    MpdCaptureKey { pcm, mpd_playing },
+                    MpdCaptureKey::new(pcm, mpd_playing),
                     mpd_capture_stream,
                 ));
             } else {
@@ -186,7 +194,7 @@ impl AppModel {
             let is_local_active = self
                 .registry
                 .active()
-                .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local);
+                .is_some_and(|p| p.provider_type() == aulos_core::provider::ProviderType::Local);
 
             if is_local_active && !self.config.music_dirs.is_empty() {
                 let music_dirs = self.config.music_dirs.clone();
@@ -240,455 +248,45 @@ impl AppModel {
     }
 }
 
-/// Identity key for the MPD status-poll subscription. Hashing only the
-/// fixed string (not the client/provider id) preserves the old
-/// fixed-string-id behavior: a single persistent subscription while an MPD
-/// backend exists, never restarted just because the client handle value
-/// changes.
-struct MpdPollKey(mpd_client::Client, Arc<str>);
-
-impl Hash for MpdPollKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Include the provider id so switching to a *different* MPD server
-        // restarts the poll against the new client; excluding the client
-        // handle itself keeps a reconnect to the same server from
-        // needlessly tearing the subscription down.
-        "mpd-status-poll".hash(state);
-        self.1.hash(state);
-    }
-}
-
-/// Everything about an MPD status that is worth redrawing for. The poll
-/// stream only emits a `Message::MpdStatusUpdate` when this differs from the
-/// previously emitted one: while MPD is stopped or paused nothing changes, so
-/// nothing is sent and the UI is not rebuilt; while playing `elapsed` moves
-/// every poll, which is exactly the position-bar update that is needed.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct StatusSig {
-    state: PlaybackState,
-    song_id: Option<mpd_client::commands::SongId>,
-    volume: Option<u8>,
-    duration: Duration,
-    elapsed: Duration,
-}
-
-/// Whether `current` must be forwarded to the UI given the last forwarded
-/// signature (`None` = nothing emitted yet, always emit the first one).
-fn status_changed(previous: Option<&StatusSig>, current: &StatusSig) -> bool {
-    previous != Some(current)
-}
-
-/// How long the status loop sleeps before polling again: only while playing
-/// (position bar) is a short interval needed. Stopped/paused states are woken
-/// by MPD idle events (see [`status_waker`]); the long interval is merely a
-/// safety net in case the idle connection is down.
-fn status_poll_delay(state: PlaybackState) -> Duration {
-    const PLAYING_INTERVAL: Duration = Duration::from_millis(300);
-    const SAFETY_INTERVAL: Duration = Duration::from_secs(15);
-    if state == PlaybackState::Playing {
-        PLAYING_INTERVAL
-    } else {
-        SAFETY_INTERVAL
-    }
-}
-
-/// Per-provider wake-up for the status stream: `mpd_idle_stream` pokes it on
-/// every MPD subsystem event (player/mixer/options/queue/...), so a stopped or
-/// paused server is re-polled exactly when something happened instead of on a
-/// timer. `Notify` stores one permit, so a poke that lands while the stream is
-/// mid-poll is not lost.
-fn status_waker(provider_id: &str) -> Arc<tokio::sync::Notify> {
-    static WAKERS: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
-    > = std::sync::LazyLock::new(Default::default);
-    let mut map = WAKERS.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(map.entry(provider_id.to_string()).or_default())
-}
-
-/// MPD: poll status from the server and forward it only when it changed (see
-/// [`StatusSig`]). Polls every 300ms while playing (keeps the position bar
-/// smooth); while stopped/paused it sleeps until an idle event wakes it (with
-/// a slow safety poll). The current song is fetched only when its identity
-/// changes, so steady state stays at exactly one `Status` command per tick.
+/// MPD: forwards the core status poll (see
+/// `aulos_core::provider::mpd_events::status_stream`) as `MpdStatusUpdate`.
 fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
-    let client = key.0.clone();
-    let provider_id = Arc::clone(&key.1);
-    let waker = status_waker(&key.1);
-    cosmic::iced::stream::channel(
-        1,
-        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut last_song_id: Option<mpd_client::commands::SongId> = None;
-            let mut last_sent: Option<StatusSig> = None;
-            loop {
-                let delay = match client.command(mpd_client::commands::Status).await {
-                    Ok(status) => {
-                        let state = match status.state {
-                            mpd_client::responses::PlayState::Playing => PlaybackState::Playing,
-                            mpd_client::responses::PlayState::Paused => PlaybackState::Paused,
-                            mpd_client::responses::PlayState::Stopped => PlaybackState::Stopped,
-                        };
-
-                        // `Status::volume` is 0 both when muted and when MPD
-                        // has no mixer; only then ask `getvol` (0.23+), which
-                        // returns nothing without a mixer. Pre-0.23 servers
-                        // reject `getvol`: keep the 0.
-                        let volume = if status.volume == 0 {
-                            client
-                                .command(crate::provider::mpd::GetVolume)
-                                .await
-                                .unwrap_or(Some(0))
-                        } else {
-                            Some(status.volume)
-                        };
-
-                        let current_id = status.current_song.map(|(_, id)| id);
-                        let sig = StatusSig {
-                            state,
-                            song_id: current_id,
-                            volume,
-                            duration: status.duration.unwrap_or(Duration::ZERO),
-                            elapsed: status.elapsed.unwrap_or(Duration::ZERO),
-                        };
-
-                        if status_changed(last_sent.as_ref(), &sig) {
-                            // Fetch the current song only when its identity
-                            // changed (including the first tick) — an
-                            // unchanged song never needs a second command.
-                            // While MPD is stopped there is nothing to adopt,
-                            // so forget the last id: the next transition into
-                            // Playing/Paused then re-fetches instead of seeing
-                            // an unchanged id and staying silent forever.
-                            let song = if state == PlaybackState::Stopped {
-                                last_song_id = None;
-                                None
-                            } else if current_id == last_song_id {
-                                None
-                            } else {
-                                last_song_id = current_id;
-                                match client.command(mpd_client::commands::CurrentSong).await {
-                                    Ok(Some(song_in_queue)) => {
-                                        Some(song_to_track(&provider_id, &song_in_queue.song))
-                                    }
-                                    Ok(None) => None,
-                                    Err(e) => {
-                                        tracing::warn!("MPD current-song fetch failed: {e}");
-                                        None
-                                    }
-                                }
-                            };
-
-                            last_sent = Some(sig);
-                            _ = emitter
-                                .send(Message::MpdStatusUpdate {
-                                    position: sig.elapsed,
-                                    duration: sig.duration,
-                                    state,
-                                    volume: volume.map(|v| f32::from(v) / 100.0),
-                                    song,
-                                })
-                                .await;
-                        }
-
-                        status_poll_delay(state)
-                    }
-                    Err(e) => {
-                        tracing::warn!("MPD status poll failed: {e}");
-                        // Forget what was sent so the first good status after
-                        // an outage is always forwarded.
-                        last_sent = None;
-                        Duration::from_secs(1)
-                    }
-                };
-
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    () = waker.notified() => {}
-                }
-            }
-        },
-    )
+    status_stream(key).map(|update| Message::MpdStatusUpdate {
+        position: update.position,
+        duration: update.duration,
+        state: update.state,
+        volume: update.volume,
+        song: update.song,
+    })
 }
 
 /// Local/Subsonic: simple tick for UI updates (no captured state).
 fn playback_tick_stream() -> impl Stream<Item = Message> {
-    cosmic::iced::stream::channel(
-        1,
-        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-            loop {
-                interval.tick().await;
-                _ = emitter.send(Message::PlaybackTick).await;
-            }
-        },
-    )
+    interval_stream(Duration::from_millis(500)).map(|()| Message::PlaybackTick)
 }
 
 /// Convert-queue progress ticker: while jobs are running, periodically
 /// triggers a re-render so the UI picks up the latest atomic progress
 /// values written by the background job tasks.
 fn convert_tick_stream() -> impl Stream<Item = Message> {
-    cosmic::iced::stream::channel(
-        1,
-        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-            loop {
-                interval.tick().await;
-                _ = emitter
-                    .send(Message::ConvertEvent(ConvertEvent::Tick))
-                    .await;
-            }
-        },
-    )
+    interval_stream(Duration::from_millis(500)).map(|()| Message::ConvertEvent(ConvertEvent::Tick))
 }
 
-/// Identity key for an MPD idle-event subscription. Hashing only `idx`
-/// (not the provider) preserves the old `("mpd-idle", idx)` identity
-/// semantics.
-struct MpdIdleKey {
-    idx: usize,
-    provider: Arc<MpdProvider>,
-}
-
-impl Hash for MpdIdleKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.idx.hash(state);
-    }
-}
-
-/// MPD idle event subscription — one per configured MPD provider.
-///
-/// Each subscription opens TWO separate TCP connections to the MPD server:
-/// 1. Idle connection — stays in idle mode, streams events via ConnectionEvents
-/// 2. Command connection — stored in MpdProvider for browse/search/playback
-///
-/// This avoids protocol conflicts between idle mode and command execution.
+/// MPD idle event subscription — one per configured MPD provider (see
+/// `aulos_core::provider::mpd_events::idle_stream`).
 fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
-    let provider = Arc::clone(&key.provider);
-    cosmic::iced::stream::channel(
-        4,
-        move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let pid = provider.id().to_string();
-
-                // Step 1: Establish the idle connection
-                // We must keep `_idle_client` alive — dropping it would
-                // close the background task and end the `events` stream.
-                let idle_result = provider.connect_idle().await;
-                let (_idle_client, mut events) = match idle_result {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        _ = emitter
-                            .send(Message::MpdConnectionFailed(pid, e.to_string()))
-                            .await;
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
-
-                // Step 2: Establish the command connection
-                if let Err(e) = provider.connect_command().await {
-                    tracing::error!("MPD provider '{pid}' command connection failed: {e}");
-                    _ = emitter
-                        .send(Message::MpdConnectionFailed(pid, e.to_string()))
-                        .await;
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-
-                // Both connections established
-                _ = emitter.send(Message::MpdConnected(pid.clone())).await;
-                status_waker(&pid).notify_one();
-
-                // Loop on idle events until the connection drops or closes.
-                // Each event carries which MPD subsystem changed; only
-                // `Database`/`Update` (library content) and
-                // `StoredPlaylist` need a reload here — everything else
-                // (player/mixer/options/queue/output/...) is already
-                // covered by the status-poll subscription, so forwarding
-                // every idle wakeup as a blanket "reload the library"
-                // trigger (the previous behavior) reset/flashed the views
-                // on every pause, volume change, etc.
-                while let Some(event) = events.next().await {
-                    match event {
-                        mpd_client::client::ConnectionEvent::SubsystemChange(subsystem) => {
-                            // Any subsystem change (player/mixer/options/...)
-                            // may alter the status: re-poll now rather than
-                            // on a timer (the status stream sleeps while MPD
-                            // is stopped/paused).
-                            status_waker(&pid).notify_one();
-                            let idle_subsystem = IdleSubsystem::from(&subsystem);
-                            _ = emitter
-                                .send(Message::MpdIdleEvent(pid.clone(), idle_subsystem))
-                                .await;
-                        }
-                        mpd_client::client::ConnectionEvent::ConnectionClosed(err) => {
-                            tracing::warn!("MPD provider '{pid}' idle connection closed: {err}");
-                            break;
-                        }
-                    }
-                }
-
-                // Idle stream ended — connection lost. Disconnect command too.
-                tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
-                provider.disconnect().await;
-
-                // Backoff before reconnect
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        },
-    )
-}
-
-/// Mirrors the subset of `mpd_client::client::Subsystem` variants Aulos's
-/// idle handler distinguishes between. Kept separate from the upstream
-/// type (rather than embedding it directly in `Message`) because
-/// `Message` must be `Clone` and `Subsystem::Other` wraps a `Box<str>` —
-/// collapsing everything Aulos doesn't act on to a single `Other` unit
-/// variant is all `idle_action` needs and keeps the conversion trivial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdleSubsystem {
-    /// The song database changed (files added/removed/rescanned).
-    Database,
-    /// A database `update`/`rescan` job finished.
-    Update,
-    /// A stored playlist was created, deleted, or modified.
-    StoredPlaylist,
-    /// Everything else (player/mixer/options/queue/output/partition/...):
-    /// already covered by the status-poll subscription, so the idle
-    /// handler takes no action for these.
-    Other,
-}
-
-impl From<&mpd_client::client::Subsystem> for IdleSubsystem {
-    fn from(subsystem: &mpd_client::client::Subsystem) -> Self {
-        match subsystem {
-            mpd_client::client::Subsystem::Database => IdleSubsystem::Database,
-            mpd_client::client::Subsystem::Update => IdleSubsystem::Update,
-            mpd_client::client::Subsystem::StoredPlaylist => IdleSubsystem::StoredPlaylist,
-            _ => IdleSubsystem::Other,
-        }
-    }
-}
-
-/// What an MPD idle event should trigger in `update()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum IdleAction {
-    /// Reload the whole library (tracks/albums/artists/covers).
-    ReloadLibrary,
-    /// Reload only the stored-playlists list.
-    ReloadPlaylists,
-    /// Nothing to do.
-    None,
-}
-
-/// Pure mapping from an idle subsystem notification to the action
-/// `update()` should take. Kept free of `self`/`AppModel` so it is
-/// trivially unit-testable without constructing an `AppModel`.
-pub(super) fn idle_action(subsystem: IdleSubsystem) -> IdleAction {
-    match subsystem {
-        IdleSubsystem::Database => IdleAction::ReloadLibrary,
-        // `update` fires once a `update`/`rescan` command's background job
-        // completes; treat it the same as `database` since content may
-        // have changed without MPD necessarily also emitting a separate
-        // `database` event for it.
-        IdleSubsystem::Update => IdleAction::ReloadLibrary,
-        IdleSubsystem::StoredPlaylist => IdleAction::ReloadPlaylists,
-        IdleSubsystem::Other => IdleAction::None,
-    }
+    idle_stream(key).map(|event| match event {
+        MpdEvent::Connected(pid) => Message::MpdConnected(pid),
+        MpdEvent::ConnectionFailed(pid, error) => Message::MpdConnectionFailed(pid, error),
+        MpdEvent::Idle(pid, subsystem) => Message::MpdIdleEvent(pid, subsystem),
+    })
 }
 
 /// Filesystem watcher subscription — only when the Local provider is active.
-///
-/// Uses notify::RecommendedWatcher to watch music_dirs recursively.
-/// Debounces events with a 2-second quiet timer before emitting
-/// Message::FilesChanged with the collected paths.
+/// Emits `Message::FilesChanged` with the debounced changed paths.
 #[allow(clippy::ptr_arg)] // must match `fn(&D) -> S` where D = Vec<PathBuf> (Subscription::run_with)
 fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
-    let music_dirs = music_dirs.clone();
-    cosmic::iced::stream::channel(
-        4,
-        move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            use notify::{RecursiveMode, Watcher};
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
-
-            // Create watcher that sends changed paths through the channel.
-            // IMPORTANT: Only react to content changes (Create/Modify/Remove),
-            // NOT Access events. Reading files during scanning triggers Access
-            // events which would create an infinite scan loop.
-            let _watcher = {
-                let tx = tx.clone();
-                let mut watcher = match notify::RecommendedWatcher::new(
-                    move |result: Result<notify::Event, notify::Error>| {
-                        if let Ok(event) = result {
-                            use notify::EventKind;
-                            match event.kind {
-                                EventKind::Create(_)
-                                | EventKind::Modify(_)
-                                | EventKind::Remove(_) => {
-                                    for path in event.paths {
-                                        let _ = tx.blocking_send(path);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    },
-                    notify::Config::default(),
-                ) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::error!("Failed to create filesystem watcher: {e}");
-                        // Keep the future alive so the subscription ID is stable.
-                        std::future::pending::<()>().await;
-                        return;
-                    }
-                };
-
-                for dir in &music_dirs {
-                    if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                        tracing::warn!("Failed to watch directory {}: {e}", dir.display());
-                    }
-                }
-
-                watcher // keep alive
-            };
-
-            // Debounce loop: collect paths, wait for 2s of quiet, then emit.
-            let debounce_duration = Duration::from_secs(2);
-            loop {
-                // Wait for the first event.
-                let first = match rx.recv().await {
-                    Some(path) => path,
-                    None => break, // channel closed
-                };
-
-                let mut changed_paths = vec![first];
-
-                // Collect more events until 2 seconds of silence.
-                loop {
-                    match tokio::time::timeout(debounce_duration, rx.recv()).await {
-                        Ok(Some(path)) => {
-                            changed_paths.push(path);
-                        }
-                        Ok(None) => break, // channel closed
-                        Err(_) => break,   // timeout — debounce complete
-                    }
-                }
-
-                // Deduplicate paths.
-                changed_paths.sort();
-                changed_paths.dedup();
-
-                tracing::debug!(
-                    "Filesystem watcher: {} changed paths after debounce",
-                    changed_paths.len()
-                );
-
-                _ = emitter.send(Message::FilesChanged(changed_paths)).await;
-            }
-        },
-    )
+    watch_stream(music_dirs).map(Message::FilesChanged)
 }
 
 /// Identity key for the lactea visualizer render subscription. Hashes to
@@ -696,10 +294,8 @@ fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> +
 /// captured Arc contents (mirrors `MpdPollKey`/`MpdIdleKey`).
 #[cfg(feature = "visualizer")]
 struct VizRenderKey {
-    pcm: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
-    cmd_rx: Arc<
-        Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
-    >,
+    pcm: Arc<Mutex<aulos_core::player::pcm::PcmBuffer>>,
+    cmd_rx: Arc<Mutex<Option<std::sync::mpsc::Receiver<aulos_core::visualizer::VizCommand>>>>,
     frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
     current_preset: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// Lock state the UI shows when the subscription starts; a fresh
@@ -804,7 +400,7 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                     // Most PCM worth reading per frame: one contiguous window
                     // (576 stereo frames) so the analyser sees real audio
                     // rather than 5ms fragments ~33ms apart.
-                    let max_pcm_samples = crate::views::now_playing::visualizer::PCM_FEED_SAMPLES;
+                    let max_pcm_samples = aulos_core::visualizer::PCM_FEED_SAMPLES;
 
                     // Fixed-deadline pacing: sleeping a flat 33 ms *after*
                     // rendering would run below 30 fps by the render time.
@@ -825,7 +421,7 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
                         // Drain every pending command before rendering
                         // this frame.
                         if let Some(rx) = cmd_rx.as_ref() {
-                            use crate::views::now_playing::visualizer::VizCommand;
+                            use aulos_core::visualizer::VizCommand;
                             while let Ok(cmd) = rx.try_recv() {
                                 match cmd {
                                     VizCommand::NextPreset => renderer.next_preset(),
@@ -914,142 +510,11 @@ fn lactea_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use
     )
 }
 
-/// Identity key for the MPD PipeWire capture subscription. Hashes to a
-/// constant (mirrors `VizRenderKey`) so there's only ever one active
-/// instance; starting/stopping is entirely driven by whether the `if` in
-/// `build_subscription` includes this subscription at all, never by the
-/// key's contents changing.
-#[cfg(feature = "visualizer")]
-struct MpdCaptureKey {
-    pcm: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
-    mpd_playing: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(feature = "visualizer")]
-impl Hash for MpdCaptureKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        "mpd-pw-capture".hash(state);
-    }
-}
-
 /// Captures MPD's own PipeWire playback stream into the shared PCM ring
-/// buffer, so the lactea visualizer reacts to audio while MPD (not the
-/// in-process local engine) is the active backend — see
-/// `player::pw_capture` for the capture itself, its node-matching rules,
-/// and the default-sink-monitor fallback.
-///
-/// The `PwCapture` handle is created *inside* this async block and held
-/// for as long as the returned future runs. iced drops that future (and
-/// with it, the handle — whose `Drop` joins the PipeWire thread) the
-/// moment this subscription's gating `if` in `build_subscription` goes
-/// false, so capture starts and stops exactly when a render subscription
-/// would actually want PCM data sourced from MPD.
+/// buffer (see `aulos_core::player::pw_capture::capture_stream`). It never
+/// yields a message; iced dropping this subscription (its gating `if` in
+/// `build_subscription` going false) stops the capture.
 #[cfg(feature = "visualizer")]
 fn mpd_capture_stream(key: &MpdCaptureKey) -> impl Stream<Item = Message> + use<> {
-    let pcm = Arc::clone(&key.pcm);
-    let mpd_playing = Arc::clone(&key.mpd_playing);
-    cosmic::iced::stream::channel(
-        1,
-        move |_emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let _capture = match crate::player::pw_capture::PwCapture::spawn(pcm, mpd_playing) {
-                Ok(capture) => capture,
-                Err(e) => {
-                    tracing::warn!("MPD visualizer capture unavailable: {e}");
-                    return;
-                }
-            };
-            // Held alive by this future until iced drops it (see the doc
-            // comment above) — never resolves on its own.
-            futures_util::future::pending::<()>().await;
-        },
-    )
-}
-
-#[cfg(test)]
-mod idle_action_tests {
-    use super::{IdleAction, IdleSubsystem, idle_action};
-
-    #[test]
-    fn database_reloads_library() {
-        assert_eq!(
-            idle_action(IdleSubsystem::Database),
-            IdleAction::ReloadLibrary
-        );
-    }
-
-    #[test]
-    fn update_reloads_library() {
-        assert_eq!(
-            idle_action(IdleSubsystem::Update),
-            IdleAction::ReloadLibrary
-        );
-    }
-
-    #[test]
-    fn stored_playlist_reloads_playlists_only() {
-        assert_eq!(
-            idle_action(IdleSubsystem::StoredPlaylist),
-            IdleAction::ReloadPlaylists
-        );
-    }
-
-    #[test]
-    fn other_subsystems_do_nothing() {
-        assert_eq!(idle_action(IdleSubsystem::Other), IdleAction::None);
-    }
-}
-
-#[cfg(test)]
-mod status_poll_tests {
-    use super::*;
-    use mpd_client::commands::SongId;
-
-    fn sig(state: PlaybackState, elapsed_ms: u64) -> StatusSig {
-        StatusSig {
-            state,
-            song_id: Some(SongId(1)),
-            volume: Some(50),
-            duration: Duration::from_secs(200),
-            elapsed: Duration::from_millis(elapsed_ms),
-        }
-    }
-
-    #[test]
-    fn first_status_is_always_forwarded() {
-        assert!(status_changed(None, &sig(PlaybackState::Stopped, 0)));
-    }
-
-    #[test]
-    fn identical_stopped_or_paused_status_is_suppressed() {
-        let s = sig(PlaybackState::Stopped, 0);
-        assert!(!status_changed(Some(&s), &s));
-        let p = sig(PlaybackState::Paused, 12_000);
-        assert!(!status_changed(Some(&p), &p));
-    }
-
-    #[test]
-    fn moving_position_state_song_or_volume_is_forwarded() {
-        let base = sig(PlaybackState::Playing, 1_000);
-        assert!(status_changed(
-            Some(&base),
-            &sig(PlaybackState::Playing, 1_300)
-        ));
-        assert!(status_changed(
-            Some(&base),
-            &sig(PlaybackState::Paused, 1_000)
-        ));
-        let mut other_song = base;
-        other_song.song_id = Some(SongId(2));
-        assert!(status_changed(Some(&base), &other_song));
-        let mut louder = base;
-        louder.volume = Some(60);
-        assert!(status_changed(Some(&base), &louder));
-    }
-
-    #[test]
-    fn only_playing_polls_on_a_short_interval() {
-        assert!(status_poll_delay(PlaybackState::Playing) <= Duration::from_millis(500));
-        assert!(status_poll_delay(PlaybackState::Paused) >= Duration::from_secs(10));
-        assert!(status_poll_delay(PlaybackState::Stopped) >= Duration::from_secs(10));
-    }
+    capture_stream(key).map(|never| match never {})
 }

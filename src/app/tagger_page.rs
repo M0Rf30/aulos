@@ -2,48 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Update logic of the tag editor page: everything the view and the
-//! "Edit tags…" menu entries can trigger, and the background I/O behind it.
+//! "Edit tags…" menu entries can trigger, and the portal pickers.
 //!
-//! The model ([`crate::tagger::TaggerState`]) decides what happens; this
-//! module only starts the work a transition asks for (always off the UI
-//! thread, inside `spawn_blocking`) and feeds the result back as a
-//! [`TaggerEvent`]. Every job carries the generation / request id the state
-//! handed out, so a result that arrives after its files were removed or its
-//! lookup replaced is dropped by the state instead of landing on the wrong
-//! files.
-
-mod jobs;
+//! The model ([`aulos_core::tagger::TaggerState`]) decides what happens; this
+//! module only routes messages and events, asks for files and starts the
+//! jobs a transition asks for ([`aulos_core::tagger::work`], each resolving
+//! to a [`TaggerEvent`] fed back into the model).
 
 use super::{AppModel, ContextPage, Message, Page};
-use crate::fl;
-use crate::library::tagio::{self, EditPicture, TagSet};
-use crate::library::{CoverArt, LibraryDb, LibraryScanner, Track, fingerprint, tags};
-use crate::online::acoustid::{self, Submission};
-use crate::online::musicbrainz::{self, FileForMatch};
-use crate::tagger::edit::{self, PICTURE_KINDS};
-use crate::tagger::state::{CoverRequest, ReleaseRequest, SearchRequest};
-use crate::tagger::{
-    ClusterKey, FileId, LoadRequest, LoadedFile, SaveJob, SaveSummary, ScanFileResult, ScanStep,
-    SubmitJob, SubmitResult, SubmitStart, TagAction, TaggerEvent, TaggerMessage, is_taggable,
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::online::{acoustid, musicbrainz};
+use aulos_core::tagger::edit::PICTURE_KINDS;
+use aulos_core::tagger::{
+    ClusterKey, SaveSummary, ScanStep, TagAction, TaggerEvent, TaggerMessage, is_taggable, jobs,
+    work,
 };
 use cosmic::Task;
-use jobs::{LOAD_CHUNK, LOOKUP_MIN_GAP, SUBMIT_BATCH};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-use tokio::sync::{Mutex, Semaphore};
-
-/// Files being read at once (in chunks of [`LOAD_CHUNK`]).
-static LOAD_PERMITS: Semaphore = Semaphore::const_new(4);
-/// Files being written at once.
-static SAVE_PERMITS: Semaphore = Semaphore::const_new(4);
-/// Files being fingerprinted at once.
-static FINGERPRINT_PERMITS: Semaphore = Semaphore::const_new(3);
-/// When the last AcoustID lookup started, shared by every scan.
-static LAST_LOOKUP: Mutex<Option<Instant>> = Mutex::const_new(None);
-/// The scan whose files may still be fingerprinted; `0` when none (a
-/// cancelled scan's queued files stop at their next checkpoint).
-static ACTIVE_SCAN: AtomicU64 = AtomicU64::new(0);
 
 type Action = cosmic::Action<Message>;
 
@@ -51,25 +27,17 @@ fn event(event: TaggerEvent) -> Action {
     cosmic::Action::App(Message::TaggerEvent(event))
 }
 
-/// Runs blocking work off the UI thread.
-async fn blocking<T, F>(work: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|e| format!("background task failed: {e}"))?
+/// Runs one of the editor's background jobs, feeding its event back.
+fn run(job: impl Future<Output = TaggerEvent> + Send + 'static) -> Task<Action> {
+    cosmic::task::future(async move { event(job.await) })
 }
 
-/// Waits until an AcoustID lookup may start, and claims the slot.
-async fn wait_for_lookup_slot() {
-    let mut last = LAST_LOOKUP.lock().await;
-    let wait = jobs::throttle_wait(*last, Instant::now(), LOOKUP_MIN_GAP);
-    if !wait.is_zero() {
-        tokio::time::sleep(wait).await;
-    }
-    *last = Some(Instant::now());
+/// Runs a batch of background jobs side by side.
+fn run_all<F>(batch: impl IntoIterator<Item = F>) -> Task<Action>
+where
+    F: Future<Output = TaggerEvent> + Send + 'static,
+{
+    Task::batch(batch.into_iter().map(run))
 }
 
 impl AppModel {
@@ -222,7 +190,7 @@ impl AppModel {
                 Task::none()
             }
             M::FetchCover => match self.tagger.fetch_cover_for_selection() {
-                Some(request) => cover_task(request),
+                Some(request) => run(work::cover(request)),
                 None => Task::none(),
             },
 
@@ -252,11 +220,11 @@ impl AppModel {
                 Task::none()
             }
             M::SearchAgain => match self.tagger.search_again() {
-                Some(request) => search_task(request),
+                Some(request) => run(work::search(request)),
                 None => Task::none(),
             },
             M::ChooseRelease(id) => match self.tagger.choose_release(&id) {
-                Some(request) => release_task(request),
+                Some(request) => run(work::release(request)),
                 None => Task::none(),
             },
             M::DiscardRelease => {
@@ -276,10 +244,7 @@ impl AppModel {
                 Task::none()
             }
             M::OpenAcoustIdPage(id) => {
-                self.report_open(
-                    open::that_detached(acoustid::track_url(&id))
-                        .map_err(|e| format!("Could not open the browser: {e}")),
-                );
+                self.report_open(acoustid::open_track_page(&id));
                 Task::none()
             }
             M::AddAsRelease(cluster) => self.start_seed(cluster),
@@ -291,7 +256,7 @@ impl AppModel {
                 self.start_scan()
             }
             M::CancelScan => {
-                ACTIVE_SCAN.store(0, Ordering::Relaxed);
+                work::cancel_scan();
                 self.tagger.cancel_scan();
                 Task::none()
             }
@@ -331,13 +296,7 @@ impl AppModel {
                     .set_notice(true, fl!("tagger-notice-pick-failed", error = error));
                 Task::none()
             }
-            E::FolderPicked(Ok(dir)) => cosmic::task::future(async move {
-                let files = blocking(move || Ok(jobs::audio_files_under(&dir))).await;
-                event(E::FilesPicked(match files {
-                    Ok(files) if files.is_empty() => Err(fl!("tagger-notice-no-audio")),
-                    other => other,
-                }))
-            }),
+            E::FolderPicked(Ok(dir)) => run(work::folder_files(dir)),
             E::FolderPicked(Err(error)) => {
                 self.tagger
                     .set_notice(true, fl!("tagger-notice-pick-failed", error = error));
@@ -357,7 +316,10 @@ impl AppModel {
                 self.run_ready_action()
             }
             E::ThumbDecoded { hash, pixels } => {
-                self.tagger.set_thumb(hash, pixels);
+                self.tagger_thumbs.insert(
+                    hash,
+                    pixels.map(|(w, h, rgba)| cosmic::widget::icon::from_raster_pixels(w, h, rgba)),
+                );
                 Task::none()
             }
             E::SearchFinished { request, result } => {
@@ -370,7 +332,7 @@ impl AppModel {
                 if self
                     .tagger
                     .lookup()
-                    .is_some_and(|l| l.source == crate::tagger::LookupSource::AcoustId)
+                    .is_some_and(|l| l.source == aulos_core::tagger::LookupSource::AcoustId)
                 {
                     self.tagger.finish_scan_release();
                 }
@@ -378,7 +340,7 @@ impl AppModel {
                     .tagger
                     .take_cover_request(self.config.tagger_use_caa_cover)
                 {
-                    Some(request) => cover_task(request),
+                    Some(request) => run(work::cover(request)),
                     None => Task::none(),
                 }
             }
@@ -392,7 +354,7 @@ impl AppModel {
                 result,
             } => match self.tagger.finish_scan_file(generation, file, result) {
                 ScanStep::Pending => Task::none(),
-                ScanStep::FetchRelease(request) => release_task(request),
+                ScanStep::FetchRelease(request) => run(work::release(request)),
                 ScanStep::NoMatch => {
                     self.tagger
                         .set_notice(false, fl!("tagger-notice-scan-no-match"));
@@ -451,7 +413,7 @@ impl AppModel {
         action: Option<TagAction>,
     ) -> Task<Action> {
         match self.tagger.begin_load(paths, select, action) {
-            Some(request) => load_tasks(request),
+            Some(request) => run_all(work::load(request)),
             None => Task::none(),
         }
     }
@@ -467,24 +429,19 @@ impl AppModel {
 
     /// Decodes the thumbnails of pictures the table shows for the first time.
     fn decode_missing_thumbs(&mut self) -> Task<Action> {
-        let wanted = self.tagger.missing_thumbs();
-        Task::batch(wanted.into_iter().map(|(hash, bytes)| {
-            cosmic::task::future(async move {
-                let pixels =
-                    tokio::task::spawn_blocking(move || CoverArt::decode_thumbnail(&bytes, 160))
-                        .await
-                        .ok()
-                        .flatten();
-                event(TaggerEvent::ThumbDecoded { hash, pixels })
-            })
-        }))
+        let wanted = self.tagger_thumbs.take_missing(&self.tagger);
+        run_all(
+            wanted
+                .into_iter()
+                .map(|(hash, bytes)| work::decode_thumb(hash, bytes)),
+        )
     }
 
     // --- MusicBrainz ----------------------------------------------------------
 
     fn start_lookup(&mut self) -> Task<Action> {
         match self.tagger.begin_lookup() {
-            Some(request) => search_task(request),
+            Some(request) => run(work::search(request)),
             None => {
                 if self.tagger.lookup().is_none() {
                     self.tagger
@@ -496,55 +453,13 @@ impl AppModel {
     }
 
     fn start_seed(&mut self, cluster: Option<ClusterKey>) -> Task<Action> {
-        let ids: Vec<FileId> = match cluster {
-            Some(key) => self
-                .tagger
-                .clusters()
-                .iter()
-                .find(|c| c.key == key)
-                .map(|c| c.files.clone())
-                .unwrap_or_default(),
-            None => {
-                let selected: Vec<FileId> =
-                    self.tagger.selected_files().iter().map(|f| f.id).collect();
-                if selected.is_empty() {
-                    self.tagger.display_order()
-                } else {
-                    selected
-                }
-            }
-        };
-        let files: Vec<(TagSet, Option<f64>, Option<String>)> = ids
-            .iter()
-            .filter_map(|id| self.tagger.file(*id))
-            .map(|f| {
-                let mut tags = f.edited.clone();
-                tags.pictures.clear();
-                let stem = f.path.file_stem().map(|s| s.to_string_lossy().into_owned());
-                (tags, f.duration_secs, stem)
-            })
-            .collect();
+        let files = self.tagger.seed_files(cluster.as_ref());
         if files.is_empty() {
             self.tagger
                 .set_notice(true, fl!("tagger-notice-nothing-to-add"));
             return Task::none();
         }
-        cosmic::task::future(async move {
-            let result = blocking(move || {
-                let for_match: Vec<FileForMatch<'_>> = files
-                    .iter()
-                    .map(|(tags, duration_secs, stem)| FileForMatch {
-                        tags,
-                        duration_secs: *duration_secs,
-                        file_stem: stem.as_deref(),
-                    })
-                    .collect();
-                let page = musicbrainz::seed_release_add(&for_match)?;
-                open::that_detached(&page).map_err(|e| format!("Could not open the browser: {e}"))
-            })
-            .await;
-            event(TaggerEvent::SeedOpened(result))
-        })
+        run(work::open_seed(files))
     }
 
     // --- AcoustID -------------------------------------------------------------
@@ -560,19 +475,7 @@ impl AppModel {
                 .set_notice(true, fl!("tagger-notice-nothing-to-scan"));
             return Task::none();
         };
-        ACTIVE_SCAN.store(start.generation, Ordering::Relaxed);
-        let generation = start.generation;
-        Task::batch(start.files.into_iter().map(|(file, path)| {
-            let key = key.clone();
-            cosmic::task::future(async move {
-                let result = scan_file(generation, path, key).await;
-                event(TaggerEvent::FileScanned {
-                    generation,
-                    file,
-                    result,
-                })
-            })
-        }))
+        run_all(work::scan(start, key))
     }
 
     fn start_submit(&mut self) -> Task<Action> {
@@ -587,7 +490,7 @@ impl AppModel {
             self.tagger.set_notice(true, error);
             return Task::none();
         };
-        cosmic::task::future(async move { event(run_submit(start, app_key).await) })
+        run(work::submit(start, app_key))
     }
 
     // --- Saving ---------------------------------------------------------------
@@ -599,7 +502,7 @@ impl AppModel {
                 .set_notice(false, fl!("tagger-notice-nothing-to-save"));
             return Task::none();
         }
-        Task::batch(jobs.into_iter().map(save_task))
+        run_all(jobs.into_iter().map(work::save))
     }
 
     /// The last write of a save batch finished: report it and bring the
@@ -629,11 +532,11 @@ impl AppModel {
         let Some(provider) = self.registry.active_shared() else {
             return Task::none();
         };
-        if provider.provider_type() != crate::provider::ProviderType::Local {
+        if provider.provider_type() != aulos_core::provider::ProviderType::Local {
             return Task::none();
         }
         self.library_scanning = true;
-        let generation = self.begin_reload_generation();
+        let generation = self.library.begin_reload_generation();
         let provider_id = provider.id().to_string();
         let SaveSummary {
             written,
@@ -641,9 +544,7 @@ impl AppModel {
             ..
         } = summary;
         cosmic::task::future(async move {
-            let count = tokio::task::spawn_blocking(move || refresh_library(&written, &album_keys))
-                .await
-                .unwrap_or(0);
+            let count = work::refresh_library(written, album_keys).await;
             cosmic::Action::App(Message::LibraryScanComplete {
                 generation,
                 provider_id,
@@ -651,32 +552,6 @@ impl AppModel {
             })
         })
     }
-}
-
-/// Re-reads the written files into the library database, after forgetting
-/// the cached covers of the albums they belonged to. Returns the number of
-/// tracks updated.
-fn refresh_library(written: &[PathBuf], album_keys: &[String]) -> usize {
-    let db_path = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("aulos")
-        .join("library.db");
-    let db = match LibraryDb::open(&db_path) {
-        Ok(db) => db,
-        Err(e) => {
-            tracing::error!("Failed to open DB after saving tags: {e}");
-            return 0;
-        }
-    };
-    for key in album_keys {
-        if let Err(e) = db.remove_cached_cover(key) {
-            tracing::warn!("could not drop cached cover {key}: {e}");
-        }
-    }
-    LibraryScanner::scan_paths(&db, written).unwrap_or_else(|e| {
-        tracing::error!("scan_paths after saving tags failed: {e}");
-        0
-    })
 }
 
 // --- Background jobs -------------------------------------------------------------
@@ -687,7 +562,7 @@ fn pick_files() -> Task<Action> {
             use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 
             let mut filter = FileFilter::new("Audio files");
-            for ext in crate::player::engine::decoder::SUPPORTED_EXTENSIONS {
+            for ext in aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS {
                 filter = filter.glob(&format!("*.{ext}"));
             }
             let selected = match SelectedFiles::open_file()
@@ -778,15 +653,7 @@ fn pick_image(kind: u8) -> Task<Action> {
         }
         .await;
         match picked {
-            Ok(Some(path)) => {
-                let result = blocking(move || {
-                    let data = std::fs::read(&path)
-                        .map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-                    edit::picture_from_bytes(data, kind)
-                })
-                .await;
-                event(TaggerEvent::ImagePicked(result))
-            }
+            Ok(Some(path)) => event(work::read_image(path, kind).await),
             // Cancelled: nothing to add. A pending thumbnail pass is a no-op.
             Ok(None) => event(TaggerEvent::FilesPicked(Ok(Vec::new()))),
             Err(e) => event(TaggerEvent::ImagePicked(Err(e))),
@@ -799,233 +666,4 @@ fn is_cancelled(error: &ashpd::Error) -> bool {
         error,
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
     )
-}
-
-/// Reads the files of one load request, in chunks of [`LOAD_CHUNK`], a few
-/// chunks at a time.
-fn load_tasks(request: LoadRequest) -> Task<Action> {
-    let LoadRequest { generation, paths } = request;
-    Task::batch(
-        jobs::split_batches(paths, LOAD_CHUNK)
-            .into_iter()
-            .map(move |chunk| {
-                cosmic::task::future(async move {
-                    let permit = LOAD_PERMITS.acquire().await;
-                    let paths = chunk.clone();
-                    let files = match tokio::task::spawn_blocking(move || {
-                        chunk.into_iter().map(read_file).collect::<Vec<_>>()
-                    })
-                    .await
-                    {
-                        Ok(files) => files,
-                        // Every requested file must be answered, or the
-                        // editor would wait for it forever.
-                        Err(e) => paths
-                            .into_iter()
-                            .map(|path| LoadedFile {
-                                path,
-                                read: Err(format!("background task failed: {e}")),
-                                duration_secs: None,
-                            })
-                            .collect(),
-                    };
-                    drop(permit);
-                    event(TaggerEvent::FilesLoaded { generation, files })
-                })
-            }),
-    )
-}
-
-fn read_file(path: PathBuf) -> LoadedFile {
-    let read = tagio::read(&path).map_err(|e| e.to_string());
-    let duration_secs = if read.is_ok() {
-        tags::probe(&path, false)
-            .map(|p| p.properties.duration.as_secs_f64())
-            .filter(|d| *d > 0.0)
-    } else {
-        None
-    };
-    LoadedFile {
-        path,
-        read,
-        duration_secs,
-    }
-}
-
-fn search_task(request: SearchRequest) -> Task<Action> {
-    cosmic::task::future(async move {
-        let SearchRequest { request, query } = request;
-        let result =
-            blocking(move || jobs::search_with_retry(&query, musicbrainz::search_releases)).await;
-        event(TaggerEvent::SearchFinished { request, result })
-    })
-}
-
-fn release_task(request: ReleaseRequest) -> Task<Action> {
-    cosmic::task::future(async move {
-        let ReleaseRequest {
-            request,
-            release_id,
-        } = request;
-        let result = blocking(move || musicbrainz::release(&release_id)).await;
-        event(TaggerEvent::ReleaseFetched {
-            request,
-            result: result.map(Box::new),
-        })
-    })
-}
-
-fn cover_task(request: CoverRequest) -> Task<Action> {
-    cosmic::task::future(async move {
-        let CoverRequest {
-            request,
-            release_id,
-        } = request;
-        let result: Result<Option<EditPicture>, String> =
-            blocking(move || musicbrainz::fetch_front_cover(&release_id)).await;
-        event(TaggerEvent::CoverFetched { request, result })
-    })
-}
-
-fn save_task(job: SaveJob) -> Task<Action> {
-    cosmic::task::future(async move {
-        let SaveJob { file, path, tags } = job;
-        let permit = SAVE_PERMITS.acquire().await;
-        let result = blocking(move || tagio::write(&path, &tags).map_err(|e| e.to_string())).await;
-        drop(permit);
-        event(TaggerEvent::FileSaved { file, result })
-    })
-}
-
-/// Fingerprints one file and looks it up. A scan that was cancelled (or
-/// replaced) while the file waited stops without doing the work.
-async fn scan_file(generation: u64, path: PathBuf, key: String) -> ScanFileResult {
-    let cancelled = || ScanFileResult {
-        fingerprint: Err("Scan cancelled".to_owned()),
-        lookup: None,
-    };
-    let permit = FINGERPRINT_PERMITS.acquire().await;
-    if ACTIVE_SCAN.load(Ordering::Relaxed) != generation {
-        return cancelled();
-    }
-    let fingerprint = blocking(move || fingerprint::compute(&path)).await;
-    drop(permit);
-    let fingerprint = match fingerprint {
-        Ok(fp) => fp,
-        Err(error) => {
-            return ScanFileResult {
-                fingerprint: Err(error),
-                lookup: None,
-            };
-        }
-    };
-    wait_for_lookup_slot().await;
-    if ACTIVE_SCAN.load(Ordering::Relaxed) != generation {
-        return cancelled();
-    }
-    let sent = fingerprint.clone();
-    let lookup = blocking(move || acoustid::lookup(&key, &sent)).await;
-    ScanFileResult {
-        fingerprint: Ok(fingerprint),
-        lookup: Some(lookup),
-    }
-}
-
-/// A file ready to submit, or why it can't be.
-struct Prepared {
-    /// Computed here (to keep for later), as opposed to taken from the file.
-    computed: Option<fingerprint::Fingerprint>,
-    submission: Result<Submission, String>,
-}
-
-async fn prepare_submission(job: SubmitJob) -> Prepared {
-    let (fingerprint, computed) = match &job.fingerprint {
-        Some(fp) => (Ok(fingerprint::Fingerprint::clone(fp)), None),
-        None => {
-            let permit = FINGERPRINT_PERMITS.acquire().await;
-            let path = job.path.clone();
-            let result = blocking(move || fingerprint::compute(&path)).await;
-            drop(permit);
-            match result {
-                Ok(fp) => (Ok(fp.clone()), Some(fp)),
-                Err(e) => (Err(e), None),
-            }
-        }
-    };
-    let submission = fingerprint.map(|fp| {
-        let mut submission = Submission::from_tags(fp, &job.tags, Some(job.recording_id.clone()));
-        submission.file_format = jobs::file_format(&job.path);
-        submission.bitrate_kbps = None;
-        submission
-    });
-    Prepared {
-        computed,
-        submission,
-    }
-}
-
-/// Fingerprints what needs it, then sends everything to AcoustID in batches.
-async fn run_submit(start: SubmitStart, app_key: String) -> TaggerEvent {
-    let SubmitStart { generation, jobs } = start;
-    let aborted = |error: String| TaggerEvent::SubmitAborted { generation, error };
-
-    let user_key = match blocking(|| {
-        crate::credentials::retrieve_password(crate::tagger::ACOUSTID_USER_KEY_ENTRY)
-    })
-    .await
-    {
-        Ok(Some(key)) if !key.trim().is_empty() => key,
-        Ok(_) => return aborted(fl!("tagger-notice-no-user-key")),
-        Err(e) => return aborted(fl!("tagger-notice-keyring-failed", error = e)),
-    };
-
-    let files: Vec<FileId> = jobs.iter().map(|j| j.file).collect();
-    let mut set = tokio::task::JoinSet::new();
-    for (index, job) in jobs.into_iter().enumerate() {
-        set.spawn(async move { (index, prepare_submission(job).await) });
-    }
-    let mut prepared: Vec<Option<Prepared>> = files.iter().map(|_| None).collect();
-    while let Some(joined) = set.join_next().await {
-        if let Ok((index, item)) = joined {
-            prepared[index] = Some(item);
-        }
-    }
-
-    let mut results: Vec<SubmitResult> = Vec::with_capacity(files.len());
-    let mut ready: Vec<(FileId, Option<fingerprint::Fingerprint>, Submission)> = Vec::new();
-    for (file, item) in files.into_iter().zip(prepared) {
-        match item {
-            Some(Prepared {
-                computed,
-                submission: Ok(submission),
-            }) => ready.push((file, computed, submission)),
-            Some(Prepared {
-                submission: Err(error),
-                ..
-            }) => results.push(SubmitResult {
-                file,
-                fingerprint: None,
-                outcome: Err(error),
-            }),
-            None => results.push(SubmitResult {
-                file,
-                fingerprint: None,
-                outcome: Err("The fingerprinting task failed".to_owned()),
-            }),
-        }
-    }
-
-    for batch in jobs::split_batches(ready, SUBMIT_BATCH) {
-        let (meta, submissions): (Vec<_>, Vec<_>) = batch
-            .into_iter()
-            .map(|(file, computed, submission)| ((file, computed), submission))
-            .unzip();
-        let (app_key, user_key) = (app_key.clone(), user_key.clone());
-        let response = blocking(move || acoustid::submit(&app_key, &user_key, &submissions)).await;
-        results.extend(jobs::map_submit_response(meta, response));
-    }
-    TaggerEvent::Submitted {
-        generation,
-        results,
-    }
 }

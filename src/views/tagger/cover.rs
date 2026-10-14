@@ -7,14 +7,16 @@
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 
-use crate::fl;
-use crate::tagger::edit::PICTURE_KINDS;
-use crate::tagger::{PictureRow, TaggerMessage as Msg, TaggerState};
 use crate::views::common;
+use aulos_core::fl;
+use aulos_core::tagger::edit::PICTURE_KINDS;
+use aulos_core::tagger::{PictureRow, TaggerMessage as Msg, TaggerState};
 
-use super::Facts;
-use super::labels;
-use super::style::{self, Tone};
+use super::Thumbs;
+use super::style;
+use aulos_core::tagger::Facts;
+use aulos_core::tagger::labels;
+use aulos_core::tagger::labels::Tone;
 
 type Element<'a> = cosmic::Element<'a, Msg>;
 
@@ -23,24 +25,8 @@ const THUMB_SIZE: f32 = 112.0;
 /// Width of a picture card (the thumbnail's width plus its padding).
 const CARD_WIDTH: f32 = 136.0;
 
-/// The type choices for a picture of `kind`: the six the editor offers,
-/// plus the picture's own when it is none of them. Returns the labels and
-/// the index of `kind` among them.
-fn kind_choices(kind: u8) -> (Vec<String>, Option<usize>) {
-    let mut names: Vec<String> = PICTURE_KINDS
-        .iter()
-        .map(|k| labels::picture_kind_label(*k))
-        .collect();
-    let mut selected = PICTURE_KINDS.iter().position(|k| *k == kind);
-    if selected.is_none() {
-        names.push(labels::picture_kind_label(kind));
-        selected = Some(names.len() - 1);
-    }
-    (names, selected)
-}
-
-fn thumbnail<'a>(state: &TaggerState, picture: &PictureRow) -> Element<'a> {
-    match state.thumb(picture.hash) {
+fn thumbnail<'a>(thumbs: &Thumbs, picture: &PictureRow) -> Element<'a> {
+    match thumbs.get(picture.hash) {
         Some(handle) => {
             let radius = cosmic::theme::active().cosmic().corner_radii.radius_s[0];
             common::cover_art(handle, THUMB_SIZE, radius, false)
@@ -54,11 +40,11 @@ fn thumbnail<'a>(state: &TaggerState, picture: &PictureRow) -> Element<'a> {
     }
 }
 
-fn picture_card<'a>(state: &TaggerState, picture: &PictureRow, editable: bool) -> Element<'a> {
+fn picture_card<'a>(thumbs: &Thumbs, picture: &PictureRow, editable: bool) -> Element<'a> {
     let spacing = cosmic::theme::active().cosmic().spacing;
     let (hash, kind) = (picture.hash, picture.kind);
 
-    let (names, selected) = kind_choices(kind);
+    let (names, selected) = labels::picture_kind_choices(kind);
     let kind_picker = widget::dropdown(names, selected, move |index| Msg::SetPictureKind {
         hash,
         kind,
@@ -81,7 +67,7 @@ fn picture_card<'a>(state: &TaggerState, picture: &PictureRow, editable: bool) -
         ));
 
     let mut column = widget::Column::new()
-        .push(thumbnail(state, picture))
+        .push(thumbnail(thumbs, picture))
         .push(kind_picker)
         .push(style::muted(fl!(
             "tagger-cover-details",
@@ -154,7 +140,7 @@ fn controls<'a>(state: &TaggerState, editable: bool) -> Element<'a> {
 }
 
 /// The cover art card.
-pub fn panel<'a>(state: &'a TaggerState, facts: &Facts) -> Element<'a> {
+pub fn panel<'a>(state: &'a TaggerState, thumbs: &'a Thumbs, facts: &Facts) -> Element<'a> {
     let spacing = cosmic::theme::active().cosmic().spacing;
     let title = fl!("tagger-cover-title");
 
@@ -174,7 +160,7 @@ pub fn panel<'a>(state: &'a TaggerState, facts: &Facts) -> Element<'a> {
         let cards: Vec<Element<'a>> = state
             .pictures()
             .iter()
-            .map(|picture| picture_card(state, picture, editable))
+            .map(|picture| picture_card(thumbs, picture, editable))
             .collect();
         body = body.push(
             widget::flex_row(cards)

@@ -63,6 +63,18 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --locked --features "$FEATURES" -- -D warnings
 
+      # `aulos-core` is the UI-independent backend: it must build on its own
+      # (no features unified in from the UI crate) and never pull in a UI
+      # toolkit.
+      - name: Check backend stays UI-free
+        run: |
+          cargo check -p aulos-core --all-targets --locked --features "$FEATURES"
+          if cargo tree -p aulos-core -e normal --prefix none --locked --features "$FEATURES" \
+            | grep -E '^(libcosmic|iced[a-z_]*|winit|egui[a-z_]*|eframe) '; then
+            echo "::error::aulos-core must not depend on a UI toolkit"
+            exit 1
+          fi
+
   test:
     name: Test Suite
     runs-on: ubuntu-24.04

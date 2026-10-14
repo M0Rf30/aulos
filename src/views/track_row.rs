@@ -22,10 +22,11 @@
 //!   — even when the cell has no content for this row — so columns never jump
 //!   between rows.
 
-use crate::fl;
-use crate::library::{Playlist, Track};
-use crate::views::context_menu::{self, TrackMenuAction};
+use crate::views::context_menu;
 use crate::views::{Route, common, list_row_button_class};
+use aulos_core::fl;
+use aulos_core::library::{Playlist, Track};
+use aulos_core::menu::TrackMenuAction;
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
@@ -233,17 +234,17 @@ fn quiet_icon_button<'a, M: Clone + 'static>(
 /// when the track earns one, and otherwise shows a dim info glyph so every
 /// row carries the same affordance in the same fixed-width column.
 fn properties_cell<'a, M: Clone + 'static>(
-    quality: crate::library::quality::AudioQuality,
+    quality: aulos_core::library::quality::AudioQuality,
     on_press: M,
 ) -> cosmic::Element<'a, M> {
-    use crate::library::quality::AudioQuality;
+    use aulos_core::library::quality::AudioQuality;
     if matches!(quality, AudioQuality::HiRes | AudioQuality::Dsd) {
         widget::tooltip(
             widget::button::custom(common::quality_badge(quality))
                 .padding([2, 0])
                 .class(quiet_button_class())
                 .on_press(on_press),
-            widget::text::caption(context_menu::properties_label()),
+            widget::text::caption(aulos_core::menu::properties_label()),
             TooltipPosition::Top,
         )
         .into()
@@ -252,7 +253,7 @@ fn properties_cell<'a, M: Clone + 'static>(
             widget::button::icon(widget::icon::from_name("dialog-information-symbolic").size(16))
                 .class(quiet_button_class())
                 .on_press(on_press),
-            widget::text::caption(context_menu::properties_label()),
+            widget::text::caption(aulos_core::menu::properties_label()),
             TooltipPosition::Top,
         )
         .into()
@@ -317,7 +318,7 @@ type Navigate<M> = fn(Route) -> M;
 type AddToPlaylistFn<M> = fn(String, String) -> M;
 
 /// Builds the tag-editor message from `(track, action)`.
-pub type TagFn<M> = fn(Track, crate::tagger::TagAction) -> M;
+pub type TagFn<M> = fn(Track, aulos_core::tagger::TagAction) -> M;
 
 /// Description of one track row. Create with [`TrackRow::new`], enable the
 /// actions the host view supports with the `with_*` methods, then call
@@ -441,10 +442,10 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
 
     /// "Edit tags…", "Look up on MusicBrainz" and "Scan with AcoustID" in the
     /// row's context menu, each emitting `make(track, action)`. A no-op for
-    /// tracks that are not local files (see [`crate::tagger::is_taggable`]).
+    /// tracks that are not local files (see [`aulos_core::tagger::is_taggable`]).
     #[must_use]
     pub fn with_tagging(mut self, make: TagFn<M>) -> Self {
-        if crate::tagger::is_taggable(self.track) {
+        if aulos_core::tagger::is_taggable(self.track) {
             self.on_tag = Some(make);
         }
         self
@@ -568,8 +569,11 @@ impl<'a, M: Clone + 'static> TrackRow<'a, M> {
         }
 
         if c.quality {
-            let quality =
-                crate::library::quality::classify(&track.path, track.sample_rate, track.bitrate);
+            let quality = aulos_core::library::quality::classify(
+                &track.path,
+                track.sample_rate,
+                track.bitrate,
+            );
             row = row.push(fixed_cell(
                 common::QUALITY_BADGE_WIDTH,
                 match &self.on_properties {
@@ -710,15 +714,15 @@ impl<M: Clone + 'static> RowMenu<'_, M> {
         if let Some(make) = self.on_tag {
             entries.push(TrackMenuAction::EditTags(make(
                 track.clone(),
-                crate::tagger::TagAction::Edit,
+                aulos_core::tagger::TagAction::Edit,
             )));
             entries.push(TrackMenuAction::LookUpMusicBrainz(make(
                 track.clone(),
-                crate::tagger::TagAction::LookUp,
+                aulos_core::tagger::TagAction::LookUp,
             )));
             entries.push(TrackMenuAction::ScanAcoustId(make(
                 track.clone(),
-                crate::tagger::TagAction::AcoustId,
+                aulos_core::tagger::TagAction::AcoustId,
             )));
         }
         if let Some(msg) = &self.on_properties {
@@ -997,8 +1001,8 @@ pub fn rows_column<'a, M: Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tagger::TagAction;
-    use crate::views::context_menu::{MenuSpec, track_menu_specs};
+    use aulos_core::menu::{MenuSpec, track_menu_specs};
+    use aulos_core::tagger::TagAction;
     use std::time::Duration;
 
     #[derive(Debug, Clone, PartialEq)]

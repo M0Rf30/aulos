@@ -19,7 +19,6 @@
 
 mod cover;
 mod files;
-mod labels;
 mod lookup;
 mod metadata;
 mod style;
@@ -28,7 +27,11 @@ mod toolbar;
 use cosmic::iced::Length;
 use cosmic::widget;
 
-use crate::tagger::{FileStatus, TaggerMessage, TaggerState};
+use aulos_core::tagger::thumbs::ThumbCache;
+use aulos_core::tagger::{Facts, TaggerMessage, TaggerState};
+
+/// The editor's decoded cover thumbnails, as drawable handles.
+pub type Thumbs = ThumbCache<widget::icon::Handle>;
 
 /// What the page needs besides the editor state: the settings it reacts to.
 #[derive(Debug, Clone, Copy)]
@@ -51,64 +54,11 @@ const COMPACT_PANE_WIDTH: f32 = 620.0;
 const FILES_PORTION: u16 = 5;
 const RIGHT_PORTION: u16 = 6;
 
-/// Numbers derived from the state that several panes need, computed once
-/// per frame: some of them walk every file.
-#[derive(Debug, Clone, Copy)]
-struct Facts {
-    /// A save, submission or scan is running.
-    busy: bool,
-    /// A lookup or scan would have files to work on (see
-    /// [`TaggerState::target_files`]).
-    has_target: bool,
-    /// The selection holds a file that can be edited.
-    selection_editable: bool,
-    /// Files a submission would send.
-    submittable: usize,
-    /// Files with edits that were not saved.
-    unsaved: usize,
-    /// Files a save would write.
-    savable: usize,
-    /// A selected file has edits (or a failed save) to revert.
-    selected_dirty: bool,
-}
-
-impl Facts {
-    fn compute(state: &TaggerState) -> Self {
-        let selection = state.selected_count() > 0;
-        Self {
-            busy: state.is_busy(),
-            has_target: has_target(
-                state
-                    .files()
-                    .iter()
-                    .map(|f| (state.is_selected(f.id), f.is_editable())),
-                selection,
-            ),
-            selection_editable: state.selection_editable(),
-            submittable: state.submittable(),
-            unsaved: state.unsaved_count(),
-            savable: state.savable_count(),
-            selected_dirty: state.files().iter().any(|f| {
-                state.is_selected(f.id)
-                    && matches!(f.status, FileStatus::Modified | FileStatus::Error(_))
-            }),
-        }
-    }
-}
-
-/// Whether a lookup or scan has files to work on, given each file's
-/// `(selected, editable)`: the selected editable files, or every editable
-/// file when nothing is selected.
-fn has_target(files: impl IntoIterator<Item = (bool, bool)>, selection: bool) -> bool {
-    files
-        .into_iter()
-        .any(|(selected, editable)| editable && (selected || !selection))
-}
-
 /// The right pane's content: the lookup (when open), then the metadata and
 /// cover cards.
 fn right_pane<'a>(
     state: &'a TaggerState,
+    thumbs: &'a Thumbs,
     props: TaggerViewProps,
     facts: &Facts,
     compact: bool,
@@ -120,13 +70,14 @@ fn right_pane<'a>(
     }
     column
         .push(metadata::panel(state, facts, compact))
-        .push(cover::panel(state, facts))
+        .push(cover::panel(state, thumbs, facts))
         .into()
 }
 
 /// The two panes for a body of `size`.
 fn body<'a>(
     state: &'a TaggerState,
+    thumbs: &'a Thumbs,
     props: TaggerViewProps,
     facts: &Facts,
     size: cosmic::iced::Size,
@@ -138,7 +89,7 @@ fn body<'a>(
             / f32::from(FILES_PORTION + RIGHT_PORTION);
         let compact = right_width < COMPACT_PANE_WIDTH;
         let right = widget::scrollable(
-            widget::container(right_pane(state, props, facts, compact)).padding([
+            widget::container(right_pane(state, thumbs, props, facts, compact)).padding([
                 0,
                 spacing.space_s,
                 0,
@@ -162,7 +113,7 @@ fn body<'a>(
         widget::scrollable(
             widget::Column::new()
                 .push(files::pane(state, props, facts, Some(files_height)))
-                .push(right_pane(state, props, facts, compact))
+                .push(right_pane(state, thumbs, props, facts, compact))
                 .spacing(spacing.space_m)
                 .padding([0, spacing.space_s, 0, 0]),
         )
@@ -174,6 +125,7 @@ fn body<'a>(
 /// The tag editor page.
 pub fn view<'a>(
     state: &'a TaggerState,
+    thumbs: &'a Thumbs,
     props: TaggerViewProps,
 ) -> cosmic::Element<'a, TaggerMessage> {
     let facts = Facts::compute(state);
@@ -183,7 +135,7 @@ pub fn view<'a>(
     widget::responsive(move |size| {
         let spacing = cosmic::theme::active().cosmic().spacing;
         let inner_width = size.width - 2.0 * f32::from(spacing.space_m);
-        let panes = widget::responsive(move |size| body(state, props, &facts, size));
+        let panes = widget::responsive(move |size| body(state, thumbs, props, &facts, size));
         widget::Column::new()
             .push(toolbar::header(&facts, state))
             .push(toolbar::toolbar(state, props, &facts, inner_width))
@@ -200,22 +152,4 @@ pub fn view<'a>(
             .into()
     })
     .into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::has_target;
-
-    #[test]
-    fn nothing_selected_targets_every_editable_file() {
-        assert!(has_target([(false, false), (false, true)], false));
-        assert!(!has_target([(false, false)], false));
-        assert!(!has_target([], false));
-    }
-
-    #[test]
-    fn a_selection_targets_only_its_editable_files() {
-        assert!(has_target([(true, true), (false, true)], true));
-        assert!(!has_target([(true, false), (false, true)], true));
-    }
 }

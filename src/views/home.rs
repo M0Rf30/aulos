@@ -3,7 +3,7 @@
 
 //! Home page: a time-of-day greeting over horizontally scrolling shelves of
 //! suggested albums and artists, driven by the play history (see
-//! `crate::library::history`).
+//! `aulos_core::library::history`).
 //!
 //! Cards are fully self-contained (`AlbumRef` carries the identity, year and
 //! artist), so the view never indexes into the album list; the app resolves
@@ -11,10 +11,11 @@
 
 mod similar;
 
-use crate::fl;
-use crate::library::CoverArt;
-use crate::library::history::{AlbumRef, ArtistRef, DecadeCount, HomeData, PlayTracker};
 use crate::views::{Route, card_button_class, common};
+use aulos_core::fl;
+use aulos_core::library::CoverArt;
+use aulos_core::library::history::{AlbumRef, ArtistRef, DecadeCount, HomeData};
+use aulos_core::library::home_state::{DecadeView, Greeting, HomeContext, HomeState, decade_label};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::widget::Stack;
@@ -22,8 +23,6 @@ use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget;
 use cosmic::widget::button::Style as ButtonStyle;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// Messages emitted by (and for) the Home page.
 #[derive(Debug, Clone)]
@@ -74,7 +73,7 @@ pub enum HomeMessage {
     /// the Home load it was computed for.
     SimilarShelf {
         request: u64,
-        shelf: Box<crate::online::similar::SimilarShelf>,
+        shelf: Box<aulos_core::online::similar::SimilarShelf>,
     },
     /// All similar-artist shelves of `request` were delivered (`count` of
     /// them) or the lookup gave up (offline).
@@ -87,50 +86,6 @@ pub enum HomeMessage {
     DecadeLoaded { decade: u32, albums: Vec<AlbumRef> },
 }
 
-/// The decade grid currently open on the Home page.
-#[derive(Debug, Clone)]
-pub struct DecadeView {
-    pub decade: u32,
-    /// `None` while the albums are still loading.
-    pub albums: Option<Vec<AlbumRef>>,
-}
-
-/// Home page state, owned by the app.
-#[derive(Debug, Default)]
-pub struct HomeState {
-    /// Loaded shelves; `None` until the first load completes.
-    pub data: Option<HomeData>,
-    /// Bumped on every load so a slow, superseded result is dropped.
-    pub request: u64,
-    /// The decade grid, when one is open.
-    pub decade: Option<DecadeView>,
-    /// Listening-time accumulator for the current track.
-    pub tracker: PlayTracker,
-    /// Track id `tracker` is currently following.
-    pub tracked_track: Option<i64>,
-    /// "Because you listened to …" shelves, loaded after the rest.
-    pub similar: Vec<crate::online::similar::SimilarShelf>,
-    /// The Home load `similar` belongs to.
-    pub similar_request: u64,
-    /// Stops the in-flight similar-artist lookup when a new one starts.
-    pub similar_cancel: Arc<AtomicBool>,
-}
-
-/// Cheap, per-frame facts about the library the Home view needs.
-#[derive(Debug, Clone, Copy)]
-pub struct HomeContext {
-    /// Albums in the active provider's library.
-    pub library_albums: usize,
-    /// Whether a library scan/load is running.
-    pub scanning: bool,
-    /// Whether any music folder is configured (marks step 1 done).
-    pub has_music_dirs: bool,
-    /// Whether any MPD/Subsonic server is configured (marks step 2 done).
-    pub has_servers: bool,
-    /// Scroll offset of the decade grid (virtualization).
-    pub decade_scroll: f32,
-}
-
 /// Cover/avatar size inside a shelf card.
 const CARD_ART: f32 = 160.0;
 const CARD_PADDING: f32 = 8.0;
@@ -138,37 +93,6 @@ const CARD_PADDING: f32 = 8.0;
 const CARD_LABEL_HEIGHT: f32 = 40.0;
 /// Clearance for the page's vertical scrollbar.
 const SCROLLBAR_CLEARANCE: f32 = 16.0;
-
-/// Which greeting suits an hour of the day (0–23).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Greeting {
-    Morning,
-    Afternoon,
-    Evening,
-}
-
-impl Greeting {
-    pub fn for_hour(hour: u32) -> Self {
-        match hour {
-            5..=11 => Self::Morning,
-            12..=17 => Self::Afternoon,
-            _ => Self::Evening,
-        }
-    }
-
-    fn text(self) -> String {
-        match self {
-            Self::Morning => fl!("home-greeting-morning"),
-            Self::Afternoon => fl!("home-greeting-afternoon"),
-            Self::Evening => fl!("home-greeting-evening"),
-        }
-    }
-}
-
-/// Label for a decade chip/title, e.g. `1980` → `"1980s"`.
-pub fn decade_label(decade: u32) -> String {
-    format!("{decade}s")
-}
 
 // ---------------------------------------------------------------------
 // Styling helpers
@@ -295,8 +219,7 @@ fn album_card<'a>(
             .font(cosmic::font::semibold())
             .into()
     };
-    let has_artist = !album.artist.trim().is_empty()
-        && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+    let has_artist = album.has_distinct_artist();
     let subtitle: cosmic::Element<'a, HomeMessage> = if has_artist {
         common::link(
             secondary_caption(album.artist.as_str()),
@@ -980,24 +903,6 @@ pub fn album_route(artist: &str, name: &str) -> Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn greeting_follows_the_hour() {
-        assert_eq!(Greeting::for_hour(4), Greeting::Evening);
-        assert_eq!(Greeting::for_hour(5), Greeting::Morning);
-        assert_eq!(Greeting::for_hour(11), Greeting::Morning);
-        assert_eq!(Greeting::for_hour(12), Greeting::Afternoon);
-        assert_eq!(Greeting::for_hour(17), Greeting::Afternoon);
-        assert_eq!(Greeting::for_hour(18), Greeting::Evening);
-        assert_eq!(Greeting::for_hour(23), Greeting::Evening);
-        assert_eq!(Greeting::for_hour(0), Greeting::Evening);
-    }
-
-    #[test]
-    fn decade_labels() {
-        assert_eq!(decade_label(1980), "1980s");
-        assert_eq!(decade_label(2020), "2020s");
-    }
 
     #[test]
     fn album_route_carries_identity() {

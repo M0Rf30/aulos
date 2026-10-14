@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{NowPlayingMessage, format_time};
-use crate::config::RepeatMode;
-use crate::fl;
-use crate::library::Track;
-use crate::library::palette::Accent;
-use crate::player::PlaybackState;
+use super::NowPlayingMessage;
 use crate::views::common;
+use aulos_core::config::RepeatMode;
+use aulos_core::fl;
+use aulos_core::format::format_duration;
+use aulos_core::library::Track;
+use aulos_core::library::palette::Accent;
+use aulos_core::player::PlaybackState;
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
@@ -209,9 +210,9 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
     // ever being draggable — the correct widget for "disabled", not a
     // degenerate slider hack.
     let seek_bar = widget::Row::new()
-        .push(widget::text::body(format_time(Duration::ZERO)))
+        .push(widget::text::body(format_duration(0)))
         .push(widget::determinate_linear(0.0).width(Length::Fill))
-        .push(widget::text::body(format_time(Duration::ZERO)))
+        .push(widget::text::body(format_duration(0)))
         .spacing(space_s)
         .align_y(Alignment::Center);
 
@@ -319,12 +320,12 @@ fn seek_bar_row<'a>(
     let time_start_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         live_badge()
     } else {
-        widget::text::body(format_time(display_position)).into()
+        widget::text::body(format_duration(display_position.as_secs())).into()
     };
     let time_end_slot: cosmic::Element<'_, NowPlayingMessage> = if is_live {
         widget::Space::new().width(0).height(0).into()
     } else {
-        widget::text::body(format_time(duration)).into()
+        widget::text::body(format_duration(duration.as_secs())).into()
     };
     widget::Row::new()
         .push(time_start_slot)
@@ -581,7 +582,7 @@ fn utility_buttons<'a>(
         .push(transport_button(
             "go-last-symbolic",
             24,
-            crate::player::party::stop_after_flag(),
+            aulos_core::player::party::stop_after_flag(),
             fl!("stop-after-track"),
             Some(NowPlayingMessage::ToggleStopAfter),
         ))
@@ -690,7 +691,7 @@ pub fn expanded_now_playing<'a>(
     seeking_preview: Option<f32>,
     expand_progress: f32,
     lyrics_overlay_active: bool,
-    lyrics: Option<&'a crate::library::Lyrics>,
+    lyrics: Option<&'a aulos_core::library::Lyrics>,
     lyrics_loading: bool,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
     #[cfg(feature = "visualizer")] viz_frame_buf: Arc<Mutex<super::viz_shader::VizFrameBuffer>>,
@@ -702,7 +703,8 @@ pub fn expanded_now_playing<'a>(
     // not chrome, and stay visible regardless.
     #[cfg(feature = "visualizer")] viz_hud_visible: bool,
     #[cfg(feature = "visualizer")] viz_browser_open: bool,
-    #[cfg(feature = "visualizer")] viz_preset_entries: &'a [super::visualizer::PresetEntry],
+    #[cfg(feature = "visualizer")]
+    viz_preset_entries: &'a [aulos_core::visualizer::presets::PresetEntry],
     #[cfg(feature = "visualizer")] viz_presets_scanned: bool,
     #[cfg(feature = "visualizer")] viz_preset_search: &'a str,
     #[cfg(feature = "visualizer")] viz_preset_scroll: f32,
@@ -719,7 +721,7 @@ pub fn expanded_now_playing<'a>(
     // Radio/other zero-duration streams: no seek slider, and shuffle/prev/
     // next/repeat are meaningless (there is nothing to shuffle or skip to)
     // so they render disabled rather than disappearing.
-    let is_live = super::is_live_stream(track);
+    let is_live = track.is_live_stream();
 
     let spacing = cosmic::theme::active().cosmic().spacing;
     let space_xxs = f32::from(spacing.space_xxs);

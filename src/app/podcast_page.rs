@@ -8,16 +8,18 @@
 //! `Message::PodcastEvent` async-result dispatch (`handle_podcast_event`),
 //! plus the private helpers/tasks that back them. The view
 //! (`crate::views::podcasts`) stays pure -- this is the only place that
-//! touches the online store, the podcast feed/iTunes HTTP client, or
-//! `AppModel`'s `podcast_*` fields.
+//! touches `AppModel`'s `podcast_*` fields; the store/feed/download work
+//! itself lives in `aulos_core::online::podcast`.
 
 use super::tasks::{download_episode_task, refresh_podcast_task};
-use super::{AppModel, HTTP_CLIENT, Message, now_epoch, open_online_store};
-use crate::fl;
-use crate::library::Track;
-use crate::online::podcast::{self, PodcastSearchResult};
-use crate::online::store::{Episode, Podcast};
-use crate::views::podcasts::{EpisodeFilter, PodcastMessage};
+use super::{AppModel, Message};
+use crate::views::podcasts::PodcastMessage;
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::online::podcast::EpisodeFilter;
+use aulos_core::online::podcast::{self, PodcastSearchResult};
+use aulos_core::online::store::{Episode, Podcast};
+use aulos_core::online::{UrlError, validate_http_url};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -66,16 +68,9 @@ impl AppModel {
     /// Load subscribed podcasts from the online store.
     pub(super) fn load_podcasts(&self) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
-            let podcasts = tokio::task::spawn_blocking(|| {
-                open_online_store()
-                    .and_then(|store| store.list_podcasts())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_podcasts failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
+            let podcasts = tokio::task::spawn_blocking(podcast::load_subscriptions)
+                .await
+                .unwrap_or_default();
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::PodcastsLoaded(
                 podcasts,
             )))
@@ -85,16 +80,9 @@ impl AppModel {
     /// Load a podcast's episodes from the online store.
     pub(super) fn load_podcast_episodes(&self, podcast_id: i64) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
-            let episodes = tokio::task::spawn_blocking(move || {
-                open_online_store()
-                    .and_then(|store| store.list_episodes(podcast_id))
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_episodes failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
+            let episodes = tokio::task::spawn_blocking(move || podcast::load_episodes(podcast_id))
+                .await
+                .unwrap_or_default();
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::EpisodesLoaded {
                 podcast_id,
                 episodes,
@@ -113,8 +101,7 @@ impl AppModel {
     ) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
             let result = tokio::task::spawn_blocking(move || {
-                open_online_store()
-                    .and_then(|store| store.save_episode_position(episode_id, position_ms, played))
+                podcast::save_episode_position(episode_id, position_ms, played)
             })
             .await;
             if let Ok(Err(e)) = result {
@@ -341,27 +328,22 @@ impl AppModel {
     /// feed URL, fetches + parses the feed, and upserts the podcast and
     /// its episodes into the online store.
     fn submit_add_podcast(&mut self, feed_url: String) -> Task<cosmic::Action<Message>> {
-        if feed_url.is_empty() {
-            self.podcast_add_error = Some(fl!("podcast-add-url-required"));
-            return Task::none();
-        }
-        if !(feed_url.starts_with("http://") || feed_url.starts_with("https://")) {
-            self.podcast_add_error = Some(fl!("podcast-add-url-invalid"));
-            return Task::none();
+        match validate_http_url(&feed_url) {
+            Err(UrlError::Empty) => {
+                self.podcast_add_error = Some(fl!("podcast-add-url-required"));
+                return Task::none();
+            }
+            Err(UrlError::NotHttp) => {
+                self.podcast_add_error = Some(fl!("podcast-add-url-invalid"));
+                return Task::none();
+            }
+            Ok(()) => {}
         }
         self.podcast_add_error = None;
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                let client = HTTP_CLIENT.clone();
-                let (meta, episodes) = podcast::fetch_feed(&client, &feed_url)?;
-                let store = open_online_store()?;
-                let id = store.add_podcast(&feed_url, &meta)?;
-                store.upsert_episodes(id, &episodes)?;
-                store.touch_podcast_refresh(id, &meta, now_epoch())?;
-                Ok(meta.title)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = tokio::task::spawn_blocking(move || podcast::subscribe(&feed_url))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::Subscribed { result }))
         })
     }
@@ -404,18 +386,9 @@ impl AppModel {
             self.podcast_episodes.clear();
         }
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let store = open_online_store()?;
-                let episodes = store.list_episodes(id)?;
-                for episode in episodes {
-                    if !episode.downloaded_path.is_empty() {
-                        let _ = std::fs::remove_file(&episode.downloaded_path);
-                    }
-                }
-                store.remove_podcast(id)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = tokio::task::spawn_blocking(move || podcast::unsubscribe(id))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::Unsubscribed { result }))
         })
     }
@@ -430,12 +403,9 @@ impl AppModel {
         self.podcast_search_loading = true;
         self.podcast_search_error = None;
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let client = HTTP_CLIENT.clone();
-                podcast::search_itunes(&client, &query)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = tokio::task::spawn_blocking(move || podcast::search(&query))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::SearchResults {
                 generation,
                 result,
@@ -560,12 +530,10 @@ impl AppModel {
         }
         let path = episode.downloaded_path.clone();
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let _ = std::fs::remove_file(&path);
-                open_online_store()?.set_episode_downloaded_path(episode_id, "")
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result =
+                tokio::task::spawn_blocking(move || podcast::delete_download(episode_id, &path))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
             cosmic::Action::App(Message::PodcastEvent(PodcastEvent::DownloadDeleted {
                 episode_id,
                 result,

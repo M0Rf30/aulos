@@ -6,75 +6,28 @@
 
 use super::message::PlaylistOp;
 use super::{AppModel, Message};
-use crate::provider::MusicProvider;
+use aulos_core::library::Track;
+use aulos_core::provider::MusicProvider;
 use cosmic::prelude::*;
 
-/// Apply `f` to every copy of the track with `track_id` held by the model.
-fn for_each_track(
-    model: &mut AppModel,
-    track_id: &str,
-    mut f: impl FnMut(&mut crate::library::Track),
-) {
-    for track in &mut model.all_tracks {
-        if track.id.to_string() == track_id {
-            f(track);
-        }
-    }
-    for album in &mut model.all_albums {
-        for track in &mut album.tracks {
-            if track.id.to_string() == track_id {
-                f(track);
-            }
-        }
-    }
-    for artist in &mut model.all_artists {
-        for album in &mut artist.albums {
-            for track in &mut album.tracks {
-                if track.id.to_string() == track_id {
-                    f(track);
-                }
-            }
-        }
-    }
-    if let Some(ct) = model.current_track.as_mut()
-        && ct.id.to_string() == track_id
-    {
-        f(ct);
-    }
-}
-
 impl AppModel {
+    /// Apply `f` to every copy of the track with `track_id` held by the
+    /// model: the library lists and the current track.
+    fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
+        self.library.for_each_track(track_id, &mut f);
+        if let Some(ct) = self.current_track.as_mut()
+            && ct.id.to_string() == track_id
+        {
+            f(ct);
+        }
+    }
+
     pub(super) fn set_favorite_local(&mut self, track_id: &str, state: bool) {
-        for_each_track(self, track_id, |t| t.is_favorite = state);
+        self.for_each_track(track_id, |t| t.is_favorite = state);
     }
 
     pub(super) fn set_rating_local(&mut self, track_id: &str, rating: Option<u8>) {
-        for_each_track(self, track_id, |t| t.rating = rating);
-    }
-
-    /// Current favourite state of a track, if known locally.
-    fn favorite_state(&self, track_id: &str) -> Option<bool> {
-        if let Some(ct) = &self.current_track
-            && ct.id.to_string() == track_id
-        {
-            return Some(ct.is_favorite);
-        }
-        self.all_tracks
-            .iter()
-            .find(|t| t.id.to_string() == track_id)
-            .map(|t| t.is_favorite)
-    }
-
-    fn rating_state(&self, track_id: &str) -> Option<u8> {
-        if let Some(ct) = &self.current_track
-            && ct.id.to_string() == track_id
-        {
-            return ct.rating;
-        }
-        self.all_tracks
-            .iter()
-            .find(|t| t.id.to_string() == track_id)
-            .and_then(|t| t.rating)
+        self.for_each_track(track_id, |t| t.rating = rating);
     }
 
     pub(super) fn toggle_favorite_async(
@@ -84,7 +37,10 @@ impl AppModel {
         let Some(provider) = self.registry.active_shared() else {
             return Task::none();
         };
-        let optimistic = !self.favorite_state(&track_id).unwrap_or(false);
+        let optimistic = !self
+            .library
+            .favorite_state(self.current_track.as_ref(), &track_id)
+            .unwrap_or(false);
         self.set_favorite_local(&track_id, optimistic);
         cosmic::task::future(async move {
             let id = track_id.clone();
@@ -109,7 +65,9 @@ impl AppModel {
         let Some(provider) = self.registry.active_shared() else {
             return Task::none();
         };
-        let previous = self.rating_state(&track_id);
+        let previous = self
+            .library
+            .rating_state(self.current_track.as_ref(), &track_id);
         self.set_rating_local(&track_id, if rating == 0 { None } else { Some(rating) });
         cosmic::task::future(async move {
             let id = track_id.clone();
@@ -146,8 +104,8 @@ impl AppModel {
     /// Select a genre and load its tracks without blocking the UI thread.
     pub(super) fn select_genre(&mut self, idx: usize) -> Task<cosmic::Action<Message>> {
         self.selected_genre = Some(idx);
-        self.genre_tracks.clear();
-        let Some(genre) = self.all_genres.get(idx).cloned() else {
+        self.library.genre_tracks.clear();
+        let Some(genre) = self.library.genres.get(idx).cloned() else {
             return Task::none();
         };
         if let Some(provider) = self.registry.active_shared() {
@@ -160,12 +118,7 @@ impl AppModel {
                 cosmic::Action::App(Message::GenreTracksLoaded { idx, tracks })
             })
         } else {
-            self.genre_tracks = self
-                .all_tracks
-                .iter()
-                .filter(|t| t.genre.eq_ignore_ascii_case(&genre))
-                .cloned()
-                .collect();
+            self.library.genre_tracks = self.library.tracks_in_genre(&genre);
             Task::none()
         }
     }

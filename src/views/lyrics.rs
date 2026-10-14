@@ -5,9 +5,9 @@
 //!
 //! Tasks 104-105: Synced lyrics rendering with highlighted current line.
 
-use crate::fl;
-use crate::library::palette::Accent;
-use crate::library::{LyricLine, Lyrics};
+use aulos_core::fl;
+use aulos_core::library::palette::Accent;
+use aulos_core::library::{LyricLine, Lyrics, find_current_line_index};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Color;
 use cosmic::iced::{Alignment, Length};
@@ -19,24 +19,6 @@ use std::time::Duration;
 pub enum LyricsMessage {
     FetchLyrics,
     Close,
-}
-
-/// Find the index of the current lyric line based on playback position.
-///
-/// Returns the index of the last line whose timestamp is <= current position,
-/// or `None` if no line has started yet.
-fn find_current_line_index(lines: &[LyricLine], position: Duration) -> Option<usize> {
-    let pos_ms = position.as_millis() as u64;
-    // Find the last line whose timestamp is <= pos_ms.
-    let mut current = None;
-    for (i, line) in lines.iter().enumerate() {
-        if line.timestamp_ms <= pos_ms {
-            current = Some(i);
-        } else {
-            break;
-        }
-    }
-    current
 }
 
 /// Theme-driven dimmed text colour for secondary labels.

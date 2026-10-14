@@ -3,12 +3,14 @@
 
 //! Artists view - list of artists with album sub-views.
 
-use crate::fl;
-use crate::library::{Album, Artist};
 use crate::views::common;
-use crate::views::context_menu::{self, AlbumMenuAction};
+use crate::views::context_menu;
 use crate::views::track_row;
 use crate::views::{card_button_class, list_row_button_class};
+use aulos_core::fl;
+use aulos_core::library::Artist;
+use aulos_core::library::display::bio_preview;
+use aulos_core::menu::AlbumMenuAction;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
@@ -43,13 +45,13 @@ pub enum ArtistMessage {
     /// Jump to another view (album page, genre…).
     Navigate(crate::views::Route),
     /// Open the Properties drawer for this track.
-    ShowProperties(crate::library::Track),
+    ShowProperties(aulos_core::library::Track),
     /// Open the Properties drawer for album `.1` of artist `.0`.
     ShowAlbumProperties(usize, usize),
     /// Open the tag editor on this (local) track.
-    Tag(crate::library::Track, crate::tagger::TagAction),
+    Tag(aulos_core::library::Track, aulos_core::tagger::TagAction),
     /// Open the tag editor on album `.1` of artist `.0`.
-    TagAlbum(usize, usize, crate::tagger::TagAction),
+    TagAlbum(usize, usize, aulos_core::tagger::TagAction),
 }
 
 /// Minimum avatar-frame/label width of a grid card; the fluid grid
@@ -68,7 +70,7 @@ const CARD_LABEL_HEIGHT: f32 = 40.0;
 pub fn artists_view<'a>(
     artists: &'a [Artist],
     artist_photos: &'a std::collections::HashMap<String, widget::image::Handle>,
-    mode: crate::config::ViewMode,
+    mode: aulos_core::config::ViewMode,
     scroll: &common::ScrollOffsets,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
@@ -79,7 +81,7 @@ pub fn artists_view<'a>(
         );
     }
 
-    use crate::config::ViewMode;
+    use aulos_core::config::ViewMode;
 
     let header = common::view_mode_toggle_header(mode, ArtistMessage::ToggleViewMode);
 
@@ -117,7 +119,7 @@ pub fn artists_view<'a>(
                     art_size,
                     CARD_LABEL_HEIGHT,
                     common::clipped_cell(common::cell_text(artist.name.as_str()).into()),
-                    common::clipped_cell(common::cell_caption(artist_summary(artist)).into()),
+                    common::clipped_cell(common::cell_caption(artist.summary()).into()),
                 );
 
                 let artist_card = common::grid_card(art_widget, art_size, label_block);
@@ -155,10 +157,6 @@ fn list_row<'a>(
 
     let avatar = common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 52.0);
 
-    let albums = artist.album_count();
-    let tracks = artist.track_count();
-    let duration = artist.total_secs;
-
     let info = common::cell_text(artist.name.as_str()).font(cosmic::font::semibold());
 
     widget::button::custom(
@@ -168,23 +166,17 @@ fn list_row<'a>(
                 widget::container(common::clipped_cell(info.into())).width(Length::FillPortion(5)),
             )
             .push(
-                widget::container(dim(format!(
-                    "{albums} album{}",
-                    if albums == 1 { "" } else { "s" }
-                )))
-                .width(80)
-                .align_x(Horizontal::Right),
+                widget::container(dim(artist.albums_label()))
+                    .width(80)
+                    .align_x(Horizontal::Right),
             )
             .push(
-                widget::container(dim(format!(
-                    "{tracks} track{}",
-                    if tracks == 1 { "" } else { "s" }
-                )))
-                .width(80)
-                .align_x(Horizontal::Right),
+                widget::container(dim(artist.tracks_label()))
+                    .width(80)
+                    .align_x(Horizontal::Right),
             )
             .push(
-                widget::container(dim(common::format_duration_coarse(duration)))
+                widget::container(dim(artist.duration_label()))
                     .width(64)
                     .align_x(Horizontal::Right),
             )
@@ -214,14 +206,14 @@ pub fn artist_detail_view<'a>(
     current_track_id: Option<i64>,
     hero: Option<(
         Option<&'a widget::icon::Handle>,
-        Option<&'a crate::library::palette::Accent>,
+        Option<&'a aulos_core::library::palette::Accent>,
     )>,
 ) -> cosmic::Element<'a, ArtistMessage> {
     let avatar = common::artist_avatar(&artist.name, artist_photos.get(&artist.name), 120.0);
 
     let header_info = widget::Column::new()
         .push(widget::text::title1(artist.name.as_str()).wrapping(Wrapping::None))
-        .push(common::cell_caption(artist_summary(artist)))
+        .push(common::cell_caption(artist.summary()))
         .spacing(4);
 
     let header = widget::Row::new()
@@ -269,7 +261,7 @@ pub fn artist_detail_view<'a>(
                 false,
                 open_album,
             ))
-            .push(common::cell_caption(album_track_summary(album)));
+            .push(common::cell_caption(album.track_summary()));
 
         let album_header = widget::Row::new()
             .push(
@@ -302,7 +294,7 @@ pub fn artist_detail_view<'a>(
             .align_y(Alignment::Center);
 
         // Right-clicking an album's header offers the album-level actions.
-        let taggable = album.tracks.first().is_some_and(crate::tagger::is_taggable);
+        let taggable = album.is_taggable();
         content = content.push(context_menu::with_menu(album_header, move || {
             let mut entries = vec![
                 AlbumMenuAction::Play(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
@@ -318,7 +310,7 @@ pub fn artist_detail_view<'a>(
                 )),
             ];
             if taggable {
-                use crate::tagger::TagAction;
+                use aulos_core::tagger::TagAction;
                 entries.extend([
                     AlbumMenuAction::EditTags(ArtistMessage::TagAlbum(
                         artist_index,
@@ -354,11 +346,7 @@ pub fn artist_detail_view<'a>(
                 album.tracks.iter().enumerate().map(|(track_idx, track)| {
                     let track_id = track.id.to_string();
                     let rating_track_id = track_id.clone();
-                    let number = if track.track_number > 0 {
-                        track.track_number.to_string()
-                    } else {
-                        (track_idx + 1).to_string()
-                    };
+                    let number = track.display_number(track_idx);
                     track_row::TrackRow::new(
                         track,
                         number,
@@ -392,64 +380,18 @@ pub fn artist_detail_view<'a>(
         .into()
 }
 
-/// Localized "N albums, M tracks" summary line for an artist.
-fn artist_summary(artist: &Artist) -> String {
-    let albums = artist.album_count();
-    let tracks = artist.track_count();
-    let album_str = if albums == 1 {
-        fl!("artist-album-count-one", count = albums.to_string())
-    } else {
-        fl!("artist-album-count-other", count = albums.to_string())
-    };
-    let track_str = if tracks == 1 {
-        fl!("artist-track-count-one", count = tracks.to_string())
-    } else {
-        fl!("artist-track-count-other", count = tracks.to_string())
-    };
-    format!("{album_str}, {track_str}")
-}
-
-/// Localized "{year} · N tracks" (or just "N tracks") summary for an album.
-fn album_track_summary(album: &Album) -> String {
-    let n = album.track_count();
-    let track_str = if n == 1 {
-        fl!("artist-track-count-one", count = n.to_string())
-    } else {
-        fl!("artist-track-count-other", count = n.to_string())
-    };
-    if album.year > 0 {
-        format!("{} · {}", album.year, track_str)
-    } else {
-        track_str
-    }
-}
-
-/// Max characters shown before the biography is clipped with a
-/// "show more" link — long enough for a couple of sentences, short
-/// enough that the detail view's header stays above the fold.
-const BIO_PREVIEW_CHARS: usize = 320;
-
 /// Clipped-biography card: the full text once `expanded`, otherwise a
 /// character-capped preview with a trailing ellipsis, plus a
 /// show-more/show-less link when the text is actually long enough to
 /// need clipping.
 fn bio_block<'a>(bio: &'a str, expanded: bool) -> cosmic::Element<'a, ArtistMessage> {
-    let char_count = bio.chars().count();
-    let is_long = char_count > BIO_PREVIEW_CHARS;
-
-    let shown = if expanded || !is_long {
-        bio.to_string()
-    } else {
-        let mut preview: String = bio.chars().take(BIO_PREVIEW_CHARS).collect();
-        preview.push('…');
-        preview
-    };
+    let preview = bio_preview(bio, expanded);
 
     let mut col = widget::Column::new()
-        .push(widget::text::body(shown))
+        .push(widget::text::body(preview.text))
         .spacing(8);
 
-    if is_long {
+    if preview.is_long {
         let label = if expanded {
             fl!("artist-bio-less")
         } else {

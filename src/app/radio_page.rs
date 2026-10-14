@@ -8,16 +8,19 @@
 //! `Message::RadioEvent` async-result dispatch (`handle_radio_event`),
 //! plus the private helpers/tasks that back them. The view
 //! (`crate::views::radio`) stays pure -- this is the only place that
-//! touches the online store, the radio-browser HTTP client, or
-//! `AppModel`'s `radio_*` fields.
+//! touches `AppModel`'s `radio_*` fields; the directory/store work itself
+//! lives in `aulos_core::online::radio`.
 
 use super::tasks::resolve_and_play_radio;
-use super::{AppModel, HTTP_CLIENT, Message, open_online_store};
-use crate::fl;
-use crate::library::Track;
-use crate::online::radio::{self, SortOrder, StationQuery, StationSearchResult};
-use crate::online::store::RadioStation;
-use crate::views::radio::{DiscoverPreset, RadioMessage};
+use super::{AppModel, Message};
+use crate::views::radio::RadioMessage;
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::online::radio::{
+    self, DiscoverPreset, SortOrder, StationQuery, StationSearchResult,
+};
+use aulos_core::online::store::RadioStation;
+use aulos_core::online::{UrlError, validate_http_url};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -48,40 +51,13 @@ pub enum RadioEvent {
     },
 }
 
-/// How many results a Discover search/preset fetch asks for.
-const DISCOVER_LIMIT: u32 = 50;
-
-/// Derive a two-letter upper-case country code from the `LC_ALL`/`LANG`
-/// locale (e.g. `en_US.UTF-8` -> `US`), or an empty string when it can't
-/// be determined. Read once at startup from the process environment --
-/// never a network lookup.
-pub(super) fn locale_country_code() -> String {
-    for key in ["LC_ALL", "LANG"] {
-        if let Ok(v) = std::env::var(key)
-            && let Some(region) = v.split('.').next().and_then(|l| l.split('_').nth(1))
-            && region.len() == 2
-            && region.chars().all(|c| c.is_ascii_alphabetic())
-        {
-            return region.to_ascii_uppercase();
-        }
-    }
-    String::new()
-}
-
 impl AppModel {
     /// Load saved radio stations from the online store.
     pub(super) fn load_radio_stations(&self) -> Task<cosmic::Action<Message>> {
         cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(|| {
-                open_online_store()
-                    .and_then(|store| store.list_radio_stations())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("list_radio_stations failed: {e}");
-                        Vec::new()
-                    })
-            })
-            .await
-            .unwrap_or_default();
+            let stations = tokio::task::spawn_blocking(radio::load_saved)
+                .await
+                .unwrap_or_default();
             cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
         })
     }
@@ -289,13 +265,16 @@ impl AppModel {
     fn submit_add_station(&mut self) -> Task<cosmic::Action<Message>> {
         let name = self.radio_add_name.trim().to_string();
         let url = self.radio_add_url.trim().to_string();
-        if url.is_empty() {
-            self.radio_add_error = Some(fl!("radio-add-url-required"));
-            return Task::none();
-        }
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            self.radio_add_error = Some(fl!("radio-add-url-invalid"));
-            return Task::none();
+        match validate_http_url(&url) {
+            Err(UrlError::Empty) => {
+                self.radio_add_error = Some(fl!("radio-add-url-required"));
+                return Task::none();
+            }
+            Err(UrlError::NotHttp) => {
+                self.radio_add_error = Some(fl!("radio-add-url-invalid"));
+                return Task::none();
+            }
+            Ok(()) => {}
         }
         self.radio_add_error = None;
         let display_name = if name.is_empty() { url.clone() } else { name };
@@ -322,9 +301,7 @@ impl AppModel {
         let name_for_event = name.clone();
         cosmic::task::future(async move {
             let outcome = tokio::task::spawn_blocking(move || {
-                open_online_store().and_then(|store| {
-                    store.add_radio_station(&name, &stream_url, &homepage, &favicon_url, &tags)
-                })
+                radio::save_station(&name, &stream_url, &homepage, &favicon_url, &tags)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
@@ -400,17 +377,13 @@ impl AppModel {
                 Message::Radio(RadioMessage::UndoRemove(station.clone()))
             });
         let remove_task = cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(move || {
-                let store = open_online_store()?;
-                store.remove_radio_station(id)?;
-                store.list_radio_stations()
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()))
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to remove radio station: {e}");
-                Vec::new()
-            });
+            let stations = tokio::task::spawn_blocking(move || radio::remove_saved(id))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to remove radio station: {e}");
+                    Vec::new()
+                });
             cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
         });
         Task::batch([remove_task, self.push_toast(toast)])
@@ -423,17 +396,13 @@ impl AppModel {
             return Task::none();
         }
         cosmic::task::future(async move {
-            let stations = tokio::task::spawn_blocking(move || {
-                let store = open_online_store()?;
-                store.rename_radio_station(id, &new_name)?;
-                store.list_radio_stations()
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()))
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to rename radio station: {e}");
-                Vec::new()
-            });
+            let stations = tokio::task::spawn_blocking(move || radio::rename_saved(id, &new_name))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to rename radio station: {e}");
+                    Vec::new()
+                });
             cosmic::Action::App(Message::RadioEvent(RadioEvent::StationsLoaded(stations)))
         })
     }
@@ -448,15 +417,12 @@ impl AppModel {
             tag: self.radio_search_tag.unwrap_or_default().to_string(),
             countrycode: self.radio_search_country.clone(),
             order: self.radio_search_sort,
-            limit: DISCOVER_LIMIT,
+            limit: radio::DISCOVER_LIMIT,
         };
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let client = HTTP_CLIENT.clone();
-                radio::search_stations(&client, &query)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = tokio::task::spawn_blocking(move || radio::search(&query))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
             cosmic::Action::App(Message::RadioEvent(RadioEvent::SearchResults {
                 generation,
                 result,
@@ -470,12 +436,9 @@ impl AppModel {
         self.radio_search_loading = true;
         self.radio_search_error = None;
         cosmic::task::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let client = HTTP_CLIENT.clone();
-                match preset {
-                    DiscoverPreset::Popular => radio::top_click_stations(&client, DISCOVER_LIMIT),
-                    DiscoverPreset::TopVoted => radio::top_vote_stations(&client, DISCOVER_LIMIT),
-                }
+            let result = tokio::task::spawn_blocking(move || match preset {
+                DiscoverPreset::Popular => radio::popular(),
+                DiscoverPreset::TopVoted => radio::top_voted(),
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));

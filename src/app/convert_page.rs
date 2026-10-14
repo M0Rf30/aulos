@@ -11,17 +11,23 @@
 //!   validation, job completion) and the progress ticker, wrapped in
 //!   `Message::ConvertEvent`.
 //!
-//! Output format/sample-rate/directory live in [`crate::config::Config`]
+//! Output format/sample-rate/directory live in [`aulos_core::config::Config`]
 //! (persisted across restarts) rather than duplicated on `AppModel`; a
-//! still-`Queued` job has no [`crate::convert::JobSettings`] of its own and
+//! still-`Queued` job has no [`aulos_core::convert::JobSettings`] of its own and
 //! is only bound to *current* config values once `Start` actually runs it
-//! (see [`crate::convert::ConvertJob::start`]), so changing the dropdowns
+//! (see [`aulos_core::convert::ConvertJob::start`]), so changing the dropdowns
 //! after adding files does affect not-yet-started jobs — unlike before.
 
 use super::{AppModel, Message};
-use crate::convert::{ConvertJob, JobId, JobKind, JobSettings, JobState, OutputFormat, run_job};
-use crate::fl;
-use crate::views::convert::{ConvertMessage, SAMPLE_RATE_OPTIONS};
+use crate::views::convert::ConvertMessage;
+use aulos_core::convert::options::{
+    BITRATE_KBPS_OPTIONS, FLAC_BIT_DEPTH_OPTIONS, FLAC_COMPRESSION_OPTIONS, MP3_MODE_OPTIONS,
+    SAMPLE_RATE_OPTIONS, VORBIS_QUALITY_OPTIONS,
+};
+use aulos_core::convert::{
+    self, ConvertJob, JobId, JobKind, JobSettings, JobState, OutputFormat, run_job,
+};
+use aulos_core::fl;
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::path::PathBuf;
@@ -42,7 +48,7 @@ pub enum ConvertEvent {
     JobFinished(JobId, JobState),
     /// The off-thread `ffmpeg -version` availability probe finished (see
     /// `AppModel::detect_ffmpeg_once`). The result is already cached
-    /// globally by `crate::convert::ffmpeg::detect` itself — this only
+    /// globally by `aulos_core::convert::ffmpeg::detect` itself — this only
     /// exists to trigger a re-render once it's known.
     FfmpegDetected(bool),
     /// Progress ticker while any job is running (see
@@ -51,28 +57,11 @@ pub enum ConvertEvent {
     Tick,
 }
 
-/// Default output directory when `Config::convert_out_dir` is unset.
-fn default_convert_out_dir() -> PathBuf {
-    dirs::audio_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-        .join("Converted")
-}
-
-/// True when `path`'s extension is `.cue` (case-insensitive).
-fn is_cue_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
-}
-
 impl AppModel {
     /// Resolved output directory: `config.convert_out_dir`, or the default
     /// under the user's music/home directory when unset.
     pub(super) fn convert_out_dir(&self) -> PathBuf {
-        self.config
-            .convert_out_dir
-            .clone()
-            .unwrap_or_else(default_convert_out_dir)
+        convert::out_dir(&self.config)
     }
 
     /// Handles direct UI actions from the convert view.
@@ -83,7 +72,7 @@ impl AppModel {
                     use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 
                     let mut filter = FileFilter::new("Audio, Video & CUE Files");
-                    for ext in crate::player::engine::decoder::SUPPORTED_EXTENSIONS
+                    for ext in aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
                         .iter()
                         .chain(["cue", "mkv", "mov", "avi"].iter())
                     {
@@ -183,7 +172,7 @@ impl AppModel {
             }
 
             ConvertMessage::FlacCompressionSelected(index) => {
-                if let Some(&level) = crate::views::convert::FLAC_COMPRESSION_OPTIONS.get(index)
+                if let Some(&level) = FLAC_COMPRESSION_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.flac_options;
@@ -196,7 +185,7 @@ impl AppModel {
             }
 
             ConvertMessage::FlacBitDepthSelected(index) => {
-                if let Some(&depth) = crate::views::convert::FLAC_BIT_DEPTH_OPTIONS.get(index)
+                if let Some(&depth) = FLAC_BIT_DEPTH_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.flac_options;
@@ -209,7 +198,7 @@ impl AppModel {
             }
 
             ConvertMessage::Mp3ModeSelected(index) => {
-                if let Some(&mode) = crate::views::convert::MP3_MODE_OPTIONS.get(index)
+                if let Some(&mode) = MP3_MODE_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.lossy_options;
@@ -222,7 +211,7 @@ impl AppModel {
             }
 
             ConvertMessage::AacBitrateSelected(index) => {
-                if let Some(&kbps) = crate::views::convert::BITRATE_KBPS_OPTIONS.get(index)
+                if let Some(&kbps) = BITRATE_KBPS_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.lossy_options;
@@ -235,7 +224,7 @@ impl AppModel {
             }
 
             ConvertMessage::OpusBitrateSelected(index) => {
-                if let Some(&kbps) = crate::views::convert::BITRATE_KBPS_OPTIONS.get(index)
+                if let Some(&kbps) = BITRATE_KBPS_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.lossy_options;
@@ -248,7 +237,7 @@ impl AppModel {
             }
 
             ConvertMessage::VorbisQualitySelected(index) => {
-                if let Some(&quality) = crate::views::convert::VORBIS_QUALITY_OPTIONS.get(index)
+                if let Some(&quality) = VORBIS_QUALITY_OPTIONS.get(index)
                     && let Some(ctx) = &self.config_context
                 {
                     let mut opts = self.config.lossy_options;
@@ -270,8 +259,7 @@ impl AppModel {
             }
 
             ConvertMessage::ClearFinished => {
-                self.convert_jobs
-                    .retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
+                self.convert_jobs.retain(|j| j.state.is_active());
                 Task::none()
             }
 
@@ -317,11 +305,7 @@ impl AppModel {
                 match result {
                     Ok(paths) => {
                         for path in paths {
-                            let kind = if is_cue_path(&path) {
-                                JobKind::CueSplit
-                            } else {
-                                JobKind::Convert
-                            };
+                            let kind = JobKind::for_path(&path);
                             let id = self.convert_next_id;
                             self.convert_next_id += 1;
                             self.convert_jobs.push(ConvertJob::new(id, path, kind));
@@ -349,21 +333,18 @@ impl AppModel {
 
             ConvertEvent::ReadyToStart(result) => match result {
                 Ok(settings) => {
-                    let mut tasks = Vec::new();
-                    for job in &mut self.convert_jobs {
-                        if job.state != JobState::Queued {
-                            continue;
-                        }
-                        job.start(settings.clone());
-                        let job_clone = job.clone();
-                        let semaphore = Arc::clone(&self.convert_semaphore);
-                        tasks.push(cosmic::task::future(async move {
-                            let (id, state) = run_job(job_clone, semaphore).await;
-                            cosmic::Action::App(Message::ConvertEvent(ConvertEvent::JobFinished(
-                                id, state,
-                            )))
-                        }));
-                    }
+                    let tasks: Vec<_> = convert::start_queued(&mut self.convert_jobs, &settings)
+                        .into_iter()
+                        .map(|job| {
+                            let semaphore = Arc::clone(&self.convert_semaphore);
+                            cosmic::task::future(async move {
+                                let (id, state) = run_job(job, semaphore).await;
+                                cosmic::Action::App(Message::ConvertEvent(
+                                    ConvertEvent::JobFinished(id, state),
+                                ))
+                            })
+                        })
+                        .collect();
                     Task::batch(tasks)
                 }
                 Err(reason) => {
@@ -380,26 +361,9 @@ impl AppModel {
                 // Queue just drained (no more queued/running jobs): summarize
                 // the batch in a toast. Guarded on "was something finished at
                 // all" so clearing an already-empty queue stays silent.
-                let still_active = self
-                    .convert_jobs
-                    .iter()
-                    .any(|j| matches!(j.state, JobState::Queued | JobState::Running));
-                if still_active {
+                let Some((done, failed)) = convert::finished_batch(&self.convert_jobs) else {
                     return Task::none();
-                }
-                let done = self
-                    .convert_jobs
-                    .iter()
-                    .filter(|j| j.state == JobState::Done)
-                    .count();
-                let failed = self
-                    .convert_jobs
-                    .iter()
-                    .filter(|j| matches!(j.state, JobState::Failed(_) | JobState::Cancelled))
-                    .count();
-                if done + failed == 0 {
-                    return Task::none();
-                }
+                };
                 self.push_toast(widget::toaster::Toast::new(if failed > 0 {
                     fl!(
                         "toast-convert-queue-done-with-failures",
@@ -418,15 +382,15 @@ impl AppModel {
     }
 
     /// Fires the off-thread `ffmpeg` availability probe if it hasn't run
-    /// yet this session (see `crate::convert::ffmpeg`) — safe to call
+    /// yet this session (see `aulos_core::convert::ffmpeg`) — safe to call
     /// every time the Convert page is opened, since it's a no-op once the
     /// result is cached.
     pub(super) fn detect_ffmpeg_once(&self) -> Task<cosmic::Action<Message>> {
-        if crate::convert::ffmpeg::cached().is_some() {
+        if aulos_core::convert::ffmpeg::cached().is_some() {
             return Task::none();
         }
         cosmic::task::future(async {
-            let available = tokio::task::spawn_blocking(crate::convert::ffmpeg::detect)
+            let available = tokio::task::spawn_blocking(aulos_core::convert::ffmpeg::detect)
                 .await
                 .unwrap_or(false);
             cosmic::Action::App(Message::ConvertEvent(ConvertEvent::FfmpegDetected(
@@ -449,26 +413,13 @@ impl AppModel {
             return Task::none();
         }
 
-        let settings = JobSettings {
-            format: self.config.convert_format,
-            target_rate: self.config.convert_sample_rate,
-            out_dir: self.convert_out_dir(),
-            flac_options: self.config.flac_options,
-            lossy_options: self.config.lossy_options,
-        };
+        let settings = JobSettings::from_config(&self.config);
 
         cosmic::task::future(async move {
             let out_dir = settings.out_dir.clone();
-            let validation = tokio::task::spawn_blocking(move || -> Result<(), String> {
-                std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-                if out_dir.is_dir() {
-                    Ok(())
-                } else {
-                    Err(format!("{} is not a directory", out_dir.display()))
-                }
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("validation task panicked: {e}")));
+            let validation = tokio::task::spawn_blocking(move || convert::ensure_out_dir(&out_dir))
+                .await
+                .unwrap_or_else(|e| Err(format!("validation task panicked: {e}")));
 
             cosmic::Action::App(Message::ConvertEvent(ConvertEvent::ReadyToStart(
                 validation.map(|()| settings),

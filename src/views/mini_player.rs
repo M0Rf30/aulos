@@ -6,9 +6,10 @@
 //! window is shrunk to mini-player mode. The headerbar is hidden in this
 //! mode, so the view carries its own thin drag strip with restore/close.
 
-use crate::fl;
 use crate::views::common;
 use crate::views::now_playing::seek_bar;
+use aulos_core::fl;
+use aulos_core::format::format_duration;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget;
@@ -233,7 +234,7 @@ fn seek_row(p: &MiniProps) -> cosmic::Element<'static, MiniMsg> {
     };
     let time = |d: Duration, align| {
         widget::container(common::cell_caption(if p.has_track && !p.is_live {
-            common::format_duration(d.as_secs())
+            format_duration(d.as_secs())
         } else {
             String::new()
         }))

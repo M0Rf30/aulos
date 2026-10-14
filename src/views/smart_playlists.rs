@@ -3,14 +3,14 @@
 
 //! Dynamic playlist list + rules editor view.
 
-use crate::fl;
-use crate::library::Track;
-use crate::library::smart_playlist::{
-    MatchMode, OrderField, Rule, RuleField, RuleOp, SmartPlaylist,
-};
 use crate::views::common;
 use crate::views::list_row_button_class;
 use crate::views::track_row;
+use aulos_core::fl;
+use aulos_core::library::Track;
+use aulos_core::library::smart_playlist::{
+    EditorState, MatchMode, OrderField, Rule, RuleField, RuleOp, SmartPlaylist,
+};
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::core::Color;
 use cosmic::iced::core::text::Wrapping;
@@ -80,169 +80,7 @@ pub enum SmartPlaylistMessage {
     /// Open the Properties drawer for this track.
     ShowProperties(Track),
     /// Open the tag editor on this (local) track.
-    Tag(Track, crate::tagger::TagAction),
-}
-
-/// In-progress edit state for the rules editor: the playlist being built,
-/// plus live validation errors recomputed after every field change.
-#[derive(Debug, Clone)]
-pub struct EditorState {
-    /// The smart playlist under edit. `id == 0` means "not yet saved" —
-    /// `EditorSave` inserts a new row instead of updating one.
-    pub playlist: SmartPlaylist,
-    /// Whether a row limit applies. `playlist.limit` only holds a value
-    /// while this is true; toggling off keeps `limit_input` so re-enabling
-    /// restores the last-typed number.
-    pub limit_enabled: bool,
-    /// Raw text of the limit field, so a momentarily empty/invalid edit
-    /// doesn't collapse `playlist.limit` before the user finishes typing.
-    pub limit_input: String,
-    /// Validation errors from the last edit; non-empty disables Save.
-    pub errors: Vec<String>,
-}
-
-impl EditorState {
-    /// Start editing a brand-new, empty smart playlist.
-    pub fn new() -> Self {
-        let playlist = SmartPlaylist {
-            id: 0,
-            name: String::new(),
-            rules: Vec::new(),
-            match_mode: MatchMode::All,
-            order_by: OrderField::Title,
-            order_desc: false,
-            limit: None,
-            track_count: 0,
-        };
-        let mut state = Self {
-            playlist,
-            limit_enabled: false,
-            limit_input: String::new(),
-            errors: Vec::new(),
-        };
-        state.revalidate();
-        state
-    }
-
-    /// Start editing a previously saved smart playlist.
-    pub fn from_existing(playlist: SmartPlaylist) -> Self {
-        let limit_enabled = playlist.limit.is_some();
-        let limit_input = playlist.limit.map(|l| l.to_string()).unwrap_or_default();
-        let mut state = Self {
-            playlist,
-            limit_enabled,
-            limit_input,
-            errors: Vec::new(),
-        };
-        state.revalidate();
-        state
-    }
-
-    fn revalidate(&mut self) {
-        self.errors = self.playlist.validate().err().unwrap_or_default();
-    }
-
-    pub fn set_name(&mut self, name: String) {
-        self.playlist.name = name;
-        self.revalidate();
-    }
-
-    pub fn set_match_mode(&mut self, index: usize) {
-        self.playlist.match_mode = if index == 1 {
-            MatchMode::Any
-        } else {
-            MatchMode::All
-        };
-        self.revalidate();
-    }
-
-    pub fn add_rule(&mut self) {
-        self.playlist.rules.push(Rule {
-            field: RuleField::Title,
-            op: RuleOp::Contains,
-            value: String::new(),
-            value2: String::new(),
-        });
-        self.revalidate();
-    }
-
-    pub fn remove_rule(&mut self, index: usize) {
-        if index < self.playlist.rules.len() {
-            self.playlist.rules.remove(index);
-            self.revalidate();
-        }
-    }
-
-    pub fn set_rule_field(&mut self, index: usize, field_index: usize) {
-        if let (Some(rule), Some(field)) = (
-            self.playlist.rules.get_mut(index),
-            RuleField::ALL.get(field_index),
-        ) {
-            rule.field = *field;
-        }
-        self.revalidate();
-    }
-
-    pub fn set_rule_op(&mut self, index: usize, op_index: usize) {
-        if let (Some(rule), Some(op)) = (
-            self.playlist.rules.get_mut(index),
-            RuleOp::ALL.get(op_index),
-        ) {
-            rule.op = *op;
-        }
-        self.revalidate();
-    }
-
-    pub fn set_rule_value(&mut self, index: usize, value: String) {
-        if let Some(rule) = self.playlist.rules.get_mut(index) {
-            rule.value = value;
-        }
-        self.revalidate();
-    }
-
-    pub fn set_rule_value2(&mut self, index: usize, value: String) {
-        if let Some(rule) = self.playlist.rules.get_mut(index) {
-            rule.value2 = value;
-        }
-        self.revalidate();
-    }
-
-    pub fn set_order_by(&mut self, index: usize) {
-        if let Some(field) = OrderField::ALL.get(index) {
-            self.playlist.order_by = *field;
-        }
-        self.revalidate();
-    }
-
-    pub fn set_order_desc(&mut self, desc: bool) {
-        self.playlist.order_desc = desc;
-        self.revalidate();
-    }
-
-    pub fn set_limit_enabled(&mut self, enabled: bool) {
-        self.limit_enabled = enabled;
-        self.sync_limit();
-    }
-
-    pub fn set_limit_input(&mut self, input: String) {
-        self.limit_input = input;
-        self.sync_limit();
-    }
-
-    fn sync_limit(&mut self) {
-        self.playlist.limit = if self.limit_enabled {
-            self.limit_input.trim().parse::<u32>().ok()
-        } else {
-            None
-        };
-        self.revalidate();
-    }
-}
-
-impl Default for EditorState {
-    fn default() -> Self {
-        Self::new()
-    }
+    Tag(Track, aulos_core::tagger::TagAction),
 }
 
 /// Localized "N tracks" label used in list rows and the detail header.
@@ -254,53 +92,6 @@ fn smart_playlist_track_count_label(count: usize) -> String {
             "smart-playlist-track-count-other",
             count = count.to_string()
         )
-    }
-}
-
-fn field_label(field: RuleField) -> String {
-    match field {
-        RuleField::Title => fl!("smart-playlist-field-title"),
-        RuleField::Artist => fl!("smart-playlist-field-artist"),
-        RuleField::AlbumArtist => fl!("smart-playlist-field-album-artist"),
-        RuleField::Album => fl!("smart-playlist-field-album"),
-        RuleField::Genre => fl!("smart-playlist-field-genre"),
-        RuleField::Year => fl!("smart-playlist-field-year"),
-        RuleField::Rating => fl!("smart-playlist-field-rating"),
-        RuleField::Favorite => fl!("smart-playlist-field-favorite"),
-        RuleField::DurationSecs => fl!("smart-playlist-field-duration"),
-        RuleField::Bitrate => fl!("smart-playlist-field-bitrate"),
-        RuleField::SampleRate => fl!("smart-playlist-field-sample-rate"),
-        RuleField::PlayCount => fl!("smart-playlist-field-play-count"),
-        RuleField::DaysSincePlayed => fl!("smart-playlist-field-days-since-played"),
-    }
-}
-
-fn op_label(op: RuleOp) -> String {
-    match op {
-        RuleOp::Is => fl!("smart-playlist-op-is"),
-        RuleOp::IsNot => fl!("smart-playlist-op-is-not"),
-        RuleOp::Contains => fl!("smart-playlist-op-contains"),
-        RuleOp::NotContains => fl!("smart-playlist-op-not-contains"),
-        RuleOp::StartsWith => fl!("smart-playlist-op-starts-with"),
-        RuleOp::EndsWith => fl!("smart-playlist-op-ends-with"),
-        RuleOp::GreaterThan => fl!("smart-playlist-op-greater-than"),
-        RuleOp::LessThan => fl!("smart-playlist-op-less-than"),
-        RuleOp::Between => fl!("smart-playlist-op-between"),
-    }
-}
-
-fn order_label(field: OrderField) -> String {
-    match field {
-        OrderField::Title => fl!("smart-playlist-order-title"),
-        OrderField::Artist => fl!("smart-playlist-order-artist"),
-        OrderField::Album => fl!("smart-playlist-order-album"),
-        OrderField::Year => fl!("smart-playlist-order-year"),
-        OrderField::Rating => fl!("smart-playlist-order-rating"),
-        OrderField::DurationSecs => fl!("smart-playlist-order-duration"),
-        OrderField::Random => fl!("smart-playlist-order-random"),
-        OrderField::RecentlyAdded => fl!("smart-playlist-order-recently-added"),
-        OrderField::PlayCount => fl!("smart-playlist-order-play-count"),
-        OrderField::LastPlayed => fl!("smart-playlist-order-last-played"),
     }
 }
 
@@ -341,7 +132,7 @@ pub fn smart_playlists_view(
     for (index, playlist) in playlists.iter().enumerate() {
         let info = widget::Column::new()
             .push(common::cell_text(playlist.name.as_str()).font(cosmic::font::semibold()))
-            .push(secondary_caption(smart_playlist_rule_summary(playlist)))
+            .push(secondary_caption(playlist.rule_summary()))
             .spacing(2);
 
         let play_btn = widget::tooltip(
@@ -429,26 +220,6 @@ fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> 
             ..Default::default()
         }
     }))
-}
-
-/// One-line rule summary: first rule as "Field op value", plus "+N" for the rest.
-fn smart_playlist_rule_summary(playlist: &SmartPlaylist) -> String {
-    let Some(first) = playlist.rules.first() else {
-        return "\u{a0}".to_string();
-    };
-    let mut text = format!("{} {}", field_label(first.field), op_label(first.op));
-    if !first.value.is_empty() {
-        text.push(' ');
-        text.push_str(&first.value);
-        if !first.value2.is_empty() {
-            text.push_str(" – ");
-            text.push_str(&first.value2);
-        }
-    }
-    if playlist.rules.len() > 1 {
-        text.push_str(&format!("  +{}", playlist.rules.len() - 1));
-    }
-    text
 }
 
 /// Render the detail view for a selected smart playlist: its resolved tracks.
@@ -557,16 +328,13 @@ fn rule_row(idx: usize, rule: &Rule) -> cosmic::Element<'_, SmartPlaylistMessage
     let op_index = RuleOp::ALL.iter().position(|o| *o == rule.op).unwrap_or(0);
 
     let field_dropdown = widget::dropdown(
-        RuleField::ALL
-            .iter()
-            .map(|f| field_label(*f))
-            .collect::<Vec<_>>(),
+        RuleField::ALL.iter().map(|f| f.label()).collect::<Vec<_>>(),
         Some(field_index),
         move |i| SmartPlaylistMessage::EditorRuleFieldChanged(idx, i),
     );
 
     let op_dropdown = widget::dropdown(
-        RuleOp::ALL.iter().map(|o| op_label(*o)).collect::<Vec<_>>(),
+        RuleOp::ALL.iter().map(|o| o.label()).collect::<Vec<_>>(),
         Some(op_index),
         move |i| SmartPlaylistMessage::EditorRuleOpChanged(idx, i),
     );
@@ -653,7 +421,7 @@ pub fn editor_view(state: &EditorState) -> cosmic::Element<'_, SmartPlaylistMess
         .push(widget::dropdown(
             OrderField::ALL
                 .iter()
-                .map(|f| order_label(*f))
+                .map(|f| f.label())
                 .collect::<Vec<_>>(),
             Some(order_field_index),
             SmartPlaylistMessage::EditorOrderByChanged,

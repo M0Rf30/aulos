@@ -144,6 +144,15 @@ just build-release --features visualizer
 
 The `tokio-console` feature is for debugging the async runtime. It replaces the normal log output with a [tokio-console](https://github.com/tokio-rs/console) server.
 
+### Code layout
+
+The repository is a Cargo workspace with two crates:
+
+- `crates/aulos-core` is the backend: library and tag I/O, the playback engine, MPD/Subsonic providers, online services (scrobbling, MusicBrainz/AcoustID, podcasts, radio), the tag editor's state, settings, MPRIS and desktop integration. It has no UI toolkit dependency, and CI fails if it gains one.
+- The root crate (`src/`) is the COSMIC user interface built on libcosmic. It turns the backend's data, streams and effects into widgets, iced tasks and subscriptions.
+
+`cargo build`, `cargo test` and `cargo clippy` at the repository root cover both crates.
+
 ## Usage
 
 Start Aulos from your application menu, or from a terminal with `aulos [FILE…]`. Add MPD and Subsonic servers from the provider menu, and change the music folders and everything else in Settings.

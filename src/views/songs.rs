@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::fl;
-use crate::library::{Playlist, Track};
 use crate::views::common;
 use crate::views::track_row::{self, HeaderColumn};
+use aulos_core::fl;
+use aulos_core::format::track_count_label;
+use aulos_core::library::state::SortField;
+use aulos_core::library::{Playlist, Track};
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::{Alignment, Length, Size};
 use cosmic::widget;
@@ -30,15 +32,7 @@ pub enum SongMessage {
     /// Open the Properties drawer for this track.
     ShowProperties(Track),
     /// Open the tag editor on this (local) track.
-    Tag(Track, crate::tagger::TagAction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortField {
-    Title,
-    Artist,
-    Album,
-    Duration,
+    Tag(Track, aulos_core::tagger::TagAction),
 }
 
 /// Row height/gap come from the shared track row. Rows must be uniform for
@@ -289,15 +283,6 @@ fn build_row<'a>(
     // Without an artist column the artist moves under the title.
     .with_artist_subtitle(!columns.artist)
     .view()
-}
-
-/// Localized "N tracks" label for the filter bar.
-fn track_count_label(count: usize) -> String {
-    if count == 1 {
-        fl!("songs-track-count-one", count = count.to_string())
-    } else {
-        fl!("songs-track-count-other", count = count.to_string())
-    }
 }
 
 #[cfg(test)]
