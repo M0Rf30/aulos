@@ -936,7 +936,7 @@ mod tests {
         CoverThumb {
             width: 1,
             height: 1,
-            rgba: Bytes::from_static(&[0, 0, 0, 255]),
+            encoded: Bytes::from_static(&[0, 0, 0, 255]),
             fingerprint,
         }
     }

@@ -1093,7 +1093,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn raw_input_hook(&mut self, _ctx: &Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
         // Smoke shots must not show hover tints or tooltips from a stray pointer.
         if self.smoke.is_some() {
             raw_input.events.retain(|e| {
@@ -1105,6 +1105,9 @@ impl eframe::App for App {
                 )
             });
             raw_input.events.push(egui::Event::PointerGone);
+            if let Some(smoke) = &self.smoke {
+                smoke.scroll(ctx, raw_input);
+            }
         }
     }
 
@@ -1128,7 +1131,7 @@ impl eframe::App for App {
             self.zoom_base = Some(1.0 / native);
             self.apply_zoom();
         }
-        self.covers.upload_pending(&mut self.session.library.covers);
+        self.covers.upload_pending(&self.session.library.covers);
         views::tagger::pump(self);
         views::settings::pump(self);
         self.update_art();

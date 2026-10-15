@@ -5,22 +5,40 @@ use egui::{
     Color32, ColorImage, Context, CornerRadius, Image, Rect, TextureHandle, TextureOptions, Ui,
     pos2,
 };
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Thumbnails uploaded to the GPU per frame: a big library otherwise stalls
 /// one frame and peaks staging memory.
 const UPLOADS_PER_FRAME: usize = 8;
+/// A thumbnail not drawn for this many frames is released from the GPU.
+const IDLE_FRAMES: u64 = 240;
+/// GPU bytes of thumbnails kept; the least recently drawn go first.
+const RESIDENT_BUDGET: usize = 48 << 20;
+
+struct Thumb {
+    tex: TextureHandle,
+    last_used: Cell<u64>,
+    bytes: usize,
+}
 
 /// Every texture the views draw, keyed by what the core calls it. Gradient
 /// placeholders are built on demand and cached, so `&Covers` is enough to
 /// draw (single-threaded UI only).
 pub struct Covers {
     ctx: Context,
-    thumbs: HashMap<String, TextureHandle>,
-    /// Keys whose thumbnail awaits its (throttled) GPU upload.
-    pending: Vec<String>,
+    /// Resident thumbnail textures: only what was drawn recently.
+    thumbs: HashMap<String, Thumb>,
+    /// Keys the core has a thumbnail for; a miss in `thumbs` on one of
+    /// these is a request to (re)upload it.
+    known: HashSet<String>,
+    /// Keys drawn without a resident texture, awaiting a throttled upload.
+    wanted: RefCell<Vec<String>>,
+    /// Frames seen, as the clock for `Thumb::last_used`.
+    frame: Cell<u64>,
+    /// GPU bytes held by `thumbs`.
+    resident: usize,
     icons: HashMap<String, TextureHandle>,
     photos: HashMap<String, TextureHandle>,
     gradients: RefCell<HashMap<(Color32, Color32), TextureHandle>>,
@@ -35,7 +53,10 @@ impl Covers {
         Self {
             ctx,
             thumbs: HashMap::new(),
-            pending: Vec::new(),
+            known: HashSet::new(),
+            wanted: RefCell::default(),
+            frame: Cell::new(0),
+            resident: 0,
             icons: HashMap::new(),
             photos: HashMap::new(),
             gradients: RefCell::default(),
@@ -44,7 +65,22 @@ impl Covers {
 
     /// An album cover thumbnail by `CoverArt::album_key`.
     pub fn thumb(&self, key: &str) -> Option<&TextureHandle> {
-        self.thumbs.get(key)
+        match self.thumbs.get(key) {
+            Some(thumb) => {
+                thumb.last_used.set(self.frame.get());
+                Some(&thumb.tex)
+            }
+            None => {
+                if self.known.contains(key) {
+                    let mut wanted = self.wanted.borrow_mut();
+                    if !wanted.iter().any(|k| k == key) {
+                        wanted.push(key.to_owned());
+                        self.ctx.request_repaint();
+                    }
+                }
+                None
+            }
+        }
     }
     /// A remote icon (radio station, podcast art) by URL.
     pub fn icon(&self, url: &str) -> Option<&TextureHandle> {
@@ -55,37 +91,94 @@ impl Covers {
         self.photos.get(name)
     }
 
-    /// Queues `key` for upload; [`Self::upload_pending`] does the work.
+    /// The core has a new or changed thumbnail for `key`: forget the old
+    /// texture; the new one uploads when it is first drawn.
     pub fn queue_thumb(&mut self, key: String) {
-        if !self.pending.contains(&key) {
-            self.pending.push(key);
-        }
-    }
-    /// Uploads up to [`UPLOADS_PER_FRAME`] queued thumbnails taking their
-    /// pixels out of `store`, and asks for another frame while more wait.
-    pub fn upload_pending(&mut self, store: &mut CoverStore) {
-        let n = self.pending.len().min(UPLOADS_PER_FRAME);
-        for key in self.pending.drain(..n).collect::<Vec<_>>() {
-            if let Some((w, h, rgba)) = store.take_pixels(&key) {
-                let tex = self.ctx.load_texture(
-                    format!("cover:{key}"),
-                    to_image(w, h, &rgba),
-                    TextureOptions::LINEAR,
-                );
-                self.thumbs.insert(key, tex);
-            }
-        }
-        if !self.pending.is_empty() {
-            self.ctx.request_repaint();
-        }
+        self.drop_texture(&key);
+        self.known.insert(key);
     }
     pub fn remove_thumb(&mut self, key: &str) {
-        self.thumbs.remove(key);
-        self.pending.retain(|k| k != key);
+        self.drop_texture(key);
+        self.known.remove(key);
+        self.wanted.borrow_mut().retain(|k| k != key);
     }
     pub fn clear_thumbs(&mut self) {
         self.thumbs.clear();
-        self.pending.clear();
+        self.known.clear();
+        self.wanted.borrow_mut().clear();
+        self.resident = 0;
+    }
+    fn drop_texture(&mut self, key: &str) {
+        if let Some(old) = self.thumbs.remove(key) {
+            self.resident -= old.bytes;
+        }
+    }
+
+    /// Once per frame: uploads up to [`UPLOADS_PER_FRAME`] of the thumbnails
+    /// drawn without a texture (decoding them from the core's compressed
+    /// copy), then releases the ones idle too long or over the byte budget.
+    pub fn upload_pending(&mut self, store: &CoverStore) {
+        let frame = self.frame.get() + 1;
+        self.frame.set(frame);
+        let batch: Vec<String> = {
+            let mut wanted = self.wanted.borrow_mut();
+            let n = wanted.len().min(UPLOADS_PER_FRAME);
+            wanted.drain(..n).collect()
+        };
+        for key in batch {
+            let Some((w, h, rgba)) = store.get(&key).and_then(|t| t.decode()) else {
+                self.known.remove(&key);
+                continue;
+            };
+            let tex = self.ctx.load_texture(
+                format!("cover:{key}"),
+                to_image(w, h, &rgba),
+                TextureOptions::LINEAR,
+            );
+            let bytes = w as usize * h as usize * 4;
+            self.resident += bytes;
+            let thumb = Thumb {
+                tex,
+                last_used: Cell::new(frame),
+                bytes,
+            };
+            if let Some(old) = self.thumbs.insert(key, thumb) {
+                self.resident -= old.bytes;
+            }
+        }
+        if !self.wanted.borrow().is_empty() {
+            self.ctx.request_repaint();
+        }
+        self.evict(frame);
+    }
+
+    fn evict(&mut self, frame: u64) {
+        let mut resident = self.resident;
+        self.thumbs.retain(|_, t| {
+            let idle = frame.saturating_sub(t.last_used.get()) > IDLE_FRAMES;
+            if idle {
+                resident -= t.bytes;
+            }
+            !idle
+        });
+        if resident > RESIDENT_BUDGET {
+            let mut by_age: Vec<(u64, String)> = self
+                .thumbs
+                .iter()
+                .filter(|(_, t)| t.last_used.get() + 1 < frame)
+                .map(|(k, t)| (t.last_used.get(), k.clone()))
+                .collect();
+            by_age.sort_unstable();
+            for (_, key) in by_age {
+                if resident <= RESIDENT_BUDGET {
+                    break;
+                }
+                if let Some(t) = self.thumbs.remove(&key) {
+                    resident -= t.bytes;
+                }
+            }
+        }
+        self.resident = resident;
     }
     pub fn add_icon(&mut self, icon: OnlineIcon) {
         let tex = self.ctx.load_texture(

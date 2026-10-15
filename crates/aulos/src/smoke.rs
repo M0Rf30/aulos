@@ -15,6 +15,7 @@
 //! - `AULOS_SMOKE_SIZE=<w>x<h>`: window size (default 1280x800)
 //! - `AULOS_SMOKE_DELAY_MS=<n>`: wait after setup before the capture (default 1500)
 //! - `AULOS_SMOKE_SECOND=<out2.ppm>`: take a second screenshot one second after the first
+//! - `AULOS_SMOKE_SCROLL=<px>`: scroll the page down by `<px>` every frame until the shot
 //! - `AULOS_SMOKE_REPEAT=1`: repeat the playing track (short fixtures)
 //!
 //! `AULOS_SMOKE_PAGE=visualizer` opens the visualizer (feature `visualizer`);
@@ -84,6 +85,30 @@ impl Smoke {
             requested: false,
             second_at: None,
         })
+    }
+
+    /// Feeds `AULOS_SMOKE_SCROLL` wheel events (and keeps frames coming)
+    /// once the setup is done.
+    pub fn scroll(&self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let Some(px) = std::env::var("AULOS_SMOKE_SCROLL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        else {
+            return;
+        };
+        if self.started.is_none() || self.requested {
+            return;
+        }
+        raw_input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(700.0, 350.0)));
+        raw_input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -px),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        ctx.request_repaint();
     }
 
     /// Returns true once the screenshot is written and the app should close.

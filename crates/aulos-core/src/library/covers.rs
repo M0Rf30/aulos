@@ -27,11 +27,12 @@ static THUMB_MAX_DIM: AtomicU32 = AtomicU32::new(CoverArt::GRID_THUMBNAIL_MAX_DI
 pub struct CoverThumb {
     pub width: u32,
     pub height: u32,
-    /// Straight RGBA pixels (empty once a UI took them with
-    /// [`CoverStore::take_pixels`]), at most [`CoverArt::GRID_THUMBNAIL_MAX_DIM`]
-    /// per side. Reference-counted, so handing them to an image handle
-    /// shares rather than copies the buffer.
-    pub rgba: Bytes,
+    /// The thumbnail, at most [`CoverArt::GRID_THUMBNAIL_MAX_DIM`] per
+    /// side, JPEG- (opaque) or PNG-encoded (see [`Self::decode`]). Kept
+    /// compressed (~20 KB instead of 260 KB of RGBA) so a UI can drop and
+    /// rebuild its image handles as covers scroll in and out of view.
+    /// Reference-counted, so cloning it is free.
+    pub encoded: Bytes,
     pub fingerprint: u64,
 }
 
@@ -46,15 +47,45 @@ impl CoverThumb {
     /// decodable image.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let (width, height, rgba) =
+        let (width, height, pixels) =
             CoverArt::decode_thumbnail(bytes, THUMB_MAX_DIM.load(Ordering::Relaxed))?;
         Some(Self {
             width,
             height,
-            rgba: Bytes::from(rgba),
+            encoded: encode(width, height, pixels)?,
             fingerprint: CoverArt::content_fingerprint(bytes),
         })
     }
+
+    /// The straight RGBA pixels as `(width, height, pixels)`.
+    #[must_use]
+    pub fn decode(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let img = image::load_from_memory(&self.encoded).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        Some((w, h, img.into_raw()))
+    }
+}
+
+/// JPEG for opaque pixels, PNG when any pixel has transparency.
+fn encode(width: u32, height: u32, rgba: Vec<u8>) -> Option<Bytes> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    if rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255) {
+        let rgb: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+            .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)
+            .ok()?;
+    } else {
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+            .ok()?;
+    }
+    Some(Bytes::from(out))
 }
 
 /// Covers by [`CoverArt::album_key`].
@@ -112,17 +143,6 @@ impl CoverStore {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&CoverThumb> {
         self.visible.get(key)
-    }
-
-    /// Hands out the pixels of `key` once and frees them from the store
-    /// (width, height, pixels). The entry stays, so its fingerprint still
-    /// de-duplicates a reload; `None` when absent or already taken.
-    pub fn take_pixels(&mut self, key: &str) -> Option<(u32, u32, Bytes)> {
-        let thumb = self.visible.get_mut(key)?;
-        if thumb.rgba.is_empty() {
-            return None;
-        }
-        Some((thumb.width, thumb.height, std::mem::take(&mut thumb.rgba)))
     }
 
     #[must_use]
@@ -227,7 +247,7 @@ mod tests {
         CoverThumb {
             width: 1,
             height: 1,
-            rgba: Bytes::from_static(&[0, 0, 0, 255]),
+            encoded: Bytes::from_static(&[0, 0, 0, 255]),
             fingerprint,
         }
     }
@@ -300,19 +320,42 @@ mod tests {
     fn unchanged_cover_keeps_its_pixel_buffer() {
         let mut store = CoverStore::default();
         store.merge(set(&[("a", 1)]));
-        let before = store.get("a").unwrap().rgba.as_ptr();
+        let before = store.get("a").unwrap().encoded.as_ptr();
         // A re-fetched, identical cover arrives as a distinct allocation.
         let fresh = CoverThumb {
-            rgba: Bytes::copy_from_slice(&[0, 0, 0, 255]),
+            encoded: Bytes::copy_from_slice(&[0, 0, 0, 255]),
             ..thumb(1)
         };
         let delta = store.replace(HashMap::from([("a".to_string(), fresh)]));
         assert!(delta.is_empty());
-        assert_eq!(store.get("a").unwrap().rgba.as_ptr(), before);
+        assert_eq!(store.get("a").unwrap().encoded.as_ptr(), before);
     }
 
     #[test]
     fn undecodable_bytes_give_no_thumbnail() {
         assert!(CoverThumb::from_bytes(b"not an image").is_none());
+    }
+
+    #[test]
+    fn thumbnails_round_trip_through_their_compressed_form() {
+        let opaque: Vec<u8> = (0..16).flat_map(|i| [i * 8, 40, 200, 255]).collect();
+        let jpeg = encode(4, 4, opaque).unwrap();
+        let thumb = CoverThumb {
+            width: 4,
+            height: 4,
+            encoded: jpeg,
+            fingerprint: 0,
+        };
+        let (w, h, px) = thumb.decode().unwrap();
+        assert_eq!((w, h, px.len()), (4, 4, 64));
+
+        let mut clear = vec![255u8; 64];
+        clear[3] = 0;
+        let png = encode(4, 4, clear.clone()).unwrap();
+        let thumb = CoverThumb {
+            encoded: png,
+            ..thumb
+        };
+        assert_eq!(thumb.decode().unwrap().2, clear);
     }
 }
