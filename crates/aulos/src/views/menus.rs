@@ -48,6 +48,14 @@ pub enum MenuAction {
         next: bool,
     },
     PlayArtist(String),
+    PlayGenre {
+        name: String,
+        shuffle: bool,
+    },
+    QueueGenre {
+        name: String,
+        next: bool,
+    },
     QueueArtist {
         name: String,
         next: bool,
@@ -256,6 +264,54 @@ pub fn artist_menu(response: &Response, name: &str) -> Option<MenuAction> {
 /// `artist_menu` opened by a click on `response` (the "…" trigger).
 pub fn artist_menu_click(response: &Response, name: &str) -> Option<MenuAction> {
     artist_menu_with(response, name, true)
+}
+
+pub fn genre_menu(response: &Response, name: &str) -> Option<MenuAction> {
+    genre_menu_with(response, name, false)
+}
+
+/// `genre_menu` opened by a click on `response` (the "…" trigger).
+pub fn genre_menu_click(response: &Response, name: &str) -> Option<MenuAction> {
+    genre_menu_with(response, name, true)
+}
+
+fn genre_menu_with(response: &Response, name: &str, click: bool) -> Option<MenuAction> {
+    show_menu(
+        response,
+        Spec {
+            click,
+            playlists: None,
+            uris: &|| Vec::new(),
+            play: &|play: Play| match play {
+                Play::Now => MenuAction::PlayGenre {
+                    name: name.to_owned(),
+                    shuffle: false,
+                },
+                Play::Next => MenuAction::QueueGenre {
+                    name: name.to_owned(),
+                    next: true,
+                },
+                Play::Queue => MenuAction::QueueGenre {
+                    name: name.to_owned(),
+                    next: false,
+                },
+            },
+            tail: &|ui: &mut Ui, pal: Palette| {
+                let mut out = None;
+                if menu_item(ui, regular::SHUFFLE, "Shuffle", Trailing::None).clicked() {
+                    out = Some(MenuAction::PlayGenre {
+                        name: name.to_owned(),
+                        shuffle: true,
+                    });
+                }
+                separator(ui, pal);
+                if menu_item(ui, regular::SHAPES, "Go to genre", Trailing::None).clicked() {
+                    out = Some(MenuAction::Open(Route::Genre(name.to_owned())));
+                }
+                out
+            },
+        },
+    )
 }
 
 fn artist_menu_with(response: &Response, name: &str, click: bool) -> Option<MenuAction> {
@@ -541,6 +597,40 @@ pub fn apply(app: &mut App, action: MenuAction) {
                 app.run(update);
             }
         }
+        MenuAction::PlayGenre { name, shuffle } => {
+            let tracks = app.session.library.tracks_in_genre(&name);
+            if tracks.is_empty() {
+                app.toast_error(format!("No tracks for {name}"));
+            } else {
+                let mut start = 0;
+                if shuffle {
+                    if !app.session.config.config.shuffle {
+                        let update = app.session.toggle_shuffle();
+                        app.run(update);
+                    }
+                    start = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.subsec_nanos() as usize)
+                        % tracks.len();
+                }
+                let update = app.session.play_tracks(tracks, start);
+                app.run(update);
+            }
+        }
+        MenuAction::QueueGenre { name, next } => {
+            let tracks = app.session.library.tracks_in_genre(&name);
+            if tracks.is_empty() {
+                app.toast_error(format!("No tracks for {name}"));
+            } else {
+                let placement = if next {
+                    QueuePlacement::Next
+                } else {
+                    QueuePlacement::End
+                };
+                let update = app.session.queue_tracks(tracks, placement);
+                app.run(update);
+            }
+        }
         MenuAction::QueueArtist { name, next } => {
             let tracks = artist_tracks(app, &name);
             if tracks.is_empty() {
@@ -656,10 +746,9 @@ mod tests {
         out
     }
 
-    /// Right-clicking an artist target opens a menu whose rows stack in one
-    /// column, a row height apart, inside the panel width.
-    #[test]
-    fn context_menu_rows_stack_vertically() {
+    /// Right-clicking a target that shows `menu` opens a menu whose `labels`
+    /// rows stack in one column, a row height apart.
+    fn assert_rows_stack(menu: impl Fn(&Response) -> Option<MenuAction>, labels: &[&str]) {
         let ctx = Context::default();
         theme::install_fonts(&ctx);
         let target = pos2(300.0, 200.0);
@@ -676,7 +765,7 @@ mod tests {
                     Id::new("target"),
                     Sense::click(),
                 );
-                let _ = artist_menu(&response, "Someone");
+                let _ = menu(&response);
             });
             out.textures_delta.clear();
             out.shapes
@@ -700,7 +789,7 @@ mod tests {
         let shapes = frame(vec![]);
 
         let all = texts(&shapes);
-        let rows: Vec<_> = ["Play", "Play next", "Add to queue", "Go to artist"]
+        let rows: Vec<_> = labels
             .iter()
             .map(|label| {
                 all.iter()
@@ -719,5 +808,27 @@ mod tests {
                 "rows not aligned: {rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn artist_context_menu_rows_stack_vertically() {
+        assert_rows_stack(
+            |r| artist_menu(r, "Someone"),
+            &["Play", "Play next", "Add to queue", "Go to artist"],
+        );
+    }
+
+    #[test]
+    fn genre_context_menu_rows_stack_vertically() {
+        assert_rows_stack(
+            |r| genre_menu(r, "Jazz"),
+            &[
+                "Play",
+                "Play next",
+                "Add to queue",
+                "Shuffle",
+                "Go to genre",
+            ],
+        );
     }
 }

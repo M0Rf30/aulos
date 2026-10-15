@@ -100,6 +100,7 @@ fn songs_label(count: u32) -> String {
 #[derive(Default)]
 struct BrowseOut {
     open: Option<String>,
+    action: Option<MenuAction>,
 }
 
 fn refresh_meta(app: &mut App) {
@@ -190,6 +191,9 @@ fn browse(app: &mut App, ui: &mut Ui) {
     }
     if let Some(name) = out.open {
         app.navigate(Route::Genre(name));
+    }
+    if let Some(action) = out.action {
+        menus::apply(app, action);
     }
 }
 
@@ -299,6 +303,12 @@ fn grid_body(ui: &mut Ui, a: &App, genres: &[String], out: &mut BrowseOut) {
             if resp.hovered() {
                 painter.rect_filled(card, CornerRadius::same(10), Color32::WHITE.alpha(0.08));
             }
+            let more = crate::widgets::more_trigger(ui, resp.id, card, resp.hovered(), 22.0);
+            out.action = out
+                .action
+                .take()
+                .or_else(|| menus::genre_menu(&resp, name))
+                .or_else(|| menus::genre_menu_click(&more, name));
             let text_w = (cw - 28.0).max(0.0);
             let title = Rect::from_min_size(
                 pos2(card.left() + 14.0, card.top() + 12.0),
@@ -393,6 +403,7 @@ fn list_body(ui: &mut Ui, a: &App, genres: &[String], out: &mut BrowseOut) {
             pal.text_4,
             false,
         );
+        out.action = out.action.take().or_else(|| menus::genre_menu(&resp, name));
         if resp.clicked() {
             out.open = Some(name.to_owned());
         }
