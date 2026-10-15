@@ -87,6 +87,8 @@ struct Spec<'a> {
     uris: &'a dyn Fn() -> Vec<String>,
     play: &'a dyn Fn(Play) -> MenuAction,
     tail: &'a dyn Fn(&mut Ui, Palette) -> Option<MenuAction>,
+    /// Opens on a primary click (a "…" button) instead of a right click.
+    click: bool,
 }
 
 pub fn track_menu(
@@ -94,9 +96,28 @@ pub fn track_menu(
     track: &Track,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
+    track_menu_with(response, track, playlists, false)
+}
+
+/// track_menu opened by a click on `response` (the "…" trigger).
+pub fn track_menu_click(
+    response: &Response,
+    track: &Track,
+    playlists: &[Playlist],
+) -> Option<MenuAction> {
+    track_menu_with(response, track, playlists, true)
+}
+
+fn track_menu_with(
+    response: &Response,
+    track: &Track,
+    playlists: &[Playlist],
+    click: bool,
+) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: Some(playlists),
             uris: &|| vec![track.source_uri.clone()],
             play: &|play: Play| match play {
@@ -122,6 +143,7 @@ pub fn track_menu(
                     out = Some(MenuAction::TrackProperties(track.clone()));
                 }
                 if is_taggable(track) {
+                    separator(ui, pal);
                     out = tag_items(ui, std::slice::from_ref(track)).or(out);
                 }
                 out
@@ -161,9 +183,28 @@ pub fn album_menu(
     album: &Album,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
+    album_menu_with(response, album, playlists, false)
+}
+
+/// album_menu opened by a click on `response` (the "…" trigger).
+pub fn album_menu_click(
+    response: &Response,
+    album: &Album,
+    playlists: &[Playlist],
+) -> Option<MenuAction> {
+    album_menu_with(response, album, playlists, true)
+}
+
+fn album_menu_with(
+    response: &Response,
+    album: &Album,
+    playlists: &[Playlist],
+    click: bool,
+) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: Some(playlists),
             uris: &|| album.tracks.iter().map(|t| t.source_uri.clone()).collect(),
             play: &|play: Play| match play {
@@ -185,13 +226,21 @@ pub fn album_menu(
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
-                if menu_item(ui, regular::INFO, "Album properties", Trailing::None).clicked() {
-                    out = Some(MenuAction::AlbumProperties(album.clone()));
-                }
                 if menu_item(ui, regular::MICROPHONE, "Go to artist", Trailing::None).clicked() {
                     out = Some(MenuAction::Open(Route::Artist(album.artist.clone())));
                 }
+                if menu_item(
+                    ui,
+                    regular::INFO,
+                    "Album properties",
+                    Trailing::Key("Alt ↵"),
+                )
+                .clicked()
+                {
+                    out = Some(MenuAction::AlbumProperties(album.clone()));
+                }
                 if album.tracks.iter().any(is_taggable) {
+                    separator(ui, pal);
                     out = tag_items(ui, &album.tracks).or(out);
                 }
                 out
@@ -201,9 +250,19 @@ pub fn album_menu(
 }
 
 pub fn artist_menu(response: &Response, name: &str) -> Option<MenuAction> {
+    artist_menu_with(response, name, false)
+}
+
+/// `artist_menu` opened by a click on `response` (the "…" trigger).
+pub fn artist_menu_click(response: &Response, name: &str) -> Option<MenuAction> {
+    artist_menu_with(response, name, true)
+}
+
+fn artist_menu_with(response: &Response, name: &str, click: bool) -> Option<MenuAction> {
     show_menu(
         response,
         Spec {
+            click,
             playlists: None,
             uris: &|| Vec::new(),
             play: &|play: Play| match play {
@@ -240,15 +299,21 @@ pub fn menu_item(ui: &mut Ui, icon: &str, label: &str, trailing: Trailing) -> Re
         painter.rect_filled(rect, CornerRadius::same(6), pal.seg_sel);
     }
     let cy = rect.center().y;
+    // An empty `icon` makes a text-only row.
+    let label_x = if icon.is_empty() {
+        10.0
+    } else {
+        painter.text(
+            pos2(rect.left() + 15.5, cy),
+            Align2::CENTER_CENTER,
+            icon,
+            theme::icon(15.0),
+            pal.text_2,
+        );
+        31.0
+    };
     painter.text(
-        pos2(rect.left() + 15.5, cy),
-        Align2::CENTER_CENTER,
-        icon,
-        theme::icon(15.0),
-        pal.text_2,
-    );
-    painter.text(
-        pos2(rect.left() + 31.0, cy),
+        pos2(rect.left() + label_x, cy),
         Align2::LEFT_CENTER,
         label,
         theme::regular(13.0),
@@ -285,7 +350,12 @@ fn show_menu(response: &Response, spec: Spec) -> Option<MenuAction> {
     // Submenu rect from the previous frame, so the pointer can cross into it.
     let last_sub: Option<Rect> = ctx.data(|d| d.get_temp::<Option<Rect>>(sub_key)).flatten();
 
-    Popup::context_menu(response)
+    let popup = if spec.click {
+        Popup::menu(response)
+    } else {
+        Popup::context_menu(response)
+    };
+    popup
         .frame(Frame::NONE)
         .show(|ui| {
             let mut out = None;
@@ -374,7 +444,7 @@ fn submenu(ui: &mut Ui, pal: Palette, spec: &Spec) -> Option<MenuAction> {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for playlist in playlists {
-                    if menu_item(ui, regular::PLAYLIST, &playlist.name, Trailing::None).clicked() {
+                    if menu_item(ui, "", &playlist.name, Trailing::None).clicked() {
                         out = Some(MenuAction::AddToPlaylist {
                             playlist: playlist.id.clone(),
                             uris: uris.clone(),
@@ -395,9 +465,13 @@ fn panel<R>(ui: &mut Ui, pal: Palette, width: f32, body: impl FnOnce(&mut Ui) ->
         .inner_margin(Margin::same(5))
         .shadow(theme::shadow([0, 16], 40, 128))
         .show(ui, |ui| {
-            // Content width = outer width minus padding (2 × 5) and border (2 × 1).
-            ui.set_width(width - 12.0);
-            body(ui)
+            // The frame inherits the caller's horizontal layout; rows stack.
+            ui.vertical(|ui| {
+                // Content width = outer width minus padding (2 × 5) and border (2 × 1).
+                ui.set_width(width - 12.0);
+                body(ui)
+            })
+            .inner
         });
     (frame.response.rect, frame.inner)
 }

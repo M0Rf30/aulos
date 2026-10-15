@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use super::history::{AlbumRef, HomeData, PlayTracker};
+use super::history::{AlbumRef, HomeData, PlayTracker, ResumePoint};
 use super::home::HomeCache;
 use crate::fl;
 use crate::online::similar::SimilarShelf;
@@ -91,6 +91,32 @@ impl Greeting {
     }
 }
 
+impl Greeting {
+    /// The greeting addressed to `name` ("Good evening, Sam"), or the bare
+    /// [`Self::text`] when there is no name.
+    #[must_use]
+    pub fn text_for(self, name: &str) -> String {
+        let name = name.trim();
+        if name.is_empty() {
+            self.text()
+        } else {
+            fl!("home-greeting-named", greeting = self.text(), name = name)
+        }
+    }
+}
+
+impl ResumePoint {
+    /// Localized "You were 6 tracks into Low Tide Tapes."
+    #[must_use]
+    pub fn label(&self) -> String {
+        fl!(
+            "home-resume",
+            count = i64::try_from(self.tracks_in).unwrap_or(i64::MAX),
+            album = self.album.as_str()
+        )
+    }
+}
+
 /// Label for a decade chip/title, e.g. `1980` → `"1980s"`.
 #[must_use]
 pub fn decade_label(decade: u32) -> String {
@@ -111,6 +137,25 @@ mod tests {
         assert_eq!(Greeting::for_hour(18), Greeting::Evening);
         assert_eq!(Greeting::for_hour(23), Greeting::Evening);
         assert_eq!(Greeting::for_hour(0), Greeting::Evening);
+    }
+
+    #[test]
+    fn greeting_names_the_user() {
+        assert_eq!(Greeting::Evening.text_for("Sam"), "Good evening, Sam");
+        assert_eq!(Greeting::Morning.text_for("  "), "Good morning");
+        assert_eq!(Greeting::Afternoon.text_for(""), "Good afternoon");
+    }
+
+    #[test]
+    fn resume_label_counts_tracks() {
+        let at = |n| ResumePoint {
+            artist: "Band".into(),
+            album: "Low Tide Tapes".into(),
+            tracks_in: n,
+            total: 10,
+        };
+        assert_eq!(at(6).label(), "You were 6 tracks into Low Tide Tapes.");
+        assert_eq!(at(1).label(), "You were 1 track into Low Tide Tapes.");
     }
 
     #[test]

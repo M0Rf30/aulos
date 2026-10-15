@@ -4,6 +4,7 @@
 //! Music library: scanning, database, metadata, and cover art.
 
 pub mod album_filter;
+pub mod album_sort;
 pub mod artist_info;
 pub mod artist_tags;
 pub mod compilations;
@@ -24,6 +25,8 @@ pub mod playlist_io;
 pub mod properties;
 pub mod quality;
 pub mod queue_source;
+pub mod release_kind;
+pub mod scan_progress;
 mod scanner;
 pub mod search;
 pub mod smart_playlist;
@@ -31,6 +34,7 @@ pub mod state;
 pub mod tagio;
 pub mod tags;
 pub mod tech_info;
+pub mod top_tracks;
 pub mod watcher;
 
 pub use cover_art::CoverArt;
@@ -84,6 +88,9 @@ pub struct Track {
     pub duration: Duration,
     pub bitrate: u32,
     pub sample_rate: u32,
+    /// Bits per sample of a lossless file (16, 24, …); `0` when lossy,
+    /// streamed or unknown.
+    pub bit_depth: u32,
     /// Which provider owns this track (e.g., "local", "mpd-home", "navidrome").
     ///
     /// Stored as `Arc<str>` so all tracks from the same provider share one
@@ -99,12 +106,51 @@ pub struct Track {
     pub rg_track_gain: Option<f32>,
     /// ReplayGain album gain in dB.
     pub rg_album_gain: Option<f32>,
+    /// Raw release-type tag (MusicBrainz album type, e.g. `"album; live"`);
+    /// empty when untagged. See [`release_kind::ReleaseKind`].
+    pub release_type: String,
+    /// Unix seconds the track entered the library; `0` when unknown
+    /// (tracks that are not stored in the library database).
+    pub added_at: i64,
+    /// Unix seconds the track was last marked as a favorite; `0` when it
+    /// is not one, or was one before favourites were timestamped.
+    pub favorited_at: i64,
 }
 
 impl Track {
     /// Format duration as `H:MM:SS` when at least an hour, otherwise `M:SS`.
     pub fn duration_string(&self) -> String {
         crate::format::format_duration(self.duration.as_secs())
+    }
+
+    /// `24/96` (or `44.1 kHz` without a bit depth); `None` when the sample
+    /// rate is unknown.
+    #[must_use]
+    pub fn depth_rate_label(&self) -> Option<String> {
+        crate::format::format_depth_rate(self.bit_depth, self.sample_rate)
+    }
+
+    /// The expanded player's format chip: `FLAC · 24/96 · 2,304 kbps`, each
+    /// part left out when unknown.
+    #[must_use]
+    pub fn format_chip(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ext) = self
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| !e.is_empty() && e.len() <= 5)
+        {
+            parts.push(ext.to_uppercase());
+        }
+        parts.extend(self.depth_rate_label());
+        if self.bitrate > 0 {
+            parts.push(format!(
+                "{} kbps",
+                crate::format::format_thousands(self.bitrate)
+            ));
+        }
+        parts.join(" \u{00B7} ")
     }
 
     /// The artist albums are grouped under: the album artist when present,
@@ -164,6 +210,11 @@ pub struct Album {
     pub quality: quality::AudioQuality,
     /// Total duration of all tracks in whole seconds.
     pub total_secs: u64,
+    /// Album, EP, single, live album or compilation.
+    pub kind: release_kind::ReleaseKind,
+    /// Unix seconds the album's newest track entered the library; `0` when
+    /// unknown (providers other than the local one).
+    pub added_at: i64,
 }
 
 impl Album {
@@ -184,14 +235,18 @@ impl Album {
             cover_key: String::new(),
             quality: quality::AudioQuality::Unknown,
             total_secs: 0,
+            kind: release_kind::ReleaseKind::Album,
+            added_at: 0,
         };
         album.refresh_derived();
         album
     }
 
-    /// Recompute `cover_key`, `quality` and `total_secs` from the current
-    /// name/artist/tracks.
+    /// Recompute `cover_key`, `quality`, `total_secs`, `kind` and
+    /// `added_at` from the current name/artist/tracks.
     pub fn refresh_derived(&mut self) {
+        self.kind = release_kind::ReleaseKind::of_album(&self.name, &self.artist, &self.tracks);
+        self.added_at = self.tracks.iter().map(|t| t.added_at).max().unwrap_or(0);
         self.cover_key = CoverArt::album_key(&self.artist, &self.name);
         self.quality = quality::album_quality(&self.tracks);
         self.total_secs = self.total_duration().as_secs();
@@ -227,6 +282,8 @@ impl Album {
             cover_key: self.cover_key.clone(),
             quality: self.quality,
             total_secs: self.total_secs,
+            kind: self.kind,
+            added_at: self.added_at,
         }
     }
 
@@ -355,7 +412,21 @@ mod derived_tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
+    }
+
+    #[test]
+    fn format_chip_shows_depth_rate_and_grouped_bitrate() {
+        let mut t = track("a.flac", 1000, 96_000);
+        t.bitrate = 2_304;
+        t.bit_depth = 24;
+        assert_eq!(t.format_chip(), "FLAC \u{00B7} 24/96 \u{00B7} 2,304 kbps");
+        t.bit_depth = 0;
+        assert_eq!(t.format_chip(), "FLAC \u{00B7} 96 kHz \u{00B7} 2,304 kbps");
     }
 
     #[test]

@@ -187,12 +187,17 @@ pub fn avatar_tile(
         .take(2)
         .flat_map(char::to_uppercase)
         .collect();
-    let size = (rect.height() * 0.34).clamp(11.0, 40.0);
+    // Design: 12px mono on small tiles (radio rows); scales on large ones.
+    let size = if rect.height() <= 48.0 {
+        12.0
+    } else {
+        (rect.height() * 0.34).clamp(11.0, 40.0)
+    };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         initials,
-        theme::semibold(size),
+        theme::mono_semibold(size),
         Color32::WHITE.alpha(0.88),
     );
 }

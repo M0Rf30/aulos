@@ -199,8 +199,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let current = app.route.root();
     let converter = app.session.config.config.experimental_converter;
 
-    if app.narrow {
-        rail(app, ui, &pal, converter);
+    let rail_mode: bool = ui
+        .ctx()
+        .data(|d| d.get_temp(egui::Id::new("sidebar_rail")))
+        .unwrap_or(app.narrow || app.sidebar_collapsed);
+    if rail_mode {
+        rail(app, ui, &pal);
         return;
     }
 
@@ -224,14 +228,28 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             theme::semibold(17.0),
             pal.text,
         );
+        let collapse = ui
+            .interact(
+                Rect::from_center_size(pos2(row.right() - 18.0, row.center().y), vec2(28.0, 28.0)),
+                ui.id().with("collapse"),
+                Sense::click(),
+            )
+            .on_hover_text("Collapse sidebar");
         paint_icon(
             ui.painter(),
             pos2(row.right() - 18.0, row.center().y),
             regular::SIDEBAR_SIMPLE,
             16.0,
-            pal.text_3,
+            if collapse.hovered() {
+                pal.text
+            } else {
+                pal.text_3
+            },
             false,
         );
+        if collapse.clicked() {
+            app.sidebar_collapsed = true;
+        }
         ui.add_space(4.0);
 
         // The navigation scrolls in the space above the pinned footer
@@ -282,7 +300,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 label,
                 key: None,
             };
-            let resp = wide_row(ui, &pal, &it, selected, 30.0, 15.0, None);
+            // Unselected tool rows are dimmer (text_3) than the nav rows.
+            let tool_pal = Palette {
+                text_2: pal.text_3,
+                ..pal
+            };
+            let resp = wide_row(ui, &tool_pal, &it, selected, 30.0, 15.0, None);
             if lab {
                 let r = Rect::from_center_size(
                     pos2(resp.rect.right() - 10.0 - 14.0, resp.rect.center().y),
@@ -402,14 +425,17 @@ fn section_label(ui: &mut Ui, text: &str, top: f32, plus: bool) -> bool {
 
 fn playlist_list(app: &mut App, ui: &mut Ui, pal: &Palette) {
     let mut open: Option<(bool, String)> = None;
+    let on_page = app.route == Route::Playlists;
     let pl = &app.session.playlists;
     for p in &pl.playlists {
-        if list_row(ui, pal, regular::LIST_BULLETS, &p.name).clicked() {
+        let selected = on_page && crate::views::playlists::is_open(app, false, &p.id);
+        if list_row(ui, pal, regular::PLAYLIST, &p.name, selected).clicked() {
             open = Some((false, p.id.clone()));
         }
     }
     for p in &pl.smart_playlists {
-        if list_row(ui, pal, regular::LIGHTNING, &p.name).clicked() {
+        let selected = on_page && crate::views::playlists::is_open(app, true, &p.id.to_string());
+        if list_row(ui, pal, fill::SPARKLE, &p.name, selected).clicked() {
             open = Some((true, p.id.to_string()));
         }
     }
@@ -419,13 +445,20 @@ fn playlist_list(app: &mut App, ui: &mut Ui, pal: &Palette) {
     }
 }
 
-fn list_row(ui: &mut Ui, pal: &Palette, icon: &str, label: &str) -> Response {
+fn list_row(ui: &mut Ui, pal: &Palette, icon: &str, label: &str, selected: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-    if resp.hovered() {
+    if selected {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), pal.surface_sel);
+    } else if resp.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), pal.text.alpha(0.05));
     }
-    let fg = if resp.hovered() { pal.text } else { pal.text_2 };
+    let fg = if selected || resp.hovered() {
+        pal.text
+    } else {
+        pal.text_2
+    };
     paint_icon(
         ui.painter(),
         pos2(rect.left() + 10.0 + 7.5, rect.center().y),
@@ -450,8 +483,11 @@ fn list_row(ui: &mut Ui, pal: &Palette, icon: &str, label: &str) -> Response {
 
 /// Provider status dots: one per configured provider (active one green).
 fn status_dots(app: &App, ui: &Ui, pal: &Palette, rect: Rect, corner: bool) {
-    let providers = &app.session.providers;
-    let n = providers.provider_list.len().min(3);
+    let mut statuses = app.session.providers.statuses();
+    // Three dots at most; failing providers win a slot over healthy ones.
+    statuses.sort_by_key(|s| s.error.is_none());
+    statuses.truncate(3);
+    let n = statuses.len();
     let mut x = if corner {
         rect.right() - 8.0 - 3.5
     } else {
@@ -462,18 +498,37 @@ fn status_dots(app: &App, ui: &Ui, pal: &Palette, rect: Rect, corner: bool) {
     } else {
         rect.center().y
     };
-    for i in (0..n).rev() {
-        let active = providers.active_index == Some(i);
-        let color = if active { pal.ok } else { pal.text_5 };
+    let right = x + 3.5;
+    for status in statuses.iter().rev() {
+        let color = if status.error.is_some() {
+            pal.danger
+        } else if status.active {
+            pal.ok
+        } else {
+            pal.text_5
+        };
         if corner {
             ui.painter().circle_filled(pos2(x, y), 5.5, pal.bg_sidebar);
         }
         ui.painter().circle_filled(pos2(x, y), 3.5, color);
         x -= 11.0;
     }
+    if n > 0 {
+        let strip = Rect::from_min_max(pos2(x + 11.0 - 3.5, y - 6.0), pos2(right, y + 6.0));
+        let tip = statuses
+            .iter()
+            .map(|s| match &s.error {
+                Some(e) => format!("{}: {e}", s.name),
+                None => s.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.interact(strip, ui.id().with("provider-dots"), Sense::hover())
+            .on_hover_text(tip);
+    }
 }
 
-fn rail(app: &mut App, ui: &mut Ui, pal: &Palette, converter: bool) {
+fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
     let t = Theme::get(ui.ctx());
     let outer = ui.max_rect();
     let current = app.route.root();
@@ -491,10 +546,18 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette, converter: bool) {
                 t.accent.fill,
                 pal.text,
             );
+            if !app.narrow {
+                let resp = ui
+                    .interact(row, ui.id().with("expand"), Sense::click())
+                    .on_hover_text("Expand sidebar");
+                if resp.clicked() {
+                    app.sidebar_collapsed = false;
+                }
+            }
             ui.add_space(6.0);
             let mut go = None;
-            // Pages scroll above the pinned tools and Settings.
-            let footer_h = 38.0 * (2.0 + f32::from(u8::from(converter))) + 8.0;
+            // Pages scroll above the pinned Settings (tools are not in the rail).
+            let footer_h = 38.0 + 8.0;
             let nav_h = (ui.available_height() - footer_h).max(0.0);
             let (nav_rect, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), nav_h), Sense::hover());
@@ -534,31 +597,6 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette, converter: bool) {
                         });
                 },
             );
-            let tags = [
-                (Route::Tagger, regular::TAG, fill::TAG, "Tag editor", true),
-                (
-                    Route::Converter,
-                    regular::ARROWS_LEFT_RIGHT,
-                    fill::ARROWS_LEFT_RIGHT,
-                    "Converter",
-                    converter,
-                ),
-            ];
-            for (route, icon, icon_fill, label, shown) in tags {
-                if !shown {
-                    continue;
-                }
-                let it = Item {
-                    route: route.clone(),
-                    icon,
-                    icon_fill,
-                    label,
-                    key: None,
-                };
-                if rail_row(ui, pal, &it, current == route).clicked() {
-                    go = Some(route);
-                }
-            }
             // Settings at the bottom.
             let settings = Item {
                 route: Route::Settings,

@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::library::Track;
-use crate::online::podcast::{self, PodcastSearchResult};
+use crate::online::podcast::{self, DownloadError, PodcastSearchResult};
 use crate::online::store::{Episode, Podcast};
 use crate::online::{UrlError, validate_http_url};
-use crate::task::Effect;
-use std::collections::HashSet;
+use crate::task::{Effect, channel_stream};
+use futures::SinkExt;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Async results of the podcast workflows; feed them to
@@ -38,6 +40,18 @@ pub enum PodcastEvent {
     Unsubscribed {
         result: Result<(), String>,
     },
+    /// Bytes received so far by a running download (`total` is `None` when
+    /// the server did not announce a length).
+    DownloadProgress {
+        episode_id: i64,
+        received: u64,
+        total: Option<u64>,
+    },
+    /// The download was cancelled with [`PodcastsState::cancel_download`];
+    /// its partial file is gone.
+    DownloadCancelled {
+        episode_id: i64,
+    },
     Downloaded {
         episode_id: i64,
         result: Result<String, String>,
@@ -59,9 +73,6 @@ pub enum PodcastNotice {
         name: String,
     },
     SubscribeFailed {
-        reason: String,
-    },
-    RefreshFailed {
         reason: String,
     },
     UnsubscribeFailed {
@@ -121,6 +132,37 @@ pub enum EpisodePlayback {
     },
 }
 
+/// A running episode download.
+#[derive(Debug, Clone)]
+pub struct DownloadState {
+    pub received: u64,
+    /// The enclosure's length, when the server announced it.
+    pub total: Option<u64>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl DownloadState {
+    /// Completed share in `0.0..=1.0`; `None` while the length is unknown.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total.filter(|t| *t > 0)?;
+        Some((self.received as f64 / total as f64).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Whether a cancel was requested and the transfer is winding down.
+    #[must_use]
+    pub fn is_cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// A subscription whose last refresh failed.
+#[derive(Debug, Clone, Copy)]
+pub struct RefreshFailure<'a> {
+    pub podcast: &'a Podcast,
+    pub reason: &'a str,
+}
+
 /// Subscriptions, the open show's episodes, directory search and playback
 /// bookkeeping.
 #[derive(Default)]
@@ -133,8 +175,11 @@ pub struct PodcastsState {
     pub episodes: Vec<Episode>,
     /// Podcast ids currently being refreshed.
     pub refreshing: HashSet<i64>,
-    /// Episode ids currently being downloaded for offline playback.
-    pub downloading: HashSet<i64>,
+    /// Why each subscription's last refresh failed, by podcast id; cleared
+    /// by a successful refresh or [`Self::dismiss_refresh_errors`].
+    pub refresh_errors: HashMap<i64, String>,
+    /// Episodes currently being downloaded for offline playback, by id.
+    pub downloading: HashMap<i64, DownloadState>,
     /// The episode id currently playing, if the current track came from a
     /// podcast subscription — used to persist playback position.
     pub current_episode_id: Option<i64>,
@@ -249,6 +294,33 @@ impl PodcastsState {
         Effect::batch(ids.into_iter().map(|id| self.refresh(id)))
     }
 
+    /// Subscriptions whose last refresh failed, in list order.
+    #[must_use]
+    pub fn refresh_failures(&self) -> Vec<RefreshFailure<'_>> {
+        self.podcasts
+            .iter()
+            .filter_map(|podcast| {
+                let reason = self.refresh_errors.get(&podcast.id)?;
+                Some(RefreshFailure { podcast, reason })
+            })
+            .collect()
+    }
+
+    /// Refreshes again every subscription whose last refresh failed.
+    pub fn retry_failed_refreshes(&mut self) -> Effect<PodcastEvent> {
+        let ids: Vec<i64> = self
+            .refresh_failures()
+            .iter()
+            .map(|f| f.podcast.id)
+            .collect();
+        Effect::batch(ids.into_iter().map(|id| self.refresh(id)))
+    }
+
+    /// Forgets the recorded refresh failures (the banner's close button).
+    pub fn dismiss_refresh_errors(&mut self) {
+        self.refresh_errors.clear();
+    }
+
     /// Unsubscribes from a podcast: drops it from the in-memory list right
     /// away (so the row disappears immediately) and deletes it (plus its
     /// downloaded episode files) from the store. Deliberately not undo-able:
@@ -262,6 +334,7 @@ impl PodcastsState {
             return None;
         }
         self.podcasts.retain(|p| p.id != id);
+        self.refresh_errors.remove(&id);
         if self.selected == Some(id) {
             self.close_show();
         }
@@ -329,6 +402,10 @@ impl PodcastsState {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         };
         let resume = (episode.position_ms > 0 && !episode.played)
             .then(|| Duration::from_millis(episode.position_ms as u64));
@@ -363,13 +440,55 @@ impl PodcastsState {
         let Some(episode) = self.episodes.iter().find(|e| e.id == episode_id).cloned() else {
             return Effect::none();
         };
-        if !self.downloading.insert(episode.id) {
+        if self.downloading.contains_key(&episode.id) {
             return Effect::none();
         }
-        Effect::blocking(
-            move || podcast::download_episode(&episode),
-            move |result| PodcastEvent::Downloaded { episode_id, result },
-        )
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.downloading.insert(
+            episode.id,
+            DownloadState {
+                received: 0,
+                total: None,
+                cancel: Arc::clone(&cancel),
+            },
+        );
+        Effect::stream(channel_stream(8, move |mut events| async move {
+            let mut progress = events.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                podcast::download_episode(&episode, &cancel, |received, total| {
+                    // A full channel only drops an intermediate report.
+                    let _ = progress.try_send(PodcastEvent::DownloadProgress {
+                        episode_id,
+                        received,
+                        total,
+                    });
+                })
+            })
+            .await
+            .unwrap_or_else(|e| Err(DownloadError::Failed(e.to_string())));
+            let last = match outcome {
+                Ok(path) => PodcastEvent::Downloaded {
+                    episode_id,
+                    result: Ok(path),
+                },
+                Err(DownloadError::Cancelled) => PodcastEvent::DownloadCancelled { episode_id },
+                Err(DownloadError::Failed(reason)) => PodcastEvent::Downloaded {
+                    episode_id,
+                    result: Err(reason),
+                },
+            };
+            let _ = events.send(last).await;
+        }))
+    }
+
+    /// Asks a running download to stop; the entry stays in
+    /// [`Self::downloading`] (see [`DownloadState::is_cancelling`]) until
+    /// [`PodcastEvent::DownloadCancelled`] arrives. A no-op when `episode_id`
+    /// is not downloading.
+    pub fn cancel_download(&self, episode_id: i64) {
+        if let Some(state) = self.downloading.get(&episode_id) {
+            state.cancel.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Deletes an episode's downloaded file. A no-op when nothing is
@@ -447,6 +566,7 @@ impl PodcastsState {
                 self.refreshing.remove(&id);
                 match result {
                     Ok(()) => {
+                        self.refresh_errors.remove(&id);
                         let episodes = if selected == Some(id) {
                             Self::load_episodes(id)
                         } else {
@@ -454,8 +574,29 @@ impl PodcastsState {
                         };
                         PodcastUpdate::effect(Effect::batch([self.load(), episodes]))
                     }
-                    Err(reason) => PodcastUpdate::notice(PodcastNotice::RefreshFailed { reason }),
+                    Err(reason) => {
+                        // Unsubscribed while the refresh was in flight: nothing to show.
+                        if self.podcasts.iter().any(|p| p.id == id) {
+                            self.refresh_errors.insert(id, reason);
+                        }
+                        PodcastUpdate::none()
+                    }
                 }
+            }
+            PodcastEvent::DownloadProgress {
+                episode_id,
+                received,
+                total,
+            } => {
+                if let Some(state) = self.downloading.get_mut(&episode_id) {
+                    state.received = received;
+                    state.total = total;
+                }
+                PodcastUpdate::none()
+            }
+            PodcastEvent::DownloadCancelled { episode_id } => {
+                self.downloading.remove(&episode_id);
+                PodcastUpdate::none()
             }
             PodcastEvent::Unsubscribed { result } => match result {
                 Ok(()) => PodcastUpdate::effect(self.load()),
@@ -524,7 +665,105 @@ mod tests {
             author: String::new(),
             last_refreshed: 0,
             unplayed_count: 0,
+            cadence: None,
         }
+    }
+
+    #[test]
+    fn download_tracks_progress_and_ends_on_completion() {
+        let mut state = PodcastsState {
+            selected: Some(1),
+            episodes: vec![episode(10, 0, false)],
+            ..PodcastsState::default()
+        };
+        let effect = state.download(10);
+        assert!(!effect.is_none());
+        // A second request for the same episode is a no-op.
+        assert!(state.download(10).is_none());
+        assert_eq!(state.downloading[&10].fraction(), None);
+
+        let _ = state.apply_event(PodcastEvent::DownloadProgress {
+            episode_id: 10,
+            received: 250,
+            total: Some(1_000),
+        });
+        assert_eq!(state.downloading[&10].fraction(), Some(0.25));
+
+        let update = state.apply_event(PodcastEvent::Downloaded {
+            episode_id: 10,
+            result: Ok("/tmp/ep.mp3".into()),
+        });
+        assert!(update.notice.is_none());
+        assert!(state.downloading.is_empty());
+        assert_eq!(state.episodes[0].downloaded_path, "/tmp/ep.mp3");
+    }
+
+    #[test]
+    fn cancelling_a_download_keeps_it_listed_until_the_task_confirms() {
+        let mut state = PodcastsState {
+            episodes: vec![episode(10, 0, false)],
+            ..PodcastsState::default()
+        };
+        let _ = state.download(10);
+        assert!(!state.downloading[&10].is_cancelling());
+        state.cancel_download(10);
+        assert!(state.downloading[&10].is_cancelling());
+        // Progress after the request must not resurrect or drop the entry.
+        let _ = state.apply_event(PodcastEvent::DownloadProgress {
+            episode_id: 10,
+            received: 5,
+            total: None,
+        });
+        assert!(state.downloading.contains_key(&10));
+        let update = state.apply_event(PodcastEvent::DownloadCancelled { episode_id: 10 });
+        assert!(update.notice.is_none());
+        assert!(state.downloading.is_empty());
+        // Progress for an unknown episode is ignored.
+        let _ = state.apply_event(PodcastEvent::DownloadProgress {
+            episode_id: 10,
+            received: 5,
+            total: None,
+        });
+        assert!(state.downloading.is_empty());
+    }
+
+    #[test]
+    fn failed_refreshes_are_kept_per_show_until_a_refresh_succeeds() {
+        let mut state = PodcastsState {
+            podcasts: vec![podcast(1), podcast(2)],
+            ..PodcastsState::default()
+        };
+        let update = state.apply_event(PodcastEvent::Refreshed {
+            id: 1,
+            result: Err("HTTP 503".into()),
+        });
+        assert!(update.notice.is_none());
+        let failures = state.refresh_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            (failures[0].podcast.id, failures[0].reason),
+            (1, "HTTP 503")
+        );
+
+        // Retry re-queues only the failed show.
+        assert!(!state.retry_failed_refreshes().is_none());
+        assert!(state.refreshing.contains(&1) && !state.refreshing.contains(&2));
+
+        let _ = state.apply_event(PodcastEvent::Refreshed {
+            id: 1,
+            result: Ok(()),
+        });
+        assert!(state.refresh_failures().is_empty());
+
+        // A failure for a show that is gone is not recorded.
+        let _ = state.apply_event(PodcastEvent::Refreshed {
+            id: 9,
+            result: Err("late".into()),
+        });
+        assert!(state.refresh_errors.is_empty());
+        state.refresh_errors.insert(2, "x".into());
+        state.dismiss_refresh_errors();
+        assert!(state.refresh_failures().is_empty());
     }
 
     #[test]

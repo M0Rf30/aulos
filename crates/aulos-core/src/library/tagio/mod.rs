@@ -22,7 +22,7 @@ pub mod base64;
 #[cfg(test)]
 mod roundtrip_tests;
 
-pub use model::{EditPicture, TagSet, keys, picture_type};
+pub use model::{EditPicture, TagSet, keys, picture_type, split_position};
 pub use symphonia_tagging::Container;
 
 use std::io;

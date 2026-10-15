@@ -107,13 +107,15 @@ fn track_info(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.add_space(8.0);
         let (title_rect, _) = ui.allocate_exact_size(vec2(text_w, 17.0), Sense::hover());
-        paint_text(
-            ui.painter(),
+        crate::widgets::marquee_text(
+            ui,
             title_rect,
-            Align::Min,
+            crate::widgets::marquee_id("nowbar", &track.title),
             &track.title,
             theme::semibold(13.5),
             t.pal.text,
+            t.pal.bg_bar,
+            true,
         );
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -165,6 +167,9 @@ fn track_info(app: &mut App, ui: &mut Ui) {
         app.toggle_favorite(&track);
     }
 }
+
+/// Width of the elapsed / remaining labels: fits `\u{2212}1:00:00`.
+const LABEL_W: f32 = 56.0;
 
 fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     let t = Theme::get(ui.ctx());
@@ -302,7 +307,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     let mono = theme::mono(11.0);
     paint_text(
         ui.painter(),
-        Rect::from_min_size(line.min, vec2(34.0, 16.0)),
+        Rect::from_min_size(line.min, vec2(LABEL_W, 16.0)),
         Align::Max,
         &elapsed,
         mono.clone(),
@@ -310,15 +315,18 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     );
     paint_text(
         ui.painter(),
-        Rect::from_min_size(pos2(line.right() - 38.0, line.top()), vec2(38.0, 16.0)),
+        Rect::from_min_size(
+            pos2(line.right() - LABEL_W, line.top()),
+            vec2(LABEL_W, 16.0),
+        ),
         Align::Min,
         &remaining,
         mono,
         t.pal.text_2,
     );
     let rail = Rect::from_min_max(
-        pos2(line.left() + 34.0 + 10.0, line.top()),
-        pos2(line.right() - 38.0 - 10.0, line.bottom()),
+        pos2(line.left() + LABEL_W + 10.0, line.top()),
+        pos2(line.right() - LABEL_W - 10.0, line.bottom()),
     );
     let seek = ui
         .scope_builder(egui::UiBuilder::new().max_rect(rail), |ui| {
@@ -328,6 +336,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 4.0,
                 rail.width(),
                 has_track && !live && !duration.is_zero(),
+                duration.as_secs_f32(),
             )
         })
         .inner;
@@ -364,12 +373,42 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     } else {
         regular::SPEAKER_HIGH
     };
-    if IconBtn::new(speaker)
-        .icon_size(16.0)
-        .tip("Mute")
-        .show(ui)
-        .clicked()
-    {
+    let muted = vol <= 0.001;
+    let mut speaker_btn =
+        IconBtn::new(speaker)
+            .icon_size(16.0)
+            .tip(if app.narrow { "Volume" } else { "Mute" });
+    if muted {
+        speaker_btn = speaker_btn.color(t.pal.danger);
+    }
+    let speaker_resp = speaker_btn.show(ui);
+    if app.narrow {
+        // Narrow: the speaker opens a volume popover (with a mute button).
+        egui::Popup::menu(&speaker_resp).show(|ui| {
+            ui.set_min_width(150.0);
+            ui.horizontal(|ui| {
+                if IconBtn::new(speaker)
+                    .size(28.0)
+                    .icon_size(16.0)
+                    .color(if muted { t.pal.danger } else { t.pal.text_2 })
+                    .tip(if muted { "Unmute" } else { "Mute" })
+                    .show(ui)
+                    .clicked()
+                {
+                    let u = app.session.toggle_mute();
+                    app.run(u);
+                }
+                let (resp, new) = slider_bar(ui, app.volume(), vec2(110.0, 20.0), t.pal.text_1);
+                if let Some(v) = new {
+                    let u = app.session.set_volume(v);
+                    app.run(u);
+                }
+                if resp.drag_stopped() || resp.clicked() {
+                    app.session.commit_volume();
+                }
+            });
+        });
+    } else if speaker_resp.clicked() {
         let u = app.session.toggle_mute();
         app.run(u);
     }
@@ -403,7 +442,15 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
             .show(ui)
             .clicked()
         {
-            app.sheet = if open { None } else { Some(Sheet::Properties) };
+            if open {
+                app.sheet = None;
+            } else {
+                if let Some(track) = app.session.playback.current_track.clone() {
+                    let effect = app.session.open_track_properties(track);
+                    app.run(effect);
+                }
+                app.sheet = Some(Sheet::Properties);
+            }
         }
     }
     if IconBtn::new(regular::MICROPHONE_STAGE)

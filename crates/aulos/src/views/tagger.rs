@@ -1218,15 +1218,24 @@ fn page(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
 
 // ---------------------------------------------------------------- header & banners
 
+/// Header row height. The right-aligned group is laid out in a box of this
+/// height: a bare `right_to_left(Align::Center)` takes the whole remaining
+/// page height on the first frame, leaving no room for the panes.
+const HEADER_H: f32 = 32.0;
+
 fn header(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
-    let one_row = ui.available_width() >= 900.0;
-    if one_row {
+    let right_aligned = |ui: &mut Ui, acts: &mut Vec<Act>| {
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), HEADER_H),
+            Layout::right_to_left(Align::Center),
+            |ui| header_right(app, ui, facts, acts),
+        );
+    };
+    if ui.available_width() >= 900.0 {
         ui.horizontal(|ui| {
             header_left(app, ui, facts, acts);
             header_scan(app, ui, acts);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                header_right(app, ui, facts, acts)
-            });
+            right_aligned(ui, acts);
         });
     } else {
         ui.horizontal(|ui| header_left(app, ui, facts, acts));
@@ -1238,9 +1247,7 @@ fn header(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         {
             ui.horizontal(|ui| header_scan(app, ui, acts));
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            header_right(app, ui, facts, acts)
-        });
+        right_aligned(ui, acts);
     }
 }
 
@@ -1456,6 +1463,48 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             Some(0) => acts.push(Act::Msg(TaggerMessage::ConfirmDiscard)),
             Some(_) => acts.push(Act::Msg(TaggerMessage::CancelDiscard)),
             None => {}
+        }
+    }
+    // Selected files whose Album artist differs from the selection's majority.
+    let selected = st.selected_files();
+    if selected.len() > 1 {
+        let artist = |f: &TagFile| f.edited.get(keys::ALBUMARTIST).unwrap_or("").to_owned();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for f in &selected {
+            *counts.entry(artist(f)).or_default() += 1;
+        }
+        if let Some((major, _)) = counts
+            .iter()
+            .max_by_key(|(k, n)| (**n, std::cmp::Reverse((*k).clone())))
+        {
+            let odd: Vec<FileId> = selected
+                .iter()
+                .filter(|f| artist(f) != *major)
+                .map(|f| f.id)
+                .collect();
+            if !odd.is_empty() {
+                let text = format!(
+                    "{} {} a different Album artist than the rest of the selection.",
+                    plural(odd.len(), "file", "files"),
+                    if odd.len() == 1 { "has" } else { "have" }
+                );
+                if banner(
+                    ui,
+                    &pal,
+                    pal.warn,
+                    regular::WARNING,
+                    &text,
+                    Bar::None,
+                    &["Show files"],
+                )
+                .is_some()
+                {
+                    acts.push(Act::Msg(TaggerMessage::SelectFile(odd[0])));
+                    for id in &odd[1..] {
+                        acts.push(Act::Msg(TaggerMessage::ToggleFile(*id)));
+                    }
+                }
+            }
         }
     }
     let key_set = app.session.config.config.acoustid_key().is_some();

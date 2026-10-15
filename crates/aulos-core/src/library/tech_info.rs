@@ -148,6 +148,19 @@ fn is_lossless_codec(short_name: &str) -> bool {
         || short_name.starts_with("dsd")
 }
 
+/// Bit depth of a stream: `params.bits_per_sample` for lossless codecs
+/// only. Containers like Matroska report a nominal sample width for lossy
+/// codecs too, and a lossy stream has no bit depth.
+pub(crate) fn lossless_bit_depth(
+    params: &symphonia::core::codecs::audio::AudioCodecParameters,
+) -> Option<u32> {
+    let bits = params.bits_per_sample.filter(|&b| b > 0)?;
+    let codec = symphonia::default::get_codecs()
+        .get_audio_decoder(params.codec)
+        .map(|r| r.codec.info)?;
+    is_lossless_codec(codec.short_name).then_some(bits)
+}
+
 fn channel_layout_name(count: usize) -> Option<&'static str> {
     Some(match count {
         0 => return None,
@@ -429,6 +442,9 @@ pub fn summarize_album(tracks: &[Track]) -> AlbumSummary {
             s.unprobed += 1;
             if track.sample_rate > 0 {
                 rates.insert(track.sample_rate);
+            }
+            if track.bit_depth > 0 {
+                depths.insert(track.bit_depth);
             }
             if track.bitrate > 0 {
                 s.bitrate_min_kbps = Some(

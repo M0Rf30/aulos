@@ -53,6 +53,65 @@ pub fn empty_state_tinted(
     clicked
 }
 
+/// Design empty state: a 56px rounded-square tile (reed icon, or danger-tinted
+/// when `error`), title, body and a primary + optional secondary pill.
+/// Returns `(primary_clicked, secondary_clicked)`.
+pub fn empty_state_actions(
+    ui: &mut Ui,
+    icon: &str,
+    title: &str,
+    body: &str,
+    primary: &str,
+    secondary: Option<&str>,
+    error: bool,
+) -> (bool, bool) {
+    let t = Theme::get(ui.ctx());
+    let (bg, fg) = if error {
+        (
+            t.pal.danger.alpha(0.14),
+            egui::Color32::from_rgb(0xEE, 0x8A, 0x7E),
+        )
+    } else {
+        (t.pal.surface_1, t.pal.reed)
+    };
+    let mut clicks = (false, false);
+    let avail = ui.available_rect_before_wrap();
+    let w = 360.0_f32.min(avail.width());
+    let top = (avail.height() * 0.5 - 110.0).max(24.0);
+    ui.allocate_ui_with_layout(
+        vec2(avail.width(), avail.height().max(220.0)),
+        Layout::top_down(Align::Center),
+        |ui| {
+            ui.add_space(top);
+            let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+            ui.painter().rect_filled(rect, CornerRadius::same(14), bg);
+            paint_icon(ui.painter(), rect.center(), icon, 26.0, fg, false);
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new(title).font(theme::semibold(20.0)));
+            ui.add_space(2.0);
+            ui.allocate_ui(vec2(w, 60.0), |ui| {
+                ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(body)
+                            .color(t.pal.text_2)
+                            .font(theme::regular(14.0)),
+                    );
+                });
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let pw = 140.0 + secondary.map_or(0.0, |_| 150.0);
+                ui.add_space(((ui.available_width() - pw) * 0.5).max(0.0));
+                clicks.0 = pill_button(ui, primary, None, PillKind::Primary, 34.0, 0.0).clicked();
+                if let Some(sec) = secondary {
+                    clicks.1 = pill_button(ui, sec, None, PillKind::Secondary, 34.0, 0.0).clicked();
+                }
+            });
+        },
+    );
+    clicks
+}
+
 /// A pulsing placeholder block (loading state).
 pub fn skeleton(ui: &mut Ui, rect: egui::Rect, radius: u8) {
     let t = Theme::get(ui.ctx());

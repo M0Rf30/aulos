@@ -4,6 +4,7 @@
 //! Scans directories for audio files and extracts metadata via symphonia
 //! (see `super::tags`).
 
+use super::scan_progress::ScanProgress;
 use super::tags;
 use super::{Track, db::LibraryDb};
 use std::path::{Path, PathBuf};
@@ -21,29 +22,34 @@ pub struct LibraryScanner;
 impl LibraryScanner {
     /// Scan the given directories and upsert tracks into the database.
     /// Returns the number of new or updated tracks.
-    #[tracing::instrument(skip(db), level = "debug")]
-    pub fn scan(db: &LibraryDb, dirs: &[PathBuf]) -> Result<usize, String> {
+    ///
+    /// `progress` is reset, then filled with the number of audio files found
+    /// (a first, cheap walk) and advanced as each one is processed.
+    #[tracing::instrument(skip(db, progress), level = "debug")]
+    pub fn scan(
+        db: &LibraryDb,
+        dirs: &[PathBuf],
+        progress: &ScanProgress,
+    ) -> Result<usize, String> {
         let mut count = 0;
         let mut complete_roots = Vec::new();
         let known_mtimes = db.track_mtimes("local")?;
 
-        for dir in dirs {
-            match std::fs::metadata(dir) {
-                Ok(metadata) if metadata.is_dir() => {}
-                Ok(_) => {
-                    tracing::warn!("Music root is not a directory: {}", dir.display());
-                    continue;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::warn!("Music directory does not exist: {}", dir.display());
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!("Cannot access music directory {}: {error}", dir.display());
-                    continue;
-                }
-            }
+        progress.reset();
+        let roots: Vec<&PathBuf> = dirs.iter().filter(|d| Self::is_usable_root(d)).collect();
+        for dir in &roots {
+            progress.set_root(dir);
+            let found = WalkDir::new(dir)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| Self::is_audio_file(e.path()))
+                .count();
+            progress.add_total(found);
+        }
 
+        for dir in roots {
+            progress.set_root(dir);
             let mut complete = true;
             for entry in WalkDir::new(dir).follow_links(true) {
                 let entry = match entry {
@@ -61,6 +67,7 @@ impl LibraryScanner {
                 if !Self::is_audio_file(path) {
                     continue;
                 }
+                progress.advance();
 
                 let metadata = match std::fs::metadata(path) {
                     Ok(metadata) => metadata,
@@ -108,6 +115,25 @@ impl LibraryScanner {
             tracing::info!("Removed {removed} missing tracks from library");
         }
         Ok(count)
+    }
+
+    /// Whether `dir` can be walked: it exists and is a directory.
+    fn is_usable_root(dir: &Path) -> bool {
+        match std::fs::metadata(dir) {
+            Ok(metadata) if metadata.is_dir() => true,
+            Ok(_) => {
+                tracing::warn!("Music root is not a directory: {}", dir.display());
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("Music directory does not exist: {}", dir.display());
+                false
+            }
+            Err(error) => {
+                tracing::warn!("Cannot access music directory {}: {error}", dir.display());
+                false
+            }
+        }
     }
 
     /// Incremental scan of specific paths.
@@ -218,12 +244,16 @@ impl LibraryScanner {
             duration: probed.properties.duration,
             bitrate: probed.properties.bitrate,
             sample_rate: probed.properties.sample_rate,
+            bit_depth: probed.properties.bit_depth,
             provider_id: Arc::from("local"),
             source_uri,
             is_favorite: false,
             rating: None,
             rg_track_gain: t.rg_track_gain,
             rg_album_gain: t.rg_album_gain,
+            release_type: t.release_type,
+            added_at: 0,
+            favorited_at: 0,
         })
     }
 }
@@ -268,6 +298,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 
@@ -279,7 +313,10 @@ mod tests {
             .unwrap();
         fs::remove_dir_all(&root).unwrap();
 
-        assert_eq!(LibraryScanner::scan(&db, &[root]).unwrap(), 0);
+        assert_eq!(
+            LibraryScanner::scan(&db, &[root], &ScanProgress::default()).unwrap(),
+            0
+        );
         assert_eq!(db.all_tracks(None).unwrap().len(), 1);
     }
 
@@ -291,7 +328,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            LibraryScanner::scan(&db, std::slice::from_ref(&root)).unwrap(),
+            LibraryScanner::scan(&db, std::slice::from_ref(&root), &ScanProgress::default())
+                .unwrap(),
             0
         );
         assert!(db.all_tracks(None).unwrap().is_empty());

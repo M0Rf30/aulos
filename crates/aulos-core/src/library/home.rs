@@ -5,7 +5,9 @@
 //! that derive Home content from the albums held in memory (used for
 //! providers whose library does not live in the library database).
 
-use super::history::{AlbumRef, DecadeCount, HomeData, SHELF_LEN};
+use super::history::{
+    AlbumRef, DecadeCount, FAVOURITES_SHELF_LEN, HomeData, SHELF_LEN, month_start,
+};
 use super::state::names_match;
 use super::{Album, Track};
 use std::time::{Duration, Instant};
@@ -132,9 +134,10 @@ pub fn decade_albums(albums: &[Album], decade: u32) -> Vec<AlbumRef> {
 }
 
 /// A history-less Home for providers that don't live in the library
-/// database: random picks and decades from the albums in memory.
+/// database: random picks, decades, recently added albums and favourites
+/// (as of `now`, Unix seconds) from the albums in memory.
 #[must_use]
-pub fn home_from_albums(albums: &[Album]) -> HomeData {
+pub fn home_from_albums(albums: &[Album], now: i64) -> HomeData {
     let mut decades: Vec<DecadeCount> = Vec::new();
     for album in albums.iter().filter(|a| !a.name.is_empty()) {
         if let Some(decade) = decade_of(album.year) {
@@ -146,7 +149,40 @@ pub fn home_from_albums(albums: &[Album]) -> HomeData {
     }
     decades.sort_by_key(|d| d.decade);
 
+    let mut added: Vec<&Album> = albums
+        .iter()
+        .filter(|a| !a.name.is_empty() && a.added_at > 0)
+        .collect();
+    added.sort_by_key(|a| std::cmp::Reverse(a.added_at));
+    let recently_added = added
+        .into_iter()
+        .take(SHELF_LEN as usize)
+        .map(|a| AlbumRef {
+            timestamp: a.added_at,
+            ..album_ref(a)
+        })
+        .collect();
+
+    let mut favourites: Vec<Track> = albums
+        .iter()
+        .flat_map(|a| a.tracks.iter())
+        .filter(|t| t.is_favorite)
+        .cloned()
+        .collect();
+    favourites.sort_by_key(|t| std::cmp::Reverse(t.favorited_at));
+    let favourites_total = favourites.len() as u32;
+    let month = month_start(now);
+    let favourites_this_month = favourites.iter().any(|t| t.favorited_at >= month);
+    if favourites_this_month {
+        favourites.retain(|t| t.favorited_at >= month);
+    }
+    favourites.truncate(FAVOURITES_SHELF_LEN as usize);
+
     HomeData {
+        recently_added,
+        favourites,
+        favourites_this_month,
+        favourites_total,
         random: random_album_refs(albums, SHELF_LEN as usize),
         decades,
         total_albums: albums.len() as u32,
@@ -181,6 +217,10 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 
@@ -241,7 +281,7 @@ mod tests {
 
     #[test]
     fn fallback_home_has_random_picks_and_decades_but_no_history() {
-        let home = home_from_albums(&library());
+        let home = home_from_albums(&library(), 1_000_000);
         assert!(!home.history_available);
         assert_eq!(home.total_albums, 5);
         assert_eq!(home.random.len(), 4, "untitled album is skipped");

@@ -14,6 +14,7 @@ use crate::provider::mpd_events::{IdleAction, IdleSubsystem, idle_action};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry, ProviderType};
 use crate::task::Effect;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,6 +45,21 @@ pub struct ProvidersState {
     pub subsonic_edit_states: Vec<SubsonicEditState>,
     /// Last connection-test status text per Subsonic card.
     pub subsonic_connection_status: Vec<Option<String>>,
+    /// Last failure per provider id (MPD connect failure, failed connection
+    /// test, Subsonic construction error); cleared when the provider
+    /// connects or a test succeeds. Drives the sidebar status dots.
+    pub provider_errors: HashMap<String, String>,
+}
+
+/// Health of one provider, for the sidebar status dots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStatus {
+    pub id: String,
+    pub name: String,
+    /// Whether it is the provider the library is browsing.
+    pub active: bool,
+    /// The last failure, `None` while the provider is healthy or untested.
+    pub error: Option<String>,
 }
 
 /// Async results of the provider workflows; feed them to
@@ -120,6 +136,7 @@ impl ProvidersState {
             mpd_connection_status: Vec::new(),
             subsonic_edit_states: Vec::new(),
             subsonic_connection_status: Vec::new(),
+            provider_errors: HashMap::new(),
         };
         state.register_mpd(config);
         let init_errors = state.register_subsonic(config);
@@ -174,6 +191,7 @@ impl ProvidersState {
                 }
                 Err(e) => {
                     tracing::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                    self.provider_errors.insert(entry.id.clone(), e.to_string());
                     errors.push((entry.name.clone(), e.to_string()));
                 }
             }
@@ -261,6 +279,14 @@ impl ProvidersState {
     fn reinit_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
         self.registry.remove_by_type(ProviderType::Subsonic);
         self.subsonic_providers.clear();
+        for entry in self
+            .subsonic_edit_states
+            .iter()
+            .map(|s| s.id.as_str())
+            .chain(config.subsonic_servers.iter().map(|s| s.id.as_str()))
+        {
+            self.provider_errors.remove(entry);
+        }
         let errors = self.register_subsonic(config);
         self.rebuild_list();
         self.rebuild_subsonic_edit_states(config);
@@ -336,16 +362,66 @@ impl ProvidersState {
         };
         match event {
             ProviderEvent::MpdTestResult(i, result) => {
+                if let Some(id) = self.mpd_edit_states.get(i).map(|s| s.id.clone()) {
+                    self.note_health(id, result.as_ref().err());
+                }
                 if let Some(s) = self.mpd_connection_status.get_mut(i) {
                     *s = Some(status(result));
                 }
             }
             ProviderEvent::SubsonicTestResult(i, result) => {
+                if let Some(id) = self.subsonic_edit_states.get(i).map(|s| s.id.clone()) {
+                    self.note_health(id, result.as_ref().err());
+                }
                 if let Some(s) = self.subsonic_connection_status.get_mut(i) {
                     *s = Some(status(result));
                 }
             }
         }
+    }
+
+    /// Records (`Some`) or clears (`None`) the failure of provider `id`.
+    fn note_health(&mut self, id: String, error: Option<&String>) {
+        match error {
+            Some(e) => {
+                self.provider_errors.insert(id, e.clone());
+            }
+            None => {
+                self.provider_errors.remove(&id);
+            }
+        }
+    }
+
+    /// One entry per registered provider (in selector order), followed by
+    /// configured servers that failed to construct and so are not
+    /// registered; the sidebar draws one status dot each.
+    #[must_use]
+    pub fn statuses(&self) -> Vec<ProviderStatus> {
+        let mut out: Vec<ProviderStatus> = self
+            .provider_list
+            .iter()
+            .enumerate()
+            .map(|(i, (id, name))| ProviderStatus {
+                id: id.clone(),
+                name: name.clone(),
+                active: self.active_index == Some(i),
+                error: self.provider_errors.get(id).cloned(),
+            })
+            .collect();
+        for state in &self.subsonic_edit_states {
+            if out.iter().any(|s| s.id == state.id) {
+                continue;
+            }
+            if let Some(error) = self.provider_errors.get(&state.id) {
+                out.push(ProviderStatus {
+                    id: state.id.clone(),
+                    name: state.name.clone(),
+                    active: false,
+                    error: Some(error.clone()),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -548,6 +624,7 @@ impl Session {
     /// since), and reload the library when it is the active one.
     pub fn on_mpd_connected(&mut self, provider_id: &str) -> MpdConnected {
         tracing::info!("MPD provider '{provider_id}' is now connected");
+        self.providers.provider_errors.remove(provider_id);
 
         if let Some(idx) = self
             .providers
@@ -603,6 +680,9 @@ impl Session {
     ) -> Option<ProviderInitError> {
         tracing::error!("MPD provider '{provider_id}' failed to connect: {error}");
 
+        self.providers
+            .provider_errors
+            .insert(provider_id.to_string(), error.to_string());
         let new_status = format!("{}: {error}", fl!("connection-failed"));
         let idx = self
             .providers
@@ -640,5 +720,66 @@ impl Session {
             }
             IdleAction::None => MpdIdleOutcome::Ignore,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::test_session;
+    use super::*;
+
+    #[test]
+    fn mpd_failure_marks_the_provider_and_connecting_clears_it() {
+        let mut session = test_session();
+        session.providers.provider_list = vec![
+            ("local".into(), "Local".into()),
+            ("mpd-a".into(), "Studio".into()),
+        ];
+        session.providers.active_index = Some(0);
+        session.providers.mpd_edit_states = vec![MpdEditState::new_default(0)];
+        session.providers.mpd_edit_states[0].id = "mpd-a".into();
+        session.providers.mpd_connection_status = vec![None];
+
+        let _ = session.on_mpd_connection_failed("mpd-a", "refused");
+        let statuses = session.providers.statuses();
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses[0].active && statuses[0].error.is_none());
+        assert_eq!(statuses[1].error.as_deref(), Some("refused"));
+
+        // `on_mpd_connected` also reloads the library; only the bookkeeping
+        // matters here, so clear the way it does.
+        session.providers.provider_errors.remove("mpd-a");
+        assert!(session.providers.statuses()[1].error.is_none());
+    }
+
+    #[test]
+    fn failed_connection_test_marks_the_server_until_a_test_passes() {
+        let mut providers = test_session().providers;
+        providers.provider_list = vec![("sub-a".into(), "Nimbus".into())];
+        providers.subsonic_edit_states = vec![SubsonicEditState::new_default(0)];
+        providers.subsonic_edit_states[0].id = "sub-a".into();
+        providers.subsonic_connection_status = vec![None];
+
+        providers.apply_event(ProviderEvent::SubsonicTestResult(
+            0,
+            Err("Ping: 401".into()),
+        ));
+        assert_eq!(providers.statuses()[0].error.as_deref(), Some("Ping: 401"));
+        providers.apply_event(ProviderEvent::SubsonicTestResult(0, Ok(())));
+        assert_eq!(providers.statuses()[0].error, None);
+    }
+
+    #[test]
+    fn unregistered_server_with_an_error_still_gets_a_status() {
+        let mut providers = test_session().providers;
+        providers.subsonic_edit_states = vec![SubsonicEditState::new_default(0)];
+        providers.subsonic_edit_states[0].id = "sub-x".into();
+        providers
+            .provider_errors
+            .insert("sub-x".into(), "bad url".into());
+        let statuses = providers.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "sub-x");
+        assert!(!statuses[0].active);
     }
 }

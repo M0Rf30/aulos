@@ -124,3 +124,84 @@ pub fn caps_label(ui: &mut Ui, text: &str) -> egui::Response {
     ui.painter().galley(rect.min, galley, t.pal.text_3);
     resp
 }
+
+/// Single-row text that scrolls horizontally (hover or `always`) when wider
+/// than `rect`, with a soft fade of `bg` on the clipped edges. Falls back to a
+/// static ellipsised row when reduced motion is on and not hovered.
+#[allow(clippy::too_many_arguments)]
+pub fn marquee_text(
+    ui: &Ui,
+    rect: Rect,
+    id: egui::Id,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    bg: Color32,
+    run: bool,
+) {
+    let full = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), color);
+    let overflow = full.size().x - rect.width();
+    let reduce = theme::motion::reduced(ui.ctx());
+    if overflow <= 0.5 || !run || reduce {
+        paint_text(ui.painter(), rect, Align::Min, text, font, color);
+        return;
+    }
+    const GAP: f32 = 36.0;
+    const SPEED: f32 = 32.0;
+    const PAUSE: f64 = 1.2;
+    let cycle = f64::from(full.size().x + GAP) / f64::from(SPEED);
+    // Read the clock before `data_mut`: nesting `input` inside it deadlocks.
+    let now = ui.input(|i| i.time);
+    let t0 = ui
+        .ctx()
+        .data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
+    let t = (now - t0) % (cycle + PAUSE);
+    let off = if t < PAUSE {
+        0.0
+    } else {
+        ((t - PAUSE) * f64::from(SPEED)) as f32
+    };
+    let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let y = rect.center().y - full.size().y / 2.0;
+    p.galley(pos2(rect.left() - off, y), full.clone(), color);
+    p.galley(
+        pos2(rect.left() - off + full.size().x + GAP, y),
+        full,
+        color,
+    );
+    fade_edges(&p, rect, bg, 14.0);
+    ui.ctx().request_repaint();
+}
+
+/// Left/right gradient fade of `bg` over `rect`'s edges.
+pub fn fade_edges(painter: &Painter, rect: Rect, bg: Color32, w: f32) {
+    use egui::epaint::{Mesh, Vertex};
+    let clear = Color32::TRANSPARENT;
+    let mut mesh = Mesh::default();
+    let mut quad = |x0: f32, x1: f32, c0: Color32, c1: Color32| {
+        let i = mesh.vertices.len() as u32;
+        for (x, y, c) in [
+            (x0, rect.top(), c0),
+            (x1, rect.top(), c1),
+            (x1, rect.bottom(), c1),
+            (x0, rect.bottom(), c0),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos: pos2(x, y),
+                uv: egui::epaint::WHITE_UV,
+                color: c,
+            });
+        }
+        mesh.indices.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+    };
+    quad(rect.left(), rect.left() + w, bg, clear);
+    quad(rect.right() - w, rect.right(), clear, bg);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// The text-run id helper for marquees keyed by track.
+pub fn marquee_id(scope: &str, text: &str) -> egui::Id {
+    egui::Id::new(("marquee", scope, text))
+}

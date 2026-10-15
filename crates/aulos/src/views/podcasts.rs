@@ -3,11 +3,11 @@
 use crate::app::App;
 use crate::theme::{self, Accent, ColorExt, Palette, Theme};
 use crate::widgets::{
-    IconBtn, PillKind, chip, cover_image, empty_state, empty_state_tinted, paint_icon, paint_text,
-    pill_button, search_field, segmented, skeleton, text_field,
+    IconBtn, PillKind, chip, cover_image, empty_state, empty_state_actions, empty_state_tinted,
+    paint_icon, paint_text, pill_button, search_field, segmented, skeleton, text_field,
 };
 use aulos_core::online::UrlError;
-use aulos_core::online::podcast::{EpisodeFilter, primary_episode};
+use aulos_core::online::podcast::{Cadence, EpisodeFilter, primary_episode};
 use aulos_core::online::store::{Episode, Podcast};
 use aulos_core::session::{EpisodePlayback, PodcastsState};
 use egui::{
@@ -39,6 +39,9 @@ pub struct State {
     text: String,
     desc_open: bool,
     pending_unsub: Option<i64>,
+    /// The user went back to the list of shows; until then the first show's
+    /// detail opens by itself.
+    browsing_list: bool,
     entered: Option<Instant>,
     selected_at: Option<Instant>,
     /// Plain text of the open show's description.
@@ -61,7 +64,10 @@ enum Intent {
     Play(i64),
     TogglePlayed(i64),
     Download(i64),
+    CancelDownload(i64),
     DeleteDownload(i64),
+    RetryRefreshes,
+    DismissRefreshErrors,
     SubmitSearch,
     Subscribe(String),
 }
@@ -75,6 +81,7 @@ struct Ctx {
 /// Called when the route is entered: start loading what the page needs.
 pub fn enter(app: &mut App) {
     app.views.podcasts.entered = Some(Instant::now());
+    app.views.podcasts.browsing_list = false;
     let load = app.session.podcasts.load();
     app.run(load);
 }
@@ -102,6 +109,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         pad: app.page_pad(),
     };
     let mut intents: Vec<Intent> = Vec::new();
+    // The page opens on the first show's episodes; Back reaches the list.
+    let st = &app.views.podcasts;
+    if st.tab == TAB_SUBSCRIPTIONS
+        && !st.browsing_list
+        && app.session.podcasts.selected.is_none()
+        && let Some(first) = app.session.podcasts.podcasts.first().map(|p| p.id)
+    {
+        apply(app, Intent::Select(first));
+    }
     {
         let st = &mut app.views.podcasts;
         let pod = &app.session.podcasts;
@@ -124,6 +140,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.add_space(12.0);
             add_form(ui, &cx, st, &mut intents);
         }
+        refresh_banner(ui, &cx, pod, &mut intents);
         ui.add_space(18.0);
 
         if st.tab == TAB_DISCOVER {
@@ -234,6 +251,116 @@ fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
     });
 }
 
+/// "Couldn't refresh N feeds" card with a Retry action, while any
+/// subscription's last refresh failed.
+fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<Intent>) {
+    let failures = pod.refresh_failures();
+    if failures.is_empty() {
+        return;
+    }
+    let pal = &cx.pal;
+    let n = failures.len();
+    let title = format!("Couldn’t refresh {n} feed{}", if n == 1 { "" } else { "s" });
+    let names: Vec<&str> = failures.iter().map(|f| f.podcast.title.as_str()).collect();
+    let names = match names.as_slice() {
+        [one] => (*one).to_owned(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+        [] => String::new(),
+    };
+    let first = failures[0].reason;
+    let mut detail = if failures.iter().all(|f| f.reason == first) {
+        format!("{names}: {first}.")
+    } else {
+        format!("{names} could not be reached.")
+    };
+    let oldest = failures
+        .iter()
+        .map(|f| f.podcast.last_refreshed)
+        .filter(|t| *t > 0)
+        .min();
+    if let Some(oldest) = oldest {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        detail.push_str(&format!(
+            " Showing episodes cached {} ago.",
+            age_label((now - oldest).max(0))
+        ));
+    }
+    let retrying = failures
+        .iter()
+        .any(|f| pod.refreshing.contains(&f.podcast.id));
+    ui.add_space(12.0);
+    padded(ui, cx.pad, |ui| {
+        egui::Frame::new()
+            .fill(pal.danger.alpha(0.08))
+            .stroke(Stroke::new(1.0, pal.danger.alpha(0.3)))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(14.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.label(
+                        RichText::new(regular::WARNING_CIRCLE)
+                            .size(18.0)
+                            .color(pal.danger),
+                    );
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        ui.set_max_width((ui.available_width() - 190.0).max(200.0));
+                        ui.label(
+                            RichText::new(title)
+                                .font(theme::semibold(13.5))
+                                .color(pal.text),
+                        );
+                        ui.label(
+                            RichText::new(detail)
+                                .font(theme::regular(13.0))
+                                .color(pal.text_2),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                        if IconBtn::new(regular::X)
+                            .size(30.0)
+                            .icon_size(14.0)
+                            .tip("Dismiss")
+                            .show(ui)
+                            .clicked()
+                        {
+                            intents.push(Intent::DismissRefreshErrors);
+                        }
+                        let label = if retrying { "Retrying…" } else { "Retry" };
+                        if pill_button(
+                            ui,
+                            label,
+                            Some(regular::ARROW_CLOCKWISE),
+                            PillKind::Secondary,
+                            30.0,
+                            0.0,
+                        )
+                        .clicked()
+                            && !retrying
+                        {
+                            intents.push(Intent::RetryRefreshes);
+                        }
+                    });
+                });
+            });
+    });
+}
+
+/// "45 minutes", "3 hours", "2 days": how long ago something was.
+fn age_label(secs: i64) -> String {
+    let (n, unit) = match secs {
+        s if s < 3_600 => ((s / 60).max(1), "minute"),
+        s if s < 86_400 => (s / 3_600, "hour"),
+        s => (s / 86_400, "day"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
 // -- subscriptions -------------------------------------------------------------
 
 fn subscriptions(
@@ -248,14 +375,22 @@ fn subscriptions(
         if recent(st.entered) {
             skeleton_rows(ui, cx, 5, 56.0, SHOW_ROW);
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else if empty_state(
-            ui,
-            regular::MICROPHONE_STAGE,
-            "No subscriptions yet",
-            "Find shows in Discover, or paste an RSS feed URL. New episodes show up here and in Home.",
-            Some("Open Discover"),
-        ) {
-            st.tab = TAB_DISCOVER;
+        } else {
+            let (discover, add) = empty_state_actions(
+                ui,
+                regular::MICROPHONE_STAGE,
+                "No subscriptions yet",
+                "Find shows in Discover, or paste an RSS feed URL. New episodes show up here and in Home.",
+                "Open Discover",
+                Some("Add feed URL"),
+                false,
+            );
+            if discover {
+                st.tab = TAB_DISCOVER;
+            }
+            if add {
+                st.add_open = true;
+            }
         }
         return;
     }
@@ -315,6 +450,12 @@ fn show_row(
         cx.pal.text,
     );
     let mut meta = show.author.clone();
+    if let Some(cadence) = show.cadence {
+        if !meta.is_empty() {
+            meta.push_str(" · ");
+        }
+        meta.push_str(cadence_label(cadence));
+    }
     if show.unplayed_count > 0 {
         if !meta.is_empty() {
             meta.push_str(" · ");
@@ -524,6 +665,12 @@ fn hero(
                 crate::widgets::caps_label(ui, "SHOW");
                 crate::widgets::label_text(ui, &show.title, theme::semibold(24.0), cx.pal.text);
                 let mut meta = show.author.clone();
+                if let Some(cadence) = show.cadence {
+                    if !meta.is_empty() {
+                        meta.push_str(" · ");
+                    }
+                    meta.push_str(cadence_label(cadence));
+                }
                 if !meta.is_empty() {
                     meta.push_str(" · ");
                 }
@@ -629,7 +776,8 @@ fn episode_row(
     let resp = ui.interact(rect, ui.id().with(("ep", e.id)), Sense::click());
     let pal = &cx.pal;
     let current = playing.filter(|(id, _)| *id == e.id);
-    let downloading = pod.downloading.contains(&e.id);
+    let download = pod.downloading.get(&e.id);
+    let downloading = download.is_some();
     let downloaded = !e.downloaded_path.is_empty();
     let started = !e.played && e.position_ms > 0;
     let fresh = !e.played && e.position_ms == 0 && e.pub_date > 0 && now - e.pub_date < 14 * 86_400;
@@ -740,8 +888,13 @@ fn episode_row(
     );
 
     if wide {
-        let (status, color) = if downloading {
-            ("Downloading…".to_owned(), pal.reed)
+        let (status, color) = if let Some(dl) = download {
+            let text = match dl.fraction() {
+                _ if dl.is_cancelling() => "Cancelling…".to_owned(),
+                Some(f) => format!("Downloading · {}%", (f * 100.0).floor() as u32),
+                None => "Downloading…".to_owned(),
+            };
+            (text, pal.reed)
         } else if e.played {
             ("Played".to_owned(), pal.text_3)
         } else if started {
@@ -774,24 +927,35 @@ fn episode_row(
             theme::mono(11.5),
             color,
         );
-        if started || e.played {
+        if downloading || started || e.played {
             let bar =
                 Rect::from_min_size(pos2(status_l, rect.center().y + 7.0), vec2(status_w, 3.0));
             p.rect_filled(bar, CornerRadius::same(2), pal.track);
-            let frac = e.progress_fraction();
+            let (frac, color) = if let Some(dl) = download {
+                (dl.fraction().unwrap_or(0.0), pal.reed)
+            } else if e.played {
+                (e.progress_fraction(), pal.text_5)
+            } else {
+                (e.progress_fraction(), cx.accent.fill)
+            };
             let fill_rect = Rect::from_min_size(bar.min, vec2(bar.width() * frac, 3.0));
-            p.rect_filled(
-                fill_rect,
-                CornerRadius::same(2),
-                if e.played { pal.text_5 } else { cx.accent.fill },
-            );
+            p.rect_filled(fill_rect, CornerRadius::same(2), color);
         }
     }
 
     // download column
     let (dl_glyph, dl_color, dl_fill, dl_tip) = if downloading {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
-        (regular::CIRCLE_NOTCH, pal.reed, false, "Downloading…")
+        (
+            regular::X_CIRCLE,
+            if dl_resp.hovered() {
+                pal.text
+            } else {
+                pal.reed
+            },
+            false,
+            "Cancel download",
+        )
     } else if downloaded {
         (
             fill::CHECK_CIRCLE,
@@ -813,11 +977,7 @@ fn episode_row(
     };
     ui.painter().circle_filled(
         dl_rect.center(),
-        if dl_resp.hovered() && !downloading {
-            16.0
-        } else {
-            0.0
-        },
+        if dl_resp.hovered() { 16.0 } else { 0.0 },
         pal.text.alpha(0.06),
     );
     paint_icon(
@@ -834,9 +994,11 @@ fn episode_row(
         intents.push(Intent::Play(e.id));
     }
     if dl_resp.clicked() {
-        if downloaded {
+        if downloading {
+            intents.push(Intent::CancelDownload(e.id));
+        } else if downloaded {
             intents.push(Intent::DeleteDownload(e.id));
-        } else if !downloading {
+        } else {
             intents.push(Intent::Download(e.id));
         }
     }
@@ -863,12 +1025,17 @@ fn episode_row(
             intents.push(Intent::TogglePlayed(e.id));
             ui.close();
         }
-        if downloaded {
+        if downloading {
+            if ui.button("Cancel download").clicked() {
+                intents.push(Intent::CancelDownload(e.id));
+                ui.close();
+            }
+        } else if downloaded {
             if ui.button("Remove download").clicked() {
                 intents.push(Intent::DeleteDownload(e.id));
                 ui.close();
             }
-        } else if !downloading && ui.button("Download").clicked() {
+        } else if ui.button("Download").clicked() {
             intents.push(Intent::Download(e.id));
             ui.close();
         }
@@ -1065,6 +1232,16 @@ fn skeleton_rows(ui: &mut Ui, cx: &Ctx, n: usize, art: f32, row_h: f32) {
     });
 }
 
+fn cadence_label(cadence: Cadence) -> &'static str {
+    match cadence {
+        Cadence::Daily => "Daily",
+        Cadence::TwiceWeekly => "Twice weekly",
+        Cadence::Weekly => "Weekly",
+        Cadence::Biweekly => "Biweekly",
+        Cadence::Monthly => "Monthly",
+    }
+}
+
 fn fmt_dur(secs: i64) -> String {
     let mins = secs / 60;
     if mins >= 60 {
@@ -1119,11 +1296,18 @@ fn apply(app: &mut App, intent: Intent) {
         Intent::Back => {
             app.session.podcasts.close_show();
             let st = &mut app.views.podcasts;
+            st.browsing_list = true;
             st.filter = 0;
             st.text.clear();
             st.desc_open = false;
             st.pending_unsub = None;
         }
+        Intent::RetryRefreshes => {
+            let effect = app.session.podcasts.retry_failed_refreshes();
+            app.run(effect);
+        }
+        Intent::DismissRefreshErrors => app.session.podcasts.dismiss_refresh_errors(),
+        Intent::CancelDownload(id) => app.session.podcasts.cancel_download(id),
         Intent::Refresh(id) => {
             let effect = app.session.podcasts.refresh(id);
             app.run(effect);
@@ -1138,6 +1322,8 @@ fn apply(app: &mut App, intent: Intent) {
         }
         Intent::Unsubscribe(id) => {
             app.views.podcasts.pending_unsub = None;
+            // Land on the list, not on another show, after unsubscribing.
+            app.views.podcasts.browsing_list = true;
             if let Some(effect) = app.session.podcasts.unsubscribe(id) {
                 app.run(effect);
             }

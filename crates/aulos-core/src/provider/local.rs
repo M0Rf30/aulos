@@ -7,6 +7,7 @@
 //! functionality behind the [`MusicProvider`] trait.
 
 use super::{MusicProvider, ProviderError, ProviderType};
+use crate::library::scan_progress::ScanProgress;
 use crate::library::{
     Album, Artist, CoverArt, LibraryDb, LibraryScanner, LyricsProvider, Playlist, Track,
 };
@@ -95,9 +96,9 @@ impl MusicProvider for LocalProvider {
         Ok(lyrics)
     }
 
-    fn sync_library(&self) -> Result<usize, ProviderError> {
+    fn sync_library(&self, progress: &ScanProgress) -> Result<usize, ProviderError> {
         let db = self.lock_db()?;
-        LibraryScanner::scan(&db, &self.music_dirs).map_err(ProviderError::Database)
+        LibraryScanner::scan(&db, &self.music_dirs, progress).map_err(ProviderError::Database)
     }
 
     // --- Playlists ---

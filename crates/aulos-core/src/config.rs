@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
+use crate::library::album_sort::AlbumSort;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -175,6 +176,33 @@ impl AutoPlayMode {
     pub const ALL: [AutoPlayMode; 3] = [Self::Off, Self::Random, Self::Similar];
 }
 
+/// Colour theme choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Follow the operating system's dark/light setting.
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    /// All choices, in the order shown in the settings.
+    pub const ALL: [ThemeMode; 3] = [Self::System, Self::Dark, Self::Light];
+
+    /// Whether this choice is dark, given the OS preference (`None`: the
+    /// OS did not say; dark is the fallback).
+    #[must_use]
+    pub fn is_dark(self, system_dark: Option<bool>) -> bool {
+        match self {
+            Self::System => system_dark.unwrap_or(true),
+            Self::Dark => true,
+            Self::Light => false,
+        }
+    }
+}
+
 /// Persistent configuration, stored as RON in [`Config::path`].
 ///
 /// Every field has a default, so a file written by an older version (missing
@@ -230,6 +258,14 @@ pub struct Config {
     pub artists_view_mode: ViewMode,
     /// Layout mode for the genres view.
     pub genres_view_mode: ViewMode,
+    /// Sort order of the albums view.
+    pub albums_sort: AlbumSort,
+    /// Sort order of the artists view.
+    pub artists_sort: AlbumSort,
+    /// Sort order of the genres view.
+    pub genres_sort: AlbumSort,
+    /// Name the Home page greets; empty greets without a name.
+    pub user_name: String,
     /// Output directory for local file conversion jobs. `None` uses
     /// `dirs::audio_dir()/Converted` (falling back to `~/Converted`).
     pub convert_out_dir: Option<PathBuf>,
@@ -238,6 +274,16 @@ pub struct Config {
     /// Output sample rate for local file conversion jobs; `None` keeps
     /// each source's original rate.
     pub convert_sample_rate: Option<u32>,
+    /// Output channel layout for local file conversion jobs.
+    pub convert_channels: crate::convert::ChannelMode,
+    /// File name pattern of converted files, e.g. `{track:02} {title}`; see
+    /// [`crate::convert::naming`] for the tokens.
+    pub convert_name_pattern: String,
+    /// Whether a CUE sheet is split into one file per track (otherwise the
+    /// audio file it refers to is converted whole).
+    pub convert_split_cue: bool,
+    /// Whether converted files get the source's tags and cover art.
+    pub convert_copy_tags: bool,
     /// Whether the (experimental) local file converter/transcoder/ripper
     /// is enabled. Off by default: shows/hides the Convert nav entry and
     /// gates its progress-ticker subscription (see
@@ -255,13 +301,33 @@ pub struct Config {
     /// the next startup via `resolve_active_provider`; falls back to the
     /// local provider if the saved id is no longer registered.
     pub active_provider: Option<String>,
-    /// Whether Aulos fetches artist images/biography from online sources
-    /// (Deezer for images, Wikipedia for bios — both keyless) when
-    /// browsing in Local or MPD mode. Off by default: purely opt-in
+    /// Whether Aulos fetches artist biographies from Wikipedia (keyless)
+    /// when browsing in Local or MPD mode. Off by default: purely opt-in
     /// network access. Ignored in Subsonic mode, which always shows the
     /// server's own artist info instead — see
     /// `crate::provider::subsonic::SubsonicProvider::get_artist_info`.
-    pub fetch_artist_info: bool,
+    pub fetch_artist_bio: bool,
+    /// Whether Aulos fetches artist photos from Deezer (keyless) in Local
+    /// or MPD mode. Off by default, and ignored in Subsonic mode like
+    /// [`Self::fetch_artist_bio`].
+    pub fetch_artist_photos: bool,
+    /// Whether radio station icons are downloaded from the stations'
+    /// servers. On by default.
+    pub fetch_radio_icons: bool,
+    /// Pre-load the next track so it follows without a gap. On by default.
+    pub gapless: bool,
+    /// Stop after every track instead of continuing with the queue.
+    pub stop_after_current: bool,
+    /// Start playing the library when the app launches.
+    pub auto_play_on_launch: bool,
+    /// Rescan the library when files in the music folders change.
+    pub watch_for_changes: bool,
+    /// Dark, light, or follow the operating system.
+    pub theme_mode: ThemeMode,
+    /// Tint the interface accent with the playing cover's colour.
+    pub tint_ui_with_cover: bool,
+    /// Turn off interface animations.
+    pub reduce_motion: bool,
     /// Size multiplier for cards in grid views (albums, artists, genres,
     /// folders, radio, podcasts…), 0.7–1.6; 1.0 is the default size.
     pub grid_scale: f32,
@@ -362,14 +428,31 @@ impl Default for Config {
             albums_view_mode: ViewMode::Grid,
             artists_view_mode: ViewMode::List,
             genres_view_mode: ViewMode::Grid,
+            albums_sort: AlbumSort::default(),
+            artists_sort: AlbumSort::default(),
+            genres_sort: AlbumSort::default(),
+            user_name: String::new(),
             convert_out_dir: None,
             convert_format: crate::convert::OutputFormat::Flac,
             convert_sample_rate: None,
+            convert_channels: crate::convert::ChannelMode::Source,
+            convert_name_pattern: crate::convert::naming::DEFAULT_PATTERN.to_owned(),
+            convert_split_cue: true,
+            convert_copy_tags: true,
             experimental_converter: false,
             flac_options: crate::convert::encoder::FlacOptions::default(),
             lossy_options: crate::convert::encoder::LossyOptions::default(),
             active_provider: None,
-            fetch_artist_info: false,
+            fetch_artist_bio: false,
+            fetch_artist_photos: false,
+            fetch_radio_icons: true,
+            gapless: true,
+            stop_after_current: false,
+            auto_play_on_launch: false,
+            watch_for_changes: true,
+            theme_mode: ThemeMode::System,
+            tint_ui_with_cover: true,
+            reduce_motion: false,
             grid_scale: 1.0,
             ui_scale: 1.0,
             intro_played: false,
@@ -682,6 +765,16 @@ mod persistence_tests {
             active_provider: Some("mpd-home".into()),
             equalizer_bands: vec![1.5, -2.0, 0.0],
             mpd_servers: vec![MpdConfigEntry::default()],
+            theme_mode: ThemeMode::Light,
+            gapless: false,
+            stop_after_current: true,
+            auto_play_on_launch: true,
+            watch_for_changes: false,
+            tint_ui_with_cover: false,
+            reduce_motion: true,
+            fetch_artist_bio: true,
+            fetch_artist_photos: true,
+            fetch_radio_icons: false,
             ..Config::default()
         };
         config.save_to(&path).unwrap();
@@ -694,6 +787,15 @@ mod persistence_tests {
             .collect();
         assert_eq!(leftovers, [std::ffi::OsString::from(SETTINGS_FILE)]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn theme_mode_resolves_against_the_system_preference() {
+        assert!(ThemeMode::System.is_dark(Some(true)));
+        assert!(!ThemeMode::System.is_dark(Some(false)));
+        assert!(ThemeMode::System.is_dark(None));
+        assert!(ThemeMode::Dark.is_dark(Some(false)));
+        assert!(!ThemeMode::Light.is_dark(Some(true)));
     }
 
     #[test]

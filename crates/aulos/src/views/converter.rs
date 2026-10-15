@@ -1,8 +1,9 @@
 //! The converter page: the job queue and the output settings.
 //!
 //! Everything the page decides lives in `aulos_core::session::ConvertState`
-//! (queue, start, cancel, retry) and in the persisted `Config` (format, sample
-//! rate, output folder, encoder options); this module draws them and routes
+//! (queue, start, pause, cancel, retry) and in the persisted `Config` (format,
+//! sample rate, channels, file name pattern, CUE/tag switches, output folder,
+//! encoder options); this module draws them and routes
 //! the user's clicks. Pickers are native dialogs run off the UI thread and
 //! report back through a channel drained every frame.
 
@@ -10,26 +11,31 @@ use crate::app::App;
 use crate::dialogs::{self, Filter};
 use crate::theme::{self, ColorExt, Palette, lerp_color};
 use crate::widgets::{
-    PillKind, empty_state, paint_icon, paint_text, pill_button_enabled, tag_badge,
+    PillKind, empty_state, paint_icon, paint_text, pill_button_enabled, tag_badge, toggle,
 };
 use aulos_core::config::Config;
 use aulos_core::convert::encoder::{FlacBitDepth, FlacOptions, LossyOptions, Mp3Mode};
+use aulos_core::convert::estimate::{self, Target};
 use aulos_core::convert::options::{
     BITRATE_KBPS_OPTIONS, FLAC_BIT_DEPTH_OPTIONS, FLAC_COMPRESSION_OPTIONS, MP3_MODE_OPTIONS,
     SAMPLE_RATE_OPTIONS, VORBIS_QUALITY_OPTIONS, bitrate_kbps_label, flac_bit_depth_label,
     format_short_label, mp3_mode_label, rate_label,
 };
-use aulos_core::convert::{self, ConvertJob, JobCounts, JobId, JobKind, JobState, OutputFormat};
+use aulos_core::convert::source::khz;
+use aulos_core::convert::{
+    self, ChannelMode, ConvertJob, JobCounts, JobId, JobKind, JobState, OutputFormat, naming,
+};
 use aulos_core::session::ConvertState;
 use egui::epaint::TextShape;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align, Align2, Color32, CornerRadius, Frame, Id, Label, Layout, Margin, Popup, Rect, RichText,
-    ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
+    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, pos2, vec2,
 };
 use egui_phosphor::{fill, regular};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// Height of one job row (10px padding, two text lines, 1px border).
@@ -77,6 +83,12 @@ enum Intent {
     OpenDir(PathBuf),
     Format(OutputFormat),
     Rate(Option<u32>),
+    Channels(ChannelMode),
+    Pattern(String),
+    SplitCue(bool),
+    CopyTags(bool),
+    Pause,
+    Resume,
     FlacCompression(u8),
     FlacDepth(FlacBitDepth),
     Mp3Mode(Mp3Mode),
@@ -106,7 +118,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             .collect()
     });
     if !dropped.is_empty() {
-        app.session.convert.enqueue(dropped);
+        let probes = app.session.convert.enqueue(dropped);
+        app.run(probes);
     }
     let mut intents = Vec::new();
     page(app, ui, &mut intents);
@@ -291,7 +304,22 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
                 .color(pal.text),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if pill_button_enabled(
+            let active = counts.queued + counts.running > 0;
+            if active {
+                // While work is queued the header action is Pause/Resume;
+                // adding more files stays one click away as an icon.
+                let paused = app.session.convert.is_paused();
+                if pause_pill(ui, &pal, paused).clicked() {
+                    out.push(if paused {
+                        Intent::Resume
+                    } else {
+                        Intent::Pause
+                    });
+                }
+                if icon_button(ui, &pal, regular::PLUS, "Add files").clicked() {
+                    out.push(Intent::AddFiles);
+                }
+            } else if pill_button_enabled(
                 ui,
                 "Add files",
                 Some(regular::PLUS),
@@ -304,7 +332,7 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             {
                 out.push(Intent::AddFiles);
             }
-            if counts.queued + counts.running > 0
+            if active
                 && pill_button_enabled(ui, "Cancel all", None, PillKind::Danger, 28.0, 0.0, true)
                     .clicked()
             {
@@ -378,6 +406,64 @@ fn ghost_button(ui: &mut Ui, pal: &Palette, label: &str) -> egui::Response {
     resp
 }
 
+/// The design's 28px "Pause" pill (filled pause glyph); reads "Resume" with a
+/// play glyph while the queue is paused.
+fn pause_pill(ui: &mut Ui, pal: &Palette, paused: bool) -> egui::Response {
+    let (label, glyph) = if paused {
+        ("Resume", fill::PLAY)
+    } else {
+        ("Pause", fill::PAUSE)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), theme::semibold(13.0), pal.text);
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2(galley.size().x + 12.0 + 6.0 + 20.0, 28.0),
+        Sense::click(),
+    );
+    let bg = if resp.hovered() {
+        pal.stroke_strong
+    } else {
+        pal.surface_hi
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(14), bg);
+    paint_icon(
+        ui.painter(),
+        pos2(rect.left() + 10.0 + 6.0, rect.center().y),
+        glyph,
+        12.0,
+        pal.text,
+        true,
+    );
+    ui.painter().galley(
+        pos2(
+            rect.left() + 10.0 + 12.0 + 6.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        pal.text,
+    );
+    resp.on_hover_text(if paused {
+        "Resume the queue"
+    } else {
+        "Pause the queue"
+    })
+}
+
+/// A 28px square ghost button with just a glyph.
+fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::radius::SM),
+            pal.text.alpha(0.07),
+        );
+    }
+    paint_icon(ui.painter(), rect.center(), glyph, 16.0, pal.text_1, false);
+    resp.on_hover_text(tip)
+}
+
 fn paint_bar(ui: &Ui, rect: Rect, frac: f32, fill: Color32, track: Color32) {
     let r = CornerRadius::same((rect.height() / 2.0).ceil() as u8);
     ui.painter().rect_filled(rect, r, track);
@@ -435,6 +521,14 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
             pal.ok,
             regular::FOLDER_OPEN,
         ),
+        JobState::Running if job.is_paused() => (
+            regular::PAUSE_CIRCLE,
+            false,
+            pal.text_2,
+            pal.text_2,
+            pal.text_3,
+            regular::X,
+        ),
         JobState::Running => (
             regular::CIRCLE_NOTCH,
             false,
@@ -479,8 +573,11 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
         JobState::Queued | JobState::Cancelled => 0.0,
     };
     let status = match &job.state {
-        JobState::Running => format!("{}%", job.progress_permille() / 10),
-        JobState::Done => "Done".to_owned(),
+        JobState::Running => running_status(job),
+        JobState::Done => job.output_bytes.map_or_else(
+            || "Done".to_owned(),
+            |bytes| format!("Done · {}", estimate::format_bytes(bytes)),
+        ),
         JobState::Queued => "Queued".to_owned(),
         JobState::Failed(reason) => reason.clone(),
         JobState::Cancelled => "Cancelled".to_owned(),
@@ -498,7 +595,7 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
 
     let inner = rect.shrink(11.0);
     let icon_c = pos2(inner.left() + 14.0, rect.center().y);
-    if matches!(job.state, JobState::Running) {
+    if matches!(job.state, JobState::Running) && !job.is_paused() {
         let time = ui.input(|i| i.time) as f32;
         let galley = painter.layout_no_wrap(icon.to_owned(), theme::icon(17.0), icon_color);
         let pos = icon_c - galley.size() / 2.0;
@@ -527,16 +624,35 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
     let flac = settings.map_or(config.flac_options, |s| s.flac_options);
     let lossy = settings.map_or(config.lossy_options, |s| s.lossy_options);
     let rate = settings.map_or(config.convert_sample_rate, |s| s.target_rate);
+    let channels = settings.map_or(config.convert_channels, |s| s.channels);
+    let split_cue = settings.map_or(config.convert_split_cue, |s| s.split_cue);
+    let target = format_tag(format, flac, lossy);
     let mut meta = match job.kind {
-        JobKind::Convert => format!(
-            "{} → {}",
-            extension_upper(&job.source),
-            format_tag(format, flac, lossy)
-        ),
-        JobKind::CueSplit => format!("CUE split → {}", format_tag(format, flac, lossy)),
+        JobKind::Convert => format!("{} → {target}", source_label(job)),
+        JobKind::CueSplit if !split_cue => format!("CUE, one file → {target}"),
+        JobKind::CueSplit => {
+            let total = job.cue_total.load(Ordering::Relaxed);
+            let current = job.cue_track.load(Ordering::Relaxed);
+            let known = job.source_info.as_ref().and_then(|i| i.cue_tracks);
+            match (
+                matches!(job.state, JobState::Running),
+                total.max(known.unwrap_or(0)),
+            ) {
+                (true, total) if total > 0 && current > 0 => {
+                    format!("CUE split · track {current} of {total} → {target}")
+                }
+                (_, total) if total > 0 => format!("CUE split · {total} tracks → {target}"),
+                _ => format!("CUE split → {target}"),
+            }
+        }
     };
     if let Some(hz) = rate {
-        meta.push_str(&format!(" · {} kHz", khz_text(hz)));
+        meta.push_str(&format!(" · {} kHz", khz(hz)));
+    }
+    match channels {
+        ChannelMode::Source => {}
+        ChannelMode::Mono => meta.push_str(" · mono"),
+        ChannelMode::Stereo => meta.push_str(" · stereo"),
     }
     let cy = rect.center().y;
     paint_text(
@@ -620,12 +736,28 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
     });
 }
 
-fn khz_text(hz: u32) -> String {
-    let khz = hz as f32 / 1000.0;
-    if khz.fract() == 0.0 {
-        format!("{}", khz as u32)
-    } else {
-        format!("{khz}")
+/// The source's `FLAC 24/96` label, or its upper-cased extension until the
+/// probe has reported (or when it failed).
+fn source_label(job: &ConvertJob) -> String {
+    job.source_info
+        .as_ref()
+        .map_or_else(|| extension_upper(&job.source), |info| info.label())
+}
+
+/// `62% · 00:41 left`, `18% · 3/14` for a CUE rip, `Paused · 62%` while held.
+fn running_status(job: &ConvertJob) -> String {
+    let percent = job.progress_permille() / 10;
+    if job.is_paused() {
+        return format!("Paused · {percent}%");
+    }
+    let total = job.cue_total.load(Ordering::Relaxed);
+    if job.kind == JobKind::CueSplit && total > 0 {
+        let current = job.cue_track.load(Ordering::Relaxed).max(1);
+        return format!("{percent}% · {current}/{total}");
+    }
+    match job.eta() {
+        Some(eta) => format!("{percent}% · {} left", estimate::format_clock(eta)),
+        None => format!("{percent}%"),
     }
 }
 
@@ -664,6 +796,26 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             );
             format_section(ui, &pal, config.convert_format, out);
             settings_grid(ui, &pal, config, out);
+            pattern_section(ui, &pal, &config.convert_name_pattern, out);
+            let cue = cue_summary(&app.session.convert.jobs);
+            switch_row(
+                ui,
+                &pal,
+                "Split by CUE sheet",
+                &cue,
+                config.convert_split_cue,
+                Intent::SplitCue,
+                out,
+            );
+            switch_row(
+                ui,
+                &pal,
+                "Copy tags & cover",
+                "Tags, ReplayGain and the front cover are carried over",
+                config.convert_copy_tags,
+                Intent::CopyTags,
+                out,
+            );
             folder_section(ui, &pal, config, out);
         });
 
@@ -674,16 +826,40 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
     let summary = if counts.queued == 0 {
         "Nothing queued".to_owned()
     } else {
-        format!(
-            "{} {} → {}",
+        let files = format!(
+            "{} {}",
             counts.queued,
-            if counts.queued == 1 { "file" } else { "files" },
-            format_tag(
-                config.convert_format,
-                config.flac_options,
-                config.lossy_options
-            )
-        )
+            if counts.queued == 1 { "file" } else { "files" }
+        );
+        let target = Target {
+            format: config.convert_format,
+            target_rate: config.convert_sample_rate,
+            channels: config.convert_channels,
+            flac: config.flac_options,
+            lossy: config.lossy_options,
+        };
+        let queued = app
+            .session
+            .convert
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Queued)
+            .filter_map(|j| j.source_info.as_ref());
+        match estimate::queue_estimate(queued, target) {
+            Some(est) => format!(
+                "{files} · ~{} → ~{}",
+                estimate::format_bytes(est.source_bytes),
+                estimate::format_bytes(est.output_bytes)
+            ),
+            None => format!(
+                "{files} → {}",
+                format_tag(
+                    config.convert_format,
+                    config.flac_options,
+                    config.lossy_options
+                )
+            ),
+        }
     };
     let mut footer_ui = ui.new_child(
         UiBuilder::new()
@@ -831,6 +1007,25 @@ fn settings_grid(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Inte
             }) {
                 out.push(Intent::FlacDepth(FLAC_BIT_DEPTH_OPTIONS[i]));
             }
+
+            let ui = &mut cols[1];
+            ui.spacing_mut().item_spacing.y = 6.0;
+            field_label(ui, pal, "Channels", 1.0);
+            let selected = ChannelMode::ALL
+                .iter()
+                .position(|c| *c == config.convert_channels);
+            let dd = Dropdown {
+                salt: "convert-channels",
+                value: channels_label(config.convert_channels),
+                count: ChannelMode::ALL.len(),
+                selected,
+                enabled: true,
+            };
+            if let Some(i) = dropdown(ui, pal, &dd, |i| {
+                channels_label(ChannelMode::ALL[i]).to_owned()
+            }) {
+                out.push(Intent::Channels(ChannelMode::ALL[i]));
+            }
         });
     });
 }
@@ -939,6 +1134,127 @@ fn quality_cell(
             dropdown(ui, pal, &dd, |_| String::new());
         }
     }
+}
+
+fn channels_label(mode: ChannelMode) -> &'static str {
+    match mode {
+        ChannelMode::Source => "Keep",
+        ChannelMode::Mono => "Mono",
+        ChannelMode::Stereo => "Stereo",
+    }
+}
+
+/// The file name pattern field (committed on Enter / focus loss) with a
+/// token reminder.
+fn pattern_section(ui: &mut Ui, pal: &Palette, pattern: &str, out: &mut Vec<Intent>) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    field_label(ui, pal, "File name pattern", 1.0);
+    let id = Id::new("convert-pattern");
+    let focused = ui.memory(|m| m.has_focus(id));
+    // While editing, the draft lives in egui's temp storage; otherwise the
+    // field mirrors the saved setting.
+    let mut draft = if focused {
+        ui.data(|d| d.get_temp::<String>(id))
+            .unwrap_or_else(|| pattern.to_owned())
+    } else {
+        pattern.to_owned()
+    };
+    let resp = ui.add(
+        TextEdit::singleline(&mut draft)
+            .id(id)
+            .hint_text(RichText::new(naming::DEFAULT_PATTERN).color(pal.text_4))
+            .desired_width(ui.available_width())
+            .margin(vec2(10.0, 7.0))
+            .font(theme::mono(11.5))
+            .background_color(pal.bg),
+    );
+    ui.painter().rect_stroke(
+        resp.rect,
+        CornerRadius::same(theme::radius::SM),
+        Stroke::new(
+            1.0,
+            if resp.has_focus() {
+                pal.text
+            } else {
+                pal.input_bd
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    if resp.has_focus() || resp.changed() {
+        ui.data_mut(|d| d.insert_temp(id, draft.clone()));
+    }
+    if resp.lost_focus() && draft != pattern {
+        out.push(Intent::Pattern(draft));
+    }
+    ui.label(
+        RichText::new("{artist} {album_artist} {album} {title} {track:02} {disc} {year} {genre} {filename} — / makes folders")
+            .font(theme::regular(11.0))
+            .color(pal.text_3),
+    );
+}
+
+/// "Live at Harbour Hall.cue · 14 tracks found" for the first CUE sheet in
+/// the queue, or a hint when there is none.
+fn cue_summary(jobs: &[ConvertJob]) -> String {
+    let Some(job) = jobs
+        .iter()
+        .find(|j| j.kind == JobKind::CueSplit && j.state.is_active())
+    else {
+        return "Applies to .cue sheets added to the queue".to_owned();
+    };
+    let name = job
+        .source
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    match job.source_info.as_ref().and_then(|i| i.cue_tracks) {
+        Some(1) => format!("{name} · 1 track found"),
+        Some(n) => format!("{name} · {n} tracks found"),
+        None => name,
+    }
+}
+
+/// A title + description on the left and an on/off switch on the right.
+fn switch_row(
+    ui: &mut Ui,
+    pal: &Palette,
+    title: &str,
+    desc: &str,
+    value: bool,
+    intent: impl FnOnce(bool) -> Intent,
+    out: &mut Vec<Intent>,
+) {
+    let mut on = value;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let switch_w = 34.0;
+        ui.allocate_ui_with_layout(
+            vec2((ui.available_width() - switch_w - 10.0).max(40.0), 36.0),
+            Layout::top_down(Align::Min),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.add(
+                    Label::new(
+                        RichText::new(title)
+                            .font(theme::semibold(13.0))
+                            .color(pal.text),
+                    )
+                    .truncate(),
+                );
+                ui.add(
+                    Label::new(
+                        RichText::new(desc)
+                            .font(theme::regular(12.0))
+                            .color(pal.text_2),
+                    )
+                    .truncate(),
+                );
+            },
+        );
+        if toggle(ui, &mut on).changed() {
+            out.push(intent(on));
+        }
+    });
 }
 
 fn folder_section(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Intent>) {
@@ -1122,6 +1438,25 @@ fn apply(app: &mut App, intent: Intent) {
         }
         Intent::Format(format) => set_config(app, |c| c.convert_format = format),
         Intent::Rate(rate) => set_config(app, |c| c.convert_sample_rate = rate),
+        Intent::Channels(mode) => set_config(app, |c| c.convert_channels = mode),
+        Intent::Pattern(pattern) => {
+            // An emptied field goes back to the default instead of naming
+            // every file after its source.
+            let pattern = pattern.trim();
+            let pattern = if pattern.is_empty() {
+                naming::DEFAULT_PATTERN
+            } else {
+                pattern
+            };
+            set_config(app, |c| c.convert_name_pattern = pattern.to_owned());
+        }
+        Intent::SplitCue(on) => set_config(app, |c| c.convert_split_cue = on),
+        Intent::CopyTags(on) => set_config(app, |c| c.convert_copy_tags = on),
+        Intent::Pause => app.session.convert.pause(),
+        Intent::Resume => {
+            let effect = app.session.convert.resume();
+            app.run(effect);
+        }
         Intent::FlacCompression(level) => {
             set_config(app, |c| c.flac_options.compression_level = level)
         }
@@ -1154,7 +1489,10 @@ fn set_config(app: &mut App, change: impl FnOnce(&mut Config)) {
 fn drain_picks(app: &mut App) {
     while let Ok(picked) = app.views.converter.rx.try_recv() {
         match picked {
-            Picked::Files(files) => app.session.convert.enqueue(files),
+            Picked::Files(files) => {
+                let probes = app.session.convert.enqueue(files);
+                app.run(probes);
+            }
             Picked::OutDir(dir) => set_config(app, |c| c.convert_out_dir = Some(dir)),
         }
     }

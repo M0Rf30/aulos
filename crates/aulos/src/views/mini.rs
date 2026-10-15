@@ -24,6 +24,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let veil = Color32::from_rgba_unmultiplied(8, 16, 20, 189);
     paint_backdrop(ui, app, rect, veil, veil);
 
+    // Drag the undecorated window from anywhere that is not a control.
+    let drag = ui.interact(
+        rect,
+        egui::Id::new("mini_drag"),
+        egui::Sense::click_and_drag(),
+    );
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+    }
+
     let Some(track) = app.session.playback.current_track.clone() else {
         let mid = Rect::from_center_size(rect.center(), vec2(rect.width(), 24.0));
         paint_text(
@@ -101,13 +111,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let text_x = cover.right() + 12.0;
     let text_w = (right - 28.0 - 12.0 - text_x).max(40.0);
     let title = Rect::from_min_size(pos2(text_x, top + 6.0), vec2(text_w, 20.0));
-    paint_text(
-        ui.painter(),
+    crate::widgets::marquee_text(
+        ui,
         title,
-        Align::Min,
+        crate::widgets::marquee_id("mini", &track.title),
         &track.title,
         theme::semibold(14.0),
         Color32::WHITE,
+        hex(0x0A1418).alpha(0.9),
+        true,
     );
     let artist = Rect::from_min_size(pos2(text_x, top + 28.0), vec2(text_w, 18.0));
     paint_text(
@@ -121,10 +133,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if let Some(q) = App::quality_of(&track) {
         let dark = t.pal.dark;
         let font = theme::mono_semibold(10.0);
-        let label = if track.sample_rate > 0 {
-            format!("{} {}", q.label(), format_rate(track.sample_rate))
-        } else {
-            q.label().to_owned()
+        let label = match track.depth_rate_label() {
+            Some(rate) => format!("{} {rate}", q.label()),
+            None => q.label().to_owned(),
         };
         let w = text_width(ui, &label, font.clone()) + 0.4 * label.chars().count() as f32 + 10.0;
         let badge = Rect::from_min_size(pos2(text_x, top + 52.0), vec2(w.min(text_w), 16.0));
@@ -200,10 +211,4 @@ fn expand_button(app: &mut App, ui: &mut Ui, rect: Rect) {
         let ctx = ui.ctx().clone();
         app.set_mini(&ctx, false);
     }
-}
-
-/// `96` / `44.1` style sample rate label (`24/96` needs a bit depth the
-/// library does not carry).
-fn format_rate(hz: u32) -> String {
-    format!("{} kHz", hz as f32 / 1000.0)
 }

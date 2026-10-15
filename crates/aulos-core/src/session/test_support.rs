@@ -70,6 +70,7 @@ fn session_with(config_path: Option<PathBuf>, config: Config) -> Session {
             mpd_connection_status: Vec::new(),
             subsonic_edit_states: Vec::new(),
             subsonic_connection_status: Vec::new(),
+            provider_errors: HashMap::new(),
         },
         library: LibraryState::default(),
         playback: PlaybackState {
@@ -86,6 +87,7 @@ fn session_with(config_path: Option<PathBuf>, config: Config) -> Session {
             extras: PlaybackExtrasState::default(),
             window_focused: false,
             seeking: false,
+            autoplay_pending: false,
             #[cfg(feature = "visualizer")]
             pcm_buffer: Arc::new(std::sync::Mutex::new(crate::player::pcm::PcmBuffer::new(
                 8192,
@@ -148,5 +150,9 @@ pub(super) fn track(id: i64) -> Track {
         rating: None,
         rg_track_gain: None,
         rg_album_gain: None,
+        bit_depth: 0,
+        release_type: String::new(),
+        added_at: 0,
+        favorited_at: 0,
     }
 }

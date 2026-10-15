@@ -2,11 +2,12 @@
 //! detail, playlists, folders…) and its 32px column header.
 
 use super::badge::quality_badge;
-use super::text::{paint_icon, paint_text, paint_text_spaced};
+use super::text::{paint_icon, paint_text, paint_text_spaced, text_width};
 use crate::app::App;
-use crate::theme::{self, Theme};
+use crate::theme::{self, ColorExt, Theme};
 use aulos_core::format::format_duration;
 use aulos_core::library::Track;
+use aulos_core::library::state::SortField;
 use egui::{Align, CornerRadius, Rect, Response, Sense, Ui, pos2, vec2};
 use egui_phosphor::{fill, regular};
 
@@ -16,7 +17,7 @@ const NUM_W: f32 = 28.0;
 const QUALITY_W: f32 = 54.0;
 const HEART_W: f32 = 20.0;
 const RATING_W: f32 = 72.0;
-const TIME_W: f32 = 44.0;
+const TIME_W: f32 = 56.0;
 const GAP: f32 = 12.0;
 const PAD: f32 = 10.0;
 
@@ -115,43 +116,144 @@ fn layout(row: Rect, cols: Columns) -> Layout {
     }
 }
 
-/// The column header. `sorted` marks the title column as the sort key.
+/// The static column header (TITLE shown as the active column).
 pub fn track_header(ui: &mut Ui, cols: Columns, number_label: &str) {
+    header(ui, cols, number_label, None);
+}
+
+/// The column header with clickable TITLE / ARTIST / ALBUM / duration cells;
+/// `sorted` is the active sort column (marked with a caret). Returns the
+/// column clicked this frame.
+pub fn track_header_sortable(
+    ui: &mut Ui,
+    cols: Columns,
+    number_label: &str,
+    sorted: SortField,
+) -> Option<SortField> {
+    header(ui, cols, number_label, Some(sorted))
+}
+
+fn header(
+    ui: &mut Ui,
+    cols: Columns,
+    number_label: &str,
+    sorted: Option<SortField>,
+) -> Option<SortField> {
     let t = Theme::get(ui.ctx());
     let (rect, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
     let l = layout(rect, cols);
     let font = theme::semibold(11.0);
-    let label = |r: Rect, align: Align, text: &str, color: egui::Color32| {
+    let mut clicked = None;
+    let sortable = sorted.is_some();
+    let mut cell = |ui: &mut Ui, r: Rect, align: Align, text: &str, field: SortField| {
+        let active = sorted.map_or(field == SortField::Title, |s| s == field);
+        let hovered = if sortable {
+            let resp = ui
+                .interact(r, ui.id().with(("sort", field as u8)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                clicked = Some(field);
+            }
+            resp.hovered()
+        } else {
+            false
+        };
+        let color = if active || hovered {
+            t.pal.text
+        } else {
+            t.pal.text_3
+        };
         paint_text_spaced(ui.painter(), r, align, text, font.clone(), color, 0.66);
+        if sortable && active {
+            let w = text_width(ui, text, font.clone()) + 0.66 * text.chars().count() as f32;
+            let x = match align {
+                Align::Max => r.right() - w - 9.0,
+                _ => r.left() + w + 9.0,
+            };
+            paint_icon(
+                ui.painter(),
+                pos2(x, r.center().y),
+                regular::CARET_UP,
+                10.0,
+                t.pal.text,
+                false,
+            );
+        }
     };
-    label(l.num, Align::Max, number_label, t.pal.text_3);
-    label(l.title, Align::Min, "TITLE", t.pal.text);
+    paint_text_spaced(
+        ui.painter(),
+        l.num,
+        Align::Max,
+        number_label,
+        font.clone(),
+        t.pal.text_3,
+        0.66,
+    );
+    cell(ui, l.title, Align::Min, "TITLE", SortField::Title);
     if let Some(r) = l.artist {
-        label(r, Align::Min, "ARTIST", t.pal.text_3);
+        cell(ui, r, Align::Min, "ARTIST", SortField::Artist);
     }
     if let Some(r) = l.album {
-        label(r, Align::Min, "ALBUM", t.pal.text_3);
+        cell(ui, r, Align::Min, "ALBUM", SortField::Album);
     }
-    if let Some(r) = l.quality {
-        label(r, Align::Min, "QUALITY", t.pal.text_3);
+    for (r, text) in [(l.quality, "QUALITY"), (l.rating, "RATING")] {
+        if let Some(r) = r {
+            paint_text_spaced(
+                ui.painter(),
+                r,
+                Align::Min,
+                text,
+                font.clone(),
+                t.pal.text_3,
+                0.66,
+            );
+        }
     }
-    if let Some(r) = l.rating {
-        label(r, Align::Min, "RATING", t.pal.text_3);
-    }
+    // Duration: the clock glyph is the header; click sorts by length.
+    let clock_active = sorted == Some(SortField::Duration);
+    let clock_hit = Rect::from_min_max(
+        pos2(l.time.left(), rect.top()),
+        pos2(l.time.right(), rect.bottom()),
+    );
+    let clock_hover = sortable && {
+        let resp = ui
+            .interact(clock_hit, ui.id().with("sort-time"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.clicked() {
+            clicked = Some(SortField::Duration);
+        }
+        resp.hovered()
+    };
+    let clock_x = l.time.right() - 6.0;
     paint_icon(
         ui.painter(),
-        pos2(l.time.right() - 6.0, l.time.center().y),
+        pos2(clock_x, l.time.center().y),
         regular::CLOCK,
         13.0,
-        t.pal.text_3,
+        if clock_active || clock_hover {
+            t.pal.text
+        } else {
+            t.pal.text_3
+        },
         false,
     );
+    if clock_active {
+        paint_icon(
+            ui.painter(),
+            pos2(clock_x - 14.0, l.time.center().y),
+            regular::CARET_UP,
+            10.0,
+            t.pal.text,
+            false,
+        );
+    }
     ui.painter().hline(
         rect.x_range(),
         rect.bottom() - 0.5,
         egui::Stroke::new(1.0, t.pal.stroke),
     );
+    clicked
 }
 
 /// What happened to a row this frame.
@@ -161,6 +263,8 @@ pub struct RowOutput {
     pub toggle_favorite: bool,
     /// A star was clicked (0 clears the rating).
     pub set_rating: Option<u8>,
+    /// The hover-only "…" trigger (feed it to `menus::track_menu_click`).
+    pub more: Response,
 }
 
 /// One track row. `number` is the text of the first column (track/position
@@ -329,9 +433,31 @@ pub fn track_row(
         pal.text_2,
     );
 
+    // "…" menu trigger, visible while the row is hovered.
+    let more_rect = Rect::from_center_size(
+        pos2(l.time.right() - 56.0, rect.center().y),
+        vec2(24.0, 24.0),
+    );
+    let more = ui.interact(more_rect, response.id.with("more"), Sense::click());
+    if hovered || more.hovered() || more.has_focus() {
+        if more.hovered() {
+            ui.painter()
+                .rect_filled(more_rect, CornerRadius::same(255), pal.text.alpha(0.1));
+        }
+        paint_icon(
+            ui.painter(),
+            more_rect.center(),
+            regular::DOTS_THREE,
+            16.0,
+            if more.hovered() { pal.text } else { pal.text_3 },
+            false,
+        );
+    }
+
     // The badge's child scope moved the cursor; put it back below the row.
     ui.advance_cursor_after_rect(rect);
     RowOutput {
+        more,
         toggle_favorite: heart.clicked(),
         set_rating,
         response,

@@ -548,8 +548,9 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                     if let Some(stars) = out.set_rating {
                         intents.push(Intent::Rate(real, stars));
                     }
-                    if let Some(action) =
-                        menus::track_menu(&out.response, track, &app.session.playlists.playlists)
+                    let playlists = &app.session.playlists.playlists;
+                    if let Some(action) = menus::track_menu(&out.response, track, playlists)
+                        .or_else(|| menus::track_menu_click(&out.more, track, playlists))
                     {
                         intents.push(Intent::Menu(Box::new(action)));
                     }

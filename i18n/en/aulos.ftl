@@ -283,6 +283,10 @@ smart-playlist-field-bitrate = Bitrate
 smart-playlist-field-sample-rate = Sample Rate
 smart-playlist-field-play-count = Play Count
 smart-playlist-field-days-since-played = Days Since Last Played
+smart-playlist-field-quality = Quality
+smart-playlist-quality-hires = Hi-Res
+smart-playlist-quality-cd = CD
+smart-playlist-quality-lossy = Lossy
 smart-playlist-op-is = is
 smart-playlist-op-is-not = is not
 smart-playlist-op-contains = contains
@@ -515,6 +519,12 @@ home = Home
 home-greeting-morning = Good morning
 home-greeting-afternoon = Good afternoon
 home-greeting-evening = Good evening
+home-greeting-named = { $greeting }, { $name }
+home-resume =
+    You were { $count ->
+        [one] 1 track
+       *[other] { $count } tracks
+    } into { $album }.
 home-subtitle =
     { $count ->
         [one] 1 album in your library
@@ -696,6 +706,48 @@ filter-all = All
 filter-albums = Albums
 filter-compilations = Compilations
 filter-decade = { $decade }s
+filter-eps = EPs
+filter-singles = Singles
+filter-live = Live
+filter-genre = Genre
+filter-favourites = Favourites
+release-kind-album = Album
+release-kind-ep = EP
+release-kind-single = Single
+release-kind-live = Live
+release-kind-compilation = Compilation
+release-count-album =
+    { $count ->
+        [one] { $count } album
+       *[other] { $count } albums
+    }
+release-count-ep =
+    { $count ->
+        [one] { $count } EP
+       *[other] { $count } EPs
+    }
+release-count-single =
+    { $count ->
+        [one] { $count } single
+       *[other] { $count } singles
+    }
+release-count-live =
+    { $count ->
+        [one] { $count } live album
+       *[other] { $count } live albums
+    }
+release-count-compilation =
+    { $count ->
+        [one] { $count } compilation
+       *[other] { $count } compilations
+    }
+sort-recently-added = Recently added
+sort-added = Added
+sort-title = Title
+sort-artist = Artist
+sort-year = Year
+scan-progress-title = Scanning { $root }
+scan-progress-counting = Counting files…
 no-albums-match-filter = No albums match these filters
 no-albums-match-filter-hint = Pick “All” to see every album again
 

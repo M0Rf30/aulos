@@ -7,7 +7,7 @@
 //! saved-station operations over the [`OnlineStore`] (a UI runs them on a
 //! worker thread).
 
-use super::store::{OnlineStore, RadioStation};
+use super::store::{NewStation, OnlineStore, RadioStation};
 use serde::Deserialize;
 
 /// A radio-browser.info directory search result.
@@ -290,17 +290,128 @@ pub fn load_saved() -> Vec<RadioStation> {
         })
 }
 
+/// Codec and bitrate a stream announces in its response headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamFormat {
+    /// Upper-case codec name ("MP3", "AAC", …); empty when unknown.
+    pub codec: String,
+    /// Bitrate in kbit/s (`icy-br`); `0` when unknown.
+    pub bitrate_kbps: u32,
+}
+
+impl StreamFormat {
+    /// Whether neither the codec nor the bitrate is known.
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.codec.is_empty() && self.bitrate_kbps == 0
+    }
+
+    /// Reads the ICY bitrate headers (`icy-br` and friends) and maps the
+    /// `Content-Type` to a codec name.
+    #[must_use]
+    pub fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        Self {
+            codec: codec_from_content_type(content_type).to_owned(),
+            bitrate_kbps: icy_metadata::IcyHeaders::parse_from_headers(headers)
+                .bitrate()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Short stream-format label for a station row: "AAC 128", "FLAC" or "128"
+/// (codec and/or kbit/s); empty when neither is known.
+#[must_use]
+pub fn format_label(codec: &str, bitrate_kbps: u32) -> String {
+    let mut label = codec.to_uppercase();
+    if bitrate_kbps > 0 {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&bitrate_kbps.to_string());
+    }
+    label
+}
+
+/// Codec name for a stream `Content-Type`; empty when it is not a known
+/// audio type.
+fn codec_from_content_type(content_type: &str) -> &'static str {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "audio/mpeg" | "audio/mp3" => "MP3",
+        "audio/aacp" => "AAC+",
+        "audio/aac" | "audio/x-aac" | "audio/mp4" | "audio/x-m4a" => "AAC",
+        "audio/ogg" | "application/ogg" => "OGG",
+        "audio/opus" => "OPUS",
+        "audio/flac" | "audio/x-flac" => "FLAC",
+        _ => "",
+    }
+}
+
+/// How long [`probe_stream_format`] waits for a station's response headers.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Opens `url` just long enough to read the response headers and reports
+/// the stream's announced codec and bitrate (the body is never read). A
+/// `.pls`/`.m3u` playlist is resolved first.
+pub fn probe_stream_format(url: &str) -> Result<StreamFormat, String> {
+    let stream_url = resolve_stream(url)?;
+    let response = super::HTTP_CLIENT
+        .get(&stream_url)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .map_err(|e| format!("Stream probe failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Stream probe returned HTTP {}", response.status()));
+    }
+    Ok(StreamFormat::from_headers(response.headers()))
+}
+
 /// Saves a station (or refreshes it when its stream URL is already saved).
+/// A station without a known codec/bitrate (added by URL) is probed first
+/// (best effort: an unreachable stream is saved without a format).
 /// Returns the row id and whether the station already existed.
-pub fn save_station(
-    name: &str,
-    stream_url: &str,
-    homepage: &str,
-    favicon_url: &str,
-    tags: &str,
-) -> Result<(i64, bool), String> {
-    OnlineStore::open_default()
-        .and_then(|store| store.add_radio_station(name, stream_url, homepage, favicon_url, tags))
+pub fn save_station(mut station: NewStation) -> Result<(i64, bool), String> {
+    if station.codec.is_empty() && station.bitrate_kbps == 0 {
+        match probe_stream_format(&station.stream_url) {
+            Ok(format) => {
+                station.codec = format.codec;
+                station.bitrate_kbps = format.bitrate_kbps;
+            }
+            Err(e) => tracing::debug!("radio format probe skipped: {e}"),
+        }
+    }
+    OnlineStore::open_default().and_then(|store| store.add_radio_station(&station))
+}
+
+/// Learns the format of the saved station whose stream URL is `key` from a
+/// probe, when the store does not know it yet. Returns the reloaded list
+/// when the store changed, `None` when there was nothing to learn.
+pub fn learn_station_format(key: &str) -> Result<Option<Vec<RadioStation>>, String> {
+    let store = OnlineStore::open_default()?;
+    let known = store
+        .list_radio_stations()?
+        .into_iter()
+        .any(|s| s.stream_url == key && !(s.codec.is_empty() && s.bitrate_kbps == 0));
+    if known {
+        return Ok(None);
+    }
+    let format = probe_stream_format(key)?;
+    if format.is_unknown()
+        || !store.set_radio_station_format(key, &format.codec, format.bitrate_kbps)?
+    {
+        return Ok(None);
+    }
+    store.list_radio_stations().map(Some)
 }
 
 /// Removes a saved station and returns the remaining list.
@@ -704,5 +815,39 @@ mod tests {
         );
         // Never request a zero-sized list.
         assert!(top_click_url(0).contains("/topclick/1?"));
+    }
+
+    #[test]
+    fn stream_format_reads_icy_bitrate_and_content_type() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "audio/mpeg".parse().unwrap());
+        headers.insert("icy-br", "128".parse().unwrap());
+        assert_eq!(
+            StreamFormat::from_headers(&headers),
+            StreamFormat {
+                codec: "MP3".into(),
+                bitrate_kbps: 128
+            }
+        );
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "audio/aacp; charset=x".parse().unwrap());
+        let format = StreamFormat::from_headers(&headers);
+        assert_eq!(format.codec, "AAC+");
+        assert_eq!(format.bitrate_kbps, 0);
+        assert!(!format.is_unknown());
+    }
+
+    #[test]
+    fn stream_format_is_unknown_without_audio_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "text/html".parse().unwrap());
+        assert!(StreamFormat::from_headers(&headers).is_unknown());
+        assert_eq!(format_label("aac", 128), "AAC 128");
+        assert_eq!(format_label("FLAC", 0), "FLAC");
+        assert_eq!(format_label("", 96), "96");
+        assert_eq!(format_label("", 0), "");
+        assert_eq!(codec_from_content_type("audio/ogg"), "OGG");
+        assert_eq!(codec_from_content_type("Audio/FLAC"), "FLAC");
     }
 }

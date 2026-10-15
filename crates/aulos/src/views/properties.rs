@@ -30,6 +30,7 @@ enum Intent {
 
 pub fn show(app: &mut App, ctx: &Context) {
     if app.sheet != Some(Sheet::Properties) {
+        theme::motion::slide_in(ctx, Id::new("aulos_properties_sheet_slide"), false);
         return;
     }
     for intent in draw(app, ctx) {
@@ -49,7 +50,12 @@ fn draw(app: &App, ctx: &Context) -> Vec<Intent> {
     let top = content.top() + theme::size::TOOLBAR + 8.0;
     let bottom = content.bottom() - theme::size::NOW_BAR - 8.0;
     let height = (bottom - top).max(0.0);
-    let origin = pos2(content.right() - 8.0 - width, top);
+    // Slides in from the right edge.
+    let slide = theme::motion::slide_in(ctx, Id::new("aulos_properties_sheet_slide"), true);
+    let origin = pos2(
+        content.right() - 8.0 - width + (1.0 - slide) * (width + 16.0),
+        top,
+    );
     let subject = app.session.properties.subject();
 
     Area::new(Id::new("aulos_properties_sheet"))
@@ -66,7 +72,7 @@ fn draw(app: &App, ctx: &Context) -> Vec<Intent> {
                 .show(ui, |ui| {
                     ui.set_width(width - 2.0);
                     ui.set_height(height - 2.0);
-                    header(ui, pal, &mut out);
+                    header(ui, pal, subject, &mut out);
                     let body_h = (height - 2.0 - HEADER_H).max(0.0);
                     ScrollArea::vertical()
                         .max_height(body_h)
@@ -81,14 +87,14 @@ fn draw(app: &App, ctx: &Context) -> Vec<Intent> {
                                     None,
                                 );
                             }
-                            Some(subject) => body(ui, app, subject, &mut out),
+                            Some(subject) => body(ui, app, subject),
                         });
                 });
         });
     out
 }
 
-fn header(ui: &mut Ui, pal: Palette, out: &mut Vec<Intent>) {
+fn header(ui: &mut Ui, pal: Palette, subject: Option<&Subject>, out: &mut Vec<Intent>) {
     let r = ui.horizontal(|ui| {
         ui.set_height(HEADER_H);
         ui.add_space(16.0);
@@ -97,6 +103,17 @@ fn header(ui: &mut Ui, pal: Palette, out: &mut Vec<Intent>) {
                 .font(theme::semibold(15.0))
                 .color(pal.text),
         );
+        // Track / Album tabs sit beside the title.
+        if let Some(subject) = subject {
+            ui.add_space(10.0);
+            let mut chosen = usize::from(matches!(subject, Subject::Album(_)));
+            if segmented(ui, &mut chosen, &["Track", "Album"], 28.0)
+                && chosen == 1
+                && let Subject::Track(track) = subject
+            {
+                out.push(Intent::AlbumOf(Box::new(track.clone())));
+            }
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(10.0);
             if icon_button(ui, regular::X, 28.0).clicked() {
@@ -112,22 +129,9 @@ fn header(ui: &mut Ui, pal: Palette, out: &mut Vec<Intent>) {
     );
 }
 
-fn body(ui: &mut Ui, app: &App, subject: &Subject, out: &mut Vec<Intent>) {
+fn body(ui: &mut Ui, app: &App, subject: &Subject) {
     let pal = app.pal;
     ui.add_space(12.0);
-
-    let mut chosen = usize::from(matches!(subject, Subject::Album(_)));
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.add_space(16.0);
-        changed = segmented(ui, &mut chosen, &["Track", "Album"], 28.0);
-    });
-    if changed
-        && chosen == 1
-        && let Subject::Track(track) = subject
-    {
-        out.push(Intent::AlbumOf(Box::new(track.clone())));
-    }
 
     ui.add_space(14.0);
     let (title, subtitle, key, quality) = match subject {

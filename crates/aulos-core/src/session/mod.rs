@@ -27,6 +27,7 @@ mod library;
 mod playback;
 mod playlists;
 mod podcasts;
+mod preferences;
 mod properties;
 mod providers;
 mod radio;
@@ -53,7 +54,8 @@ pub use playlists::{
 pub use podcasts::{EpisodePlayback, PodcastEvent, PodcastNotice, PodcastUpdate, PodcastsState};
 pub use properties::PropertiesEvent;
 pub use providers::{
-    MpdConnected, MpdIdleOutcome, ProviderEvent, ProviderInitError, ProviderReinit, ProvidersState,
+    MpdConnected, MpdIdleOutcome, ProviderEvent, ProviderInitError, ProviderReinit, ProviderStatus,
+    ProvidersState,
 };
 pub use radio::{RadioEvent, RadioNotice, RadioState, RadioUpdate};
 pub use transport::{SEEK_STEP, VOLUME_STEP};

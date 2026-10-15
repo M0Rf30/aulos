@@ -17,6 +17,7 @@
 use super::LibraryDb;
 use super::Track;
 use rusqlite::{ToSql, params};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Provider whose tracks live in the library database.
@@ -122,8 +123,8 @@ pub struct AlbumRef {
     /// Number of recorded plays of the album's tracks (0 when the query
     /// doesn't involve history).
     pub plays: u32,
-    /// Query-specific Unix timestamp: last play, or file modification time
-    /// for "recently added"; 0 when not applicable.
+    /// Query-specific Unix timestamp: last play, or the date added for
+    /// "recently added"; 0 when not applicable.
     pub timestamp: i64,
 }
 
@@ -142,6 +143,38 @@ pub struct DecadeCount {
     pub albums: u32,
 }
 
+/// Where the last listening session left off: the album of the most
+/// recently played track and how far into it that track is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoint {
+    pub artist: String,
+    pub album: String,
+    /// Position (1-based) of the last played track in the album, i.e.
+    /// "you were N tracks into it".
+    pub tracks_in: usize,
+    /// Tracks in the album.
+    pub total: usize,
+}
+
+/// Tracks the Home "Favourites" shelf holds (two columns of six).
+pub const FAVOURITES_SHELF_LEN: u32 = 12;
+
+/// Unix seconds of the start of the local calendar month containing `now`.
+#[must_use]
+pub fn month_start(now: i64) -> i64 {
+    use chrono::{Datelike, TimeZone};
+    let local = chrono::Local;
+    local
+        .timestamp_opt(now, 0)
+        .single()
+        .and_then(|dt| {
+            local
+                .with_ymd_and_hms(dt.year(), dt.month(), 1, 0, 0, 0)
+                .earliest()
+        })
+        .map_or(now - MONTH_SECS, |start| start.timestamp())
+}
+
 /// Everything the Home page shows, loaded in one go.
 #[derive(Debug, Clone, Default)]
 pub struct HomeData {
@@ -152,6 +185,17 @@ pub struct HomeData {
     pub rediscover: Vec<AlbumRef>,
     pub random: Vec<AlbumRef>,
     pub decades: Vec<DecadeCount>,
+    /// Newest favourite tracks: those favourited this month, or — when
+    /// there are none — the latest ones overall (see
+    /// [`HomeData::favourites_this_month`]).
+    pub favourites: Vec<Track>,
+    /// Whether [`HomeData::favourites`] are all from the current month
+    /// ("Favourites of October") rather than the latest overall.
+    pub favourites_this_month: bool,
+    /// Number of favourite tracks in the library.
+    pub favourites_total: u32,
+    /// Where the last listening session stopped, if it stopped mid-album.
+    pub resume: Option<ResumePoint>,
     pub total_albums: u32,
     pub total_plays: u64,
     /// Whether plays are recorded for this library at all (false for
@@ -196,6 +240,24 @@ impl LibraryDb {
             )
             .map(|n| n.max(0) as u32)
             .map_err(|e| format!("Play count error: {e}"))
+    }
+
+    /// Recorded plays of each of `ids` that was played at least once.
+    pub fn play_counts(&self, ids: &[i64]) -> Result<HashMap<i64, u32>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM play_history WHERE track_id = ?1")
+            .map_err(|e| format!("Play counts error: {e}"))?;
+        let mut counts = HashMap::new();
+        for &id in ids {
+            let n = stmt
+                .query_row(params![id], |row| row.get::<_, i64>(0))
+                .map_err(|e| format!("Play counts error: {e}"))?;
+            if n > 0 {
+                counts.insert(id, n as u32);
+            }
+        }
+        Ok(counts)
     }
 
     /// Total number of recorded plays.
@@ -244,7 +306,8 @@ impl LibraryDb {
                 "SELECT t.id, t.path, t.title, t.artist, t.album_artist, t.album, t.genre,
                         t.track_number, t.disc_number, t.year, t.duration_ms, t.bitrate,
                         t.sample_rate, t.provider, t.provider_track_id, t.is_favorite,
-                        t.rating, t.rg_track_gain, t.rg_album_gain
+                        t.rating, t.rg_track_gain, t.rg_album_gain, t.bit_depth,
+                        t.release_type, t.added_at, t.favorited_at
                  FROM tracks t
                  JOIN (SELECT track_id, MAX(played_at) AS lp, MAX(id) AS mid
                        FROM play_history GROUP BY track_id) h ON h.track_id = t.id
@@ -331,19 +394,18 @@ impl LibraryDb {
             .map_err(|e| format!("Top artists row error: {e}"))
     }
 
-    /// Albums by newest file modification time (the library keeps no
-    /// separate "date added", so the scan-time file mtime stands in).
+    /// Albums by the date their newest track entered the library.
     pub fn recently_added_albums(
         &self,
         provider: &str,
         limit: u32,
     ) -> Result<Vec<AlbumRef>, String> {
         let sql = format!(
-            "SELECT {ALBUM_COLUMNS}, 0, MAX(t.mtime)
+            "SELECT {ALBUM_COLUMNS}, 0, MAX(t.added_at)
              FROM tracks t
              WHERE t.provider = ?1 AND t.album != ''
              GROUP BY t.album_artist, t.album
-             ORDER BY MAX(t.mtime) DESC, t.album_artist, t.album
+             ORDER BY MAX(t.added_at) DESC, t.album_artist, t.album
              LIMIT ?2"
         );
         self.query_albums(&sql, &[&provider, &limit])
@@ -445,13 +507,97 @@ impl LibraryDb {
     /// Shelves are deduplicated against each other where it matters: the
     /// random picks never repeat Rediscover entries, and Rediscover is empty
     /// until there is any history to rediscover *from*.
+    /// Favourite tracks, newest favourite first (legacy favourites without a
+    /// timestamp last, by title); only those favourited at or after `since`
+    /// unless `since` is `0`.
+    pub fn favourite_tracks(
+        &self,
+        provider: &str,
+        since: i64,
+        limit: u32,
+    ) -> Result<Vec<Track>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain,
+                        rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                 FROM tracks
+                 WHERE provider = ?1 AND is_favorite = 1 AND favorited_at >= ?2
+                 ORDER BY favorited_at DESC, title COLLATE NOCASE
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("Favourite tracks query error: {e}"))?;
+        let rows = stmt
+            .query_map(params![provider, since, limit], Self::row_to_track)
+            .map_err(|e| format!("Favourite tracks query error: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Number of favourite tracks of `provider`.
+    pub fn favourite_count(&self, provider: &str) -> Result<u32, String> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE provider = ?1 AND is_favorite = 1",
+                params![provider],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n.max(0) as u32)
+            .map_err(|e| format!("Favourite count error: {e}"))
+    }
+
+    /// The last played track's album and how far into it that track is;
+    /// `None` without history, or when the last track ended its album (there
+    /// is nothing to resume).
+    pub fn resume_point(&self, provider: &str) -> Result<Option<ResumePoint>, String> {
+        let last: Option<(i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT t.id, t.album_artist, t.album
+                 FROM play_history h JOIN tracks t ON t.id = h.track_id
+                 WHERE t.provider = ?1 AND t.album != ''
+                 ORDER BY h.played_at DESC, h.id DESC
+                 LIMIT 1",
+                params![provider],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+        let Some((track_id, artist, album)) = last else {
+            return Ok(None);
+        };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id FROM tracks
+                 WHERE provider = ?1 AND album_artist = ?2 AND album = ?3
+                 ORDER BY disc_number, track_number, id",
+            )
+            .map_err(|e| format!("Resume query error: {e}"))?;
+        let ids = stmt
+            .query_map(params![provider, artist, album], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Resume query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        let Some(position) = ids.iter().position(|&id| id == track_id) else {
+            return Ok(None);
+        };
+        let tracks_in = position + 1;
+        Ok((tracks_in < ids.len()).then_some(ResumePoint {
+            artist,
+            album,
+            tracks_in,
+            total: ids.len(),
+        }))
+    }
+
     pub fn home_data(&self, provider: &str, now: i64) -> Result<HomeData, String> {
         let total_plays = self.total_plays()?;
-        let month_start = now - MONTH_SECS;
+        let last_30_days = now - MONTH_SECS;
 
         let recently_played = self.recently_played_albums(provider, SHELF_LEN)?;
-        let most_played_month = self.most_played_albums(provider, month_start, SHELF_LEN)?;
-        let top_artists_month = self.most_played_artists(provider, month_start, SHELF_LEN)?;
+        let most_played_month = self.most_played_albums(provider, last_30_days, SHELF_LEN)?;
+        let top_artists_month = self.most_played_artists(provider, last_30_days, SHELF_LEN)?;
         let recently_added = self.recently_added_albums(provider, SHELF_LEN)?;
         let rediscover = if total_plays > 0 {
             self.rediscover_albums(provider, now, SHELF_LEN)?
@@ -461,7 +607,18 @@ impl LibraryDb {
         let mut random = self.random_albums(provider, SHELF_LEN * 2)?;
         exclude_albums(&mut random, &rediscover, SHELF_LEN as usize);
 
+        let mut favourites =
+            self.favourite_tracks(provider, month_start(now), FAVOURITES_SHELF_LEN)?;
+        let favourites_this_month = !favourites.is_empty();
+        if !favourites_this_month {
+            favourites = self.favourite_tracks(provider, 0, FAVOURITES_SHELF_LEN)?;
+        }
+
         Ok(HomeData {
+            favourites,
+            favourites_this_month,
+            favourites_total: self.favourite_count(provider)?,
+            resume: self.resume_point(provider)?,
             recently_played,
             most_played_month,
             top_artists_month,
@@ -828,12 +985,17 @@ mod tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         }
     }
 
     fn add(db: &LibraryDb, path: &str, artist: &str, album: &str, year: u32, mtime: i64) -> i64 {
-        db.upsert_track(&make_track(path, artist, album, year), mtime)
-            .unwrap();
+        let mut track = make_track(path, artist, album, year);
+        track.added_at = mtime;
+        db.upsert_track(&track, mtime).unwrap();
         db.conn
             .query_row(
                 "SELECT id FROM tracks WHERE path = ?1",
@@ -958,12 +1120,90 @@ mod tests {
     }
 
     #[test]
-    fn recently_added_orders_by_mtime() {
+    fn recently_added_orders_by_date_added() {
         let (db, _) = library();
         let albums = db.recently_added_albums("local", 10).unwrap();
         assert_eq!(names(&albums), ["B", "C", "A"]);
         assert_eq!(albums[0].timestamp, 300);
         assert_eq!(db.recently_added_albums("local", 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn play_counts_lists_only_played_tracks() {
+        let (db, ids) = library();
+        play_at(&db, ids[0], 10);
+        play_at(&db, ids[0], 20);
+        play_at(&db, ids[2], 30);
+        let counts = db.play_counts(&ids).unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[&ids[0]], 2);
+        assert_eq!(counts[&ids[2]], 1);
+        assert!(db.play_counts(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn favourites_shelf_prefers_this_month_and_falls_back_to_the_latest() {
+        let (db, ids) = library();
+        let now = crate::unix_now();
+        db.toggle_favorite(ids[0]).unwrap();
+        db.toggle_favorite(ids[2]).unwrap();
+        // The second favourite is older than this month.
+        db.conn
+            .execute(
+                "UPDATE tracks SET favorited_at = ?1 WHERE id = ?2",
+                params![month_start(now) - 5, ids[2]],
+            )
+            .unwrap();
+        let home = db.home_data("local", now).unwrap();
+        assert!(home.favourites_this_month);
+        assert_eq!(home.favourites_total, 2);
+        assert_eq!(home.favourites.len(), 1);
+        assert_eq!(home.favourites[0].id, ids[0]);
+        assert!(home.favourites[0].favorited_at >= month_start(now));
+
+        // Nothing favourited this month: the latest overall, newest first.
+        db.conn
+            .execute(
+                "UPDATE tracks SET favorited_at = ?1 WHERE id = ?2",
+                params![month_start(now) - 50, ids[0]],
+            )
+            .unwrap();
+        let home = db.home_data("local", now).unwrap();
+        assert!(!home.favourites_this_month);
+        let order: Vec<i64> = home.favourites.iter().map(|t| t.id).collect();
+        assert_eq!(order, [ids[2], ids[0]]);
+
+        // Un-favouriting clears the timestamp.
+        db.toggle_favorite(ids[0]).unwrap();
+        let t = db.favourite_tracks("local", 0, 10).unwrap();
+        assert_eq!(t.len(), 1);
+        let cleared: i64 = db
+            .conn
+            .query_row(
+                "SELECT favorited_at FROM tracks WHERE id = ?1",
+                params![ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleared, 0);
+    }
+
+    #[test]
+    fn resume_point_is_the_last_played_album_unless_it_was_finished() {
+        let (db, ids) = library();
+        assert_eq!(db.resume_point("local").unwrap(), None, "no history");
+        play_at(&db, ids[2], 10); // B, first of two tracks
+        assert_eq!(
+            db.resume_point("local").unwrap(),
+            Some(ResumePoint {
+                artist: "Beta".into(),
+                album: "B".into(),
+                tracks_in: 1,
+                total: 2,
+            })
+        );
+        play_at(&db, ids[3], 20); // B's last track: nothing left to resume
+        assert_eq!(db.resume_point("local").unwrap(), None);
     }
 
     #[test]
@@ -1075,6 +1315,10 @@ mod import_tests {
             rating: None,
             rg_track_gain: None,
             rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 0,
+            favorited_at: 0,
         };
         db.upsert_track(&track, 1).unwrap();
         let id: i64 = db

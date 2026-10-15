@@ -10,6 +10,7 @@
 use super::store::{Episode, OnlineStore, Podcast};
 use feed_rs::model::{Entry, Feed};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Podcast-level metadata extracted from a feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,27 +334,46 @@ fn episode_file_extension(mime: &str, enclosure_url: &str) -> String {
         .unwrap_or_else(|| "mp3".to_string())
 }
 
+/// Why [`download_episode`] did not produce a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadError {
+    /// The caller's cancel flag was raised mid-transfer; the partial file is
+    /// gone.
+    Cancelled,
+    Failed(String),
+}
+
+/// Smallest number of bytes between two progress reports.
+const PROGRESS_STEP_BYTES: u64 = 128 * 1024;
+
 /// Downloads an episode's enclosure to `<data dir>/podcast_downloads` for
 /// offline playback and records the resulting path in the online store. A
-/// partial file is removed on failure. Returns the downloaded file's path.
-pub fn download_episode(episode: &Episode) -> Result<String, String> {
+/// partial file is removed on failure or cancellation. `on_progress` gets
+/// `(bytes received, total bytes if the server announced them)` after every
+/// [`PROGRESS_STEP_BYTES`]; raising `cancel` stops the transfer at the next
+/// chunk. Returns the downloaded file's path.
+pub fn download_episode(
+    episode: &Episode,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<String, DownloadError> {
     let dir = crate::paths::data_dir().join("podcast_downloads");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Create download dir error: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| DownloadError::Failed(format!("Create download dir error: {e}")))?;
     let ext = episode_file_extension(&episode.mime, &episode.enclosure_url);
     let dest = dir.join(format!("{}.{ext}", episode.id));
 
-    let write_result = (|| -> Result<(), String> {
+    let write_result = (|| -> Result<(), DownloadError> {
         let mut response = super::HTTP_CLIENT
             .get(&episode.enclosure_url)
             .send()
-            .map_err(|e| format!("Download request error: {e}"))?
+            .map_err(|e| DownloadError::Failed(format!("Download request error: {e}")))?
             .error_for_status()
-            .map_err(|e| format!("Download response error: {e}"))?;
-        let mut file =
-            std::fs::File::create(&dest).map_err(|e| format!("Create download file error: {e}"))?;
-        std::io::copy(&mut response, &mut file)
-            .map_err(|e| format!("Write download error: {e}"))?;
-        Ok(())
+            .map_err(|e| DownloadError::Failed(format!("Download response error: {e}")))?;
+        let total = response.content_length().filter(|&n| n > 0);
+        let mut file = std::fs::File::create(&dest)
+            .map_err(|e| DownloadError::Failed(format!("Create download file error: {e}")))?;
+        copy_with_progress(&mut response, &mut file, total, cancel, &mut on_progress)
     })();
 
     if let Err(e) = write_result {
@@ -362,8 +382,45 @@ pub fn download_episode(episode: &Episode) -> Result<String, String> {
     }
 
     let path = dest.to_string_lossy().into_owned();
-    OnlineStore::open_default()?.set_episode_downloaded_path(episode.id, &path)?;
+    OnlineStore::open_default()
+        .and_then(|store| store.set_episode_downloaded_path(episode.id, &path))
+        .map_err(DownloadError::Failed)?;
     Ok(path)
+}
+
+/// Copies `reader` to `writer` in chunks, reporting progress and honouring
+/// `cancel` between chunks.
+fn copy_with_progress(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    total: Option<u64>,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(u64, Option<u64>),
+) -> Result<(), DownloadError> {
+    let mut buf = [0u8; 32 * 1024];
+    let mut received = 0u64;
+    let mut reported = 0u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(DownloadError::Cancelled);
+        }
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| DownloadError::Failed(format!("Write download error: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| DownloadError::Failed(format!("Write download error: {e}")))?;
+        received += n as u64;
+        if received - reported >= PROGRESS_STEP_BYTES {
+            reported = received;
+            on_progress(received, total);
+        }
+    }
+    on_progress(received, total.or(Some(received)));
+    Ok(())
 }
 
 /// Deletes a downloaded episode file (if still present) and clears its
@@ -467,6 +524,54 @@ pub fn primary_episode(episodes: &[Episode]) -> Option<(&Episode, bool)> {
         .find(|e| e.should_show_resume())
         .map(|e| (e, true))
         .or_else(|| episodes.first().map(|e| (e, false)))
+}
+
+/// How often a show publishes, derived from its episode dates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    Daily,
+    TwiceWeekly,
+    Weekly,
+    Biweekly,
+    Monthly,
+}
+
+/// How many of the newest episodes [`Cadence::from_pub_dates`] looks at.
+pub const CADENCE_SAMPLE: usize = 12;
+
+impl Cadence {
+    /// The cadence of a show whose episodes were published at `pub_dates`
+    /// (epoch seconds, any order, `0` = unknown and ignored): the median gap
+    /// between the newest [`CADENCE_SAMPLE`] episodes, snapped to the
+    /// nearest regular schedule. `None` with fewer than three dated
+    /// episodes or an irregular schedule.
+    #[must_use]
+    pub fn from_pub_dates(pub_dates: &[i64]) -> Option<Self> {
+        const DAY: f64 = 86_400.0;
+        let mut dates: Vec<i64> = pub_dates.iter().copied().filter(|&d| d > 0).collect();
+        dates.sort_unstable_by(|a, b| b.cmp(a));
+        dates.truncate(CADENCE_SAMPLE);
+        if dates.len() < 3 {
+            return None;
+        }
+        let mut gaps: Vec<i64> = dates.windows(2).map(|w| w[0] - w[1]).collect();
+        gaps.sort_unstable();
+        let mid = gaps.len() / 2;
+        let median = if gaps.len() % 2 == 1 {
+            gaps[mid] as f64
+        } else {
+            (gaps[mid - 1] + gaps[mid]) as f64 / 2.0
+        } / DAY;
+        match median {
+            d if d < 0.5 => None,
+            d if d <= 1.5 => Some(Self::Daily),
+            d if (2.0..=4.5).contains(&d) => Some(Self::TwiceWeekly),
+            d if (5.5..=9.0).contains(&d) => Some(Self::Weekly),
+            d if (11.0..=17.0).contains(&d) => Some(Self::Biweekly),
+            d if (26.0..=35.0).contains(&d) => Some(Self::Monthly),
+            _ => None,
+        }
+    }
 }
 
 /// A subscribed show's `last_refreshed` (epoch seconds), formatted as a
@@ -696,5 +801,90 @@ mod tests {
         assert_eq!(results[0].feed_url, "https://feed.example/rss");
         assert_eq!(results[0].image, "https://example.com/600.png");
         assert_eq!(results[0].author, "Alice");
+    }
+
+    fn dates_every(days: f64, n: usize) -> Vec<i64> {
+        (0..n)
+            .map(|i| 1_700_000_000 + (i as f64 * days * 86_400.0) as i64)
+            .collect()
+    }
+
+    #[test]
+    fn cadence_snaps_to_regular_schedules() {
+        assert_eq!(
+            Cadence::from_pub_dates(&dates_every(1.0, 10)),
+            Some(Cadence::Daily)
+        );
+        assert_eq!(
+            Cadence::from_pub_dates(&dates_every(3.5, 10)),
+            Some(Cadence::TwiceWeekly)
+        );
+        assert_eq!(
+            Cadence::from_pub_dates(&dates_every(7.0, 10)),
+            Some(Cadence::Weekly)
+        );
+        assert_eq!(
+            Cadence::from_pub_dates(&dates_every(14.0, 6)),
+            Some(Cadence::Biweekly)
+        );
+        assert_eq!(
+            Cadence::from_pub_dates(&dates_every(30.0, 6)),
+            Some(Cadence::Monthly)
+        );
+    }
+
+    #[test]
+    fn cadence_tolerates_a_missed_week_and_any_order() {
+        // Weekly with one skipped week: the median gap is still seven days.
+        let mut dates = dates_every(7.0, 8);
+        dates.remove(3);
+        dates.reverse();
+        assert_eq!(Cadence::from_pub_dates(&dates), Some(Cadence::Weekly));
+    }
+
+    #[test]
+    fn cadence_needs_enough_dated_regular_episodes() {
+        assert_eq!(Cadence::from_pub_dates(&dates_every(7.0, 2)), None);
+        assert_eq!(Cadence::from_pub_dates(&[0, 0, 0, 0]), None);
+        assert_eq!(Cadence::from_pub_dates(&dates_every(60.0, 6)), None);
+    }
+
+    #[test]
+    fn cadence_only_samples_the_newest_episodes() {
+        // Old monthly archive, recent weekly releases.
+        let mut dates = dates_every(30.0, 20);
+        let newest = dates[19];
+        dates.extend((1..=12).map(|i| newest + i * 7 * 86_400));
+        assert_eq!(Cadence::from_pub_dates(&dates), Some(Cadence::Weekly));
+    }
+
+    #[test]
+    fn copy_reports_progress_and_honours_cancel() {
+        let data = vec![7u8; 300 * 1024];
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        let cancel = AtomicBool::new(false);
+        copy_with_progress(
+            &mut &data[..],
+            &mut out,
+            Some(data.len() as u64),
+            &cancel,
+            &mut |got, total| seen.push((got, total)),
+        )
+        .unwrap();
+        assert_eq!(out.len(), data.len());
+        let last = *seen.last().unwrap();
+        assert_eq!(last, (data.len() as u64, Some(data.len() as u64)));
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+
+        cancel.store(true, Ordering::Relaxed);
+        let result = copy_with_progress(
+            &mut &data[..],
+            &mut Vec::new(),
+            None,
+            &cancel,
+            &mut |_, _| {},
+        );
+        assert_eq!(result, Err(DownloadError::Cancelled));
     }
 }

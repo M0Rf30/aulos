@@ -71,6 +71,35 @@ pub fn format_bitrate(kbps: u32) -> String {
     format!("{kbps} kbps")
 }
 
+/// Integer with `,` thousands separators: `2,304`.
+pub fn format_thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Sample format as audiophile shorthand: `24/96`, `16/44.1`. Without a bit
+/// depth it falls back to the plain rate (`44.1 kHz`); `None` when the rate
+/// is unknown.
+pub fn format_depth_rate(bit_depth: u32, hz: u32) -> Option<String> {
+    if hz == 0 {
+        return None;
+    }
+    if bit_depth == 0 {
+        return Some(format_sample_rate(hz));
+    }
+    Some(format!(
+        "{bit_depth}/{}",
+        trim_decimal(f64::from(hz) / 1_000.0, 3)
+    ))
+}
+
 /// Binary-prefixed size with one decimal: `812 B`, `12.3 MiB`.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
@@ -204,6 +233,22 @@ mod tests {
         assert_eq!(format_sample_rate(96_000), "96 kHz");
         assert_eq!(format_sample_rate(22_050), "22.05 kHz");
         assert_eq!(format_sample_rate(2_822_400), "2.8224 MHz");
+    }
+
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(320), "320");
+        assert_eq!(format_thousands(2_304), "2,304");
+        assert_eq!(format_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn depth_rate_shorthand() {
+        assert_eq!(format_depth_rate(24, 96_000).as_deref(), Some("24/96"));
+        assert_eq!(format_depth_rate(16, 44_100).as_deref(), Some("16/44.1"));
+        assert_eq!(format_depth_rate(0, 44_100).as_deref(), Some("44.1 kHz"));
+        assert_eq!(format_depth_rate(24, 0), None);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::app::{App, Route};
 use crate::theme::{self, ColorExt, Theme};
 use crate::widgets::{IconBtn, paint_icon, paint_text, search_field, segmented};
 use aulos_core::config::ViewMode;
+use aulos_core::library::album_sort::AlbumSort;
 use egui::{Align, CornerRadius, Layout, Rect, Sense, Ui, pos2, vec2};
 use egui_phosphor::regular;
 
@@ -69,7 +70,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 Route::Artists => !app.session.library.artists.is_empty(),
                 _ => !app.session.library.genres.is_empty(),
             };
-            if browse && populated {
+            let detail = matches!(
+                app.route,
+                Route::Album(_) | Route::Artist(_) | Route::Genre(_)
+            );
+            if browse && populated && !detail {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let cfg = &mut app.session.config.config;
@@ -90,25 +95,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     if !app.narrow {
                         sources_menu(app, ui);
                     }
+                    sort_menu(app, ui, &root);
                 });
             }
         },
     );
 }
 
-/// The "All sources" dropdown: switches the active provider.
-fn sources_menu(app: &mut App, ui: &mut Ui) {
+/// A toolbar dropdown trigger: icon, label and caret in a 30px hover pill.
+fn dropdown_button(ui: &mut Ui, icon: &str, label: &str) -> egui::Response {
     let t = Theme::get(ui.ctx());
-    let providers = &app.session.providers;
-    let label = providers
-        .active_index
-        .and_then(|i| providers.provider_list.get(i))
-        .map_or("All sources", |(_, name)| name.as_str())
-        .to_owned();
     let font = theme::regular(13.0);
     let w = ui
         .painter()
-        .layout_no_wrap(label.clone(), font.clone(), t.pal.text)
+        .layout_no_wrap(label.to_owned(), font.clone(), t.pal.text)
         .size()
         .x
         + 10.0
@@ -125,7 +125,7 @@ fn sources_menu(app: &mut App, ui: &mut Ui) {
     paint_icon(
         ui.painter(),
         pos2(rect.left() + 17.0, rect.center().y),
-        regular::HARD_DRIVES,
+        icon,
         14.0,
         t.pal.text_2,
         false,
@@ -137,7 +137,7 @@ fn sources_menu(app: &mut App, ui: &mut Ui) {
             pos2(rect.right() - 24.0, rect.bottom()),
         ),
         Align::Min,
-        &label,
+        label,
         font,
         t.pal.text_1,
     );
@@ -149,6 +149,58 @@ fn sources_menu(app: &mut App, ui: &mut Ui) {
         t.pal.text_3,
         false,
     );
+    resp
+}
+
+/// The sort dropdown of the Albums / Artists / Genres pages.
+fn sort_menu(app: &mut App, ui: &mut Ui, root: &Route) {
+    let cfg = &app.session.config.config;
+    let current = match root {
+        Route::Albums => cfg.albums_sort,
+        Route::Artists => cfg.artists_sort,
+        _ => cfg.genres_sort,
+    };
+    let label = if app.narrow {
+        current.short_label()
+    } else {
+        current.label()
+    };
+    let resp = dropdown_button(ui, regular::ARROWS_DOWN_UP, &label);
+    let mut chosen = None;
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(150.0);
+        for sort in AlbumSort::ALL {
+            // Artists and genres have no separate "artist" key: Title is it.
+            if sort == AlbumSort::Artist && !matches!(root, Route::Albums) {
+                continue;
+            }
+            if ui.selectable_label(sort == current, sort.label()).clicked() {
+                chosen = Some(sort);
+                ui.close();
+            }
+        }
+    });
+    if let Some(sort) = chosen {
+        match root {
+            Route::Albums => app.session.set_albums_sort(sort),
+            Route::Artists => app.session.set_artists_sort(sort),
+            _ => app.session.set_genres_sort(sort),
+        }
+    }
+}
+
+/// The "All sources" dropdown: switches the active provider.
+fn sources_menu(app: &mut App, ui: &mut Ui) {
+    let providers = &app.session.providers;
+    // A single provider is just "all sources"; name the active one only when
+    // there is a choice.
+    let label = providers
+        .active_index
+        .filter(|_| providers.provider_list.len() > 1)
+        .and_then(|i| providers.provider_list.get(i))
+        .map_or("All sources", |(_, name)| name.as_str())
+        .to_owned();
+    let resp = dropdown_button(ui, regular::HARD_DRIVES, &label);
 
     let entries: Vec<(usize, String, bool)> = {
         let p = &app.session.providers;

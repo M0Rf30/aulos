@@ -10,7 +10,20 @@
 //! argument. Persistence (the `smart_playlists` table) lives in
 //! `library::db`.
 
+use super::quality::{AudioQuality, classify};
+use rusqlite::functions::FunctionFlags;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Name of the SQL scalar function [`register_sql_functions`] installs: the
+/// quality tier code of a `(path, sample_rate)` pair.
+const QUALITY_FN: &str = "aulos_quality";
+
+/// Quality tier code of the current `tracks` row; `''` when the format is
+/// not recognised, so `is not` rules still match such tracks.
+const QUALITY_EXPR: &str = "COALESCE(aulos_quality(path, sample_rate), '')";
 
 /// Correlated subquery: recorded plays of the current `tracks` row.
 const PLAY_COUNT_EXPR: &str = "(SELECT COUNT(*) FROM play_history WHERE track_id = tracks.id)";
@@ -46,11 +59,16 @@ pub enum RuleField {
     /// Whole days since the last play; a never-played track reads as
     /// "very many" days, so `> 90` also matches tracks never played.
     DaysSincePlayed,
+    /// Audio quality tier ([`QualityTier`]), inferred from the file
+    /// extension and sample rate like the quality badges. Only `is` /
+    /// `is not` apply. Added after the other fields: rules saved before it
+    /// existed never name it, so they deserialise unchanged.
+    Quality,
 }
 
 impl RuleField {
     /// Every field, in the order dropdowns should list them.
-    pub const ALL: [RuleField; 13] = [
+    pub const ALL: [RuleField; 14] = [
         Self::Title,
         Self::Artist,
         Self::AlbumArtist,
@@ -64,6 +82,7 @@ impl RuleField {
         Self::SampleRate,
         Self::PlayCount,
         Self::DaysSincePlayed,
+        Self::Quality,
     ];
 
     /// The literal `tracks` column (or column expression) this field reads.
@@ -85,16 +104,29 @@ impl RuleField {
             Self::SampleRate => "sample_rate",
             Self::PlayCount => PLAY_COUNT_EXPR,
             Self::DaysSincePlayed => DAYS_SINCE_PLAYED_EXPR,
+            Self::Quality => QUALITY_EXPR,
         }
     }
 
     /// Whether this field holds a numeric (or boolean-as-integer) value,
-    /// as opposed to free text.
+    /// as opposed to free text or a fixed choice ([`Self::Quality`]).
     fn is_numeric(self) -> bool {
         !matches!(
             self,
-            Self::Title | Self::Artist | Self::AlbumArtist | Self::Album | Self::Genre
+            Self::Title
+                | Self::Artist
+                | Self::AlbumArtist
+                | Self::Album
+                | Self::Genre
+                | Self::Quality
         )
+    }
+
+    /// Whether the value is one of a fixed set of choices rather than
+    /// free text or a number.
+    #[must_use]
+    pub fn is_choice(self) -> bool {
+        self == Self::Quality
     }
 
     /// Convert a rule's raw string value into the bindable SQL value for
@@ -107,10 +139,85 @@ impl RuleField {
             } else {
                 0i64
             }),
+            Self::Quality => {
+                Box::new(QualityTier::from_code(raw.trim()).map_or("", QualityTier::code))
+            }
             f if f.is_numeric() => Box::new(raw.trim().parse::<i64>().unwrap_or(0)),
             _ => Box::new(raw.to_string()),
         }
     }
+}
+
+/// The quality choices of a [`RuleField::Quality`] rule, stored in
+/// [`Rule::value`] as [`Self::code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityTier {
+    /// Lossless above CD rate (and DSD).
+    HiRes,
+    /// Lossless at CD rate or below.
+    Cd,
+    /// Lossy codecs.
+    Lossy,
+}
+
+impl QualityTier {
+    /// Every tier, in the order dropdowns should list them.
+    pub const ALL: [QualityTier; 3] = [Self::HiRes, Self::Cd, Self::Lossy];
+
+    /// The stable stored form (language independent).
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::HiRes => "hires",
+            Self::Cd => "cd",
+            Self::Lossy => "lossy",
+        }
+    }
+
+    /// Parses a [`Self::code`].
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tier| tier.code() == code)
+    }
+
+    /// The rule tier a classified track falls in; DSD counts as hi-res and
+    /// an unclassified track belongs to none.
+    #[must_use]
+    pub fn of(quality: AudioQuality) -> Option<Self> {
+        match quality {
+            AudioQuality::HiRes | AudioQuality::Dsd => Some(Self::HiRes),
+            AudioQuality::CdLossless => Some(Self::Cd),
+            AudioQuality::Lossy => Some(Self::Lossy),
+            AudioQuality::Unknown => None,
+        }
+    }
+
+    /// Localised name shown in the editor and summaries.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::HiRes => crate::fl!("smart-playlist-quality-hires"),
+            Self::Cd => crate::fl!("smart-playlist-quality-cd"),
+            Self::Lossy => crate::fl!("smart-playlist-quality-lossy"),
+        }
+    }
+}
+
+/// Installs the SQL functions smart-playlist queries rely on
+/// (`aulos_quality`) on `conn`. Every connection that may run
+/// [`SmartPlaylist::to_sql`] output needs this.
+pub(crate) fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        QUALITY_FN,
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let path: String = ctx.get(0)?;
+            let rate: Option<i64> = ctx.get(1)?;
+            let rate = rate.and_then(|r| u32::try_from(r).ok()).unwrap_or(0);
+            Ok(QualityTier::of(classify(Path::new(&path), rate, 0)).map(QualityTier::code))
+        },
+    )
 }
 
 /// A column [`SmartPlaylist::order_by`] can sort resolved tracks on.
@@ -349,6 +456,20 @@ impl SmartPlaylist {
         if self.name.trim().is_empty() {
             errors.push("Playlist name must not be empty.".to_string());
         }
+        errors.extend(self.rule_errors());
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// The problems of the rules alone (everything [`Self::validate`]
+    /// reports except the name): a playlist with no rule errors can be
+    /// evaluated, whatever it is called.
+    pub fn rule_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
 
         for (i, rule) in self.rules.iter().enumerate() {
             let n = i + 1;
@@ -364,6 +485,14 @@ impl SmartPlaylist {
                 errors.push(format!(
                     "Rule {n}: this operator does not apply to a text field."
                 ));
+                continue;
+            }
+            if rule.field == RuleField::Quality {
+                if !matches!(rule.op, RuleOp::Is | RuleOp::IsNot) {
+                    errors.push(format!("Rule {n}: quality can only be “is” or “is not”."));
+                } else if QualityTier::from_code(rule.value.trim()).is_none() {
+                    errors.push(format!("Rule {n}: pick a quality."));
+                }
                 continue;
             }
             if !numeric_field {
@@ -414,11 +543,37 @@ impl SmartPlaylist {
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
+        errors
+    }
+
+    /// The ` WHERE (...)` text for the rules (empty for none), binding
+    /// their values onto `params`.
+    fn where_clause(&self, params: &mut Vec<Box<dyn rusqlite::types::ToSql>>) -> String {
+        if self.rules.is_empty() {
+            return String::new();
         }
+        let clauses: Vec<String> = self
+            .rules
+            .iter()
+            .map(|rule| rule.to_sql_clause(params))
+            .collect();
+        let joiner = match self.match_mode {
+            MatchMode::All => " AND ",
+            MatchMode::Any => " OR ",
+        };
+        format!(" WHERE ({})", clauses.join(joiner))
+    }
+
+    /// Compile a `SELECT COUNT(*)` of every track the rules match, ignoring
+    /// [`Self::limit`] (and the ordering, which cannot change a count).
+    /// Binds values exactly like [`Self::to_sql`].
+    pub fn to_count_sql(&self) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let sql = format!(
+            "SELECT COUNT(*) FROM tracks{}",
+            self.where_clause(&mut params)
+        );
+        (sql, params)
     }
 
     /// Compile this playlist into a fully parameterised
@@ -436,25 +591,12 @@ impl SmartPlaylist {
         let mut sql = String::from(
             "SELECT id, path, title, artist, album_artist, album, genre, \
              track_number, disc_number, year, duration_ms, bitrate, sample_rate, \
-             provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain \
+             provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, \
+             bit_depth, release_type, added_at, favorited_at \
              FROM tracks",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-        if !self.rules.is_empty() {
-            let clauses: Vec<String> = self
-                .rules
-                .iter()
-                .map(|rule| rule.to_sql_clause(&mut params))
-                .collect();
-            let joiner = match self.match_mode {
-                MatchMode::All => " AND ",
-                MatchMode::Any => " OR ",
-            };
-            sql.push_str(" WHERE (");
-            sql.push_str(&clauses.join(joiner));
-            sql.push(')');
-        }
+        sql.push_str(&self.where_clause(&mut params));
 
         sql.push_str(" ORDER BY ");
         sql.push_str(self.order_by.expr());
@@ -501,6 +643,7 @@ impl RuleField {
             RuleField::SampleRate => crate::fl!("smart-playlist-field-sample-rate"),
             RuleField::PlayCount => crate::fl!("smart-playlist-field-play-count"),
             RuleField::DaysSincePlayed => crate::fl!("smart-playlist-field-days-since-played"),
+            RuleField::Quality => crate::fl!("smart-playlist-field-quality"),
         }
     }
 }
@@ -543,28 +686,47 @@ impl OrderField {
 }
 
 impl SmartPlaylist {
-    /// One-line rule summary: first rule as "Field op value", plus "+N" for the rest.
-    ///
-    /// Returns a non-breaking space for a rule-less playlist so list rows
-    /// keep their height.
+    /// Short one-line rule summary for list rows: the first rule's phrase
+    /// ("Quality is Hi-Res", "Play Count < 1", "Year 2015–2026"), plus
+    /// " +k" when `k` more rules follow. Empty for a rule-less playlist.
     #[must_use]
     pub fn rule_summary(&self) -> String {
         let Some(first) = self.rules.first() else {
-            return "\u{a0}".to_string();
+            return String::new();
         };
-        let mut text = format!("{} {}", first.field.label(), first.op.label());
-        if !first.value.is_empty() {
-            text.push(' ');
-            text.push_str(&first.value);
-            if !first.value2.is_empty() {
-                text.push_str(" – ");
-                text.push_str(&first.value2);
-            }
-        }
+        let mut text = first.phrase();
         if self.rules.len() > 1 {
-            text.push_str(&format!("  +{}", self.rules.len() - 1));
+            text.push_str(&format!(" +{}", self.rules.len() - 1));
         }
         text
+    }
+}
+
+impl Rule {
+    /// The value as shown to the user: a quality's localised name, the raw
+    /// text otherwise.
+    #[must_use]
+    pub fn value_label(&self) -> String {
+        match self.field {
+            RuleField::Quality => QualityTier::from_code(self.value.trim())
+                .map_or_else(|| self.value.clone(), QualityTier::label),
+            _ => self.value.clone(),
+        }
+    }
+
+    /// Compact phrase for summaries: numeric comparisons use `<`/`>` and a
+    /// range reads "lo–hi"; every other operator is spelled out.
+    #[must_use]
+    pub fn phrase(&self) -> String {
+        let field = self.field.label();
+        let value = self.value_label();
+        match self.op {
+            RuleOp::GreaterThan => format!("{field} > {value}"),
+            RuleOp::LessThan => format!("{field} < {value}"),
+            RuleOp::Between => format!("{field} {value}–{}", self.value2),
+            op if value.is_empty() => format!("{field} {}", op.label()),
+            op => format!("{field} {} {value}", op.label()),
+        }
     }
 }
 
@@ -584,40 +746,77 @@ pub struct EditorState {
     pub limit_input: String,
     /// Validation errors from the last edit; non-empty disables Save.
     pub errors: Vec<String>,
+    /// Bumped on every edit that can change which tracks match (everything
+    /// but the name); tags match-count requests so stale answers are ignored.
+    pub rules_revision: u64,
+    /// How many library tracks the current rules match, ignoring the limit;
+    /// `None` until the first answer arrives or while the rules are invalid.
+    /// Keeps the previous answer while a newer one is pending.
+    pub match_count: Option<usize>,
+    /// The newest revision, shared with in-flight requests so superseded
+    /// ones skip their query (the debounce).
+    match_latest: Arc<AtomicU64>,
+    /// The revision a request was last handed out for.
+    match_requested: Option<u64>,
+}
+
+/// A request to count the tracks matching in-editor rules, from
+/// [`EditorState::take_match_request`].
+#[derive(Debug, Clone)]
+pub struct MatchRequest {
+    /// The edited playlist, limit included (the count ignores it).
+    pub playlist: SmartPlaylist,
+    /// The [`EditorState::rules_revision`] it was taken at.
+    pub revision: u64,
+    /// The editor's newest revision; a request whose `revision` differs from
+    /// it is superseded.
+    pub latest: Arc<AtomicU64>,
+}
+
+impl MatchRequest {
+    /// Whether a newer edit has superseded this request.
+    #[must_use]
+    pub fn is_superseded(&self) -> bool {
+        self.latest.load(Ordering::Relaxed) != self.revision
+    }
 }
 
 impl EditorState {
     /// Start editing a brand-new, empty smart playlist.
     pub fn new() -> Self {
-        let playlist = SmartPlaylist {
-            id: 0,
-            name: String::new(),
-            rules: Vec::new(),
-            match_mode: MatchMode::All,
-            order_by: OrderField::Title,
-            order_desc: false,
-            limit: None,
-            track_count: 0,
-        };
-        let mut state = Self {
-            playlist,
-            limit_enabled: false,
-            limit_input: String::new(),
-            errors: Vec::new(),
-        };
-        state.revalidate();
-        state
+        Self::with(
+            SmartPlaylist {
+                id: 0,
+                name: String::new(),
+                rules: Vec::new(),
+                match_mode: MatchMode::All,
+                order_by: OrderField::Title,
+                order_desc: false,
+                limit: None,
+                track_count: 0,
+            },
+            false,
+            String::new(),
+        )
     }
 
     /// Start editing a previously saved smart playlist.
     pub fn from_existing(playlist: SmartPlaylist) -> Self {
         let limit_enabled = playlist.limit.is_some();
         let limit_input = playlist.limit.map(|l| l.to_string()).unwrap_or_default();
+        Self::with(playlist, limit_enabled, limit_input)
+    }
+
+    fn with(playlist: SmartPlaylist, limit_enabled: bool, limit_input: String) -> Self {
         let mut state = Self {
             playlist,
             limit_enabled,
             limit_input,
             errors: Vec::new(),
+            rules_revision: 0,
+            match_count: None,
+            match_latest: Arc::new(AtomicU64::new(0)),
+            match_requested: None,
         };
         state.revalidate();
         state
@@ -625,6 +824,41 @@ impl EditorState {
 
     fn revalidate(&mut self) {
         self.errors = self.playlist.validate().err().unwrap_or_default();
+    }
+
+    /// Records an edit that can change the matching tracks.
+    fn rules_changed(&mut self) {
+        self.rules_revision += 1;
+        self.match_latest
+            .store(self.rules_revision, Ordering::Relaxed);
+        self.revalidate();
+    }
+
+    /// The count request for the current rules, once per revision; `None`
+    /// when this revision was already requested or the rules are invalid
+    /// (which also clears the shown count: it no longer describes them).
+    pub fn take_match_request(&mut self) -> Option<MatchRequest> {
+        if !self.playlist.rule_errors().is_empty() {
+            self.match_count = None;
+            return None;
+        }
+        if self.match_requested == Some(self.rules_revision) {
+            return None;
+        }
+        self.match_requested = Some(self.rules_revision);
+        Some(MatchRequest {
+            playlist: self.playlist.clone(),
+            revision: self.rules_revision,
+            latest: Arc::clone(&self.match_latest),
+        })
+    }
+
+    /// Stores the answer to a [`MatchRequest`]; ignored when the rules have
+    /// changed since.
+    pub fn set_match_count(&mut self, revision: u64, count: usize) {
+        if revision == self.rules_revision {
+            self.match_count = Some(count);
+        }
     }
 
     pub fn set_name(&mut self, name: String) {
@@ -638,7 +872,7 @@ impl EditorState {
         } else {
             MatchMode::All
         };
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn add_rule(&mut self) {
@@ -648,24 +882,41 @@ impl EditorState {
             value: String::new(),
             value2: String::new(),
         });
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn remove_rule(&mut self, index: usize) {
         if index < self.playlist.rules.len() {
             self.playlist.rules.remove(index);
-            self.revalidate();
+            self.rules_changed();
         }
     }
 
+    /// Switches rule `index` to the field at `field_index` of
+    /// [`RuleField::ALL`]. A choice field ([`RuleField::Quality`]) gets a
+    /// valid operator and value; leaving one clears its value, which means
+    /// nothing to the new field.
     pub fn set_rule_field(&mut self, index: usize, field_index: usize) {
         if let (Some(rule), Some(field)) = (
             self.playlist.rules.get_mut(index),
             RuleField::ALL.get(field_index),
         ) {
+            let was_choice = rule.field.is_choice();
             rule.field = *field;
+            if field.is_choice() {
+                if !matches!(rule.op, RuleOp::Is | RuleOp::IsNot) {
+                    rule.op = RuleOp::Is;
+                }
+                if QualityTier::from_code(rule.value.trim()).is_none() {
+                    rule.value = QualityTier::HiRes.code().to_string();
+                }
+                rule.value2.clear();
+            } else if was_choice {
+                rule.value.clear();
+                rule.value2.clear();
+            }
         }
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn set_rule_op(&mut self, index: usize, op_index: usize) {
@@ -675,21 +926,21 @@ impl EditorState {
         ) {
             rule.op = *op;
         }
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn set_rule_value(&mut self, index: usize, value: String) {
         if let Some(rule) = self.playlist.rules.get_mut(index) {
             rule.value = value;
         }
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn set_rule_value2(&mut self, index: usize, value: String) {
         if let Some(rule) = self.playlist.rules.get_mut(index) {
             rule.value2 = value;
         }
-        self.revalidate();
+        self.rules_changed();
     }
 
     pub fn set_order_by(&mut self, index: usize) {
@@ -910,6 +1161,10 @@ mod tests {
                 rating: None,
                 rg_track_gain: None,
                 rg_album_gain: None,
+                bit_depth: 0,
+                release_type: String::new(),
+                added_at: 0,
+                favorited_at: 0,
             }
         }
 
@@ -962,6 +1217,10 @@ mod tests {
                 rating: None,
                 rg_track_gain: None,
                 rg_album_gain: None,
+                bit_depth: 0,
+                release_type: String::new(),
+                added_at: 0,
+                favorited_at: 0,
             }
         }
 
@@ -1028,5 +1287,270 @@ mod tests {
         assert_eq!(titles(&playlist), ["/a", "/b", "/c"]);
         playlist.order_by = OrderField::LastPlayed;
         assert_eq!(titles(&playlist), ["/a", "/b", "/c"]);
+    }
+
+    /// Inserts a bare `tracks` row: only what the rules under test read.
+    fn insert_track(db: &crate::library::LibraryDb, path: &str, sample_rate: u32, year: u32) {
+        db.conn
+            .execute(
+                "INSERT INTO tracks (path, title, sample_rate, year, provider, provider_track_id)
+                 VALUES (?1, ?1, ?2, ?3, 'local', ?1)",
+                rusqlite::params![path, sample_rate, year],
+            )
+            .unwrap();
+    }
+
+    fn quality_rule(op: RuleOp, tier: &str) -> Rule {
+        Rule {
+            field: RuleField::Quality,
+            op,
+            value: tier.into(),
+            value2: String::new(),
+        }
+    }
+
+    fn titles(db: &crate::library::LibraryDb, playlist: &SmartPlaylist) -> Vec<String> {
+        db.smart_playlist_tracks(playlist, None)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect()
+    }
+
+    /// A library of one track per tier plus an unclassifiable one.
+    fn quality_library() -> crate::library::LibraryDb {
+        let db = crate::library::LibraryDb::open_memory().expect("open in-memory db");
+        insert_track(&db, "/m/hires.flac", 96_000, 2020);
+        insert_track(&db, "/m/dsd.dsf", 2_822_400, 2021);
+        insert_track(&db, "/m/cd.flac", 44_100, 2019);
+        insert_track(&db, "/m/lossy.mp3", 44_100, 2018);
+        insert_track(&db, "/m/mystery", 44_100, 2017);
+        db
+    }
+
+    #[test]
+    fn quality_is_matches_the_classified_tier() {
+        let db = quality_library();
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::Is, "hires"));
+        assert_eq!(titles(&db, &playlist), ["/m/dsd.dsf", "/m/hires.flac"]);
+        playlist.rules[0] = quality_rule(RuleOp::Is, "cd");
+        assert_eq!(titles(&db, &playlist), ["/m/cd.flac"]);
+        playlist.rules[0] = quality_rule(RuleOp::Is, "lossy");
+        assert_eq!(titles(&db, &playlist), ["/m/lossy.mp3"]);
+        assert!(playlist.validate().is_ok());
+    }
+
+    #[test]
+    fn quality_is_not_keeps_unclassified_tracks() {
+        let db = quality_library();
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::IsNot, "hires"));
+        assert_eq!(
+            titles(&db, &playlist),
+            ["/m/cd.flac", "/m/lossy.mp3", "/m/mystery"]
+        );
+    }
+
+    #[test]
+    fn quality_combines_with_other_rules() {
+        let db = quality_library();
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::Is, "hires"));
+        playlist.rules.push(Rule {
+            field: RuleField::Year,
+            op: RuleOp::GreaterThan,
+            value: "2020".into(),
+            value2: String::new(),
+        });
+        assert_eq!(titles(&db, &playlist), ["/m/dsd.dsf"]);
+        playlist.match_mode = MatchMode::Any;
+        assert_eq!(titles(&db, &playlist), ["/m/dsd.dsf", "/m/hires.flac"]);
+    }
+
+    #[test]
+    fn quality_rule_validation() {
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::Is, "hires"));
+        assert!(playlist.rule_errors().is_empty());
+        playlist.rules[0] = quality_rule(RuleOp::Is, "platinum");
+        assert_eq!(playlist.rule_errors().len(), 1);
+        playlist.rules[0] = quality_rule(RuleOp::Contains, "hires");
+        assert_eq!(playlist.rule_errors().len(), 1);
+        playlist.rules[0] = quality_rule(RuleOp::GreaterThan, "hires");
+        assert_eq!(playlist.rule_errors().len(), 1);
+    }
+
+    #[test]
+    fn rule_errors_leave_the_name_out() {
+        let mut playlist = base();
+        playlist.name.clear();
+        assert!(playlist.rule_errors().is_empty());
+        assert!(playlist.validate().is_err());
+    }
+
+    #[test]
+    fn definitions_saved_before_quality_existed_still_load() {
+        let old = r#"{"id":3,"name":"Old","rules":[{"field":"Artist","op":"Contains","value":"a","value2":""},{"field":"DaysSincePlayed","op":"GreaterThan","value":"9","value2":""}],"match_mode":"Any","order_by":"Random","order_desc":false,"limit":25}"#;
+        let playlist: SmartPlaylist = serde_json::from_str(old).expect("old definition loads");
+        assert_eq!(playlist.rules.len(), 2);
+        assert_eq!(playlist.rules[0].field, RuleField::Artist);
+        assert_eq!(playlist.limit, Some(25));
+        assert!(playlist.validate().is_ok());
+    }
+
+    #[test]
+    fn quality_rules_round_trip_through_json() {
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::IsNot, "lossy"));
+        let json = serde_json::to_string(&playlist).unwrap();
+        assert!(json.contains("\"Quality\""));
+        let back: SmartPlaylist = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.rules[0].field, RuleField::Quality);
+        assert_eq!(back.rules[0].op, RuleOp::IsNot);
+        assert_eq!(back.rules[0].value, "lossy");
+    }
+
+    #[test]
+    fn quality_tier_codes_round_trip() {
+        for tier in QualityTier::ALL {
+            assert_eq!(QualityTier::from_code(tier.code()), Some(tier));
+        }
+        assert_eq!(QualityTier::from_code("nope"), None);
+        assert_eq!(QualityTier::of(AudioQuality::Dsd), Some(QualityTier::HiRes));
+        assert_eq!(QualityTier::of(AudioQuality::Unknown), None);
+    }
+
+    #[test]
+    fn match_count_ignores_the_limit_but_the_listing_honours_it() {
+        let db = crate::library::LibraryDb::open_memory().expect("open in-memory db");
+        for (i, year) in [2001u32, 2005, 2010, 2015, 2020].into_iter().enumerate() {
+            insert_track(&db, &format!("/m/{i}.flac"), 44_100, year);
+        }
+        let mut playlist = base();
+        playlist.rules.push(Rule {
+            field: RuleField::Year,
+            op: RuleOp::GreaterThan,
+            value: "2002".into(),
+            value2: String::new(),
+        });
+        playlist.limit = Some(2);
+
+        assert_eq!(titles(&db, &playlist).len(), 2);
+        assert_eq!(db.smart_playlist_match_count(&playlist).unwrap(), 4);
+
+        playlist.limit = None;
+        assert_eq!(db.smart_playlist_match_count(&playlist).unwrap(), 4);
+        playlist.rules.clear();
+        assert_eq!(db.smart_playlist_match_count(&playlist).unwrap(), 5);
+    }
+
+    #[test]
+    fn match_count_of_a_quality_rule() {
+        let db = quality_library();
+        let mut playlist = base();
+        playlist.rules.push(quality_rule(RuleOp::Is, "hires"));
+        assert_eq!(db.smart_playlist_match_count(&playlist).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_sql_has_no_order_or_limit() {
+        let mut playlist = base();
+        playlist.limit = Some(10);
+        let (sql, params) = playlist.to_count_sql();
+        assert_eq!(sql, "SELECT COUNT(*) FROM tracks");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn match_requests_are_made_once_per_revision() {
+        let mut ed = EditorState::new();
+        let first = ed.take_match_request().expect("empty rules match all");
+        assert_eq!(first.revision, 0);
+        assert!(ed.take_match_request().is_none(), "already requested");
+
+        // Order, limit and name do not change what matches.
+        ed.set_name("n".into());
+        ed.set_limit_enabled(true);
+        ed.set_limit_input("5".into());
+        ed.set_order_by(1);
+        assert!(ed.take_match_request().is_none());
+
+        ed.add_rule();
+        assert!(first.is_superseded());
+        let second = ed.take_match_request().expect("rules changed");
+        assert_eq!(second.revision, 1);
+        assert!(!second.is_superseded());
+        assert_eq!(second.playlist.rules.len(), 1);
+    }
+
+    #[test]
+    fn stale_match_counts_are_ignored_and_invalid_rules_clear_it() {
+        let mut ed = EditorState::new();
+        ed.set_match_count(0, 7);
+        assert_eq!(ed.match_count, Some(7));
+
+        ed.add_rule();
+        // The old answer is kept while the new one is pending…
+        assert_eq!(ed.match_count, Some(7));
+        // …but a late answer for the old revision is dropped.
+        ed.set_match_count(0, 99);
+        assert_eq!(ed.match_count, Some(7));
+        ed.set_match_count(1, 3);
+        assert_eq!(ed.match_count, Some(3));
+
+        // A numeric rule with no value is invalid: nothing to count.
+        ed.set_rule_field(
+            0,
+            RuleField::ALL
+                .iter()
+                .position(|f| *f == RuleField::Year)
+                .unwrap(),
+        );
+        assert!(ed.take_match_request().is_none());
+        assert_eq!(ed.match_count, None);
+    }
+
+    #[test]
+    fn switching_a_rule_to_quality_picks_a_valid_operator_and_value() {
+        let mut ed = EditorState::new();
+        ed.add_rule();
+        ed.set_rule_op(
+            0,
+            RuleOp::ALL
+                .iter()
+                .position(|o| *o == RuleOp::Contains)
+                .unwrap(),
+        );
+        ed.set_rule_value(0, "abc".into());
+        let quality = RuleField::ALL
+            .iter()
+            .position(|f| *f == RuleField::Quality)
+            .unwrap();
+        ed.set_rule_field(0, quality);
+        let rule = &ed.playlist.rules[0];
+        assert_eq!(rule.op, RuleOp::Is);
+        assert_eq!(rule.value, "hires");
+        assert!(ed.playlist.rule_errors().is_empty());
+
+        // Leaving it clears the tier code, which means nothing elsewhere.
+        ed.set_rule_field(0, 0);
+        assert_eq!(ed.playlist.rules[0].value, "");
+    }
+
+    #[test]
+    fn rule_summary_is_short() {
+        let mut playlist = base();
+        assert_eq!(playlist.rule_summary(), "");
+        playlist.rules.push(quality_rule(RuleOp::Is, "hires"));
+        assert_eq!(playlist.rule_summary(), "Quality is Hi-Res");
+        playlist.rules.push(Rule {
+            field: RuleField::Year,
+            op: RuleOp::Between,
+            value: "2015".into(),
+            value2: "2026".into(),
+        });
+        assert_eq!(playlist.rule_summary(), "Quality is Hi-Res +1");
+        assert_eq!(playlist.rules[1].phrase(), "Year 2015–2026");
     }
 }

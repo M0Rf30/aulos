@@ -20,8 +20,6 @@
 
 Aulos is a modern music player for Linux, Windows and macOS, written in Rust. It plays your local library, drives MPD servers and streams from Subsonic/OpenSubsonic servers, with internet radio, podcasts, synced lyrics, a 10-band equalizer, a MilkDrop visualizer and a Picard-style tag editor. The interface is a native [egui](https://github.com/emilk/egui) app: dark by default, tinted by the colour of the cover that is playing.
 
-> **Status: preview.** This branch replaces the previous libcosmic interface with egui. Every page of the design is in place (Home, Albums, Artists, Songs, Genres, Folders, Playlists, Podcasts, Radio, Tag editor, Converter, Settings, the expanded now-playing view, the mini player and the visualizer), but some controls are still missing because the backend can't feed them yet, and settings start fresh (nothing is imported from the old COSMIC settings).
-
 The name comes from the *aulos*, the double pipe of ancient Greece; the logo's two slanted reeds are a nod to it.
 
 ## Features
