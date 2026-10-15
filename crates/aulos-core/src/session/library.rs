@@ -15,7 +15,7 @@
 
 use super::Session;
 use crate::library::album_sort::AlbumSort;
-use crate::library::covers::{CoverDelta, CoverSet, CoverThumb};
+use crate::library::covers::{CachedThumb, CoverDelta, CoverSet, CoverThumb, ThumbStamp};
 use crate::library::search::SEARCH_DEBOUNCE_MS;
 use crate::library::state::SortField;
 use crate::library::top_tracks::{ArtistTop, TOP_TRACKS_LEN, rank_top_tracks};
@@ -717,7 +717,9 @@ async fn load_local(
     generation: u64,
     provider_id: String,
 ) -> LibraryEvent {
+    let browsed = Arc::clone(&provider);
     let (tracks, albums) = tokio::task::spawn_blocking(move || {
+        let provider = browsed;
         let tracks = provider.browse_tracks().unwrap_or_else(|e| {
             tracing::error!("browse_tracks failed: {e}");
             Vec::new()
@@ -732,6 +734,21 @@ async fn load_local(
     .unwrap_or_default();
 
     let permits = Arc::new(tokio::sync::Semaphore::new(COVER_DECODE_CONCURRENCY));
+
+    // Thumbnails persisted by earlier launches: an album whose cover file
+    // is unchanged skips the full-size decode.
+    let mut cached = {
+        let provider = Arc::clone(&provider);
+        tokio::task::spawn_blocking(move || provider.cached_thumbs())
+            .await
+            .unwrap_or_default()
+    };
+    let keep: std::collections::HashSet<String> = albums
+        .iter()
+        .map(|a| CoverArt::album_key(&a.artist, &a.name))
+        .collect();
+    let stale_cache = cached.keys().any(|k| !keep.contains(k));
+
     let cover_tasks: Vec<_> = albums
         .iter()
         .filter_map(|album| {
@@ -748,11 +765,28 @@ async fn load_local(
             // an unbounded burst peaks at GBs and leaves one malloc arena
             // per thread behind.
             let permits = Arc::clone(&permits);
+            let hit = cached.remove(&key);
             tokio::spawn(async move {
                 let _permit = permits.acquire_owned().await.ok()?;
                 tokio::task::spawn_blocking(move || {
+                    let stamp = ThumbStamp::of(&path);
+                    if let (Some(hit), Some(stamp)) = (&hit, &stamp)
+                        && hit.stamp == *stamp
+                    {
+                        return Some((key, hit.thumb.clone(), None));
+                    }
                     let bytes = CoverArt::get_cover_art(&path)?;
-                    Some((key, CoverThumb::from_bytes(&bytes)?))
+                    let thumb = CoverThumb::from_bytes(&bytes)?;
+                    let fresh = stamp.map(|stamp| {
+                        (
+                            key.clone(),
+                            CachedThumb {
+                                thumb: thumb.clone(),
+                                stamp,
+                            },
+                        )
+                    });
+                    Some((key, thumb, fresh))
                 })
                 .await
                 .ok()
@@ -762,10 +796,18 @@ async fn load_local(
         .collect();
 
     let mut covers = CoverSet::new();
+    let mut fresh = Vec::new();
     for task in cover_tasks {
-        if let Ok(Some((key, thumb))) = task.await {
+        if let Ok(Some((key, thumb, new))) = task.await {
             covers.insert(key, thumb);
+            fresh.extend(new);
         }
+    }
+    if !fresh.is_empty() || stale_cache {
+        // Not awaited: the library need not wait for the cache write.
+        drop(tokio::task::spawn_blocking(move || {
+            provider.store_thumbs(&fresh, &keep);
+        }));
     }
 
     LibraryEvent::Loaded {
@@ -996,6 +1038,91 @@ mod tests {
         session.apply_library_event(LibraryEvent::SearchDebounced(2));
         assert_eq!(visible_names(&session), ["Abbey Road"]);
         assert_eq!(session.library.search_query(), "abbey");
+    }
+
+    #[test]
+    fn local_load_reuses_persisted_thumbnails_until_the_file_changes() {
+        use crate::provider::local::LocalProvider;
+        let dir = super::super::test_support::scratch_dir("cover-cache");
+        let audio = dir.join("a.mp3");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/tagio/plain.mp3"
+            ),
+            &audio,
+        )
+        .unwrap();
+        let png = |shade: u8| {
+            let mut out = Vec::new();
+            image::ImageEncoder::write_image(
+                image::codecs::png::PngEncoder::new(&mut out),
+                &[shade; 8 * 8 * 3],
+                8,
+                8,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+            out
+        };
+        std::fs::write(dir.join("cover.png"), png(10)).unwrap();
+
+        let db = LibraryDb::open_memory().unwrap();
+        let mut t = track(1);
+        t.path = audio.clone();
+        t.source_uri = audio.to_string_lossy().into_owned();
+        db.upsert_track(&t, 0).unwrap();
+        let provider = Arc::new(LocalProvider::new(db, Vec::new()));
+        let key = CoverArt::album_key("", "album");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let load = || async {
+                let LibraryEvent::Loaded { covers, .. } =
+                    load_local(provider.clone(), 1, "local".into()).await
+                else {
+                    panic!("not a Loaded event");
+                };
+                covers
+            };
+            // The write-back runs detached: wait for it.
+            let persisted = || async {
+                for _ in 0..200 {
+                    let all = provider.cached_thumbs();
+                    if !all.is_empty() {
+                        return all;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("thumbnail never persisted");
+            };
+
+            let first = load().await;
+            let real = first[&key].fingerprint;
+            let stored = persisted().await;
+            assert_eq!(stored[&key].thumb.fingerprint, real);
+
+            // Swap in a marker thumbnail carrying the same stamp: a second
+            // load that returns it never decoded the cover again.
+            let mut marked = stored[&key].clone();
+            marked.thumb.fingerprint = 42;
+            provider.store_thumbs(&[(key.clone(), marked)], &[key.clone()].into());
+            assert_eq!(load().await[&key].fingerprint, 42);
+
+            // The cover file is replaced (new content and size): the stale
+            // stamp is ignored and the cover decoded afresh.
+            std::fs::write(
+                audio.clone(),
+                [std::fs::read(&audio).unwrap(), vec![0; 7]].concat(),
+            )
+            .unwrap();
+            let after = load().await;
+            assert_ne!(after[&key].fingerprint, 42);
+            assert_eq!(after[&key].fingerprint, real);
+        });
     }
 
     #[test]

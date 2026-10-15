@@ -43,6 +43,12 @@ impl CoverThumb {
         THUMB_MAX_DIM.store(px.max(1), Ordering::Relaxed);
     }
 
+    /// The side length (px) new thumbnails are downscaled to.
+    #[must_use]
+    pub fn max_dim() -> u32 {
+        THUMB_MAX_DIM.load(Ordering::Relaxed)
+    }
+
     /// Decodes and downscales `bytes`; `None` when they are not a
     /// decodable image.
     #[must_use]
@@ -64,6 +70,46 @@ impl CoverThumb {
         let (w, h) = img.dimensions();
         Some((w, h, img.into_raw()))
     }
+}
+
+/// What a persisted thumbnail was made from: the file its cover was read
+/// from (path, modification time, size) and the thumbnail side length. A
+/// stored thumbnail is reused only while the file on disk still has the same
+/// stamp and the requested side length is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThumbStamp {
+    pub path: String,
+    pub mtime_ns: i64,
+    pub size: u64,
+    pub max_dim: u32,
+}
+
+impl ThumbStamp {
+    /// The stamp of `path` as it is now, for the current thumbnail size;
+    /// `None` when the file cannot be inspected.
+    #[must_use]
+    pub fn of(path: &std::path::Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let mtime_ns = match mtime.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_nanos()).ok()?,
+            Err(e) => -i64::try_from(e.duration().as_nanos()).ok()?,
+        };
+        Some(Self {
+            path: path.to_string_lossy().into_owned(),
+            mtime_ns,
+            size: meta.len(),
+            max_dim: CoverThumb::max_dim(),
+        })
+    }
+}
+
+/// A thumbnail together with what it was made from, as persisted in the
+/// library database.
+#[derive(Debug, Clone)]
+pub struct CachedThumb {
+    pub thumb: CoverThumb,
+    pub stamp: ThumbStamp,
 }
 
 /// JPEG for opaque pixels, PNG when any pixel has transparency.

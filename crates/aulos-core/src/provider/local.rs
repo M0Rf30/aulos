@@ -7,6 +7,7 @@
 //! functionality behind the [`MusicProvider`] trait.
 
 use super::{MusicProvider, ProviderError, ProviderType};
+use crate::library::covers::CachedThumb;
 use crate::library::scan_progress::ScanProgress;
 use crate::library::{
     Album, Artist, CoverArt, LibraryDb, LibraryScanner, LyricsProvider, Playlist, Track,
@@ -137,6 +138,31 @@ impl MusicProvider for LocalProvider {
         let db = self.lock_db()?;
         db.add_to_playlist(playlist_id, track_ids)
             .map_err(ProviderError::Database)
+    }
+
+    fn cached_thumbs(&self) -> std::collections::HashMap<String, CachedThumb> {
+        let loaded = self
+            .lock_db()
+            .map_err(|e| e.to_string())
+            .and_then(|db| db.cached_thumbs());
+        loaded.unwrap_or_else(|e| {
+            tracing::warn!("cover cache unreadable: {e}");
+            Default::default()
+        })
+    }
+
+    fn store_thumbs(
+        &self,
+        entries: &[(String, CachedThumb)],
+        keep: &std::collections::HashSet<String>,
+    ) {
+        let stored = self
+            .lock_db()
+            .map_err(|e| e.to_string())
+            .and_then(|db| db.store_thumbs(entries, keep));
+        if let Err(e) = stored {
+            tracing::warn!("cover cache not saved: {e}");
+        }
     }
 
     fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {

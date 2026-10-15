@@ -3,10 +3,11 @@
 
 //! SQLite-backed music library database.
 
+use super::covers::{CachedThumb, CoverThumb, ThumbStamp};
 use super::smart_playlist::SmartPlaylist;
 use super::{Album, Artist, Track};
 use rusqlite::{Connection, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -425,6 +426,35 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v11 commit error: {e}"))?;
         }
 
+        if version < 12 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v12 transaction error: {e}"))?;
+            // Persisted grid thumbnails: `image_data` holds the encoded
+            // thumbnail, the rest says what it was made from.
+            for (column, definition) in [
+                ("width", "INTEGER"),
+                ("height", "INTEGER"),
+                ("fingerprint", "INTEGER"),
+                ("src_path", "TEXT"),
+                ("src_mtime_ns", "INTEGER"),
+                ("src_size", "INTEGER"),
+                ("max_dim", "INTEGER"),
+            ] {
+                if !self.column_exists("cover_cache", column)? {
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE cover_cache ADD COLUMN {column} {definition};"
+                    ))
+                    .map_err(|e| format!("Migration v12 error ({column}): {e}"))?;
+                }
+            }
+            tx.execute_batch("PRAGMA user_version=12;")
+                .map_err(|e| format!("Migration v12 error (version): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v12 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -718,6 +748,97 @@ impl LibraryDb {
                 |row| row.get(0),
             )
             .ok()
+    }
+
+    /// Every persisted grid thumbnail, by album key. Rows without a source
+    /// stamp (full-size covers cached by older code) are skipped.
+    pub fn cached_thumbs(&self) -> Result<HashMap<String, CachedThumb>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT album_key, image_data, width, height, fingerprint,
+                        src_path, src_mtime_ns, src_size, max_dim
+                 FROM cover_cache
+                 WHERE image_data IS NOT NULL AND src_path IS NOT NULL
+                   AND width IS NOT NULL AND height IS NOT NULL AND fingerprint IS NOT NULL
+                   AND src_mtime_ns IS NOT NULL AND src_size IS NOT NULL
+                   AND max_dim IS NOT NULL",
+            )
+            .map_err(|e| format!("Cover cache error: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let key: String = row.get(0)?;
+                let data: Vec<u8> = row.get(1)?;
+                let thumb = CoverThumb {
+                    width: row.get(2)?,
+                    height: row.get(3)?,
+                    encoded: data.into(),
+                    fingerprint: row.get::<_, i64>(4)? as u64,
+                };
+                let stamp = ThumbStamp {
+                    path: row.get(5)?,
+                    mtime_ns: row.get(6)?,
+                    size: row.get::<_, i64>(7)? as u64,
+                    max_dim: row.get(8)?,
+                };
+                Ok((key, CachedThumb { thumb, stamp }))
+            })
+            .map_err(|e| format!("Cover cache error: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("Cover cache error: {e}"))
+    }
+
+    /// Stores `entries` and drops every other persisted thumbnail whose
+    /// album key is not in `keep` (albums that left the library), in one
+    /// transaction.
+    pub fn store_thumbs(
+        &self,
+        entries: &[(String, CachedThumb)],
+        keep: &HashSet<String>,
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Cover cache transaction error: {e}"))?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO cover_cache
+                        (album_key, image_data, width, height, fingerprint,
+                         src_path, src_mtime_ns, src_size, max_dim)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(|e| format!("Cover cache error: {e}"))?;
+            for (key, cached) in entries {
+                insert
+                    .execute(params![
+                        key,
+                        cached.thumb.encoded.as_ref(),
+                        cached.thumb.width,
+                        cached.thumb.height,
+                        cached.thumb.fingerprint as i64,
+                        cached.stamp.path,
+                        cached.stamp.mtime_ns,
+                        cached.stamp.size as i64,
+                        cached.stamp.max_dim,
+                    ])
+                    .map_err(|e| format!("Cover cache error: {e}"))?;
+            }
+            let stale: Vec<String> = tx
+                .prepare("SELECT album_key FROM cover_cache WHERE src_path IS NOT NULL")
+                .and_then(|mut q| q.query_map([], |row| row.get(0))?.collect())
+                .map_err(|e| format!("Cover cache error: {e}"))?;
+            let mut delete = tx
+                .prepare("DELETE FROM cover_cache WHERE album_key = ?1")
+                .map_err(|e| format!("Cover cache error: {e}"))?;
+            for key in stale.iter().filter(|k| !keep.contains(*k)) {
+                delete
+                    .execute(params![key])
+                    .map_err(|e| format!("Cover cache error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Cover cache commit error: {e}"))
     }
 
     /// Forget the cached cover of one album, so the next scan re-reads it
@@ -1553,11 +1674,12 @@ mod tests {
         assert!(db.column_exists("tracks", "release_type").unwrap());
         assert!(db.column_exists("tracks", "added_at").unwrap());
         assert!(db.column_exists("tracks", "favorited_at").unwrap());
+        assert!(db.column_exists("cover_cache", "src_mtime_ns").unwrap());
         assert_eq!(
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
         assert!(
             db.conn
@@ -1590,7 +1712,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
@@ -1664,6 +1786,60 @@ mod tests {
             ["/tmp/d.mp3", "/tmp/b.mp3", "/tmp/c.mp3", "/tmp/a.mp3"]
         );
         assert!(db.move_playlist_track(&id, 0, 4).is_err());
+    }
+
+    fn cached(path: &str, mtime_ns: i64) -> CachedThumb {
+        CachedThumb {
+            thumb: CoverThumb {
+                width: 2,
+                height: 3,
+                encoded: vec![1, 2, 3].into(),
+                fingerprint: u64::MAX - 5,
+            },
+            stamp: ThumbStamp {
+                path: path.into(),
+                mtime_ns,
+                size: 77,
+                max_dim: 256,
+            },
+        }
+    }
+
+    #[test]
+    fn persisted_thumbs_round_trip_and_albums_that_left_are_dropped() {
+        let db = LibraryDb::open_memory().unwrap();
+        // A full-size cover cached by older code has no stamp: ignored.
+        db.cache_cover("legacy", b"full-size").unwrap();
+        db.store_thumbs(
+            &[
+                ("a".into(), cached("/m/a.flac", -4)),
+                ("b".into(), cached("/m/b.flac", 9)),
+            ],
+            &HashSet::from(["a".to_string(), "b".to_string(), "legacy".to_string()]),
+        )
+        .unwrap();
+        let loaded = db.cached_thumbs().unwrap();
+        assert_eq!(loaded.len(), 2);
+        let a = &loaded["a"];
+        assert_eq!(a.thumb.fingerprint, u64::MAX - 5);
+        assert_eq!((a.thumb.width, a.thumb.height), (2, 3));
+        assert_eq!(a.thumb.encoded.as_ref(), [1, 2, 3]);
+        assert_eq!(a.stamp, cached("/m/a.flac", -4).stamp);
+
+        // `b` left the library; `a` is refreshed.
+        db.store_thumbs(
+            &[("a".into(), cached("/m/a2.flac", 1))],
+            &HashSet::from(["a".to_string()]),
+        )
+        .unwrap();
+        let loaded = db.cached_thumbs().unwrap();
+        assert_eq!(loaded.keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(loaded["a"].stamp.path, "/m/a2.flac");
+        // The legacy row has no stamp, so it is not touched.
+        assert!(db.get_cached_cover("legacy").is_some());
+
+        db.remove_cached_cover("a").unwrap();
+        assert!(db.cached_thumbs().unwrap().is_empty());
     }
 
     #[test]

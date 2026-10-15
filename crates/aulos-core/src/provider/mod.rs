@@ -225,6 +225,24 @@ pub trait MusicProvider: Send + Sync {
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
+    /// Grid thumbnails persisted by an earlier launch, by album key.
+    /// Providers without a library database have none.
+    fn cached_thumbs(
+        &self,
+    ) -> std::collections::HashMap<String, crate::library::covers::CachedThumb> {
+        std::collections::HashMap::new()
+    }
+
+    /// Persists freshly decoded thumbnails and forgets those of albums not in
+    /// `keep`. A failure only costs a re-decode next launch, so it is logged.
+    fn store_thumbs(
+        &self,
+        entries: &[(String, crate::library::covers::CachedThumb)],
+        keep: &std::collections::HashSet<String>,
+    ) {
+        let _ = (entries, keep);
+    }
+
     /// Removes the track at 0-based `index` of a playlist. Entries are
     /// addressed by position because a track can appear more than once.
     fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
