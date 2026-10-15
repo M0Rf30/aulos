@@ -1022,15 +1022,13 @@ fn track_rows(
         if resp.drag_stopped()
             && let (Cur::Plain(p), Some(from), Some(slot)) =
                 (cur, st.dragging.take(), st.drop_slot.take())
+            && let Some(to) = super::drop_target(from, slot)
         {
-            let to = if slot > from { slot - 1 } else { slot };
-            if to != from {
-                out.acts.push(Act::MoveTrack {
-                    id: p.id.clone(),
-                    from,
-                    to,
-                });
-            }
+            out.acts.push(Act::MoveTrack {
+                id: p.id.clone(),
+                from,
+                to,
+            });
         }
         let current = app
             .session

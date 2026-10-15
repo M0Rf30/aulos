@@ -358,11 +358,9 @@ fn up_row(
         }
         if resp.drag_stopped()
             && let (Some(from), Some(slot)) = (st.dragging.take(), st.drop_slot.take())
+            && let Some(to) = super::drop_target(from, slot)
         {
-            let to = if slot > from { slot - 1 } else { slot };
-            if to != from {
-                out.push(Intent::Move { from, to });
-            }
+            out.push(Intent::Move { from, to });
         }
         if resp.clicked() {
             out.push(Intent::Jump(abs));

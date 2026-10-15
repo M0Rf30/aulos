@@ -636,3 +636,88 @@ pub fn resolve_pending(app: &mut App) {
         app.run(effect);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, PointerButton, RawInput, Shape};
+
+    /// Every text drawn in `shapes`, with the position it starts at.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Pos2)> {
+        fn walk(shape: &Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                Shape::Text(t) => out.push((t.galley.text().to_owned(), t.pos)),
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(&s.shape, &mut out));
+        out
+    }
+
+    /// Right-clicking an artist target opens a menu whose rows stack in one
+    /// column, a row height apart, inside the panel width.
+    #[test]
+    fn context_menu_rows_stack_vertically() {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        let target = pos2(300.0, 200.0);
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0));
+        let frame = |events: Vec<Event>| {
+            let input = RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let response = ui.interact(
+                    Rect::from_center_size(target, vec2(80.0, 40.0)),
+                    Id::new("target"),
+                    Sense::click(),
+                );
+                let _ = artist_menu(&response, "Someone");
+            });
+            out.textures_delta.clear();
+            out.shapes
+        };
+        frame(vec![Event::PointerMoved(target)]);
+        frame(vec![
+            Event::PointerButton {
+                pos: target,
+                button: PointerButton::Secondary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            Event::PointerButton {
+                pos: target,
+                button: PointerButton::Secondary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]);
+        frame(vec![]);
+        let shapes = frame(vec![]);
+
+        let all = texts(&shapes);
+        let rows: Vec<_> = ["Play", "Play next", "Add to queue", "Go to artist"]
+            .iter()
+            .map(|label| {
+                all.iter()
+                    .find(|(t, _)| t == label)
+                    .unwrap_or_else(|| panic!("menu row {label:?} not drawn; got {all:?}"))
+                    .1
+            })
+            .collect();
+        for pair in rows.windows(2) {
+            assert!(
+                pair[1].y - pair[0].y >= ITEM_H - 0.5,
+                "rows overlap or sit side by side: {rows:?}"
+            );
+            assert!(
+                (pair[1].x - pair[0].x).abs() < 1.0,
+                "rows not aligned: {rows:?}"
+            );
+        }
+    }
+}
