@@ -36,6 +36,34 @@ pub fn layout(
     painter.layout_job(job)
 }
 
+/// One row made of differently styled `runs`, ending in `…` when wider than
+/// the space left in the current row.
+pub fn truncated_runs(ui: &mut Ui, runs: &[(&str, FontId, Color32)]) -> egui::Response {
+    let mut job = LayoutJob::default();
+    for (text, font, color) in runs {
+        job.append(
+            text,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: *color,
+                valign: Align::Center,
+                ..Default::default()
+            },
+        );
+    }
+    job.wrap = TextWrapping {
+        max_width: ui.available_width().max(1.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.painter().layout_job(job);
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    ui.painter().galley(rect.min, galley, Color32::WHITE);
+    resp
+}
+
 /// Paints one row of text inside `rect`, vertically centred, aligned
 /// horizontally by `align`, ellipsised to the rect's width. Returns the
 /// painted width.

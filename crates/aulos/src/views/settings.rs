@@ -530,21 +530,18 @@ fn content(app: &mut App, ui: &mut Ui, _pal: Palette, pad: f32) {
 // ---------------------------------------------------------------- primitives
 
 fn heading(ui: &mut Ui, pal: &Palette, title: &str, note: &str) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
-        ui.label(
-            egui::RichText::new(title)
-                .font(theme::semibold(17.0))
-                .color(pal.text),
-        );
-        if !note.is_empty() {
-            ui.label(
-                egui::RichText::new(note)
-                    .font(theme::regular(12.5))
-                    .color(pal.text_3),
-            );
-        }
-    });
+    let note = if note.is_empty() {
+        String::new()
+    } else {
+        format!("   {note}")
+    };
+    crate::widgets::truncated_runs(
+        ui,
+        &[
+            (title, theme::semibold(17.0), pal.text),
+            (&note, theme::regular(12.5), pal.text_3),
+        ],
+    );
 }
 
 /// A setting row: title and wrapped description left, `control` right, a
@@ -1178,7 +1175,7 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         ui.add_space(10.0);
     }
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         if pill_button_enabled(
             ui,
@@ -1194,12 +1191,15 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
             pick_folder(app);
         }
         let st = &mut app.views.settings;
+        // Leave room for the "Add" pill and the field margins; the field
+        // shrinks on narrow pages.
+        let field_w = (ui.available_width() - 100.0).clamp(40.0, 240.0);
         input(
             ui,
             &pal,
             &mut st.path_input,
             "…or type a path",
-            240.0,
+            field_w,
             false,
         );
         let path = PathBuf::from(st.path_input.trim());

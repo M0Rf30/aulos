@@ -336,7 +336,27 @@ impl Smoke {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                let update = app.session.play_album(album, 0);
+                // Never play real music: every queued track points at a
+                // silent file, the first one is the file itself.
+                let silence = std::env::var_os("AULOS_SMOKE_FILE")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| "target/smoke/silence.flac".into());
+                let mut tracks = app
+                    .session
+                    .library
+                    .albums
+                    .get(album)
+                    .map(|a| a.tracks.clone())
+                    .unwrap_or_default();
+                for track in &mut tracks {
+                    track.source_uri = silence.to_string_lossy().into_owned();
+                    track.path.clone_from(&silence);
+                    track.duration = Duration::from_secs(600);
+                }
+                if let Some(first) = tracks.first_mut() {
+                    first.title = "Silence".into();
+                }
+                let update = app.session.play_tracks(tracks, 0);
                 app.run(update);
                 if std::env::var_os("AULOS_SMOKE_REPEAT").is_some() {
                     let update = app

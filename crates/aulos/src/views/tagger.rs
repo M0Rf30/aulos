@@ -1238,7 +1238,7 @@ fn header(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             right_aligned(ui, acts);
         });
     } else {
-        ui.horizontal(|ui| header_left(app, ui, facts, acts));
+        ui.horizontal_wrapped(|ui| header_left(app, ui, facts, acts));
         if app
             .session
             .tagger
@@ -1785,7 +1785,8 @@ fn files_empty(app: &App, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
             .layout(Layout::top_down(Align::Center)),
     );
     cui.spacing_mut().item_spacing.y = 8.0;
-    cui.add_space(36.0);
+    // Roughly 200pt of content: tighten the top gap when the pane is short.
+    cui.add_space(((rect.height() - 32.0 - 200.0) * 0.5).clamp(2.0, 36.0));
     cui.label(
         RichText::new(regular::MUSIC_NOTES)
             .font(theme::icon(30.0))

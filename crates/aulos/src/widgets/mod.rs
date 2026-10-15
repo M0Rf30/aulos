@@ -22,7 +22,7 @@ pub use input::{search_field, text_field};
 pub use states::{empty_state, empty_state_actions, empty_state_tinted, skeleton};
 pub use text::{
     caps_label, label_text, marquee_id, marquee_text, paint_icon, paint_text, paint_text_spaced,
-    text_width,
+    text_width, truncated_runs,
 };
 pub use track_row::{
     Columns, HEADER_HEIGHT, ROW_HEIGHT, track_header, track_header_sortable, track_row,

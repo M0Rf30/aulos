@@ -155,17 +155,17 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
                 .color(pal.text),
         );
         tag_badge(ui, "LAB", pal.text_1, Color32::TRANSPARENT, pal.text_5);
-        ui.label(
-            RichText::new("Experimental. Originals are never modified; output goes to")
-                .color(pal.text_2),
-        );
-        ui.add(
-            Label::new(
-                RichText::new(convert::out_dir(config).display().to_string())
-                    .font(theme::mono(12.0))
-                    .color(pal.text_1),
-            )
-            .truncate(),
+        let dir = convert::out_dir(config).display().to_string();
+        crate::widgets::truncated_runs(
+            ui,
+            &[
+                (
+                    "Experimental. Originals are never modified; output goes to ",
+                    theme::regular(14.0),
+                    pal.text_2,
+                ),
+                (&dir, theme::mono(12.0), pal.text_1),
+            ],
         );
     });
 
@@ -208,14 +208,9 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
 
     // Queue | Output card.
     let body = ui.available_rect_before_wrap();
-    let right_w = if app.narrow { 300.0 } else { 340.0 };
-    let left = Rect::from_min_max(
-        body.min,
-        pos2(
-            (body.right() - right_w - 20.0).max(body.left() + 160.0),
-            body.bottom(),
-        ),
-    );
+    // The card gives up width before the queue is squeezed under ~half.
+    let right_w = (if app.narrow { 300.0_f32 } else { 340.0 }).min(body.width() * 0.48);
+    let left = Rect::from_min_max(body.min, pos2(body.right() - right_w - 20.0, body.bottom()));
     let right = Rect::from_min_max(pos2(left.right() + 20.0, body.top()), body.max);
     let mut queue_ui = ui.new_child(
         UiBuilder::new()
@@ -346,7 +341,7 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             if counts.failed > 0 {
                 summary.push_str(&format!(" · {} failed", counts.failed));
             }
-            ui.label(RichText::new(summary).color(pal.text_2));
+            ui.add(Label::new(RichText::new(summary).color(pal.text_2)).truncate());
         });
     });
 

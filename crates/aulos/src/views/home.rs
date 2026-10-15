@@ -395,27 +395,19 @@ fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
         .and_then(|data| data.resume.as_ref());
     match &app.session.playback.current_track {
         Some(track) if !track.is_live_stream() => {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let font = theme::regular(14.0);
-                ui.label(
-                    RichText::new("Now playing ")
-                        .font(font.clone())
-                        .color(pal.text_2),
-                );
-                ui.label(
-                    RichText::new(&track.title)
-                        .font(theme::medium(14.0))
-                        .color(pal.text),
-                );
-                if !track.artist.is_empty() {
-                    ui.label(
-                        RichText::new(format!(" · {}", track.artist))
-                            .font(font)
-                            .color(pal.text_2),
-                    );
-                }
-            });
+            let artist = if track.artist.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", track.artist)
+            };
+            crate::widgets::truncated_runs(
+                ui,
+                &[
+                    ("Now playing ", theme::regular(14.0), pal.text_2),
+                    (&track.title, theme::medium(14.0), pal.text),
+                    (&artist, theme::regular(14.0), pal.text_2),
+                ],
+            );
         }
         _ => match resume {
             Some(resume) => {

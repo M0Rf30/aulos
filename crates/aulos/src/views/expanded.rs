@@ -647,16 +647,10 @@ fn chip(
 fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     const INFO_H: f32 = 203.0;
     let t = Theme::get(ui.ctx());
-    // The cover, seek bar and controls share one width; the column narrows
-    // (keeping the cover square) when the window is too short for 380pt.
-    let w = col
-        .width()
-        .min(380.0)
-        .min(col.height() - INFO_H - 22.0)
-        .max(180.0);
-    let cover = w;
-    let x0 = col.center().x - w / 2.0;
-    // The title wraps to a second row; everything under it moves down.
+    // Title, seek bar and controls use one width (380pt, less in a narrow
+    // column, never under 280pt); the square cover shrinks below it when the
+    // window is too short, so the whole column always fits.
+    let w = col.width().min(380.0).max(col.width().min(280.0));
     let mut title_job = egui::text::LayoutJob::simple(
         track.title.clone(),
         theme::semibold(26.0),
@@ -666,8 +660,10 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     title_job.wrap.max_rows = 2;
     title_job.wrap.overflow_character = Some('\u{2026}');
     let title_galley = ui.painter().layout_job(title_job);
-    let title_h = title_galley.size().y;
-    let extra = (title_h - 30.0).max(0.0);
+    // A two-row title pushes the info block down; the cover gives up that height.
+    let extra = (title_galley.size().y - 30.0).max(0.0);
+    let cover = w.min(col.height() - INFO_H - 22.0 - extra).max(64.0);
+    let x0 = col.center().x - w / 2.0;
     let total = cover + 22.0 + INFO_H + extra;
     let top = (col.center().y - total / 2.0).max(col.top());
 
