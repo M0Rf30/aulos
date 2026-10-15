@@ -28,6 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Concurrent cover decodes while loading the local library.
+const COVER_DECODE_CONCURRENCY: usize = 4;
+
 /// Albums fetched per batch from a remote provider.
 const BATCH_SIZE: usize = 50;
 
@@ -728,6 +731,7 @@ async fn load_local(
     .await
     .unwrap_or_default();
 
+    let permits = Arc::new(tokio::sync::Semaphore::new(COVER_DECODE_CONCURRENCY));
     let cover_tasks: Vec<_> = albums
         .iter()
         .filter_map(|album| {
@@ -740,9 +744,19 @@ async fn load_local(
             // full-size bytes are dropped right here; they are re-read
             // lazily for whichever album needs them (blur, hero,
             // notification).
-            tokio::task::spawn_blocking(move || {
-                let bytes = CoverArt::get_cover_art(&path)?;
-                Some((key, CoverThumb::from_bytes(&bytes)?))
+            // At most `COVER_DECODE_CONCURRENCY` full-size decodes at once:
+            // an unbounded burst peaks at GBs and leaves one malloc arena
+            // per thread behind.
+            let permits = Arc::clone(&permits);
+            tokio::spawn(async move {
+                let _permit = permits.acquire_owned().await.ok()?;
+                tokio::task::spawn_blocking(move || {
+                    let bytes = CoverArt::get_cover_art(&path)?;
+                    Some((key, CoverThumb::from_bytes(&bytes)?))
+                })
+                .await
+                .ok()
+                .flatten()
             })
         })
         .collect();
