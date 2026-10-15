@@ -680,6 +680,7 @@ fn grid_body(
             let is_playing = playing
                 .as_deref()
                 .is_some_and(|p| p.eq_ignore_ascii_case(&artist.name));
+            let more = crate::widgets::more_trigger(ui, resp.id, circle, resp.hovered(), 18.0);
             if resp.hovered() || is_playing {
                 painter.circle_stroke(
                     circle.center(),
@@ -708,7 +709,9 @@ fn grid_body(
             if resp.clicked() {
                 out.open = Some(artist.name.clone());
             }
-            if let Some(action) = menus::artist_menu(&resp, &artist.name) {
+            if let Some(action) = menus::artist_menu(&resp, &artist.name)
+                .or_else(|| menus::artist_menu_click(&more, &artist.name))
+            {
                 out.action = Some(action);
             }
         }

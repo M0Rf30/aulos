@@ -17,7 +17,7 @@ pub use bar::{seek_bar, slider_bar};
 pub use button::{
     IconBtn, PillKind, chip, icon_button, pill_button, pill_button_enabled, segmented, toggle,
 };
-pub use cover::{Covers, avatar_tile, cover_image, gradient_fill, seed_colors};
+pub use cover::{Covers, avatar_tile, cover_image, gradient_fill, more_trigger, seed_colors};
 pub use input::{search_field, text_field};
 pub use states::{empty_state, empty_state_actions, empty_state_tinted, skeleton};
 pub use text::{

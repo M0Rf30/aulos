@@ -283,6 +283,40 @@ pub fn cover_image(
     }
 }
 
+/// The hover-only "…" circle in the top-right corner of a card's `art`
+/// rect. Interact it after the card's own response so it wins hit-testing;
+/// `card_hovered` is the card's hover state (the circle also shows while it is
+/// itself hovered).
+pub fn more_trigger(
+    ui: &Ui,
+    id: egui::Id,
+    art: Rect,
+    card_hovered: bool,
+    inset: f32,
+) -> egui::Response {
+    let rect = Rect::from_center_size(
+        pos2(art.right() - inset, art.top() + inset),
+        egui::vec2(28.0, 28.0),
+    );
+    let more = ui.interact(rect, id.with("more"), egui::Sense::click());
+    if card_hovered || more.hovered() {
+        ui.painter().circle_filled(
+            rect.center(),
+            14.0,
+            Color32::from_black_alpha(if more.hovered() { 170 } else { 120 }),
+        );
+        super::paint_icon(
+            ui.painter(),
+            rect.center(),
+            egui_phosphor::regular::DOTS_THREE,
+            17.0,
+            Color32::WHITE,
+            false,
+        );
+    }
+    more
+}
+
 /// A circular (or rounded) tile with the initials of `name` on a tinted
 /// gradient, or the artist photo when present.
 pub fn avatar_tile(

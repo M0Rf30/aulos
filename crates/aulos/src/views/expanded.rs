@@ -482,14 +482,28 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
     if let Some(track) = track.filter(|t| !t.album.is_empty()) {
         let name =
             Rect::from_center_size(pos2(rect.center().x, rect.top() + 34.0), vec2(mid_w, 18.0));
-        paint_text(
-            ui.painter(),
-            name,
-            Align::Center,
-            &track.album,
-            theme::semibold(13.0),
-            Color32::WHITE,
-        );
+        let font = theme::semibold(13.0);
+        if crate::widgets::text_width(ui, &track.album, font.clone()) <= name.width() {
+            paint_text(
+                ui.painter(),
+                name,
+                Align::Center,
+                &track.album,
+                font,
+                Color32::WHITE,
+            );
+        } else {
+            crate::widgets::marquee_text(
+                ui,
+                name,
+                crate::widgets::marquee_id("expanded-album", &track.album),
+                &track.album,
+                font,
+                Color32::WHITE,
+                rgba(6, 14, 18, 0.75),
+                true,
+            );
+        }
     }
 }
 

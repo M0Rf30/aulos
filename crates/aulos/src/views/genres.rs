@@ -676,6 +676,9 @@ fn top_artists(ui: &mut Ui, a: &App, out: &mut DetailOut) {
             if resp.clicked() {
                 out.open_artist = Some(name.clone());
             }
+            if let Some(action) = menus::artist_menu(&resp, name) {
+                out.action = Some(action);
+            }
         }
     });
 }

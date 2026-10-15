@@ -245,7 +245,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         "most",
                         "Most played this month",
                         None,
-                        None,
+                        Some(Act::SeeAllAlbums {
+                            recently_added: false,
+                        }),
                         &data.most_played_month,
                     );
                     ui.add_space(SECTION_GAP);
@@ -255,9 +257,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: "Top artists this month",
                         hint: None,
                         action: None,
-                        see_all: false,
+                        see_all: true,
                     };
-                    shelf(
+                    let clicked = shelf(
                         ui,
                         offsets,
                         Id::new(("home-shelf", "top-artists")),
@@ -273,6 +275,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                             }
                         },
                     );
+                    if clicked.see_all {
+                        cx.out.act = Some(Act::Goto(Route::Artists));
+                    }
                     ui.add_space(SECTION_GAP);
                 }
                 for s in &app.session.home.similar {
@@ -284,9 +289,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: &title,
                         hint: Some("Artists you may like"),
                         action: None,
-                        see_all: false,
+                        see_all: true,
                     };
-                    shelf(
+                    let clicked = shelf(
                         ui,
                         offsets,
                         Id::new(("home-shelf", "similar", &s.seed)),
@@ -310,6 +315,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                             }
                         },
                     );
+                    if clicked.see_all {
+                        cx.out.act = Some(Act::Goto(Route::Artists));
+                    }
                     ui.add_space(SECTION_GAP);
                 }
                 if !data.recently_added.is_empty() {
@@ -336,7 +344,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         "rediscover",
                         "Rediscover",
                         hint,
-                        None,
+                        Some(Act::SeeAllAlbums {
+                            recently_added: false,
+                        }),
                         &data.rediscover,
                     );
                     ui.add_space(SECTION_GAP);
@@ -346,7 +356,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         title: "Random picks",
                         hint: None,
                         action: Some((regular::SHUFFLE, "Shuffle picks")),
-                        see_all: false,
+                        see_all: true,
                     };
                     let clicked =
                         shelf(ui, offsets, Id::new(("home-shelf", "random")), head, |ui| {
@@ -356,6 +366,10 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         });
                     if clicked.action {
                         cx.out.act = Some(Act::Reroll);
+                    } else if clicked.see_all {
+                        cx.out.act = Some(Act::SeeAllAlbums {
+                            recently_added: false,
+                        });
                     }
                     ui.add_space(SECTION_GAP);
                 }
@@ -772,6 +786,9 @@ fn album_card_at(ui: &mut Ui, cx: &mut Cx, rect: Rect, a: &AlbumRef) {
         );
     }
 
+    let more =
+        crate::widgets::more_trigger(ui, resp.id, art, resp.hovered() || play.hovered(), 22.0);
+
     let title_rect = Rect::from_min_size(pos2(rect.left(), art.bottom() + 8.0), vec2(w, 18.0));
     if a.name.trim().is_empty() {
         paint_text(
@@ -807,11 +824,16 @@ fn album_card_at(ui: &mut Ui, cx: &mut Cx, rect: Rect, a: &AlbumRef) {
     } else if resp.clicked() {
         cx.out.act = Some(Act::OpenAlbum(a.artist.clone(), a.name.clone()));
     }
-    if resp.secondary_clicked() || resp.context_menu_opened() {
+    if resp.secondary_clicked()
+        || resp.context_menu_opened()
+        || more.clicked()
+        || more.context_menu_opened()
+    {
         let lib = &cx.app.session.library;
+        let playlists = &cx.app.session.playlists.playlists;
         if let Some(idx) = lib.find_album_exact(&a.artist, &a.name)
-            && let Some(menu) =
-                menus::album_menu(&resp, &lib.albums[idx], &cx.app.session.playlists.playlists)
+            && let Some(menu) = menus::album_menu(&resp, &lib.albums[idx], playlists)
+                .or_else(|| menus::album_menu_click(&more, &lib.albums[idx], playlists))
         {
             cx.out.menu = Some(menu);
         }
@@ -855,6 +877,9 @@ fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind
     );
     let play = library.then(|| ui.interact(play_rect, resp.id.with("play"), Sense::click()));
     let play_hovered = play.as_ref().is_some_and(|p| p.hovered());
+    let more = library.then(|| {
+        crate::widgets::more_trigger(ui, resp.id, art, resp.hovered() || play_hovered, 18.0)
+    });
     if library && (resp.hovered() || play_hovered) {
         let bg = if play_hovered {
             pal.text
@@ -897,9 +922,10 @@ fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind
             } else if resp.clicked() {
                 cx.out.act = Some(Act::OpenArtist(name.to_owned()));
             }
-            if (resp.secondary_clicked() || resp.context_menu_opened())
-                && let Some(menu) = menus::artist_menu(&resp, name)
-            {
+            if let Some(menu) = menus::artist_menu(&resp, name).or_else(|| {
+                more.as_ref()
+                    .and_then(|m| menus::artist_menu_click(m, name))
+            }) {
                 cx.out.menu = Some(menu);
             }
         }

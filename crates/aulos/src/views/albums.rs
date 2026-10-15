@@ -553,26 +553,7 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                         play_clicked = pr.clicked();
                     }
                     // Hover-only "…" circle (top right) opening the album menu.
-                    let more_rect = Rect::from_center_size(
-                        pos2(cover.right() - 22.0, cover.top() + 22.0),
-                        vec2(28.0, 28.0),
-                    );
-                    let more = ui.interact(more_rect, id.with("more"), Sense::click());
-                    if hovered || more.hovered() {
-                        ui.painter().circle_filled(
-                            more_rect.center(),
-                            14.0,
-                            egui::Color32::from_black_alpha(if more.hovered() { 170 } else { 120 }),
-                        );
-                        paint_icon(
-                            ui.painter(),
-                            more_rect.center(),
-                            regular::DOTS_THREE,
-                            17.0,
-                            egui::Color32::WHITE,
-                            false,
-                        );
-                    }
+                    let more = crate::widgets::more_trigger(ui, id, cover, hovered, 22.0);
                     if playing {
                         let badge = Rect::from_min_size(
                             pos2(cover.left() + 8.0, cover.bottom() - 32.0),
