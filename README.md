@@ -12,6 +12,7 @@
 [![CI](https://github.com/M0Rf30/aulos/actions/workflows/ci.yml/badge.svg)](https://github.com/M0Rf30/aulos/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/M0Rf30/aulos)](https://github.com/M0Rf30/aulos/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Try it in your browser](https://img.shields.io/badge/Try%20it-in%20your%20browser-E07A5F?logo=webassembly&logoColor=white)](https://m0rf30.github.io/aulos/)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/W7W61U8IUL)
 
 </div>
