@@ -32,6 +32,34 @@ impl Session {
         self.config.save();
     }
 
+    /// Stores the visualizer's lock, beat sensitivity (clamped to 0–2) and
+    /// last preset, saving only when something changed. `preset` of `None`
+    /// keeps the stored one.
+    pub fn set_visualizer_prefs(
+        &mut self,
+        locked: bool,
+        sensitivity: f32,
+        preset: Option<&std::path::Path>,
+    ) {
+        let sensitivity = Config::clamp_visualizer_sensitivity(sensitivity);
+        let config = &mut self.config.config;
+        let preset = preset.map(std::path::Path::to_path_buf);
+        let changed = config.visualizer_locked != locked
+            || (config.visualizer_sensitivity - sensitivity).abs() > f32::EPSILON
+            || preset
+                .as_ref()
+                .is_some_and(|p| config.visualizer_preset.as_ref() != Some(p));
+        if !changed {
+            return;
+        }
+        config.visualizer_locked = locked;
+        config.visualizer_sensitivity = sensitivity;
+        if preset.is_some() {
+            config.visualizer_preset = preset;
+        }
+        self.config.save();
+    }
+
     /// Turns "stop after every track" on or off and saves it. The one-off
     /// form is [`Self::toggle_stop_after`].
     pub fn set_stop_after_each_track(&mut self, on: bool) {
@@ -108,6 +136,20 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{test_session, test_session_persisting, track};
+
+    #[test]
+    fn visualizer_prefs_are_clamped_stored_and_persisted() {
+        let mut session = test_session_persisting();
+        let preset = std::path::Path::new("/presets/a.milk2");
+        session.set_visualizer_prefs(true, 7.0, Some(preset));
+        // No preset: the stored one stays.
+        session.set_visualizer_prefs(true, 0.5, None);
+        session.config.flush();
+        let saved = crate::config::Config::load_from(session.config.path.as_ref().unwrap());
+        assert!(saved.visualizer_locked);
+        assert_eq!(saved.visualizer_sensitivity, 0.5);
+        assert_eq!(saved.visualizer_preset.as_deref(), Some(preset));
+    }
 
     #[test]
     fn toggles_are_stored_and_persisted() {

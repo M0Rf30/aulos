@@ -334,6 +334,12 @@ pub struct Config {
     /// Interface zoom, [`Self::UI_SCALE_MIN`]–[`Self::UI_SCALE_MAX`]; 1.0
     /// follows the display's own scale factor unchanged. Loading clamps it.
     pub ui_scale: f32,
+    /// Visualizer: keep the current preset instead of rotating.
+    pub visualizer_locked: bool,
+    /// Visualizer beat sensitivity, 0.0–2.0 (1.0 is neutral). Loading clamps it.
+    pub visualizer_sensitivity: f32,
+    /// The preset on screen when the visualizer was last used.
+    pub visualizer_preset: Option<PathBuf>,
     /// Whether the first-run intro jingle ("it really pipes the satyr's
     /// ass") has already been played.
     pub intro_played: bool,
@@ -455,6 +461,9 @@ impl Default for Config {
             reduce_motion: false,
             grid_scale: 1.0,
             ui_scale: 1.0,
+            visualizer_locked: false,
+            visualizer_sensitivity: 1.0,
+            visualizer_preset: None,
             intro_played: false,
             fade_duration_secs: 0.0,
             auto_play_mode: AutoPlayMode::Off,
@@ -531,6 +540,8 @@ impl Config {
         match ron::from_str::<Config>(&text) {
             Ok(mut config) => {
                 config.ui_scale = Self::clamp_ui_scale(config.ui_scale);
+                config.visualizer_sensitivity =
+                    Self::clamp_visualizer_sensitivity(config.visualizer_sensitivity);
                 config
             }
             Err(e) => {
@@ -559,6 +570,16 @@ impl Config {
     pub fn clamp_ui_scale(scale: f32) -> f32 {
         if scale.is_finite() {
             scale.clamp(Self::UI_SCALE_MIN, Self::UI_SCALE_MAX)
+        } else {
+            1.0
+        }
+    }
+
+    /// `sensitivity` limited to the visualizer's 0.0–2.0 range (1.0 for NaN).
+    #[must_use]
+    pub fn clamp_visualizer_sensitivity(sensitivity: f32) -> f32 {
+        if sensitivity.is_finite() {
+            sensitivity.clamp(0.0, 2.0)
         } else {
             1.0
         }
@@ -805,6 +826,32 @@ mod persistence_tests {
             Config::load_from(&dir.join(SETTINGS_FILE)),
             Config::default()
         );
+    }
+
+    #[test]
+    fn visualizer_settings_default_round_trip_and_clamp() {
+        let dir = scratch("visualizer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        let defaults = Config::default();
+        assert!(!defaults.visualizer_locked);
+        assert_eq!(defaults.visualizer_sensitivity, 1.0);
+        assert_eq!(defaults.visualizer_preset, None);
+
+        let config = Config {
+            visualizer_locked: true,
+            visualizer_sensitivity: 1.4,
+            visualizer_preset: Some(PathBuf::from("/presets/a.milk2")),
+            ..Config::default()
+        };
+        config.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), config);
+
+        std::fs::write(&path, "(visualizer_sensitivity: 9.0)").unwrap();
+        assert_eq!(Config::load_from(&path).visualizer_sensitivity, 2.0);
+        std::fs::write(&path, "(visualizer_sensitivity: -1.0)").unwrap();
+        assert_eq!(Config::load_from(&path).visualizer_sensitivity, 0.0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

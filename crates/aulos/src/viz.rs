@@ -51,8 +51,8 @@ const SILENCE_SAMPLES: usize = (PCM_SAMPLE_RATE as usize / 60) * 2;
 /// Image extensions a preset `sampler_*` texture may use.
 const TEXTURE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "tga", "bmp", "dib"];
 
-/// What the visualizer remembers between openings (kept by the app: the
-/// config has no fields for it).
+/// What the visualizer remembers between openings (stored in the config via
+/// `Session::set_visualizer_prefs`).
 #[derive(Clone)]
 pub struct Settings {
     pub locked: bool,
@@ -65,12 +65,13 @@ pub struct Settings {
     pub entries: Option<Arc<Vec<PresetEntry>>>,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
+impl Settings {
+    /// The remembered settings of the config.
+    pub fn from_config(config: &aulos_core::config::Config) -> Self {
         Self {
-            locked: false,
-            sensitivity: 1.0,
-            preset: None,
+            locked: config.visualizer_locked,
+            sensitivity: config.visualizer_sensitivity,
+            preset: config.visualizer_preset.clone(),
             entries: None,
         }
     }

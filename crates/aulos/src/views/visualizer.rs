@@ -184,6 +184,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     for intent in intents {
         apply(app, &ctx, &frame, intent);
     }
+    // Remember lock, sensitivity and the preset on screen (writes only on change).
+    app.session.set_visualizer_prefs(
+        app.viz_settings.locked,
+        app.viz_settings.sensitivity,
+        frame.preset.as_deref(),
+    );
 }
 
 /// A centred message over the video.

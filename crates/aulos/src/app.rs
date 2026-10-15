@@ -278,6 +278,8 @@ impl App {
         let dark = Self::resolve_dark(session.config.config.theme_mode, cc.egui_ctx.system_theme());
         let pal = if dark { theme::DARK } else { theme::LIGHT };
         let accent = Accent::default_for(&pal);
+        #[cfg(feature = "visualizer")]
+        let viz_settings = crate::viz::Settings::from_config(&session.config.config);
         let mut app = Self {
             session,
             handle,
@@ -323,7 +325,7 @@ impl App {
             #[cfg(feature = "visualizer")]
             viz: None,
             #[cfg(feature = "visualizer")]
-            viz_settings: crate::viz::Settings::default(),
+            viz_settings,
             #[cfg(feature = "visualizer")]
             render_state: cc.wgpu_render_state.clone(),
         };
