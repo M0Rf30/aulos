@@ -81,6 +81,32 @@ jobs:
             exit 1
           fi
 
+  # The egui app also builds for the browser (see pages.yml). Native-only
+  # dependencies are gated by target, so no system packages are needed here.
+  wasm:
+    name: Check (wasm32)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+          cache-on-failure: true
+
+      - name: Check
+        run: cargo check --target wasm32-unknown-unknown -p aulos --locked
+
+      - name: Run clippy
+        run: cargo clippy --target wasm32-unknown-unknown -p aulos --locked -- -D warnings
+
   test:
     name: Test Suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

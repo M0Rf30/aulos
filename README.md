@@ -22,6 +22,28 @@ Aulos is a modern music player for Linux, Windows and macOS, written in Rust. It
 
 The name comes from the *aulos*, the double pipe of ancient Greece; the logo's two slanted reeds are a nod to it.
 
+## Try it in your browser
+
+**[m0rf30.github.io/aulos](https://m0rf30.github.io/aulos/)**: the same egui interface, compiled to WebAssembly. It runs entirely client-side (WebGPU, with a WebGL2 fallback) and nothing is sent to a server.
+
+The browser build is an early preview: the interface renders with an empty library, navigation and settings work, and settings persist in `localStorage`, but nothing plays yet.
+
+| Feature | Desktop | Browser |
+|---|---|---|
+| Local library | ✅ scans your folders | 🚧 pick folders with the File System Access API |
+| Playback | ✅ cpal, gapless, crossfade, DSD | 🚧 Web Audio |
+| Subsonic / OpenSubsonic | ✅ | 🚧 over `fetch`; the server must allow CORS |
+| MPD | ✅ direct TCP | 🚧 through a WebSocket bridge such as websockify |
+| Podcasts and internet radio | ✅ | 🚧 with an optional CORS proxy |
+| Tag editor | ✅ | ❌ |
+| File converter | ✅ | ❌ |
+| Visualizer | ✅ | ❌ |
+| MPRIS, media keys, notifications | ✅ | 🚧 Media Session API; notifications ❌ |
+| Credential storage | ✅ system keyring | ✅ `localStorage` (not encrypted) |
+| Settings | ✅ | ✅ `localStorage` |
+
+✅ available, 🚧 planned, ❌ not available.
+
 ## Features
 
 ### Music sources

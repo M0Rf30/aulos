@@ -1,4 +1,5 @@
 /target
+/crates/aulos/dist
 /.cargo
 /vendor
 /vendor.tar

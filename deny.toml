@@ -3,13 +3,15 @@
 
 [graph]
 # Aulos targets Linux (wayland/X11, zbus, ashpd, keyutils), Windows (MSVC)
-# and macOS (Apple silicon and Intel).
+# and macOS (Apple silicon and Intel), plus the browser build (wasm32, see
+# .github/workflows/pages.yml).
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-apple-darwin" },
     { triple = "x86_64-apple-darwin" },
+    { triple = "wasm32-unknown-unknown" },
 ]
 all-features = true
 
@@ -41,6 +43,8 @@ allow = [
     "MPL-2.0",
     # clipboard-win / error-code (eframe -> arboard on Windows)
     "BSL-1.0",
+    # webpki-root-certs (rustls-platform-verifier on wasm32): Mozilla CA bundle
+    "CDLA-Permissive-2.0",
     # epaint_default_fonts ships egui's default fonts under these
     "OFL-1.1",
     "Ubuntu-font-1.0",
