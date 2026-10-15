@@ -1,4 +1,5 @@
 use crate::theme::{self, ColorExt, oklch};
+use aulos_core::library::covers::CoverStore;
 use aulos_core::session::{ArtistPhoto, OnlineIcon};
 use egui::{
     Color32, ColorImage, Context, CornerRadius, Image, Rect, TextureHandle, TextureOptions, Ui,
@@ -8,12 +9,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+/// Thumbnails uploaded to the GPU per frame: a big library otherwise stalls
+/// one frame and peaks staging memory.
+const UPLOADS_PER_FRAME: usize = 8;
+
 /// Every texture the views draw, keyed by what the core calls it. Gradient
 /// placeholders are built on demand and cached, so `&Covers` is enough to
 /// draw (single-threaded UI only).
 pub struct Covers {
     ctx: Context,
     thumbs: HashMap<String, TextureHandle>,
+    /// Keys whose thumbnail awaits its (throttled) GPU upload.
+    pending: Vec<String>,
     icons: HashMap<String, TextureHandle>,
     photos: HashMap<String, TextureHandle>,
     gradients: RefCell<HashMap<(Color32, Color32), TextureHandle>>,
@@ -28,6 +35,7 @@ impl Covers {
         Self {
             ctx,
             thumbs: HashMap::new(),
+            pending: Vec::new(),
             icons: HashMap::new(),
             photos: HashMap::new(),
             gradients: RefCell::default(),
@@ -47,19 +55,37 @@ impl Covers {
         self.photos.get(name)
     }
 
-    pub fn set_thumb(&mut self, key: String, w: u32, h: u32, rgba: &[u8]) {
-        let tex = self.ctx.load_texture(
-            format!("cover:{key}"),
-            to_image(w, h, rgba),
-            TextureOptions::LINEAR,
-        );
-        self.thumbs.insert(key, tex);
+    /// Queues `key` for upload; [`Self::upload_pending`] does the work.
+    pub fn queue_thumb(&mut self, key: String) {
+        if !self.pending.contains(&key) {
+            self.pending.push(key);
+        }
+    }
+    /// Uploads up to [`UPLOADS_PER_FRAME`] queued thumbnails taking their
+    /// pixels out of `store`, and asks for another frame while more wait.
+    pub fn upload_pending(&mut self, store: &mut CoverStore) {
+        let n = self.pending.len().min(UPLOADS_PER_FRAME);
+        for key in self.pending.drain(..n).collect::<Vec<_>>() {
+            if let Some((w, h, rgba)) = store.take_pixels(&key) {
+                let tex = self.ctx.load_texture(
+                    format!("cover:{key}"),
+                    to_image(w, h, &rgba),
+                    TextureOptions::LINEAR,
+                );
+                self.thumbs.insert(key, tex);
+            }
+        }
+        if !self.pending.is_empty() {
+            self.ctx.request_repaint();
+        }
     }
     pub fn remove_thumb(&mut self, key: &str) {
         self.thumbs.remove(key);
+        self.pending.retain(|k| k != key);
     }
     pub fn clear_thumbs(&mut self) {
         self.thumbs.clear();
+        self.pending.clear();
     }
     pub fn add_icon(&mut self, icon: OnlineIcon) {
         let tex = self.ctx.load_texture(

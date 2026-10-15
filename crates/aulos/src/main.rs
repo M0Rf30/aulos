@@ -53,35 +53,55 @@ fn main() -> eframe::Result {
     let handle = runtime.handle().clone();
 
     let size = smoke::window_size().unwrap_or([1280.0, 800.0]);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(size)
-            .with_min_inner_size([420.0, 190.0])
-            .with_title("Aulos")
-            .with_app_id("io.github.m0rf30.Aulos")
-            // X11 and desktops that don't resolve the icon from the
-            // desktop file via the app id need it on the window itself.
-            .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
-                    .unwrap_or_default(),
-            ),
-        // wgpu's default reserves 128-256 MB blocks; ~10 MB is ever used.
-        wgpu_options: low_memory_wgpu(),
-        ..Default::default()
+    let run = |backends| {
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size(size)
+                .with_min_inner_size([420.0, 190.0])
+                .with_title("Aulos")
+                .with_app_id("io.github.m0rf30.Aulos")
+                // X11 and desktops that don't resolve the icon from the
+                // desktop file via the app id need it on the window itself.
+                .with_icon(
+                    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
+                        .unwrap_or_default(),
+                ),
+            // wgpu's default reserves 128-256 MB blocks; ~10 MB is ever used.
+            wgpu_options: low_memory_wgpu(backends),
+            ..Default::default()
+        };
+        let handle = handle.clone();
+        eframe::run_native(
+            "Aulos",
+            options,
+            Box::new(|cc| Ok(Box::new(app::App::new(cc, handle)))),
+        )
     };
-    eframe::run_native(
-        "Aulos",
-        options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc, handle)))),
-    )
+    // Vulkan alone keeps Mesa's GL stack (libgallium, LLVM; ~50 MB) from
+    // loading; fall back to every backend when it has no adapter.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        match run(Some(eframe::wgpu::Backends::VULKAN)) {
+            Err(eframe::Error::Wgpu(err)) => {
+                tracing::warn!("Vulkan unavailable ({err}); retrying with all backends");
+            }
+            other => return other,
+        }
+    }
+    run(None)
 }
 
-/// Default wgpu setup with small memory blocks (`MemoryHints::MemoryUsage`):
+/// Default wgpu setup (restricted to `backends` when given) with small memory blocks (`MemoryHints::MemoryUsage`):
 /// about 160 MB less shared GPU memory than the performance default.
-fn low_memory_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+fn low_memory_wgpu(
+    backends: Option<eframe::wgpu::Backends>,
+) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
     let mut config = WgpuConfiguration::default();
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
+        if let Some(backends) = backends {
+            setup.instance_descriptor.backends = backends;
+        }
         let previous = setup.device_descriptor.clone();
         setup.device_descriptor = std::sync::Arc::new(move |adapter| {
             let mut descriptor = previous(adapter);

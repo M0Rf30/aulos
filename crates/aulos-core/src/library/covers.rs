@@ -15,6 +15,9 @@
 use super::CoverArt;
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static THUMB_MAX_DIM: AtomicU32 = AtomicU32::new(CoverArt::GRID_THUMBNAIL_MAX_DIM);
 
 /// One album's cover: a decoded, downscaled RGBA thumbnail and a
 /// fingerprint of the full-size bytes it came from. The full-size bytes are
@@ -24,7 +27,8 @@ use std::collections::HashMap;
 pub struct CoverThumb {
     pub width: u32,
     pub height: u32,
-    /// Straight RGBA pixels, at most [`CoverArt::GRID_THUMBNAIL_MAX_DIM`]
+    /// Straight RGBA pixels (empty once a UI took them with
+    /// [`CoverStore::take_pixels`]), at most [`CoverArt::GRID_THUMBNAIL_MAX_DIM`]
     /// per side. Reference-counted, so handing them to an image handle
     /// shares rather than copies the buffer.
     pub rgba: Bytes,
@@ -32,12 +36,18 @@ pub struct CoverThumb {
 }
 
 impl CoverThumb {
+    /// Sets the side length (px) future thumbnails are downscaled to, e.g.
+    /// from the UI's pixel density. Already decoded thumbnails keep theirs.
+    pub fn set_max_dim(px: u32) {
+        THUMB_MAX_DIM.store(px.max(1), Ordering::Relaxed);
+    }
+
     /// Decodes and downscales `bytes`; `None` when they are not a
     /// decodable image.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (width, height, rgba) =
-            CoverArt::decode_thumbnail(bytes, CoverArt::GRID_THUMBNAIL_MAX_DIM)?;
+            CoverArt::decode_thumbnail(bytes, THUMB_MAX_DIM.load(Ordering::Relaxed))?;
         Some(Self {
             width,
             height,
@@ -102,6 +112,17 @@ impl CoverStore {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&CoverThumb> {
         self.visible.get(key)
+    }
+
+    /// Hands out the pixels of `key` once and frees them from the store
+    /// (width, height, pixels). The entry stays, so its fingerprint still
+    /// de-duplicates a reload; `None` when absent or already taken.
+    pub fn take_pixels(&mut self, key: &str) -> Option<(u32, u32, Bytes)> {
+        let thumb = self.visible.get_mut(key)?;
+        if thumb.rgba.is_empty() {
+            return None;
+        }
+        Some((thumb.width, thumb.height, std::mem::take(&mut thumb.rgba)))
     }
 
     #[must_use]

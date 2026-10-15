@@ -83,7 +83,7 @@ impl CoverArt {
     /// headroom to spare, while remaining far smaller than typical
     /// full-resolution embedded cover art (which can be several thousand
     /// pixels per side) — see `decode_thumbnail`.
-    pub const GRID_THUMBNAIL_MAX_DIM: u32 = 320;
+    pub const GRID_THUMBNAIL_MAX_DIM: u32 = 256;
 
     /// Max side length (px) for the larger cover shown in the expanded
     /// now-playing view, which can render at up to roughly half the

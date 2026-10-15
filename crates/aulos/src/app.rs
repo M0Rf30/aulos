@@ -269,6 +269,12 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let (app_tx, app_rx) = mpsc::channel();
         let (session, init_errors) = Session::bootstrap();
+        // Thumbnails at the physical size of a grid card (256 px at 1x).
+        aulos_core::library::covers::CoverThumb::set_max_dim(
+            (256.0 * cc.egui_ctx.pixels_per_point())
+                .round()
+                .clamp(128.0, 640.0) as u32,
+        );
         let dark = Self::resolve_dark(session.config.config.theme_mode, cc.egui_ctx.system_theme());
         let pal = if dark { theme::DARK } else { theme::LIGHT };
         let accent = Accent::default_for(&pal);
@@ -394,10 +400,7 @@ impl App {
             self.covers.remove_thumb(key);
         }
         for key in covers.changed {
-            if let Some(thumb) = self.session.library.covers.get(&key) {
-                self.covers
-                    .set_thumb(key, thumb.width, thumb.height, &thumb.rgba);
-            }
+            self.covers.queue_thumb(key);
         }
         if changes.artist_photos_cleared {
             self.covers.clear_photos();
@@ -1125,6 +1128,7 @@ impl eframe::App for App {
             self.zoom_base = Some(1.0 / native);
             self.apply_zoom();
         }
+        self.covers.upload_pending(&mut self.session.library.covers);
         views::tagger::pump(self);
         views::settings::pump(self);
         self.update_art();
