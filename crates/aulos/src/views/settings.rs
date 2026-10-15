@@ -1838,15 +1838,36 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
                 );
                 labelled_input(ui, &pal, "Username", &mut s.username, "", false);
                 labelled_input(ui, &pal, "Password or API key", &mut s.password, "", true);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    toggle(ui, &mut s.accept_invalid_certs);
+                if cfg!(target_arch = "wasm32") {
+                    // `fetch` cannot skip certificate checks: the browser
+                    // alone decides which certificates it trusts.
+                    s.accept_invalid_certs = false;
                     small_text(
                         ui,
-                        "Accept invalid TLS certificates (self-signed servers)",
+                        "The browser validates TLS certificates itself, so self-signed servers \
+                         only work once your browser trusts their certificate. The server must \
+                         also allow requests from this site (CORS) and use https when this page \
+                         is served over https.",
                         pal.text_2,
                     );
-                });
+                    ui.add_space(6.0);
+                    small_text(
+                        ui,
+                        "The password is stored unencrypted in this browser's localStorage for \
+                         this site; the web has no system keyring.",
+                        pal.warn,
+                    );
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        toggle(ui, &mut s.accept_invalid_certs);
+                        small_text(
+                            ui,
+                            "Accept invalid TLS certificates (self-signed servers)",
+                            pal.text_2,
+                        );
+                    });
+                }
                 ui.add_space(10.0);
             }
         }

@@ -58,6 +58,10 @@ rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 
 # Lyrics fetching and AutoEQ profile fetching
 reqwest.workspace = true
+# Subsonic/OpenSubsonic API client: async reqwest, so `fetch` in the browser.
+opensubsonic.workspace = true
+# Async methods in the object-safe `MusicProvider` trait.
+async-trait = "0.1"
 icy-metadata = "0.6"
 # Held at 2.x: feed-rs 3.0 drops an item's iTunes media object unless it
 # also carries an itunes title/summary, losing `<itunes:duration>` for
@@ -114,7 +118,6 @@ hound = "3.5"
 tokio = { workspace = true, features = ["full"] }
 cpal = "0.18"
 mpd_client.workspace = true
-opensubsonic.workspace = true
 notify = "8"
 # Opens URLs in the default browser (the web build uses `window.open`).
 open.workspace = true
@@ -128,6 +131,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "Window",
+    "Location",
     "Storage",
     "Navigator",
     # Web Audio playback (`player/web_backend.rs`).

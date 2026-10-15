@@ -41,10 +41,7 @@ impl Session {
             .begin_track(track.clone(), Loadable::Loading);
         let provider = self.providers.registry.get_shared(&track.provider_id);
         Effect::future(async move {
-            let result =
-                crate::task::spawn_blocking(move || probe_track(&track, provider.as_deref()))
-                    .await
-                    .map_or_else(|e| Err(e.to_string()), |r| r.map(Box::new));
+            let result = probe_track(&track, provider.as_deref()).await.map(Box::new);
             PropertiesEvent::Track { request_id, result }
         })
     }

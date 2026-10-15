@@ -97,6 +97,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                     sort_menu(app, ui, &root);
                 });
+            } else if browse
+                && !detail
+                && !app.narrow
+                && app.session.providers.provider_list.len() > 1
+            {
+                // An empty library has no view controls, but the way to
+                // another source (a server, say) must stay reachable.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    sources_menu(app, ui);
+                });
             }
         },
     );

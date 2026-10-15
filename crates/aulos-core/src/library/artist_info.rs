@@ -35,6 +35,7 @@
 //! this module only for the on-disk cache, not for Deezer/Wikipedia.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long a positive (bio and/or image found) cache entry stays fresh
@@ -464,9 +465,10 @@ pub fn resolve_via_agents(
 
 /// Resolves one artist's info from a provider-native source (currently
 /// only meaningfully implemented for `SubsonicProvider`), consulting/
-/// populating `store` first with a server-namespaced key.
-pub fn resolve_via_provider(
-    store: &ArtistInfoStore,
+/// populating `store` first with a server-namespaced key. The request is
+/// awaited; decoding and caching the image run on the blocking pool.
+pub async fn resolve_via_provider(
+    store: Arc<ArtistInfoStore>,
     provider: &dyn crate::provider::MusicProvider,
     provider_id: &str,
     name: &str,
@@ -483,32 +485,34 @@ pub fn resolve_via_provider(
         };
     }
 
-    let (bio, raw_image) = match provider.get_artist_info(name) {
+    let (bio, raw_image) = match provider.get_artist_info(name).await {
         Ok(Some(result)) => (result.bio, result.image_bytes),
         Ok(None) | Err(_) => (None, None),
     };
 
-    let image = raw_image.as_deref().and_then(|bytes| {
-        store.save_image(&key, bytes);
-        crate::library::CoverArt::decode_thumbnail(bytes, 640)
-    });
+    let name = name.to_string();
+    let fallback = name.clone();
+    crate::task::spawn_blocking(move || {
+        let image = raw_image.as_deref().and_then(|bytes| {
+            store.save_image(&key, bytes);
+            crate::library::CoverArt::decode_thumbnail(bytes, 640)
+        });
 
-    let negative = bio.is_none() && image.is_none();
-    store.put(
-        &key,
-        ArtistInfoEntry {
-            bio: bio.clone(),
-            image_cached: image.is_some(),
-            fetched_at: now,
-            negative,
-        },
-    );
+        let negative = bio.is_none() && image.is_none();
+        store.put(
+            &key,
+            ArtistInfoEntry {
+                bio: bio.clone(),
+                image_cached: image.is_some(),
+                fetched_at: now,
+                negative,
+            },
+        );
 
-    ArtistInfoOutcome {
-        name: name.to_string(),
-        bio,
-        image,
-    }
+        ArtistInfoOutcome { name, bio, image }
+    })
+    .await
+    .unwrap_or_else(|_| ArtistInfoOutcome::empty(fallback))
 }
 
 #[cfg(test)]

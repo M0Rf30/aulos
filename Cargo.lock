@@ -638,6 +638,7 @@ version = "0.6.1"
 dependencies = [
  "apple-native-keyring-store",
  "ashpd",
+ "async-trait",
  "audioadapter-buffers",
  "bytes",
  "chrono",
@@ -4557,7 +4558,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "opensubsonic"
 version = "0.6.0"
-source = "git+https://github.com/M0Rf30/opensubsonic-rs.git?rev=a43fb76058d4457c6d7d9b824fcdd90025652864#a43fb76058d4457c6d7d9b824fcdd90025652864"
+source = "git+https://github.com/M0Rf30/opensubsonic-rs.git?rev=2f36ee1eb4e962a53ad1369ecf199c9242a9155e#2f36ee1eb4e962a53ad1369ecf199c9242a9155e"
 dependencies = [
  "bytes",
  "futures-util",

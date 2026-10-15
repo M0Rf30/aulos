@@ -21,13 +21,13 @@ use mpd_client::protocol::command::Command as RawCommand;
 use mpd_client::protocol::response::Frame;
 use mpd_client::responses;
 use mpd_client::tag::Tag;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
 /// Filter-expression construction. `mpd_client::filter::Filter` escaped
 /// values incorrectly before elomatreb/mpd_client#27 (`"` broke the command,
@@ -270,20 +270,18 @@ pub struct MpdProvider {
     provider_id: Arc<str>,
     /// Command connection — used for browse, search, playback, etc.
     client: Arc<Mutex<Option<Client>>>,
-    runtime: tokio::runtime::Handle,
     /// Whether MPD stickers are supported (detected on connect).
     stickers_supported: AtomicBool,
 }
 
 impl MpdProvider {
     /// Create a new MPD provider. Does NOT connect yet — call `connect_idle()` first.
-    pub fn new(config: MpdConfig, runtime: tokio::runtime::Handle) -> Self {
+    pub fn new(config: MpdConfig) -> Self {
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
         Self {
             config,
             provider_id,
             client: Arc::new(Mutex::new(None)),
-            runtime,
             stickers_supported: AtomicBool::new(false),
         }
     }
@@ -353,36 +351,26 @@ impl MpdProvider {
             .store(stickers_ok, Ordering::Relaxed);
         tracing::info!("MPD sticker support: {stickers_ok}");
 
-        let mut guard = self.client.lock().await;
-        *guard = Some(client);
+        *self.client.lock() = Some(client);
         Ok(())
     }
 
     /// Disconnect the command connection (e.g. before reconnecting).
     pub async fn disconnect(&self) {
-        let mut guard = self.client.lock().await;
-        *guard = None;
+        *self.client.lock() = None;
     }
 
     /// Get a clone of the command client, or error if not connected.
-    async fn get_client(&self) -> Result<Client, ProviderError> {
-        let guard = self.client.lock().await;
-        guard
+    fn get_client(&self) -> Result<Client, ProviderError> {
+        self.client
+            .lock()
             .clone()
             .ok_or_else(|| ProviderError::NotConnected("Not connected to MPD".into()))
     }
 
     /// Get the `Client` for use in the `MpdBackend` (public for player module).
     pub fn client_clone(&self) -> Option<Client> {
-        self.runtime.block_on(async {
-            let guard = self.client.lock().await;
-            guard.clone()
-        })
-    }
-
-    /// Get a clone of the tokio runtime handle (for MpdBackend creation).
-    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.runtime.clone()
+        self.client.lock().clone()
     }
 
     /// Shared provider id `Arc`, for building `Track`s outside `MpdProvider`
@@ -401,21 +389,13 @@ impl MpdProvider {
         &self.config.host
     }
 
-    /// Run an async block on the tokio runtime (bridging sync MusicProvider to async mpd_client).
-    fn block_on<F, T>(&self, future: F) -> T
-    where
-        F: std::future::Future<Output = T>,
-    {
-        self.runtime.block_on(future)
-    }
-
     /// Get the full list of unique album names from MPD.
     ///
     /// This is a single fast command (`list album`). The returned names
     /// can then be chunked and passed to [`browse_albums_batch`] for
     /// incremental loading.
     pub async fn list_album_names(&self) -> Result<Vec<String>, ProviderError> {
-        let client = self.get_client().await?;
+        let client = self.get_client()?;
         let album_list = client
             .command(List::new(Tag::Album))
             .await
@@ -436,7 +416,7 @@ impl MpdProvider {
         &self,
         album_names: &[String],
     ) -> Result<Vec<Album>, ProviderError> {
-        let client = self.get_client().await?;
+        let client = self.get_client()?;
         let mut albums = Vec::with_capacity(album_names.len());
 
         for album_name in album_names {
@@ -478,9 +458,9 @@ impl MpdProvider {
         Ok(albums)
     }
 
-    /// Query MPD status (async).
-    pub async fn status_async(&self) -> Result<responses::Status, ProviderError> {
-        let client = self.get_client().await?;
+    /// Query MPD status.
+    pub async fn status(&self) -> Result<responses::Status, ProviderError> {
+        let client = self.get_client()?;
         client.command(Status).await.map_err(mpd_err("status"))
     }
 
@@ -488,7 +468,7 @@ impl MpdProvider {
     pub async fn current_song_async(
         &self,
     ) -> Result<Option<responses::SongInQueue>, ProviderError> {
-        let client = self.get_client().await?;
+        let client = self.get_client()?;
         client
             .command(CurrentSong)
             .await
@@ -498,64 +478,48 @@ impl MpdProvider {
     // --- MPD state control methods (Tasks 56-59) ---
 
     /// Send `random 0/1` to MPD.
-    pub fn send_random(&self, enabled: bool) -> Result<(), ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(SetRandom(enabled))
-                .await
-                .map_err(mpd_err("random"))
-        })
+    pub async fn send_random(&self, enabled: bool) -> Result<(), ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(SetRandom(enabled))
+            .await
+            .map_err(mpd_err("random"))
     }
 
     /// Send `repeat 0/1` to MPD.
-    pub fn send_repeat(&self, enabled: bool) -> Result<(), ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(SetRepeat(enabled))
-                .await
-                .map_err(mpd_err("repeat"))
-        })
+    pub async fn send_repeat(&self, enabled: bool) -> Result<(), ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(SetRepeat(enabled))
+            .await
+            .map_err(mpd_err("repeat"))
     }
 
     /// Send `single 0/1/oneshot` to MPD.
-    pub fn send_single(&self, mode: SingleMode) -> Result<(), ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(SetSingle(mode))
-                .await
-                .map_err(mpd_err("single"))
-        })
+    pub async fn send_single(&self, mode: SingleMode) -> Result<(), ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(SetSingle(mode))
+            .await
+            .map_err(mpd_err("single"))
     }
 
     /// Send `crossfade <seconds>` to MPD.
-    pub fn send_crossfade(&self, seconds: u64) -> Result<(), ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(Crossfade(Duration::from_secs(seconds)))
-                .await
-                .map_err(mpd_err("crossfade"))
-        })
+    pub async fn send_crossfade(&self, seconds: u64) -> Result<(), ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(Crossfade(Duration::from_secs(seconds)))
+            .await
+            .map_err(mpd_err("crossfade"))
     }
 
     /// Send `replay_gain_mode` to MPD.
-    pub fn send_replay_gain_mode(&self, mode: ReplayGainMode) -> Result<(), ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(SetReplayGainMode(mode))
-                .await
-                .map_err(mpd_err("replay_gain_mode"))
-        })
-    }
-
-    /// Read MPD status (sync). Returns the parsed status for reading
-    /// `random`, `repeat`, `single`, `crossfade`, etc.
-    pub fn status(&self) -> Result<responses::Status, ProviderError> {
-        self.block_on(self.status_async())
+    pub async fn send_replay_gain_mode(&self, mode: ReplayGainMode) -> Result<(), ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(SetReplayGainMode(mode))
+            .await
+            .map_err(mpd_err("replay_gain_mode"))
     }
 
     /// Whether MPD sticker support was detected on connect.
@@ -776,6 +740,7 @@ mod tech_info_tests {
     }
 }
 
+#[async_trait::async_trait]
 impl MusicProvider for MpdProvider {
     fn id(&self) -> &str {
         &self.config.id
@@ -790,489 +755,452 @@ impl MusicProvider for MpdProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
-        self.block_on(async {
-            let names = self.list_album_names().await?;
-            let mut albums = self.browse_albums_batch(&names).await?;
-            albums.sort_by(|a, b| a.name.cmp(&b.name).then(a.artist.cmp(&b.artist)));
-            Ok(albums)
-        })
+    async fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
+        let names = self.list_album_names().await?;
+        let mut albums = self.browse_albums_batch(&names).await?;
+        albums.sort_by(|a, b| a.name.cmp(&b.name).then(a.artist.cmp(&b.artist)));
+        Ok(albums)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
+    async fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
+        let client = self.get_client()?;
 
-            let artist_list = client
-                .command(List::new(Tag::AlbumArtist))
+        let artist_list = client
+            .command(List::new(Tag::AlbumArtist))
+            .await
+            .map_err(mpd_err("list albumartist"))?;
+
+        let artist_names: Vec<String> = artist_list.into_iter().collect();
+        let mut artists = Vec::new();
+
+        for artist_name in &artist_names {
+            if artist_name.is_empty() {
+                continue;
+            }
+
+            // Get albums for this artist
+            let expr = filter_expr::eq("AlbumArtist", artist_name);
+            let album_list = client
+                .command(ListAlbumFiltered(expr))
                 .await
-                .map_err(mpd_err("list albumartist"))?;
+                .map_err(mpd_err("list album"))?;
 
-            let artist_names: Vec<String> = artist_list.into_iter().collect();
-            let mut artists = Vec::new();
+            let album_names: Vec<String> = album_list.into_iter().collect();
+            let mut artist_albums = Vec::new();
 
-            for artist_name in &artist_names {
-                if artist_name.is_empty() {
+            for album_name in &album_names {
+                if album_name.is_empty() {
                     continue;
                 }
 
-                // Get albums for this artist
-                let expr = filter_expr::eq("AlbumArtist", artist_name);
-                let album_list = client
-                    .command(ListAlbumFiltered(expr))
+                let expr = filter_expr::and(&[
+                    filter_expr::eq("Album", album_name),
+                    filter_expr::eq("AlbumArtist", artist_name),
+                ]);
+                let songs = client
+                    .command(FilterQuery::find(expr))
                     .await
-                    .map_err(mpd_err("list album"))?;
+                    .map_err(mpd_err("find"))?;
 
-                let album_names: Vec<String> = album_list.into_iter().collect();
-                let mut artist_albums = Vec::new();
+                let mut tracks: Vec<Track> = songs
+                    .iter()
+                    .map(|s| song_to_track(&self.provider_id, s))
+                    .collect();
+                Track::sort_by_disc_and_track(&mut tracks);
 
-                for album_name in &album_names {
-                    if album_name.is_empty() {
-                        continue;
-                    }
+                let cover_source = tracks
+                    .first()
+                    .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
 
-                    let expr = filter_expr::and(&[
-                        filter_expr::eq("Album", album_name),
-                        filter_expr::eq("AlbumArtist", artist_name),
-                    ]);
-                    let songs = client
-                        .command(FilterQuery::find(expr))
-                        .await
-                        .map_err(mpd_err("find"))?;
-
-                    let mut tracks: Vec<Track> = songs
-                        .iter()
-                        .map(|s| song_to_track(&self.provider_id, s))
-                        .collect();
-                    Track::sort_by_disc_and_track(&mut tracks);
-
-                    let cover_source = tracks
-                        .first()
-                        .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
-
-                    let mut album = Album::from_tracks(album_name.clone(), tracks, cover_source);
-                    album.artist = artist_name.clone();
-                    album.refresh_derived();
-                    artist_albums.push(album);
-                }
-
-                artist_albums.sort_by_key(|a| a.year);
-
-                artists.push(Artist::new(artist_name.clone(), artist_albums));
+                let mut album = Album::from_tracks(album_name.clone(), tracks, cover_source);
+                album.artist = artist_name.clone();
+                album.refresh_derived();
+                artist_albums.push(album);
             }
 
-            artists.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(artists)
-        })
+            artist_albums.sort_by_key(|a| a.year);
+
+            artists.push(Artist::new(artist_name.clone(), artist_albums));
+        }
+
+        artists.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(artists)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
+    async fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
+        let client = self.get_client()?;
 
-            // Use listallinfo to get all songs from the root
-            let songs = client
-                .command(commands::ListAllIn::root())
-                .await
-                .map_err(mpd_err("listallinfo"))?;
+        // Use listallinfo to get all songs from the root
+        let songs = client
+            .command(commands::ListAllIn::root())
+            .await
+            .map_err(mpd_err("listallinfo"))?;
 
-            let mut tracks: Vec<Track> = songs
-                .iter()
-                .map(|s| song_to_track(&self.provider_id, s))
-                .collect();
-            tracks.sort_by(|a, b| a.title.cmp(&b.title));
-            Ok(tracks)
-        })
+        let mut tracks: Vec<Track> = songs
+            .iter()
+            .map(|s| song_to_track(&self.provider_id, s))
+            .collect();
+        tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        Ok(tracks)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
+    async fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
         let query_owned = query.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
+        let client = self.get_client()?;
 
-            // `any contains` searches every tag; `search` (unlike `find`)
-            // matches case-insensitively.
-            let expr = filter_expr::contains("any", &query_owned);
-            let songs = client
-                .command(FilterQuery::search(expr))
-                .await
-                .map_err(mpd_err("search"))?;
+        // `any contains` searches every tag; `search` (unlike `find`)
+        // matches case-insensitively.
+        let expr = filter_expr::contains("any", &query_owned);
+        let songs = client
+            .command(FilterQuery::search(expr))
+            .await
+            .map_err(mpd_err("search"))?;
 
-            let tracks: Vec<Track> = songs
-                .iter()
-                .map(|s| song_to_track(&self.provider_id, s))
-                .collect();
-            Ok(tracks)
-        })
+        let tracks: Vec<Track> = songs
+            .iter()
+            .map(|s| song_to_track(&self.provider_id, s))
+            .collect();
+        Ok(tracks)
     }
 
     #[tracing::instrument(skip(self, album), level = "debug")]
-    fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
+    async fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
+        let client = self.get_client()?;
 
-            let uri = match album.tracks.first() {
-                Some(t) => &t.source_uri,
-                None => return Ok(None),
-            };
+        let uri = match album.tracks.first() {
+            Some(t) => &t.source_uri,
+            None => return Ok(None),
+        };
 
-            match client.album_art(uri).await {
-                Ok(Some((data, _mime))) => Ok(Some(data.to_vec())),
-                Ok(None) => Ok(None),
-                Err(e) => {
-                    tracing::warn!("Failed to get MPD album art for {uri}: {e}");
-                    Ok(None)
-                }
+        match client.album_art(uri).await {
+            Ok(Some((data, _mime))) => Ok(Some(data.to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                tracing::warn!("Failed to get MPD album art for {uri}: {e}");
+                Ok(None)
             }
-        })
+        }
     }
 
-    fn get_lyrics(&self, _track: &Track) -> Result<Option<crate::library::Lyrics>, ProviderError> {
+    async fn get_lyrics(
+        &self,
+        _track: &Track,
+    ) -> Result<Option<crate::library::Lyrics>, ProviderError> {
         // MPD doesn't serve lyrics; the app falls back to LRCLIB.
         Ok(None)
     }
 
     #[tracing::instrument(skip(self, track), level = "debug")]
-    fn track_tech_info(
+    async fn track_tech_info(
         &self,
         track: &Track,
     ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
         let uri = track.source_uri.clone();
-        self.block_on(async {
-            let client = self.get_client().await?;
+        let client = self.get_client()?;
 
-            // The playing song carries a decoded `Format` and the only
-            // moment MPD reports a bitrate; any other song is looked up in
-            // the database.
-            let current = client
-                .command(CurrentSong)
+        // The playing song carries a decoded `Format` and the only
+        // moment MPD reports a bitrate; any other song is looked up in
+        // the database.
+        let current = client
+            .command(CurrentSong)
+            .await
+            .map_err(mpd_err("currentsong"))?
+            .filter(|queued| queued.song.url == uri);
+        if let Some(queued) = current {
+            let bitrate = client
+                .command(Status)
                 .await
-                .map_err(mpd_err("currentsong"))?
-                .filter(|queued| queued.song.url == uri);
-            if let Some(queued) = current {
-                let bitrate = client
-                    .command(Status)
-                    .await
-                    .map_err(mpd_err("status"))?
-                    .bitrate;
-                return Ok(Some(song_to_tech_info(&queued.song, bitrate)));
-            }
+                .map_err(mpd_err("status"))?
+                .bitrate;
+            return Ok(Some(song_to_tech_info(&queued.song, bitrate)));
+        }
 
-            let found = client
-                .command(FilterQuery::find(filter_expr::eq("file", &uri)))
-                .await
-                .map_err(mpd_err("find"))?;
-            Ok(found.first().map(|song| song_to_tech_info(song, None)))
-        })
+        let found = client
+            .command(FilterQuery::find(filter_expr::eq("file", &uri)))
+            .await
+            .map_err(mpd_err("find"))?;
+        Ok(found.first().map(|song| song_to_tech_info(song, None)))
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn sync_library(&self, _progress: &ScanProgress) -> Result<usize, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(Update::new())
-                .await
-                .map_err(mpd_err("update"))?;
-            Ok(0)
-        })
+    async fn sync_library(&self, _progress: Arc<ScanProgress>) -> Result<usize, ProviderError> {
+        let client = self.get_client()?;
+        client
+            .command(Update::new())
+            .await
+            .map_err(mpd_err("update"))?;
+        Ok(0)
     }
 
     // --- Playlist methods (Tasks 47-51) ---
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            let playlists = client
-                .command(GetPlaylists)
-                .await
-                .map_err(mpd_err("listplaylists"))?;
+    async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
+        let client = self.get_client()?;
+        let playlists = client
+            .command(GetPlaylists)
+            .await
+            .map_err(mpd_err("listplaylists"))?;
 
-            Ok(playlists
-                .into_iter()
-                .map(|p| Playlist {
-                    id: p.name.clone(),
-                    name: p.name,
-                    tracks: Vec::new(),
-                    track_count: 0,
-                    total_duration: Duration::ZERO,
-                })
-                .collect())
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
-        let id_owned = id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            let songs = client
-                .command(GetPlaylist(&id_owned))
-                .await
-                .map_err(mpd_err("listplaylistinfo"))?;
-
-            let tracks: Vec<Track> = songs
-                .iter()
-                .map(|s| song_to_track(&self.provider_id, s))
-                .collect();
-            let total_duration = tracks.iter().map(|t| t.duration).sum();
-            let track_count = tracks.len() as u32;
-
-            Ok(Playlist {
-                id: id_owned.clone(),
-                name: id_owned,
-                tracks,
-                track_count,
-                total_duration,
-            })
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
-        let name_owned = name.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            // MPD's `playlistclear` only clears an *existing* stored
-            // playlist — it does not reliably create one. `save` creates
-            // the playlist (as a snapshot of the live queue, which is left
-            // untouched), then `playlistclear` wipes that snapshot so the
-            // stored playlist ends up genuinely empty regardless of what
-            // was in the queue. If the clear fails, best-effort delete the
-            // playlist `save` just created so we don't leave a non-empty
-            // one behind.
-            client
-                .command(SaveQueueAsPlaylist(&name_owned))
-                .await
-                .map_err(mpd_err("save"))?;
-
-            if let Err(e) = client.command(ClearPlaylist(&name_owned)).await {
-                let _ = client.command(DeletePlaylist(&name_owned)).await;
-                return Err(mpd_err("playlistclear")(e));
-            }
-
-            Ok(Playlist {
-                id: name_owned.clone(),
-                name: name_owned,
+        Ok(playlists
+            .into_iter()
+            .map(|p| Playlist {
+                id: p.name.clone(),
+                name: p.name,
                 tracks: Vec::new(),
                 track_count: 0,
                 total_duration: Duration::ZERO,
             })
-        })
+            .collect())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+    async fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
         let id_owned = id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(DeletePlaylist(&id_owned))
-                .await
-                .map_err(mpd_err("rm"))
+        let client = self.get_client()?;
+        let songs = client
+            .command(GetPlaylist(&id_owned))
+            .await
+            .map_err(mpd_err("listplaylistinfo"))?;
+
+        let tracks: Vec<Track> = songs
+            .iter()
+            .map(|s| song_to_track(&self.provider_id, s))
+            .collect();
+        let total_duration = tracks.iter().map(|t| t.duration).sum();
+        let track_count = tracks.len() as u32;
+
+        Ok(Playlist {
+            id: id_owned.clone(),
+            name: id_owned,
+            tracks,
+            track_count,
+            total_duration,
         })
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+    async fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
+        let name_owned = name.to_string();
+        let client = self.get_client()?;
+        // MPD's `playlistclear` only clears an *existing* stored
+        // playlist — it does not reliably create one. `save` creates
+        // the playlist (as a snapshot of the live queue, which is left
+        // untouched), then `playlistclear` wipes that snapshot so the
+        // stored playlist ends up genuinely empty regardless of what
+        // was in the queue. If the clear fails, best-effort delete the
+        // playlist `save` just created so we don't leave a non-empty
+        // one behind.
+        client
+            .command(SaveQueueAsPlaylist(&name_owned))
+            .await
+            .map_err(mpd_err("save"))?;
+
+        if let Err(e) = client.command(ClearPlaylist(&name_owned)).await {
+            let _ = client.command(DeletePlaylist(&name_owned)).await;
+            return Err(mpd_err("playlistclear")(e));
+        }
+
+        Ok(Playlist {
+            id: name_owned.clone(),
+            name: name_owned,
+            tracks: Vec::new(),
+            track_count: 0,
+            total_duration: Duration::ZERO,
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        let client = self.get_client()?;
+        client
+            .command(DeletePlaylist(&id_owned))
+            .await
+            .map_err(mpd_err("rm"))
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
         let id_owned = id.to_string();
         let new_name_owned = new_name.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(commands::RenamePlaylist::new(&id_owned, &new_name_owned))
-                .await
-                .map_err(mpd_err("rename"))
-        })
+        let client = self.get_client()?;
+        client
+            .command(commands::RenamePlaylist::new(&id_owned, &new_name_owned))
+            .await
+            .map_err(mpd_err("rename"))
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn add_to_playlist(
+    async fn add_to_playlist(
         &self,
         playlist_id: &str,
         track_ids: &[String],
     ) -> Result<(), ProviderError> {
         let playlist_owned = playlist_id.to_string();
         let uris: Vec<String> = track_ids.to_vec();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            for uri in &uris {
-                client
-                    .command(AddToPlaylist::new(&playlist_owned, uri))
-                    .await
-                    .map_err(mpd_err("playlistadd"))?;
-            }
-            Ok(())
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
-        let playlist = playlist_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
+        let client = self.get_client()?;
+        for uri in &uris {
             client
-                .command(commands::RemoveFromPlaylist::position(&playlist, index))
+                .command(AddToPlaylist::new(&playlist_owned, uri))
                 .await
-                .map_err(mpd_err("playlistdelete"))
-        })
+                .map_err(mpd_err("playlistadd"))?;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn move_in_playlist(
+    async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        index: usize,
+    ) -> Result<(), ProviderError> {
+        let playlist = playlist_id.to_string();
+        let client = self.get_client()?;
+        client
+            .command(commands::RemoveFromPlaylist::position(&playlist, index))
+            .await
+            .map_err(mpd_err("playlistdelete"))
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn move_in_playlist(
         &self,
         playlist_id: &str,
         from: usize,
         to: usize,
     ) -> Result<(), ProviderError> {
         let playlist = playlist_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            client
-                .command(commands::MoveInPlaylist::new(&playlist, from, to))
-                .await
-                .map_err(mpd_err("playlistmove"))
-        })
+        let client = self.get_client()?;
+        client
+            .command(commands::MoveInPlaylist::new(&playlist, from, to))
+            .await
+            .map_err(mpd_err("playlistmove"))
     }
 
     // --- Favorites and ratings via stickers (Tasks 52-53) ---
 
-    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+    async fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         self.require_stickers()?;
         let uri = track_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            // Check current favorite state
-            let is_fav = match client.command(StickerGet::new(&uri, "favorite")).await {
-                Ok(s) => s.value == "1",
-                Err(_) => false,
-            };
+        let client = self.get_client()?;
+        // Check current favorite state
+        let is_fav = match client.command(StickerGet::new(&uri, "favorite")).await {
+            Ok(s) => s.value == "1",
+            Err(_) => false,
+        };
 
-            if is_fav {
-                // Remove favorite sticker
-                let _ = client.command(StickerDelete::new(&uri, "favorite")).await;
-                Ok(false)
-            } else {
-                client
-                    .command(StickerSet::new(&uri, "favorite", "1"))
-                    .await
-                    .map_err(mpd_err("sticker set favorite"))?;
-                Ok(true)
-            }
-        })
+        if is_fav {
+            // Remove favorite sticker
+            let _ = client.command(StickerDelete::new(&uri, "favorite")).await;
+            Ok(false)
+        } else {
+            client
+                .command(StickerSet::new(&uri, "favorite", "1"))
+                .await
+                .map_err(mpd_err("sticker set favorite"))?;
+            Ok(true)
+        }
     }
 
-    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+    async fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         if !self.stickers_supported() {
             return Ok(false);
         }
         let uri = track_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            match client.command(StickerGet::new(&uri, "favorite")).await {
-                Ok(s) => Ok(s.value == "1"),
-                Err(_) => Ok(false),
-            }
-        })
+        let client = self.get_client()?;
+        match client.command(StickerGet::new(&uri, "favorite")).await {
+            Ok(s) => Ok(s.value == "1"),
+            Err(_) => Ok(false),
+        }
     }
 
-    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+    async fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
         self.require_stickers()?;
         let uri = track_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            if rating == 0 {
-                // Clear rating
-                let _ = client.command(StickerDelete::new(&uri, "rating")).await;
-                Ok(())
-            } else {
-                let val = rating.min(5).to_string();
-                client
-                    .command(StickerSet::new(&uri, "rating", &val))
-                    .await
-                    .map_err(mpd_err("sticker set rating"))
-            }
-        })
+        let client = self.get_client()?;
+        if rating == 0 {
+            // Clear rating
+            let _ = client.command(StickerDelete::new(&uri, "rating")).await;
+            Ok(())
+        } else {
+            let val = rating.min(5).to_string();
+            client
+                .command(StickerSet::new(&uri, "rating", &val))
+                .await
+                .map_err(mpd_err("sticker set rating"))
+        }
     }
 
-    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+    async fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
         if !self.stickers_supported() {
             return Ok(None);
         }
         let uri = track_id.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            match client.command(StickerGet::new(&uri, "rating")).await {
-                Ok(s) => Ok(s.value.parse::<u8>().ok()),
-                Err(_) => Ok(None),
-            }
-        })
+        let client = self.get_client()?;
+        match client.command(StickerGet::new(&uri, "rating")).await {
+            Ok(s) => Ok(s.value.parse::<u8>().ok()),
+            Err(_) => Ok(None),
+        }
     }
 
-    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+    async fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
         self.require_stickers()?;
-        self.block_on(async {
-            let client = self.get_client().await?;
-            // Find all songs with favorite=1 sticker
-            let results = client
-                .command(StickerFind::new("", "favorite").where_eq("1"))
-                .await
-                .map_err(mpd_err("sticker find favorite"))?;
+        let client = self.get_client()?;
+        // Find all songs with favorite=1 sticker
+        let results = client
+            .command(StickerFind::new("", "favorite").where_eq("1"))
+            .await
+            .map_err(mpd_err("sticker find favorite"))?;
 
-            let mut uris: Vec<&String> = results.value.keys().collect();
-            uris.sort();
-            let mut tracks = Vec::with_capacity(uris.len());
-            for uri in uris {
-                // Look up each song's metadata
-                let expr = filter_expr::eq("file", uri.as_str());
-                if let Ok(songs) = client.command(FilterQuery::find(expr)).await {
-                    for song in &songs {
-                        let mut track = song_to_track(&self.provider_id, song);
-                        track.is_favorite = true;
-                        tracks.push(track);
-                    }
+        let mut uris: Vec<&String> = results.value.keys().collect();
+        uris.sort();
+        let mut tracks = Vec::with_capacity(uris.len());
+        for uri in uris {
+            // Look up each song's metadata
+            let expr = filter_expr::eq("file", uri.as_str());
+            if let Ok(songs) = client.command(FilterQuery::find(expr)).await {
+                for song in &songs {
+                    let mut track = song_to_track(&self.provider_id, song);
+                    track.is_favorite = true;
+                    tracks.push(track);
                 }
             }
-            Ok(tracks)
-        })
+        }
+        Ok(tracks)
     }
 
     // --- Genre methods (Tasks 54-55) ---
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
-        self.block_on(async {
-            let client = self.get_client().await?;
-            let genre_list = client
-                .command(List::new(Tag::Genre))
-                .await
-                .map_err(mpd_err("list genre"))?;
+    async fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        let client = self.get_client()?;
+        let genre_list = client
+            .command(List::new(Tag::Genre))
+            .await
+            .map_err(mpd_err("list genre"))?;
 
-            Ok(genre_list.into_iter().filter(|g| !g.is_empty()).collect())
-        })
+        Ok(genre_list.into_iter().filter(|g| !g.is_empty()).collect())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+    async fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
         let genre_owned = genre.to_string();
-        self.block_on(async {
-            let client = self.get_client().await?;
-            let expr = filter_expr::eq("Genre", &genre_owned);
-            let songs = client
-                .command(FilterQuery::find(expr))
-                .await
-                .map_err(mpd_err("find genre"))?;
+        let client = self.get_client()?;
+        let expr = filter_expr::eq("Genre", &genre_owned);
+        let songs = client
+            .command(FilterQuery::find(expr))
+            .await
+            .map_err(mpd_err("find genre"))?;
 
-            let tracks: Vec<Track> = songs
-                .iter()
-                .map(|s| song_to_track(&self.provider_id, s))
-                .collect();
-            Ok(tracks)
-        })
+        let tracks: Vec<Track> = songs
+            .iter()
+            .map(|s| song_to_track(&self.provider_id, s))
+            .collect();
+        Ok(tracks)
     }
 }
 
@@ -1367,23 +1295,20 @@ mod tests {
         let seed_queue = vec!["track-a.mp3".to_string(), "track-b.mp3".to_string()];
         let (port, commands, live_queue) = spawn_fake_mpd(seed_queue.clone());
 
-        let provider = MpdProvider::new(
-            MpdConfig {
-                id: "mpd-test".into(),
-                name: "Test".into(),
-                host: "127.0.0.1".into(),
-                port,
-                password: None,
-            },
-            runtime.handle().clone(),
-        );
+        let provider = MpdProvider::new(MpdConfig {
+            id: "mpd-test".into(),
+            name: "Test".into(),
+            host: "127.0.0.1".into(),
+            port,
+            password: None,
+        });
 
         runtime
             .block_on(provider.connect_command())
             .expect("connect to fake MPD");
 
-        let playlist = provider
-            .create_playlist("new-playlist")
+        let playlist = runtime
+            .block_on(provider.create_playlist("new-playlist"))
             .expect("create_playlist should succeed");
         assert_eq!(playlist.track_count, 0);
         assert!(playlist.tracks.is_empty());
@@ -1406,8 +1331,8 @@ mod tests {
         assert!(saw_playlistclear, "expected a playlistclear command");
 
         // The stored playlist ends up genuinely empty...
-        let fetched = provider
-            .get_playlist("new-playlist")
+        let fetched = runtime
+            .block_on(provider.get_playlist("new-playlist"))
             .expect("get_playlist should succeed");
         assert!(fetched.tracks.is_empty());
         assert_eq!(fetched.track_count, 0);
@@ -1495,16 +1420,13 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (port, commands, _live_queue) = spawn_fake_mpd(Vec::new());
 
-        let provider = MpdProvider::new(
-            MpdConfig {
-                id: "mpd-test".into(),
-                name: "Test".into(),
-                host: "127.0.0.1".into(),
-                port,
-                password: None,
-            },
-            runtime.handle().clone(),
-        );
+        let provider = MpdProvider::new(MpdConfig {
+            id: "mpd-test".into(),
+            name: "Test".into(),
+            host: "127.0.0.1".into(),
+            port,
+            password: None,
+        });
 
         runtime
             .block_on(provider.connect_command())

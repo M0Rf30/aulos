@@ -15,9 +15,72 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Helper to wrap Subsonic errors into `ProviderError::Io` with a labeled context.
-fn subsonic_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError {
-    super::wrap_err("Subsonic", op)
+/// What a failed Subsonic request means to the user, in one place for the
+/// provider, the connection test and the browser's stream fetch.
+///
+/// The server's own words are kept for API errors (wrong credentials, ...)
+/// and HTTP statuses. A request that got no answer at all is, in a browser,
+/// mostly a CORS refusal or a down server, which the page cannot tell apart,
+/// so it says both ([`crate::http::no_answer_message`], which also catches
+/// mixed content); natively it is reported as it came, labeled with the
+/// operation.
+fn describe_error(url: &str, op: &str, error: &opensubsonic::Error) -> String {
+    use opensubsonic::Error;
+    match error {
+        Error::Api(api) => format!("{api}"),
+        Error::Http(e) => match e.status() {
+            Some(status) => crate::http::status_message(
+                &crate::http::host_of(url),
+                status.as_u16(),
+                status.canonical_reason().unwrap_or_default(),
+            ),
+            None if cfg!(target_arch = "wasm32") && !e.is_decode() && !e.is_body() => {
+                crate::http::no_answer_message(url)
+            }
+            None => format!("Subsonic {op}: {e}"),
+        },
+        other => format!("Subsonic {op}: {other}"),
+    }
+}
+
+/// Checks that a server answers `ping` with the given credentials: the
+/// settings card's "Test connection". `Err` is a message for the user.
+///
+/// # Errors
+/// The classified failure (see [`describe_error`]).
+pub async fn test_connection(
+    url: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<(), String> {
+    crate::http::check_mixed_content(url)?;
+    let client = build_client(url, username, password, accept_invalid_certs)
+        .map_err(|e| format!("Client: {e}"))?;
+    client
+        .ping()
+        .await
+        .map_err(|e| describe_error(url, "ping", &e))
+}
+
+/// The API client for a server. `accept_invalid_certs` only exists natively:
+/// a browser decides on certificates itself and the setting cannot apply.
+fn build_client(
+    url: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<Client, opensubsonic::Error> {
+    let client = Client::new(url, Auth::token(username, password))?.with_client_name("aulos");
+    #[cfg(not(target_arch = "wasm32"))]
+    if accept_invalid_certs {
+        return client.with_danger_accept_invalid_certs();
+    }
+    #[cfg(target_arch = "wasm32")]
+    if accept_invalid_certs {
+        tracing::warn!("accept_invalid_certs has no effect in the browser");
+    }
+    Ok(client)
 }
 
 /// Unix seconds of a server timestamp (ISO 8601, e.g. `created` and
@@ -105,8 +168,8 @@ impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
 
 /// Subsonic music provider backed by the `opensubsonic` crate.
 ///
-/// All API calls are async (via the opensubsonic `Client`). The `MusicProvider`
-/// trait is synchronous, so we bridge using `runtime.block_on()`.
+/// All API calls are async (via the opensubsonic `Client`), on whatever
+/// executor polls them: tokio natively, the browser's event loop on wasm.
 pub struct SubsonicProvider {
     config: SubsonicConfig,
     /// Shared provider ID for zero-copy assignment to tracks.
@@ -115,26 +178,19 @@ pub struct SubsonicProvider {
     /// Shared HTTP client for cover art fetches (avoids creating a new
     /// connection pool per request).
     http_client: reqwest::Client,
-    runtime: tokio::runtime::Handle,
 }
 
 impl SubsonicProvider {
     /// Create a new Subsonic provider. The client is constructed immediately
     /// but no network call is made until `ping()` or a browse method is called.
-    pub fn new(
-        config: SubsonicConfig,
-        runtime: tokio::runtime::Handle,
-    ) -> Result<Self, ProviderError> {
-        let auth = Auth::token(&config.username, &config.password);
-        let mut client = Client::new(&config.url, auth)
-            .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
-            .with_client_name("aulos");
-
-        if config.accept_invalid_certs {
-            client = client
-                .with_danger_accept_invalid_certs()
-                .map_err(|e| ProviderError::NotConnected(format!("TLS config error: {e}")))?;
-        }
+    pub fn new(config: SubsonicConfig) -> Result<Self, ProviderError> {
+        let client = build_client(
+            &config.url,
+            &config.username,
+            &config.password,
+            config.accept_invalid_certs,
+        )
+        .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?;
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
         let http_client = reqwest::Client::new();
@@ -143,24 +199,22 @@ impl SubsonicProvider {
             provider_id,
             client,
             http_client,
-            runtime,
         })
+    }
+
+    /// Maps a failed request of operation `op` to the error shown to the
+    /// user.
+    fn err(&self, op: &'static str) -> impl FnOnce(opensubsonic::Error) -> ProviderError + '_ {
+        move |e| ProviderError::Io(describe_error(&self.config.url, op, &e))
     }
 
     /// Validate connectivity by sending a `ping` request.
     pub async fn ping(&self) -> Result<(), ProviderError> {
+        crate::http::check_mixed_content(&self.config.url).map_err(ProviderError::NotConnected)?;
         self.client
             .ping()
             .await
-            .map_err(|e| ProviderError::NotConnected(format!("Subsonic ping failed: {e}")))
-    }
-
-    /// Run an async block on the tokio runtime (bridging sync MusicProvider to async).
-    fn block_on<F, T>(&self, future: F) -> T
-    where
-        F: std::future::Future<Output = T>,
-    {
-        self.runtime.block_on(future)
+            .map_err(|e| ProviderError::NotConnected(describe_error(&self.config.url, "ping", &e)))
     }
 
     /// Convert an opensubsonic `Child` (song) to our `Track` model.
@@ -280,7 +334,7 @@ impl SubsonicProvider {
                 .client
                 .get_album(&album_id3.id)
                 .await
-                .map_err(subsonic_err("getAlbum"))?;
+                .map_err(self.err("getAlbum"))?;
 
             let mut tracks: Vec<Track> = album_detail
                 .song
@@ -329,37 +383,38 @@ impl SubsonicProvider {
                     .offset(offset),
             )
             .await
-            .map_err(subsonic_err("getAlbumList2"))
+            .map_err(self.err("getAlbumList2"))
     }
 
-    /// Scrobble a track (mark as played) on the Subsonic server.
+    /// Scrobble a track (mark as played) on the Subsonic server; failures
+    /// are only logged.
     ///
     /// The `song_id` is the Subsonic song ID (not the stream URL).
     /// Call this when a track reaches 50% or 4 minutes of playback.
-    pub fn scrobble(&self, song_id: &str) {
-        let id = song_id.to_string();
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            if let Err(e) = client.scrobble(&id, None, Some(true)).await {
-                tracing::warn!("Subsonic scrobble failed for '{id}': {e}");
-            } else {
-                tracing::debug!("Scrobbled song '{id}'");
-            }
-        });
+    pub async fn scrobble(&self, song_id: &str) {
+        match self.client.scrobble(song_id, None, Some(true)).await {
+            Ok(_) => tracing::debug!("Scrobbled song '{song_id}'"),
+            Err(e) => tracing::warn!(
+                "Subsonic scrobble failed for '{song_id}': {}",
+                describe_error(&self.config.url, "scrobble", &e)
+            ),
+        }
     }
 
-    /// Send a "now playing" notification to the Subsonic server.
-    pub fn now_playing(&self, song_id: &str) {
-        let id = song_id.to_string();
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            if let Err(e) = client.scrobble(&id, None, Some(false)).await {
-                tracing::debug!("Subsonic now-playing failed for '{id}': {e}");
-            }
-        });
+    /// Send a "now playing" notification to the Subsonic server; failures
+    /// are only logged.
+    pub async fn now_playing(&self, song_id: &str) {
+        if let Err(e) = self.client.scrobble(song_id, None, Some(false)).await {
+            tracing::debug!(
+                "Subsonic now-playing failed for '{song_id}': {}",
+                describe_error(&self.config.url, "now playing", &e)
+            );
+        }
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl MusicProvider for SubsonicProvider {
     fn id(&self) -> &str {
         &self.config.id
@@ -374,185 +429,177 @@ impl MusicProvider for SubsonicProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
-        self.block_on(async {
-            let mut all_albums = Vec::new();
-            let mut offset = 0;
-            let page_size = 500;
+    async fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
+        let mut all_albums = Vec::new();
+        let mut offset = 0;
+        let page_size = 500;
 
-            loop {
-                let (batch, has_more) = self.browse_albums_page(offset, page_size).await?;
-                if batch.is_empty() {
-                    break;
-                }
-                let count = batch.len();
-                all_albums.extend(batch);
-                if !has_more {
-                    break;
-                }
-                offset += count as i32;
+        loop {
+            let (batch, has_more) = self.browse_albums_page(offset, page_size).await?;
+            if batch.is_empty() {
+                break;
             }
+            let count = batch.len();
+            all_albums.extend(batch);
+            if !has_more {
+                break;
+            }
+            offset += count as i32;
+        }
 
-            all_albums.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(all_albums)
-        })
+        all_albums.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(all_albums)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
-        self.block_on(async {
-            let artists_id3 = self
-                .client
-                .get_artists(None)
-                .await
-                .map_err(subsonic_err("getArtists"))?;
+    async fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
+        let artists_id3 = self
+            .client
+            .get_artists(None)
+            .await
+            .map_err(self.err("getArtists"))?;
 
-            let mut artists = Vec::new();
+        let mut artists = Vec::new();
 
-            for index in &artists_id3.index {
-                for artist_id3 in &index.artist {
-                    // Get artist details with album list.
-                    let artist_detail = self
-                        .client
-                        .get_artist(&artist_id3.id)
-                        .await
-                        .map_err(subsonic_err("getArtist"))?;
+        for index in &artists_id3.index {
+            for artist_id3 in &index.artist {
+                // Get artist details with album list.
+                let artist_detail = self
+                    .client
+                    .get_artist(&artist_id3.id)
+                    .await
+                    .map_err(self.err("getArtist"))?;
 
-                    let mut artist_albums = Vec::new();
+                let mut artist_albums = Vec::new();
 
-                    for album_id3 in &artist_detail.album {
-                        // Fetch full album (with songs).
-                        let album_detail = self
-                            .client
-                            .get_album(&album_id3.id)
-                            .await
-                            .map_err(subsonic_err("getAlbum"))?;
-
-                        let mut tracks: Vec<Track> = album_detail
-                            .song
-                            .iter()
-                            .map(|s| self.child_to_track(s))
-                            .collect();
-                        Track::sort_by_disc_and_track(&mut tracks);
-
-                        let cover_source = self.cover_source_from_id(&album_detail.cover_art);
-
-                        let mut album =
-                            Album::from_tracks(album_detail.name.clone(), tracks, cover_source);
-                        album.artist = artist_id3.name.clone();
-                        album.year = album_detail.year.unwrap_or(0) as u32;
-                        album.refresh_derived();
-                        artist_albums.push(album);
-                    }
-
-                    artist_albums.sort_by_key(|a| a.year);
-
-                    artists.push(Artist::new(artist_id3.name.clone(), artist_albums));
-                }
-            }
-
-            artists.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(artists)
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
-        self.block_on(async {
-            let mut all_tracks = Vec::new();
-            let page_size = 500;
-            let mut offset = 0;
-
-            loop {
-                let album_list = self.fetch_album_list(page_size, offset).await?;
-
-                let count = album_list.len();
-                if count == 0 {
-                    break;
-                }
-
-                for album_id3 in &album_list {
+                for album_id3 in &artist_detail.album {
+                    // Fetch full album (with songs).
                     let album_detail = self
                         .client
                         .get_album(&album_id3.id)
                         .await
-                        .map_err(subsonic_err("getAlbum"))?;
+                        .map_err(self.err("getAlbum"))?;
 
-                    for song in &album_detail.song {
-                        all_tracks.push(self.child_to_track(song));
-                    }
+                    let mut tracks: Vec<Track> = album_detail
+                        .song
+                        .iter()
+                        .map(|s| self.child_to_track(s))
+                        .collect();
+                    Track::sort_by_disc_and_track(&mut tracks);
+
+                    let cover_source = self.cover_source_from_id(&album_detail.cover_art);
+
+                    let mut album =
+                        Album::from_tracks(album_detail.name.clone(), tracks, cover_source);
+                    album.artist = artist_id3.name.clone();
+                    album.year = album_detail.year.unwrap_or(0) as u32;
+                    album.refresh_derived();
+                    artist_albums.push(album);
                 }
 
-                if count < page_size as usize {
-                    break;
-                }
-                offset += page_size;
+                artist_albums.sort_by_key(|a| a.year);
+
+                artists.push(Artist::new(artist_id3.name.clone(), artist_albums));
             }
+        }
 
-            all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
-            Ok(all_tracks)
-        })
+        artists.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(artists)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
-        let query_owned = query.to_string();
-        self.block_on(async {
-            let results = self
-                .client
-                .search3(
-                    &query_owned,
-                    &opensubsonic::Search3Options::new()
-                        .artist_count(0) // no artists
-                        .album_count(0) // no albums
-                        .song_count(50), // up to 50 songs
-                )
-                .await
-                .map_err(subsonic_err("search3"))?;
+    async fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
+        let mut all_tracks = Vec::new();
+        let page_size = 500;
+        let mut offset = 0;
 
-            let tracks: Vec<Track> = results
-                .song
-                .iter()
-                .map(|s| self.child_to_track(s))
-                .collect();
-            Ok(tracks)
-        })
+        loop {
+            let album_list = self.fetch_album_list(page_size, offset).await?;
+
+            let count = album_list.len();
+            if count == 0 {
+                break;
+            }
+
+            for album_id3 in &album_list {
+                let album_detail = self
+                    .client
+                    .get_album(&album_id3.id)
+                    .await
+                    .map_err(self.err("getAlbum"))?;
+
+                for song in &album_detail.song {
+                    all_tracks.push(self.child_to_track(song));
+                }
+            }
+
+            if count < page_size as usize {
+                break;
+            }
+            offset += page_size;
+        }
+
+        all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        Ok(all_tracks)
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
+        let query_owned = query.to_string();
+        let results = self
+            .client
+            .search3(
+                &query_owned,
+                &opensubsonic::Search3Options::new()
+                    .artist_count(0) // no artists
+                    .album_count(0) // no albums
+                    .song_count(50), // up to 50 songs
+            )
+            .await
+            .map_err(self.err("search3"))?;
+
+        let tracks: Vec<Track> = results
+            .song
+            .iter()
+            .map(|s| self.child_to_track(s))
+            .collect();
+        Ok(tracks)
     }
 
     #[tracing::instrument(skip(self, album), level = "debug")]
-    fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
+    async fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
         // The cover_source should already contain a Url from browse_albums().
         // Fetch the image bytes for display.
         match &album.cover_source {
             Some(CoverSource::Url(url)) => {
-                let http = self.http_client.clone();
-                self.block_on(async {
-                    let resp = http
-                        .get(url)
-                        .send()
-                        .await
-                        .map_err(subsonic_err("cover art fetch"))?;
-                    let bytes = resp.bytes().await.map_err(subsonic_err("cover art read"))?;
-                    Ok(Some(bytes.to_vec()))
-                })
+                let resp = self
+                    .http_client
+                    .get(url)
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status)
+                    .map_err(|e| self.err("cover art fetch")(e.into()))?;
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| self.err("cover art read")(e.into()))?;
+                Ok(Some(bytes.to_vec()))
             }
             _ => {
                 // Try to get cover art from the first track's album ID.
                 if let Some(first_track) = album.tracks.first() {
-                    self.block_on(async {
-                        // The source_uri is the song ID; we can try using it as the cover art ID.
-                        match self
-                            .client
-                            .get_cover_art(&first_track.source_uri, Some(300))
-                            .await
-                        {
-                            Ok(bytes) => Ok(Some(bytes.to_vec())),
-                            Err(e) => {
-                                tracing::warn!("Subsonic cover art for '{}': {e}", album.name);
-                                Ok(None)
-                            }
+                    // The source_uri is the song ID; we can try using it as the cover art ID.
+                    match self
+                        .client
+                        .get_cover_art(&first_track.source_uri, Some(300))
+                        .await
+                    {
+                        Ok(bytes) => Ok(Some(bytes.to_vec())),
+                        Err(e) => {
+                            tracing::warn!("Subsonic cover art for '{}': {e}", album.name);
+                            Ok(None)
                         }
-                    })
+                    }
                 } else {
                     Ok(None)
                 }
@@ -560,333 +607,305 @@ impl MusicProvider for SubsonicProvider {
         }
     }
 
-    fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError> {
+    async fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError> {
         // Extract the Subsonic song ID from the stream URL path.
         let song_id = track.path.to_string_lossy();
-        self.block_on(async {
-            // Try getLyricsBySongId first (OpenSubsonic extension).
-            match self.client.get_lyrics_by_song_id(&song_id, None).await {
-                Ok(lyrics_list) => {
-                    if let Some(structured) = lyrics_list.structured_lyrics.first() {
-                        if structured.synced {
-                            // Build synced lyrics from timestamps.
-                            let offset_ms = structured.offset.unwrap_or(0.0);
-                            let lines: Vec<LyricLine> = structured
-                                .line
-                                .iter()
-                                .filter_map(|l| {
-                                    l.start.map(|start| LyricLine {
-                                        timestamp_ms: (start + offset_ms).max(0.0) as u64,
-                                        text: l.value.clone(),
-                                    })
-                                })
-                                .collect();
-                            if !lines.is_empty() {
-                                return Ok(Some(Lyrics::Synced(lines)));
-                            }
-                        }
-                        // Unsynced structured lyrics — join lines.
-                        let text: String = structured
+        // Try getLyricsBySongId first (OpenSubsonic extension).
+        match self.client.get_lyrics_by_song_id(&song_id, None).await {
+            Ok(lyrics_list) => {
+                if let Some(structured) = lyrics_list.structured_lyrics.first() {
+                    if structured.synced {
+                        // Build synced lyrics from timestamps.
+                        let offset_ms = structured.offset.unwrap_or(0.0);
+                        let lines: Vec<LyricLine> = structured
                             .line
                             .iter()
-                            .map(|l| l.value.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !text.is_empty() {
-                            return Ok(Some(Lyrics::Unsynced(text)));
+                            .filter_map(|l| {
+                                l.start.map(|start| LyricLine {
+                                    timestamp_ms: (start + offset_ms).max(0.0) as u64,
+                                    text: l.value.clone(),
+                                })
+                            })
+                            .collect();
+                        if !lines.is_empty() {
+                            return Ok(Some(Lyrics::Synced(lines)));
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::debug!("getLyricsBySongId not available: {e}");
-                }
-            }
-
-            // Fallback: legacy getLyrics with artist + title.
-            match self
-                .client
-                .get_lyrics(Some(&track.artist), Some(&track.title))
-                .await
-            {
-                Ok(lyrics) => {
-                    if let Some(text) = lyrics.value
-                        && !text.is_empty()
-                    {
+                    // Unsynced structured lyrics — join lines.
+                    let text: String = structured
+                        .line
+                        .iter()
+                        .map(|l| l.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
                         return Ok(Some(Lyrics::Unsynced(text)));
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("getLyrics not available: {e}");
+            }
+            Err(e) => {
+                tracing::debug!("getLyricsBySongId not available: {e}");
+            }
+        }
+
+        // Fallback: legacy getLyrics with artist + title.
+        match self
+            .client
+            .get_lyrics(Some(&track.artist), Some(&track.title))
+            .await
+        {
+            Ok(lyrics) => {
+                if let Some(text) = lyrics.value
+                    && !text.is_empty()
+                {
+                    return Ok(Some(Lyrics::Unsynced(text)));
                 }
             }
+            Err(e) => {
+                tracing::debug!("getLyrics not available: {e}");
+            }
+        }
 
-            Ok(None)
-        })
+        Ok(None)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn sync_library(&self, _progress: &ScanProgress) -> Result<usize, ProviderError> {
+    async fn sync_library(&self, _progress: Arc<ScanProgress>) -> Result<usize, ProviderError> {
         // Subsonic servers manage their own library scanning.
         // We can trigger a scan via startScan, but the actual library
         // data is fetched on demand via browse_*() methods.
-        self.block_on(async {
-            match self.client.start_scan().await {
-                Ok(_) => tracing::info!("Triggered Subsonic library scan"),
-                Err(e) => tracing::warn!("Subsonic startScan: {e}"),
-            }
-            Ok(0)
-        })
+        match self.client.start_scan().await {
+            Ok(_) => tracing::info!("Triggered Subsonic library scan"),
+            Err(e) => tracing::warn!("Subsonic startScan: {e}"),
+        }
+        Ok(0)
     }
 
     // --- Playlists ---
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
-        self.block_on(async {
-            let playlists = self
-                .client
-                .get_playlists(None)
-                .await
-                .map_err(subsonic_err("getPlaylists"))?;
+    async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
+        let playlists = self
+            .client
+            .get_playlists(None)
+            .await
+            .map_err(self.err("getPlaylists"))?;
 
-            Ok(playlists
-                .into_iter()
-                .map(|p| Playlist {
-                    id: p.id,
-                    name: p.name,
-                    tracks: Vec::new(),
-                    track_count: p.song_count.unwrap_or(0) as u32,
-                    total_duration: Duration::from_secs(p.duration.unwrap_or(0) as u64),
-                })
-                .collect())
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
-        let id_owned = id.to_string();
-        self.block_on(async {
-            let p = self
-                .client
-                .get_playlist(&id_owned)
-                .await
-                .map_err(subsonic_err("getPlaylist"))?;
-
-            let tracks: Vec<Track> = p.entry.iter().map(|s| self.child_to_track(s)).collect();
-            let total_duration = tracks.iter().map(|t| t.duration).sum();
-
-            Ok(Playlist {
-                id: p.id,
-                name: p.name,
-                track_count: tracks.len() as u32,
-                total_duration,
-                tracks,
-            })
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
-        let name_owned = name.to_string();
-        self.block_on(async {
-            let p = self
-                .client
-                .create_playlist(None, Some(&name_owned), &[])
-                .await
-                .map_err(subsonic_err("createPlaylist"))?;
-
-            Ok(Playlist {
+        Ok(playlists
+            .into_iter()
+            .map(|p| Playlist {
                 id: p.id,
                 name: p.name,
                 tracks: Vec::new(),
-                track_count: 0,
-                total_duration: Duration::ZERO,
+                track_count: p.song_count.unwrap_or(0) as u32,
+                total_duration: Duration::from_secs(p.duration.unwrap_or(0) as u64),
             })
-        })
+            .collect())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+    async fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
         let id_owned = id.to_string();
-        self.block_on(async {
-            self.client
-                .delete_playlist(&id_owned)
-                .await
-                .map_err(subsonic_err("deletePlaylist"))
+        let p = self
+            .client
+            .get_playlist(&id_owned)
+            .await
+            .map_err(self.err("getPlaylist"))?;
+
+        let tracks: Vec<Track> = p.entry.iter().map(|s| self.child_to_track(s)).collect();
+        let total_duration = tracks.iter().map(|t| t.duration).sum();
+
+        Ok(Playlist {
+            id: p.id,
+            name: p.name,
+            track_count: tracks.len() as u32,
+            total_duration,
+            tracks,
         })
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+    async fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
+        let name_owned = name.to_string();
+        let p = self
+            .client
+            .create_playlist(None, Some(&name_owned), &[])
+            .await
+            .map_err(self.err("createPlaylist"))?;
+
+        Ok(Playlist {
+            id: p.id,
+            name: p.name,
+            tracks: Vec::new(),
+            track_count: 0,
+            total_duration: Duration::ZERO,
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        self.client
+            .delete_playlist(&id_owned)
+            .await
+            .map_err(self.err("deletePlaylist"))
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
         let id_owned = id.to_string();
         let name_owned = new_name.to_string();
-        self.block_on(async {
-            self.client
-                .update_playlist(
-                    &id_owned,
-                    &opensubsonic::UpdatePlaylistOptions::new().name(name_owned.as_str()),
-                )
-                .await
-                .map_err(subsonic_err("updatePlaylist"))
-        })
+        self.client
+            .update_playlist(
+                &id_owned,
+                &opensubsonic::UpdatePlaylistOptions::new().name(name_owned.as_str()),
+            )
+            .await
+            .map_err(self.err("updatePlaylist"))
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn add_to_playlist(
+    async fn add_to_playlist(
         &self,
         playlist_id: &str,
         track_ids: &[String],
     ) -> Result<(), ProviderError> {
         let pid = playlist_id.to_string();
         let ids: Vec<String> = track_ids.to_vec();
-        self.block_on(async {
-            self.client
-                .update_playlist(
-                    &pid,
-                    &opensubsonic::UpdatePlaylistOptions::new().add_songs(ids.iter().cloned()),
-                )
-                .await
-                .map_err(subsonic_err("updatePlaylist"))
-        })
+        self.client
+            .update_playlist(
+                &pid,
+                &opensubsonic::UpdatePlaylistOptions::new().add_songs(ids.iter().cloned()),
+            )
+            .await
+            .map_err(self.err("updatePlaylist"))
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+    async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        index: usize,
+    ) -> Result<(), ProviderError> {
         let pid = playlist_id.to_string();
         let index = i32::try_from(index)
             .map_err(|_| ProviderError::Other(format!("Playlist index {index} out of range")))?;
-        self.block_on(async {
-            self.client
-                .update_playlist(
-                    &pid,
-                    &opensubsonic::UpdatePlaylistOptions::new().remove_index(index),
-                )
-                .await
-                .map_err(subsonic_err("updatePlaylist"))
-        })
+        self.client
+            .update_playlist(
+                &pid,
+                &opensubsonic::UpdatePlaylistOptions::new().remove_index(index),
+            )
+            .await
+            .map_err(self.err("updatePlaylist"))
     }
 
     // --- Favorites and ratings ---
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+    async fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         let id = track_id.to_string();
-        self.block_on(async {
-            // Check if already starred by fetching the song.
-            let song = self
-                .client
-                .get_song(&id)
-                .await
-                .map_err(subsonic_err("getSong"))?;
+        // Check if already starred by fetching the song.
+        let song = self
+            .client
+            .get_song(&id)
+            .await
+            .map_err(self.err("getSong"))?;
 
-            if song.starred.is_some() {
-                // Currently starred → unstar.
-                self.client
-                    .unstar(&[id.as_str()], &[], &[])
-                    .await
-                    .map_err(subsonic_err("unstar"))?;
-                Ok(false)
-            } else {
-                // Not starred → star.
-                self.client
-                    .star(&[id.as_str()], &[], &[])
-                    .await
-                    .map_err(subsonic_err("star"))?;
-                Ok(true)
-            }
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
-        let id = track_id.to_string();
-        self.block_on(async {
-            let song = self
-                .client
-                .get_song(&id)
-                .await
-                .map_err(subsonic_err("getSong"))?;
-            Ok(song.starred.is_some())
-        })
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
-        let id = track_id.to_string();
-        self.block_on(async {
+        if song.starred.is_some() {
+            // Currently starred → unstar.
             self.client
-                .set_rating(&id, rating as i32)
+                .unstar(&[id.as_str()], &[], &[])
                 .await
-                .map_err(subsonic_err("setRating"))
-        })
+                .map_err(self.err("unstar"))?;
+            Ok(false)
+        } else {
+            // Not starred → star.
+            self.client
+                .star(&[id.as_str()], &[], &[])
+                .await
+                .map_err(self.err("star"))?;
+            Ok(true)
+        }
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+    async fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         let id = track_id.to_string();
-        self.block_on(async {
-            let song = self
-                .client
-                .get_song(&id)
-                .await
-                .map_err(subsonic_err("getSong"))?;
-            Ok(song
-                .user_rating
-                .and_then(|r| if r > 0 { Some(r as u8) } else { None }))
-        })
+        let song = self
+            .client
+            .get_song(&id)
+            .await
+            .map_err(self.err("getSong"))?;
+        Ok(song.starred.is_some())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
-        self.block_on(async {
-            let starred = self
-                .client
-                .get_starred2(None)
-                .await
-                .map_err(subsonic_err("getStarred2"))?;
+    async fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+        let id = track_id.to_string();
+        self.client
+            .set_rating(&id, rating as i32)
+            .await
+            .map_err(self.err("setRating"))
+    }
 
-            let tracks: Vec<Track> = starred
-                .song
-                .iter()
-                .map(|s| self.child_to_track(s))
-                .collect();
-            Ok(tracks)
-        })
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+        let id = track_id.to_string();
+        let song = self
+            .client
+            .get_song(&id)
+            .await
+            .map_err(self.err("getSong"))?;
+        Ok(song
+            .user_rating
+            .and_then(|r| if r > 0 { Some(r as u8) } else { None }))
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+        let starred = self
+            .client
+            .get_starred2(None)
+            .await
+            .map_err(self.err("getStarred2"))?;
+
+        let tracks: Vec<Track> = starred
+            .song
+            .iter()
+            .map(|s| self.child_to_track(s))
+            .collect();
+        Ok(tracks)
     }
 
     // --- Genres ---
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
-        self.block_on(async {
-            let genres = self
-                .client
-                .get_genres()
-                .await
-                .map_err(subsonic_err("getGenres"))?;
+    async fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        let genres = self
+            .client
+            .get_genres()
+            .await
+            .map_err(self.err("getGenres"))?;
 
-            let mut names: Vec<String> = genres.into_iter().map(|g| g.name).collect();
-            names.sort();
-            Ok(names)
-        })
+        let mut names: Vec<String> = genres.into_iter().map(|g| g.name).collect();
+        names.sort();
+        Ok(names)
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+    async fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
         let genre_owned = genre.to_string();
-        self.block_on(async {
-            let songs = self
-                .client
-                .get_songs_by_genre(
-                    &genre_owned,
-                    &opensubsonic::SongsByGenreOptions::new().count(500),
-                )
-                .await
-                .map_err(subsonic_err("getSongsByGenre"))?;
+        let songs = self
+            .client
+            .get_songs_by_genre(
+                &genre_owned,
+                &opensubsonic::SongsByGenreOptions::new().count(500),
+            )
+            .await
+            .map_err(self.err("getSongsByGenre"))?;
 
-            let tracks: Vec<Track> = songs.iter().map(|s| self.child_to_track(s)).collect();
-            Ok(tracks)
-        })
+        let tracks: Vec<Track> = songs.iter().map(|s| self.child_to_track(s)).collect();
+        Ok(tracks)
     }
 
     // --- Artist metadata ---
@@ -898,89 +917,85 @@ impl MusicProvider for SubsonicProvider {
     /// would be redundant (and pointlessly slower) next to data the
     /// Subsonic/Navidrome server already curates.
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_artist_info(
+    async fn get_artist_info(
         &self,
         name: &str,
     ) -> Result<Option<crate::library::ArtistInfoResult>, ProviderError> {
-        self.block_on(async {
-            let indexes = self
-                .client
-                .get_artists(None)
-                .await
-                .map_err(subsonic_err("getArtists"))?;
+        let indexes = self
+            .client
+            .get_artists(None)
+            .await
+            .map_err(self.err("getArtists"))?;
 
-            let Some(artist_ref) = indexes
-                .index
-                .iter()
-                .flat_map(|idx| idx.artist.iter())
-                .find(|a| a.name.eq_ignore_ascii_case(name))
-            else {
-                return Ok(None);
-            };
-            let artist_id = artist_ref.id.clone();
+        let Some(artist_ref) = indexes
+            .index
+            .iter()
+            .flat_map(|idx| idx.artist.iter())
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+        else {
+            return Ok(None);
+        };
+        let artist_id = artist_ref.id.clone();
 
-            let detail = self
-                .client
-                .get_artist(&artist_id)
-                .await
-                .map_err(subsonic_err("getArtist"))?;
+        let detail = self
+            .client
+            .get_artist(&artist_id)
+            .await
+            .map_err(self.err("getArtist"))?;
 
-            let bio = self
-                .client
-                .get_artist_info2(&artist_id, None, None)
-                .await
-                .ok()
-                .and_then(|info| info.biography)
-                .map(|b| b.trim().to_string())
-                .filter(|b| !b.is_empty());
+        let bio = self
+            .client
+            .get_artist_info2(&artist_id, None, None)
+            .await
+            .ok()
+            .and_then(|info| info.biography)
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty());
 
-            // Prefer the server's own cover art (an authenticated URL,
-            // already signed by the client, matching `get_cover_art`'s
-            // `CoverSource::Url` handling above) over the external
-            // `artistImageUrl`, which may be stale or absent on servers
-            // that don't scrape one.
-            let image_url = self
-                .cover_source_from_id(&detail.cover_art)
-                .and_then(|src| match src {
-                    CoverSource::Url(u) => Some(u),
-                    CoverSource::LocalFile(_) | CoverSource::MpdAlbumArt(_) => None,
-                })
-                .or_else(|| detail.artist_image_url.clone());
+        // Prefer the server's own cover art (an authenticated URL,
+        // already signed by the client, matching `get_cover_art`'s
+        // `CoverSource::Url` handling above) over the external
+        // `artistImageUrl`, which may be stale or absent on servers
+        // that don't scrape one.
+        let image_url = self
+            .cover_source_from_id(&detail.cover_art)
+            .and_then(|src| match src {
+                CoverSource::Url(u) => Some(u),
+                CoverSource::LocalFile(_) | CoverSource::MpdAlbumArt(_) => None,
+            })
+            .or_else(|| detail.artist_image_url.clone());
 
-            let image_bytes = match image_url {
-                Some(url) => match self.http_client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        resp.bytes().await.ok().map(|b| b.to_vec())
-                    }
-                    _ => None,
-                },
-                None => None,
-            };
+        let image_bytes = match image_url {
+            Some(url) => match self.http_client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.bytes().await.ok().map(|b| b.to_vec())
+                }
+                _ => None,
+            },
+            None => None,
+        };
 
-            if bio.is_none() && image_bytes.is_none() {
-                return Ok(None);
-            }
+        if bio.is_none() && image_bytes.is_none() {
+            return Ok(None);
+        }
 
-            Ok(Some(crate::library::ArtistInfoResult { bio, image_bytes }))
-        })
+        Ok(Some(crate::library::ArtistInfoResult { bio, image_bytes }))
     }
 
     #[tracing::instrument(skip(self, track), level = "debug")]
-    fn track_tech_info(
+    async fn track_tech_info(
         &self,
         track: &Track,
     ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
         // The song ID lives in `track.path` (see `child_to_track`);
         // `source_uri` is a signed stream URL and is never shown.
         let song_id = track.path.to_string_lossy().to_string();
-        self.block_on(async {
-            let song = self
-                .client
-                .get_song(&song_id)
-                .await
-                .map_err(subsonic_err("getSong"))?;
-            Ok(Some(song_to_tech_info(&song)))
-        })
+        let song = self
+            .client
+            .get_song(&song_id)
+            .await
+            .map_err(self.err("getSong"))?;
+        Ok(Some(song_to_tech_info(&song)))
     }
 }
 
@@ -1090,5 +1105,60 @@ mod tech_info_tests {
         assert_eq!(info.sample_rate, None);
         assert_eq!(info.file_size, None);
         assert_eq!(info.duration, None);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod connection_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serves `answers` (status line, JSON body) to successive requests.
+    async fn serve(answers: Vec<(&'static str, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            for (status, body) in answers {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    const PONG: &str = r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#;
+    const WRONG_PASSWORD: &str = r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}"#;
+
+    #[tokio::test]
+    async fn a_server_that_answers_ping_connects() {
+        let url = serve(vec![("200 OK", PONG)]).await;
+        assert_eq!(test_connection(&url, "u", "p", false).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn api_errors_keep_the_servers_own_message() {
+        let url = serve(vec![("200 OK", WRONG_PASSWORD)]).await;
+        let error = test_connection(&url, "u", "bad", false)
+            .await
+            .expect_err("rejected");
+        assert!(error.contains("Wrong username or password"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn http_status_errors_name_the_host_and_status() {
+        let url = serve(vec![("503 Service Unavailable", "")]).await;
+        let error = test_connection(&url, "u", "p", false)
+            .await
+            .expect_err("unavailable");
+        assert!(error.contains("503"), "{error}");
+        assert!(error.contains("127.0.0.1"), "{error}");
     }
 }

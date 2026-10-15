@@ -33,7 +33,7 @@ mod properties;
 mod providers;
 mod radio;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod transport;
 
 pub use artist_info::{ARTIST_INFO_CONCURRENCY, ArtistInfoState, ArtistPhoto};

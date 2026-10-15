@@ -346,20 +346,26 @@ pub fn needs_probe(track: &Track) -> bool {
     source_kind(track) != SourceKind::Stream
 }
 
-/// Reads one track's technical details (blocking). The single place that
-/// dispatches on where the track lives: local files are probed directly,
-/// servers are asked through their provider, streams only report what the
-/// track already knows.
-pub fn probe_track(
+/// Reads one track's technical details. The single place that dispatches on
+/// where the track lives: local files are probed directly (on the blocking
+/// pool), servers are asked through their provider, streams only report what
+/// the track already knows.
+pub async fn probe_track(
     track: &Track,
     provider: Option<&dyn MusicProvider>,
 ) -> Result<TechInfo, String> {
     match source_kind(track) {
-        SourceKind::Local => tech_info::probe(&track.path),
+        SourceKind::Local => {
+            let path = track.path.clone();
+            crate::task::spawn_blocking(move || tech_info::probe(&path))
+                .await
+                .map_err(|e| e.to_string())?
+        }
         SourceKind::Subsonic | SourceKind::Mpd => {
             let provider = provider.ok_or_else(|| fl!("props-provider-unavailable"))?;
             provider
                 .track_tech_info(track)
+                .await
                 .map_err(|e| e.to_string())
                 .map(|info| info.unwrap_or_else(|| known_from_track(track)))
         }
@@ -469,7 +475,8 @@ mod state_tests {
 
     #[test]
     fn a_remote_track_without_its_provider_reports_an_error() {
-        assert!(probe_track(&track("subsonic-home", "42"), None).is_err());
+        let result = futures::executor::block_on(probe_track(&track("subsonic-home", "42"), None));
+        assert!(result.is_err());
     }
 }
 

@@ -22,12 +22,9 @@ use crate::library::top_tracks::{ArtistTop, TOP_TRACKS_LEN, rank_top_tracks};
 use crate::library::{Album, CoverArt, LibraryDb, LibraryScanner, Track};
 use crate::provider::{MusicProvider, ProviderType};
 use crate::task::Effect;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::task::channel_stream;
-#[cfg(not(target_arch = "wasm32"))]
-use futures::SinkExt;
-#[cfg(not(target_arch = "wasm32"))]
 use futures::channel::mpsc;
+use futures::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,8 +34,10 @@ use std::time::Duration;
 const COVER_DECODE_CONCURRENCY: usize = 4;
 
 /// Albums fetched per batch from a remote provider.
-#[cfg(not(target_arch = "wasm32"))]
 const BATCH_SIZE: usize = 50;
+
+/// Concurrent cover requests while loading a remote library.
+const COVER_FETCH_CONCURRENCY: usize = 8;
 
 /// Async results of the library workflows; feed them to
 /// [`Session::apply_library_event`].
@@ -307,14 +306,10 @@ impl Session {
                 };
                 #[cfg(not(target_arch = "wasm32"))]
                 let scan = async move {
-                    crate::task::spawn_blocking(move || {
-                        provider.sync_library(&progress).unwrap_or_else(|e| {
-                            tracing::error!("sync_library failed: {e}");
-                            0
-                        })
+                    provider.sync_library(progress).await.unwrap_or_else(|e| {
+                        tracing::error!("sync_library failed: {e}");
+                        0
                     })
-                    .await
-                    .unwrap_or(0)
                 };
                 Reload::effect(self.scan_with(scan))
             }
@@ -427,28 +422,35 @@ impl Session {
                     self.cover_bytes.clear();
                     self.library.covers.clear()
                 };
-                #[cfg(target_arch = "wasm32")]
-                let effect = {
-                    // No remote provider exists in the browser yet.
-                    _ = (provider, generation, provider_id);
-                    Effect::none()
-                };
+                let subsonic = self
+                    .providers
+                    .subsonic_providers
+                    .iter()
+                    .find(|p| p.id() == provider_id)
+                    .cloned();
                 #[cfg(not(target_arch = "wasm32"))]
-                let effect = Effect::stream(channel_stream(8, {
-                    let mpd = self
-                        .providers
-                        .mpd_providers
-                        .iter()
-                        .find(|p| p.id() == provider_id)
-                        .cloned();
-                    let subsonic = self
-                        .providers
-                        .subsonic_providers
-                        .iter()
-                        .find(|p| p.id() == provider_id)
-                        .cloned();
-                    move |tx| load_incremental(tx, provider, mpd, subsonic, generation, provider_id)
-                }));
+                let mpd = self
+                    .providers
+                    .mpd_providers
+                    .iter()
+                    .find(|p| p.id() == provider_id)
+                    .cloned();
+                let stream = channel_stream(8, move |tx| {
+                    load_incremental(
+                        tx,
+                        provider,
+                        #[cfg(not(target_arch = "wasm32"))]
+                        mpd,
+                        subsonic,
+                        generation,
+                        provider_id,
+                    )
+                });
+                // `fetch` futures are not `Send`; the page has one thread,
+                // so the stream is only ever polled where it was created.
+                #[cfg(target_arch = "wasm32")]
+                let stream = send_wrapper::SendWrapper::new(stream);
+                let effect = Effect::stream(stream);
                 Reload { covers, effect }
             }
         }
@@ -616,14 +618,10 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let genres = crate::task::spawn_blocking(move || {
-                provider.list_genres().unwrap_or_else(|e| {
-                    tracing::debug!("list_genres: {e}");
-                    Vec::new()
-                })
-            })
-            .await
-            .unwrap_or_default();
+            let genres = provider.list_genres().await.unwrap_or_else(|e| {
+                tracing::debug!("list_genres: {e}");
+                Vec::new()
+            });
             LibraryEvent::GenresLoaded(genres)
         })
     }
@@ -641,11 +639,10 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let tracks = crate::task::spawn_blocking(move || {
-                provider.get_tracks_by_genre(&genre).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let tracks = provider
+                .get_tracks_by_genre(&genre)
+                .await
+                .unwrap_or_default();
             LibraryEvent::GenreTracksLoaded { idx, tracks }
         })
     }
@@ -700,12 +697,10 @@ impl Session {
             .unwrap_or(false);
         self.set_favorite_local(&track_id, optimistic);
         Effect::future(async move {
-            let id = track_id.clone();
-            let result = crate::task::spawn_blocking(move || {
-                provider.toggle_favorite(&id).map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = provider
+                .toggle_favorite(&track_id)
+                .await
+                .map_err(|e| e.to_string());
             LibraryEvent::FavoriteToggled {
                 track_id,
                 optimistic,
@@ -725,12 +720,10 @@ impl Session {
             .rating_state(self.playback.current_track.as_ref(), &track_id);
         self.set_rating_local(&track_id, if rating == 0 { None } else { Some(rating) });
         Effect::future(async move {
-            let id = track_id.clone();
-            let result = crate::task::spawn_blocking(move || {
-                provider.set_rating(&id, rating).map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let result = provider
+                .set_rating(&track_id, rating)
+                .await
+                .map_err(|e| e.to_string());
             LibraryEvent::RatingSet {
                 track_id,
                 previous,
@@ -740,11 +733,14 @@ impl Session {
     }
 }
 
-/// Fetch one album's cover through the provider (blocking).
-#[cfg(not(target_arch = "wasm32"))]
-fn provider_cover(provider: &dyn MusicProvider, album: &Album) -> Option<CoverThumb> {
-    let bytes = provider.get_cover_art(album).ok().flatten()?;
-    CoverThumb::from_bytes(&bytes)
+/// Fetch one album's cover through the provider; the bytes are decoded on
+/// the blocking pool.
+async fn provider_cover(provider: &dyn MusicProvider, album: &Album) -> Option<CoverThumb> {
+    let bytes = provider.get_cover_art(album).await.ok().flatten()?;
+    crate::task::spawn_blocking(move || CoverThumb::from_bytes(&bytes))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Single-shot reload of a database-backed provider, with covers extracted
@@ -754,21 +750,14 @@ async fn load_local(
     generation: u64,
     provider_id: String,
 ) -> LibraryEvent {
-    let browsed = Arc::clone(&provider);
-    let (tracks, albums) = crate::task::spawn_blocking(move || {
-        let provider = browsed;
-        let tracks = provider.browse_tracks().unwrap_or_else(|e| {
-            tracing::error!("browse_tracks failed: {e}");
-            Vec::new()
-        });
-        let albums = provider.browse_albums().unwrap_or_else(|e| {
-            tracing::error!("browse_albums failed: {e}");
-            Vec::new()
-        });
-        (tracks, albums)
-    })
-    .await
-    .unwrap_or_default();
+    let tracks = provider.browse_tracks().await.unwrap_or_else(|e| {
+        tracing::error!("browse_tracks failed: {e}");
+        Vec::new()
+    });
+    let albums = provider.browse_albums().await.unwrap_or_else(|e| {
+        tracing::error!("browse_albums failed: {e}");
+        Vec::new()
+    });
 
     // Thumbnails persisted by earlier launches: an album whose cover file
     // is unchanged skips the full-size decode.
@@ -969,42 +958,46 @@ async fn album_covers(
     found
 }
 
-/// Covers of one batch of albums, fetched in parallel.
-#[cfg(not(target_arch = "wasm32"))]
+/// One album's key with its fetched and decoded cover.
+async fn keyed_cover(
+    provider: &dyn MusicProvider,
+    key: String,
+    album: Album,
+) -> (String, Option<CoverThumb>) {
+    let thumb = provider_cover(provider, &album).await;
+    (key, thumb)
+}
+
+/// Covers of one batch of albums, fetched concurrently.
 async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> CoverSet {
-    let tasks: Vec<_> = albums
+    let fetches: Vec<_> = albums
         .iter()
         .map(|album| {
             let key = CoverArt::album_key(&album.artist, &album.name);
-            let provider = Arc::clone(provider);
-            let album = album.cover_hint();
-            // Decode + downscale inside the blocking closure.
-            crate::task::spawn_blocking(move || (key, provider_cover(provider.as_ref(), &album)))
+            keyed_cover(provider.as_ref(), key, album.cover_hint())
         })
         .collect();
-    let mut covers = CoverSet::new();
-    for task in tasks {
-        if let Ok((key, Some(thumb))) = task.await {
-            covers.insert(key, thumb);
-        }
-    }
-    covers
+    futures::stream::iter(fetches)
+        .buffer_unordered(COVER_FETCH_CONCURRENCY)
+        .filter_map(|(key, thumb)| async move { thumb.map(|t| (key, t)) })
+        .collect()
+        .await
 }
 
 /// Incremental reload of a remote provider: albums in batches of
 /// [`BATCH_SIZE`], each sent as a [`LibraryEvent::Batch`] with its covers,
 /// then [`LibraryEvent::LoadComplete`]. `mpd`/`subsonic` are the concrete
 /// provider behind `provider` (whichever it is), for paged access.
-#[cfg(not(target_arch = "wasm32"))]
 async fn load_incremental(
     mut tx: mpsc::Sender<LibraryEvent>,
     provider: Arc<dyn MusicProvider>,
-    mpd: Option<Arc<crate::provider::mpd::MpdProvider>>,
+    #[cfg(not(target_arch = "wasm32"))] mpd: Option<Arc<crate::provider::mpd::MpdProvider>>,
     subsonic: Option<Arc<crate::provider::subsonic::SubsonicProvider>>,
     generation: u64,
     provider_id: String,
 ) {
     match provider.provider_type() {
+        #[cfg(not(target_arch = "wasm32"))]
         ProviderType::Mpd => {
             let Some(mpd) = mpd else { return };
 
@@ -1099,8 +1092,11 @@ async fn load_incremental(
                 offset += page_size;
             }
         }
-        // Database-backed providers load in one piece (`load_local`).
+        // Database-backed providers load in one piece (`load_local`); the
+        // browser has no MPD provider.
         ProviderType::Local => return,
+        #[cfg(target_arch = "wasm32")]
+        ProviderType::Mpd => return,
     }
 
     _ = tx

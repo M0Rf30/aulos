@@ -23,7 +23,6 @@ use crate::player::extras::{InhibitStep, toggle_party_genre, toggle_stop_after, 
 use crate::player::{
     ActiveBackend, PlaybackState as PlayerState, Player, PreviousResult, QueueEditOutcome,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::MusicProvider;
 use crate::provider::mpd_events::MpdStatusUpdate;
 use crate::task::Effect;
@@ -35,7 +34,6 @@ use web_time::Instant;
 
 /// A track is scrobbled to Subsonic after half its length or this long,
 /// whichever comes first.
-#[cfg(not(target_arch = "wasm32"))]
 const SCROBBLE_MAX_THRESHOLD: Duration = Duration::from_secs(240);
 
 /// How far the seek shortcuts jump.
@@ -45,7 +43,6 @@ pub const SEEK_STEP: Duration = Duration::from_secs(5);
 pub const VOLUME_STEP: f32 = 0.05;
 
 /// Playback time after which a Subsonic play counts as a scrobble.
-#[cfg(not(target_arch = "wasm32"))]
 fn scrobble_threshold(duration: Duration) -> Duration {
     (duration / 2).min(SCROBBLE_MAX_THRESHOLD)
 }
@@ -582,6 +579,7 @@ impl Session {
         }
 
         let mut position_save = Effect::none();
+        let mut server_scrobble = Effect::none();
         if let Some(track) = self.playback.current_track.clone() {
             match &*track.provider_id {
                 "radio" => {
@@ -610,14 +608,20 @@ impl Session {
                 }
                 _ => {}
             }
-            self.handle_scrobble(track);
+            server_scrobble = self.handle_scrobble(track);
         }
         let mpris = self.publish_mpris();
         let extras = self.playback_extras_tick();
         let history = self
             .track_play_history()
             .map(|_| PlaybackEvent::PlayRecorded);
-        update.also(Effect::batch([position_save, mpris, extras, history]))
+        update.also(Effect::batch([
+            position_save,
+            server_scrobble,
+            mpris,
+            extras,
+            history,
+        ]))
     }
 
     /// Applies a polled MPD status. While the user drags the seek slider
@@ -691,54 +695,70 @@ impl Session {
         } else {
             PlaybackUpdate::none()
         };
-        if let Some(track) = self.playback.current_track.clone() {
-            self.handle_scrobble(track);
-        }
-        update.also(self.publish_mpris())
+        let server_scrobble = match self.playback.current_track.clone() {
+            Some(track) => self.handle_scrobble(track),
+            None => Effect::none(),
+        };
+        update.also(Effect::batch([server_scrobble, self.publish_mpris()]))
     }
 
     /// Scrobbling for the current track: the multi-service scrobblers
     /// (ListenBrainz / Last.fm / Libre.fm) while playing, and the Subsonic
     /// server's own "now playing" (once per track) and scrobble (at 50% of
     /// the duration or 4 minutes, whichever comes first).
-    fn handle_scrobble(&mut self, track: Track) {
+    fn handle_scrobble(&mut self, track: Track) -> Effect<PlaybackEvent> {
         if self.playback.is_playing() {
             self.playback
                 .scrobble
                 .on_playback(&track, self.playback.position);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        self.scrobble_to_subsonic(&track);
+        self.scrobble_to_subsonic(&track)
     }
 
     /// The Subsonic half of [`Self::handle_scrobble`]: the server's own
     /// "now playing" and scrobble, when `track` comes from a Subsonic server.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn scrobble_to_subsonic(&mut self, track: &Track) {
+    fn scrobble_to_subsonic(&mut self, track: &Track) -> Effect<PlaybackEvent> {
         let Some(provider) = self
             .providers
             .subsonic_providers
             .iter()
             .find(|p| p.id() == &*track.provider_id)
+            .cloned()
         else {
-            return;
+            return Effect::none();
         };
 
         // The Subsonic song ID is stored in track.path (set by child_to_track).
         let song_id = track.path.to_string_lossy().to_string();
 
-        if !self.playback.scrobble_now_playing_sent {
+        let now_playing = if self.playback.scrobble_now_playing_sent {
+            false
+        } else {
             self.playback.scrobble_now_playing_sent = true;
-            provider.now_playing(&song_id);
-        }
+            true
+        };
 
+        let mut scrobble = false;
         if !self.playback.scrobble_sent {
             let threshold = scrobble_threshold(track.duration);
             if self.playback.position >= threshold && threshold > Duration::ZERO {
                 self.playback.scrobble_sent = true;
-                provider.scrobble(&song_id);
+                scrobble = true;
             }
         }
+
+        if !now_playing && !scrobble {
+            return Effect::none();
+        }
+        Effect::future(async move {
+            if now_playing {
+                provider.now_playing(&song_id).await;
+            }
+            if scrobble {
+                provider.scrobble(&song_id).await;
+            }
+            PlaybackEvent::ServerScrobbled
+        })
     }
 
     /// Applies the result of earlier asynchronous work.
@@ -778,9 +798,9 @@ impl Session {
                 }
                 self.play_tracks(tracks, 0)
             }
-            PlaybackEvent::PodcastPositionSaved | PlaybackEvent::InhibitReleased => {
-                PlaybackUpdate::none()
-            }
+            PlaybackEvent::PodcastPositionSaved
+            | PlaybackEvent::InhibitReleased
+            | PlaybackEvent::ServerScrobbled => PlaybackUpdate::none(),
             PlaybackEvent::InhibitAcquired(token) => {
                 // A token comes back only when playback stopped while the
                 // request was in flight.
@@ -1206,15 +1226,14 @@ impl Session {
 
         Effect::future(async move {
             let for_cover = track.clone();
+            let loaded = match (&cached_cover, &lazy_cover) {
+                (None, Some((provider, hint))) => provider.get_cover_art(hint).await.ok().flatten(),
+                _ => None,
+            };
             let image = crate::task::spawn_blocking(move || {
-                let loaded;
-                let bytes: Option<&[u8]> = match (&cached_cover, &lazy_cover) {
-                    (Some(b), _) => Some(b.as_slice()),
-                    (None, Some((provider, hint))) => {
-                        loaded = provider.get_cover_art(hint).ok().flatten();
-                        loaded.as_deref()
-                    }
-                    (None, None) => None,
+                let bytes: Option<&[u8]> = match &cached_cover {
+                    Some(b) => Some(b.as_slice()),
+                    None => loaded.as_deref(),
                 };
                 notify::prepare_cover(&for_cover, bytes)
             })

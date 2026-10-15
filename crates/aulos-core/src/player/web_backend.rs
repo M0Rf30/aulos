@@ -335,31 +335,25 @@ async fn load(source: &TrackSource, rg_db: Option<f32>) -> Result<TrackData, Str
 }
 
 /// The whole body of `url`. Failures say what went wrong in terms a user can
-/// act on: the request itself failing is, in a browser, mostly the server not
-/// allowing this page to read it (CORS) or mixed content, which the page
-/// cannot tell apart from the server being unreachable.
+/// act on (the wording lives in [`crate::http`]): the request itself failing
+/// is, in a browser, mostly the server not allowing this page to read it
+/// (CORS), which the page cannot tell apart from the server being down;
+/// mixed content is caught before the request is sent.
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let host = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "the server".to_string());
+    crate::http::check_mixed_content(url)?;
+    let host = crate::http::host_of(url);
     let window = web_sys::window().ok_or("No browser window")?;
     let response = JsFuture::from(window.fetch_with_str(url))
         .await
-        .map_err(|_| {
-            format!(
-                "Could not load the track from {host}: the server is unreachable, does not allow \
-                 this page to read it (CORS), or is not served over HTTPS like this page"
-            )
-        })?;
+        .map_err(|_| crate::http::no_answer_message(url))?;
     let response: web_sys::Response = response
         .dyn_into()
         .map_err(|_| "Unexpected answer from the server".to_string())?;
     if !response.ok() {
-        return Err(format!(
-            "{host} answered HTTP {} {}",
+        return Err(crate::http::status_message(
+            &host,
             response.status(),
-            response.status_text()
+            &response.status_text(),
         ));
     }
     let body = response.array_buffer().map_err(|e| js_message(&e))?;

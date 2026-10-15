@@ -33,6 +33,160 @@ pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> 
     builder.build()
 }
 
+/// The host of `url` for error messages (`the server` when it has none).
+pub fn host_of(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "the server".to_string())
+}
+
+/// Whether a page served over `page_protocol` (`"https:"`, as
+/// `window.location.protocol` spells it) cannot fetch `url`: browsers block
+/// an `http://` request made from an `https://` page ("mixed content"),
+/// except to loopback addresses, which they treat as secure.
+pub fn is_mixed_content(page_protocol: &str, url: &str) -> bool {
+    if page_protocol != "https:" {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.to_ascii_lowercase();
+            domain != "localhost" && !domain.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => !ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => !ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Why a browser refuses to fetch an `http://` server from an `https://`
+/// page.
+pub fn mixed_content_message(host: &str) -> String {
+    format!(
+        "{host} is served over plain http:// but this page is https://, so the browser blocks \
+         the request (mixed content). Use an https:// address for the server."
+    )
+}
+
+/// What a request that never got an answer means in a browser: it cannot
+/// tell a server that is down from one that does not allow this page to read
+/// it, so the message names both.
+pub fn unreachable_message(host: &str) -> String {
+    format!(
+        "Could not reach {host}: the server is down, unreachable, or does not allow requests \
+         from this site (CORS: it must send Access-Control-Allow-Origin and \
+         Access-Control-Allow-Headers and answer OPTIONS preflights, see \
+         https://developer.mozilla.org/docs/Web/HTTP/Guides/CORS)"
+    )
+}
+
+/// A server that answered with an HTTP error status.
+pub fn status_message(host: &str, status: u16, reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        format!("{host} answered HTTP {status}")
+    } else {
+        format!("{host} answered HTTP {status} {reason}")
+    }
+}
+
+/// The explanation of a request to `url` that got no answer at all: mixed
+/// content when this page cannot fetch it (see [`check_mixed_content`]),
+/// otherwise [`unreachable_message`].
+pub fn no_answer_message(url: &str) -> String {
+    check_mixed_content(url)
+        .err()
+        .unwrap_or_else(|| unreachable_message(&host_of(url)))
+}
+
+/// Fails with [`mixed_content_message`] when this page cannot fetch `url`
+/// (see [`is_mixed_content`]); always `Ok` natively.
+///
+/// # Errors
+/// The message to show to the user.
+pub fn check_mixed_content(url: &str) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let protocol = web_sys::window()
+            .and_then(|w| w.location().protocol().ok())
+            .unwrap_or_default();
+        if is_mixed_content(&protocol, url) {
+            return Err(mixed_content_message(&host_of(url)));
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = url;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_from_an_https_page_is_mixed_content() {
+        assert!(is_mixed_content("https:", "http://music.example.com/"));
+        assert!(is_mixed_content("https:", "http://192.168.1.10:4533"));
+        assert!(is_mixed_content("https:", "HTTP://Music.Example.com"));
+    }
+
+    #[test]
+    fn https_servers_and_http_pages_are_not() {
+        assert!(!is_mixed_content("https:", "https://music.example.com"));
+        assert!(!is_mixed_content("http:", "http://music.example.com"));
+        assert!(!is_mixed_content("file:", "http://music.example.com"));
+    }
+
+    #[test]
+    fn loopback_is_secure_for_browsers() {
+        assert!(!is_mixed_content("https:", "http://localhost:4533"));
+        assert!(!is_mixed_content("https:", "http://127.0.0.1:4533"));
+        assert!(!is_mixed_content("https:", "http://[::1]:4533"));
+        assert!(!is_mixed_content("https:", "http://app.localhost"));
+    }
+
+    #[test]
+    fn unparseable_urls_are_left_to_the_client() {
+        assert!(!is_mixed_content("https:", "not a url"));
+    }
+
+    #[test]
+    fn messages_name_the_host_and_the_remedy() {
+        assert_eq!(
+            host_of("https://music.example.com:4533/rest"),
+            "music.example.com"
+        );
+        assert_eq!(host_of("garbage"), "the server");
+        assert!(mixed_content_message("nas.lan").contains("https://"));
+        let unreachable = unreachable_message("nas.lan");
+        assert!(unreachable.starts_with("Could not reach nas.lan:"));
+        assert!(unreachable.contains("CORS"));
+        assert!(unreachable.contains("Access-Control-Allow-Origin"));
+        assert!(unreachable.contains("OPTIONS"));
+        assert_eq!(
+            status_message("nas.lan", 404, "Not Found"),
+            "nas.lan answered HTTP 404 Not Found"
+        );
+        assert_eq!(
+            status_message("nas.lan", 502, " "),
+            "nas.lan answered HTTP 502"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_builds_never_see_mixed_content() {
+        assert_eq!(check_mixed_content("http://music.example.com"), Ok(()));
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::convert::Infallible;

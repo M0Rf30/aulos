@@ -28,7 +28,7 @@ tokio = { version = "1", default-features = false }
 mpd_client = { git = "https://github.com/M0Rf30/mpd_client.git", rev = "49b12544278f6f149bbde8d74bf8d7d907653803" }
 
 # OpenSubsonic/Subsonic API client
-opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "a43fb76058d4457c6d7d9b824fcdd90025652864" }
+opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "2f36ee1eb4e962a53ad1369ecf199c9242a9155e" }
 
 # `blocking` and the rustls TLS stack are native only (core's manifest adds
 # them): in the browser reqwest is a thin layer over `fetch`.

@@ -7,21 +7,22 @@
 //! and the [`ProviderRegistry`] that manages active providers.
 
 pub mod local;
-// MPD and Subsonic need TCP sockets and a tokio runtime; their browser
-// transports (a WebSocket bridge, `fetch`) are separate providers. The MPD
-// event types (`mpd_events`) are plain data and exist everywhere.
+// MPD needs TCP sockets and a tokio runtime; its browser transport (a
+// WebSocket bridge) would be a separate provider. The MPD event types
+// (`mpd_events`) are plain data and exist everywhere. Subsonic is plain HTTP,
+// so it runs on `fetch` in the browser.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mpd;
 pub mod mpd_events;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mpd_streams;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod subsonic;
 
 use crate::library::scan_progress::ScanProgress;
 use crate::library::{Album, Artist, Lyrics, Track};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// The type of a music provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,6 @@ impl std::error::Error for ProviderError {}
 /// Container label for a file suffix reported by a remote server (Subsonic
 /// `suffix`, the extension of an MPD path), in the same spelling the local
 /// probe uses (`"FLAC"`, `"MPEG-4 (M4A)"`…). Unknown suffixes are upper-cased.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn container_from_suffix(suffix: &str) -> Option<String> {
     let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
     let label = match suffix.as_str() {
@@ -101,7 +101,6 @@ pub(crate) fn container_from_suffix(suffix: &str) -> Option<String> {
 
 /// Whether a file suffix denotes a lossless format; `None` when the suffix
 /// alone cannot tell (`m4a` may hold ALAC or AAC, `wv` may be hybrid).
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
     match suffix
         .trim()
@@ -118,7 +117,6 @@ pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
 }
 
 /// Conventional channel-layout name for a channel count.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn channel_layout_name(channels: u32) -> Option<String> {
     Some(
         match channels {
@@ -143,8 +141,7 @@ impl From<String> for ProviderError {
 }
 
 /// Wrap a network/protocol error into `ProviderError::Io`, labeled with the
-/// backend name and the failing operation. Shared by `mpd.rs` and
-/// `subsonic.rs`, whose per-backend `*_err` helpers differed only in prefix.
+/// backend name and the failing operation.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn wrap_err<E: fmt::Display>(
     backend: &str,
@@ -160,6 +157,13 @@ pub(crate) fn wrap_err<E: fmt::Display>(
 /// Each provider manages a library of tracks, albums, and artists, and can
 /// resolve audio sources for playback. Implementations must be `Send + Sync`
 /// to work with async runtimes and the UI task system.
+///
+/// Everything that does I/O is `async`, so a network provider never blocks a
+/// thread (there is only one in the browser). Natively the futures are
+/// `Send`; on wasm32 they are not (`fetch` futures hold JS handles). Database
+/// and file-system work belongs on [`crate::task::spawn_blocking`].
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait MusicProvider: Send + Sync {
     /// Unique identifier for this provider instance (e.g., "local", "mpd-home").
     fn id(&self) -> &str;
@@ -171,63 +175,63 @@ pub trait MusicProvider: Send + Sync {
     fn provider_type(&self) -> ProviderType;
 
     /// Browse all albums from this provider's library.
-    fn browse_albums(&self) -> Result<Vec<Album>, ProviderError>;
+    async fn browse_albums(&self) -> Result<Vec<Album>, ProviderError>;
 
     /// Browse all artists from this provider's library.
-    fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError>;
+    async fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError>;
 
     /// Browse all tracks from this provider's library.
-    fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError>;
+    async fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError>;
 
     /// Search tracks matching the given query string.
-    fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError>;
+    async fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError>;
 
     /// Get cover art bytes for an album, if available.
-    fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError>;
+    async fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError>;
 
     /// Get lyrics for a track, if available.
-    fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError>;
+    async fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError>;
 
     /// Synchronize / refresh the provider's library.
     /// Returns the number of tracks added or updated.
     ///
     /// Providers that can tell how far along they are report it through
     /// `progress`; the others leave it untouched.
-    fn sync_library(&self, progress: &ScanProgress) -> Result<usize, ProviderError>;
+    async fn sync_library(&self, progress: Arc<ScanProgress>) -> Result<usize, ProviderError>;
 
     // --- Playlist methods (optional, default: NotSupported) ---
 
     /// List all playlists from this provider.
-    fn list_playlists(&self) -> Result<Vec<crate::library::Playlist>, ProviderError> {
+    async fn list_playlists(&self) -> Result<Vec<crate::library::Playlist>, ProviderError> {
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
     /// Get a playlist with its tracks.
-    fn get_playlist(&self, id: &str) -> Result<crate::library::Playlist, ProviderError> {
+    async fn get_playlist(&self, id: &str) -> Result<crate::library::Playlist, ProviderError> {
         let _ = id;
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
     /// Create a new playlist with the given name.
-    fn create_playlist(&self, name: &str) -> Result<crate::library::Playlist, ProviderError> {
+    async fn create_playlist(&self, name: &str) -> Result<crate::library::Playlist, ProviderError> {
         let _ = name;
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
     /// Delete a playlist by ID.
-    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+    async fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
         let _ = id;
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
     /// Rename a playlist.
-    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+    async fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
         let _ = (id, new_name);
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
     /// Add tracks to a playlist.
-    fn add_to_playlist(
+    async fn add_to_playlist(
         &self,
         playlist_id: &str,
         track_ids: &[String],
@@ -256,13 +260,17 @@ pub trait MusicProvider: Send + Sync {
 
     /// Removes the track at 0-based `index` of a playlist. Entries are
     /// addressed by position because a track can appear more than once.
-    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+    async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        index: usize,
+    ) -> Result<(), ProviderError> {
         let _ = (playlist_id, index);
         Err(ProviderError::NotSupported("playlist track removal".into()))
     }
 
     /// Moves the track at `from` to final index `to` (both 0-based).
-    fn move_in_playlist(
+    async fn move_in_playlist(
         &self,
         playlist_id: &str,
         from: usize,
@@ -275,43 +283,43 @@ pub trait MusicProvider: Send + Sync {
     // --- Favorites and ratings methods (optional, default: not supported) ---
 
     /// Toggle favorite status for a track (by source_uri or provider-specific ID).
-    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+    async fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         let _ = track_id;
         Err(ProviderError::NotSupported("favorites".into()))
     }
 
     /// Check if a track is a favorite.
-    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+    async fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
         let _ = track_id;
         Ok(false)
     }
 
     /// Set a rating (1-5) for a track. Pass 0 to clear.
-    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+    async fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
         let _ = (track_id, rating);
         Err(ProviderError::NotSupported("ratings".into()))
     }
 
     /// Get the rating for a track.
-    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+    async fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
         let _ = track_id;
         Ok(None)
     }
 
     /// List all favorite tracks.
-    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+    async fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
         Err(ProviderError::NotSupported("favorites".into()))
     }
 
     // --- Genre methods (optional, default: empty) ---
 
     /// List all distinct genres from this provider.
-    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+    async fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
         Ok(Vec::new())
     }
 
     /// Get all tracks matching the given genre.
-    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+    async fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
         let _ = genre;
         Ok(Vec::new())
     }
@@ -324,7 +332,7 @@ pub trait MusicProvider: Send + Sync {
     /// `NotSupported` tells `crate::library::artist_info` callers to fall
     /// back to Aulos's own Deezer/Wikipedia lookup instead, gated by
     /// `Config::fetch_artist_bio` / `Config::fetch_artist_photos`.
-    fn get_artist_info(
+    async fn get_artist_info(
         &self,
         name: &str,
     ) -> Result<Option<crate::library::ArtistInfoResult>, ProviderError> {
@@ -334,11 +342,11 @@ pub trait MusicProvider: Send + Sync {
 
     // --- Technical properties (optional, default: nothing beyond the Track) ---
 
-    /// Technical data of a remote track for the Properties drawer (blocking:
-    /// a network round trip). `Ok(None)` — the default — means this provider
+    /// Technical data of a remote track for the Properties drawer (a network
+    /// round trip). `Ok(None)` — the default — means this provider
     /// has nothing beyond what the [`Track`] already carries (the local
     /// provider's files are probed directly by `library::tech_info::probe`).
-    fn track_tech_info(
+    async fn track_tech_info(
         &self,
         track: &Track,
     ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
@@ -432,5 +440,3 @@ impl ProviderRegistry {
             .collect()
     }
 }
-
-use std::sync::Arc;

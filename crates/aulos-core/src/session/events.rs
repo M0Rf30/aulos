@@ -442,22 +442,15 @@ impl Session {
             return Effect::none();
         }
         Effect::future(async move {
-            // The browser reads local files asynchronously (the only
-            // provider it has is the local one).
-            #[cfg(target_arch = "wasm32")]
-            let bytes = {
-                _ = provider;
-                match hint.tracks.first() {
+            let bytes = match provider.provider_type() {
+                // The browser reads local files asynchronously.
+                #[cfg(target_arch = "wasm32")]
+                crate::provider::ProviderType::Local => match hint.tracks.first() {
                     Some(track) => crate::library::web_covers::cover_bytes(&track.path).await,
                     None => None,
-                }
+                },
+                _ => provider.get_cover_art(&hint).await.ok().flatten(),
             };
-            #[cfg(not(target_arch = "wasm32"))]
-            let bytes =
-                crate::task::spawn_blocking(move || provider.get_cover_art(&hint).ok().flatten())
-                    .await
-                    .ok()
-                    .flatten();
             SessionEvent::CoverBytes { key, bytes }
         })
     }

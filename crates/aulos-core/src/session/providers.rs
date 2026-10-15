@@ -8,13 +8,11 @@ use crate::config::{self, Config};
 use crate::fl;
 use crate::library::LibraryDb;
 use crate::player::PlaybackState;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::MusicProvider;
 use crate::provider::local::LocalProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::mpd_events::{IdleAction, IdleSubsystem, idle_action};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{ProviderRegistry, ProviderType};
 use crate::task::Effect;
@@ -32,7 +30,6 @@ pub struct ProvidersState {
     #[cfg(not(target_arch = "wasm32"))]
     pub mpd_providers: Vec<Arc<MpdProvider>>,
     /// Shared references to Subsonic providers for scrobbling.
-    #[cfg(not(target_arch = "wasm32"))]
     pub subsonic_providers: Vec<Arc<SubsonicProvider>>,
     /// Ordered list of (provider_id, display_name) for the selector dropdown.
     pub provider_list: Vec<(String, String)>,
@@ -135,7 +132,6 @@ impl ProvidersState {
             registry,
             #[cfg(not(target_arch = "wasm32"))]
             mpd_providers: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             subsonic_providers: Vec::new(),
             provider_list: Vec::new(),
             active_index: None,
@@ -174,10 +170,9 @@ impl ProvidersState {
     /// Registers one MPD provider per configured server.
     #[cfg(not(target_arch = "wasm32"))]
     fn register_mpd(&mut self, config: &Config) {
-        let rt_handle = tokio::runtime::Handle::current();
         for entry in &config.mpd_servers {
             let mpd_config: MpdConfig = entry.clone().into();
-            let provider = Arc::new(MpdProvider::new(mpd_config, rt_handle.clone()));
+            let provider = Arc::new(MpdProvider::new(mpd_config));
             self.mpd_providers.push(Arc::clone(&provider));
             self.registry
                 .register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
@@ -191,13 +186,11 @@ impl ProvidersState {
 
     /// Registers one Subsonic provider per configured server; returns the
     /// ones that failed to construct.
-    #[cfg(not(target_arch = "wasm32"))]
     fn register_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
-        let rt_handle = tokio::runtime::Handle::current();
         let mut errors = Vec::new();
         for entry in &config.subsonic_servers {
             let subsonic_config: SubsonicConfig = entry.clone().into();
-            match SubsonicProvider::new(subsonic_config, rt_handle.clone()) {
+            match SubsonicProvider::new(subsonic_config) {
                 Ok(provider) => {
                     let provider = Arc::new(provider);
                     self.subsonic_providers.push(Arc::clone(&provider));
@@ -212,22 +205,6 @@ impl ProvidersState {
             }
         }
         errors
-    }
-
-    /// No Subsonic client runs in the browser yet: every configured server
-    /// is reported as failed to construct.
-    #[cfg(target_arch = "wasm32")]
-    fn register_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
-        config
-            .subsonic_servers
-            .iter()
-            .map(|entry| {
-                let reason = "Subsonic is not available in the browser yet".to_string();
-                self.provider_errors
-                    .insert(entry.id.clone(), reason.clone());
-                (entry.name.clone(), reason)
-            })
-            .collect()
     }
 
     /// Rebuilds the settings cards' editing state (and clears their
@@ -310,7 +287,6 @@ impl ProvidersState {
     /// Subsonic cards); returns the servers that failed to construct.
     fn reinit_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
         self.registry.remove_by_type(ProviderType::Subsonic);
-        #[cfg(not(target_arch = "wasm32"))]
         self.subsonic_providers.clear();
         for entry in self
             .subsonic_edit_states
@@ -370,18 +346,6 @@ impl ProvidersState {
     }
 
     /// Test the connection with the editing state of Subsonic card `i`.
-    #[cfg(target_arch = "wasm32")]
-    pub fn test_subsonic_connection(&self, i: usize) -> Effect<ProviderEvent> {
-        Effect::future(async move {
-            ProviderEvent::SubsonicTestResult(
-                i,
-                Err("Subsonic is not available in the browser yet".into()),
-            )
-        })
-    }
-
-    /// Test the connection with the editing state of Subsonic card `i`.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn test_subsonic_connection(&self, i: usize) -> Effect<ProviderEvent> {
         let Some(state) = self.subsonic_edit_states.get(i) else {
             return Effect::none();
@@ -391,18 +355,12 @@ impl ProvidersState {
         let password = state.password.clone();
         let accept_invalid_certs = state.accept_invalid_certs;
         Effect::future(async move {
-            let result = async {
-                let auth = opensubsonic::Auth::token(&username, &password);
-                let mut client =
-                    opensubsonic::Client::new(&url, auth).map_err(|e| format!("Client: {e}"))?;
-                if accept_invalid_certs {
-                    client = client
-                        .with_danger_accept_invalid_certs()
-                        .map_err(|e| format!("TLS: {e}"))?;
-                }
-                client.ping().await.map_err(|e| format!("Ping: {e}"))?;
-                Ok(())
-            }
+            let result = crate::provider::subsonic::test_connection(
+                &url,
+                &username,
+                &password,
+                accept_invalid_certs,
+            )
             .await;
             ProviderEvent::SubsonicTestResult(i, result)
         })

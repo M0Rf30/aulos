@@ -103,7 +103,7 @@ impl ArtistInfoState {
     }
 
     /// Marks `names` pending and returns one fetch per artist, each
-    /// acquiring the shared semaphore before its blocking resolve (cache hit
+    /// acquiring the shared semaphore before its resolve (cache hit
     /// or network fetch), so the actual concurrency bound lives in one place
     /// rather than in how many futures happen to be dispatched at once.
     fn dispatch(
@@ -124,14 +124,17 @@ impl ArtistInfoState {
             fetches.push(Effect::future(async move {
                 let permit = semaphore.acquire_owned().await.ok();
                 let now = crate::unix_now();
+                if is_subsonic {
+                    let outcome =
+                        resolve_via_provider(store, provider.as_ref(), &provider_id, &name, now)
+                            .await;
+                    drop(permit);
+                    return outcome;
+                }
                 let name_for_panic = name.clone();
                 crate::task::spawn_blocking(move || {
                     let _permit = permit;
-                    if is_subsonic {
-                        resolve_via_provider(&store, provider.as_ref(), &provider_id, &name, now)
-                    } else {
-                        resolve_via_agents(&store, &name, now, wanted)
-                    }
+                    resolve_via_agents(&store, &name, now, wanted)
                 })
                 .await
                 .unwrap_or_else(|_| ArtistInfoOutcome::empty(name_for_panic))

@@ -40,6 +40,9 @@ pub enum PlaybackEvent {
     FilesRead(Vec<Track>),
     /// A podcast position write finished (nothing to do).
     PodcastPositionSaved,
+    /// A Subsonic server's now-playing / scrobble request finished (nothing
+    /// to do; failures are logged where they happen).
+    ServerScrobbled,
     /// An inhibit request finished; `None` when it failed.
     InhibitAcquired(Option<InhibitToken>),
     /// A released inhibit lock is gone (nothing to do).

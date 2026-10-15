@@ -6,13 +6,18 @@
 //! Passwords for MPD and Subsonic providers are stored in the platform's
 //! native credential store via the `keyring-core` crate: the kernel keyutils
 //! or the D-Bus secret service (GNOME Keyring, KDE Wallet) on Linux, the
-//! Credential Manager on Windows, the Keychain on macOS. On other targets
-//! (the web build) there is no store, so every call reports the keyring as
-//! unavailable. Each password is keyed by `(SERVICE, provider_id)`.
+//! Credential Manager on Windows, the Keychain on macOS. The web build has no
+//! keyring: its store keeps passwords **unencrypted** in the browser's
+//! `localStorage` (see [`web_store`]). Other targets have no store, so every
+//! call reports the keyring as unavailable. Each password is keyed by
+//! `(SERVICE, provider_id)`.
 
 use std::sync::{Arc, Once};
 
 use keyring_core::api::CredentialStore;
+
+#[cfg(target_arch = "wasm32")]
+mod web_store;
 
 const SERVICE: &str = "io.github.m0rf30.Aulos";
 
@@ -55,8 +60,19 @@ fn platform_store() -> Option<Arc<CredentialStore>> {
         .ok()
 }
 
+/// The browser's `localStorage`, unencrypted (the web has no keyring).
+#[cfg(target_arch = "wasm32")]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    Some(web_store::Store::new())
+}
+
 /// No credential store on this target.
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_arch = "wasm32"
+)))]
 fn platform_store() -> Option<Arc<CredentialStore>> {
     None
 }

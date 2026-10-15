@@ -114,6 +114,7 @@ mod native {
         command(async move {
             provider
                 .send_crossfade(seconds)
+                .await
                 .map_err(|e| format!("crossfade: {e}"))
         })
     }
@@ -132,6 +133,7 @@ mod native {
         command(async move {
             provider
                 .send_replay_gain_mode(mode)
+                .await
                 .map_err(|e| format!("replay_gain_mode: {e}"))
         })
     }

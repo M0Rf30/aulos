@@ -129,7 +129,7 @@ fn session_with(config_path: Option<PathBuf>, config: Config) -> Session {
 }
 
 /// A local-library track with the given id.
-pub(super) fn track(id: i64) -> Track {
+pub(crate) fn track(id: i64) -> Track {
     Track {
         id,
         path: PathBuf::from(format!("/music/{id}.flac")),

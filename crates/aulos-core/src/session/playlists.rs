@@ -11,8 +11,10 @@ use super::{PlaybackUpdate, Session};
 use crate::library::playlist_io::{self, ExportSource, ImportSummary};
 use crate::library::smart_playlist::{EditorState, SmartPlaylist};
 use crate::library::{LibraryDb, Playlist, Track};
+use crate::provider::{MusicProvider, ProviderError};
 use crate::task::Effect;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// How long a rule edit settles before its match count is queried.
 const MATCH_COUNT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -298,52 +300,38 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let playlists = crate::task::spawn_blocking(move || {
-                let mut playlists = provider.list_playlists().unwrap_or_else(|e| {
-                    tracing::warn!("list_playlists failed: {e}");
-                    Vec::new()
-                });
-                // `list_playlists` returns summaries only (no tracks) for
-                // the local provider; fetch each playlist's tracks so the
-                // detail view, "play all" and M3U export have them.
-                for playlist in playlists.iter_mut() {
-                    if playlist.tracks.is_empty()
-                        && playlist.track_count > 0
-                        && let Ok(full) = provider.get_playlist(&playlist.id)
-                    {
-                        playlist.tracks = full.tracks;
-                    }
+            let mut playlists = provider.list_playlists().await.unwrap_or_else(|e| {
+                tracing::warn!("list_playlists failed: {e}");
+                Vec::new()
+            });
+            // `list_playlists` returns summaries only (no tracks) for the
+            // local provider; fetch each playlist's tracks so the detail
+            // view, "play all" and M3U export have them.
+            for playlist in playlists.iter_mut() {
+                if playlist.tracks.is_empty()
+                    && playlist.track_count > 0
+                    && let Ok(full) = provider.get_playlist(&playlist.id).await
+                {
+                    playlist.tracks = full.tracks;
                 }
-                playlists
-            })
-            .await
-            .unwrap_or_default();
+            }
             PlaylistEvent::Loaded(playlists)
         })
     }
 
-    /// Runs a playlist mutation against the active provider off the UI
-    /// thread.
-    fn playlist_op(
-        &self,
-        op: PlaylistOp,
-        f: impl FnOnce(&dyn crate::provider::MusicProvider) -> Result<(), String> + Send + 'static,
-    ) -> Effect<PlaylistEvent> {
-        let Some(provider) = self.providers.registry.active_shared() else {
-            return Effect::none();
-        };
-        Effect::blocking(
-            move || f(provider.as_ref()),
-            move |result| PlaylistEvent::OpDone { op, result },
-        )
+    /// The provider a playlist mutation runs against.
+    fn playlist_provider(&self) -> Option<Arc<dyn MusicProvider>> {
+        self.providers.registry.active_shared()
     }
 
     /// Creates a playlist on the active provider.
     pub fn create_playlist(&self, name: String) -> Effect<PlaylistEvent> {
-        self.playlist_op(PlaylistOp::Create, move |p| {
-            p.create_playlist(&name)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(async move {
+            let result = provider.create_playlist(&name).await.map(|_| ());
+            op_done(PlaylistOp::Create, result)
         })
     }
 
@@ -353,9 +341,12 @@ impl Session {
             return Effect::none();
         };
         let id = playlist.id.clone();
-        self.playlist_op(PlaylistOp::Delete, move |p| {
-            p.delete_playlist(&id).map_err(|e| e.to_string())
-        })
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(
+            async move { op_done(PlaylistOp::Delete, provider.delete_playlist(&id).await) },
+        )
     }
 
     /// Renames the playlist at `idx` of `playlists.playlists`.
@@ -364,8 +355,12 @@ impl Session {
             return Effect::none();
         };
         let id = playlist.id.clone();
-        self.playlist_op(PlaylistOp::Rename, move |p| {
-            p.rename_playlist(&id, &new_name).map_err(|e| e.to_string())
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(async move {
+            let result = provider.rename_playlist(&id, &new_name).await;
+            op_done(PlaylistOp::Rename, result)
         })
     }
 
@@ -375,9 +370,14 @@ impl Session {
         playlist_id: String,
         track_source_uri: String,
     ) -> Effect<PlaylistEvent> {
-        self.playlist_op(PlaylistOp::AddTrack, move |p| {
-            p.add_to_playlist(&playlist_id, &[track_source_uri])
-                .map_err(|e| e.to_string())
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(async move {
+            let result = provider
+                .add_to_playlist(&playlist_id, &[track_source_uri])
+                .await;
+            op_done(PlaylistOp::AddTrack, result)
         })
     }
 
@@ -405,9 +405,12 @@ impl Session {
             return Effect::none();
         }
         let id = self.playlists.playlists[idx].id.clone();
-        self.playlist_op(PlaylistOp::RemoveTrack, move |p| {
-            p.remove_from_playlist(&id, track)
-                .map_err(|e| e.to_string())
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(async move {
+            let result = provider.remove_from_playlist(&id, track).await;
+            op_done(PlaylistOp::RemoveTrack, result)
         })
     }
 
@@ -423,8 +426,12 @@ impl Session {
             return Effect::none();
         }
         let id = self.playlists.playlists[idx].id.clone();
-        self.playlist_op(PlaylistOp::MoveTrack, move |p| {
-            p.move_in_playlist(&id, from, to).map_err(|e| e.to_string())
+        let Some(provider) = self.playlist_provider() else {
+            return Effect::none();
+        };
+        Effect::future(async move {
+            let result = provider.move_in_playlist(&id, from, to).await;
+            op_done(PlaylistOp::MoveTrack, result)
         })
     }
 
@@ -498,6 +505,14 @@ impl Session {
 
 /// Runs a smart-playlist list query on the blocking pool; a failure is
 /// logged (prefixed with `what`) and yields an empty list.
+/// The event of a finished playlist mutation.
+fn op_done(op: PlaylistOp, result: Result<(), ProviderError>) -> PlaylistEvent {
+    PlaylistEvent::OpDone {
+        op,
+        result: result.map_err(|e| e.to_string()),
+    }
+}
+
 fn smart_list_effect(
     what: &'static str,
     f: impl FnOnce() -> Result<Vec<SmartPlaylist>, String> + Send + 'static,
@@ -717,8 +732,15 @@ mod tests {
             .map(|t| t.id.to_string())
             .collect();
         let provider = Arc::new(LocalProvider::new(db, Vec::new()));
-        let created = provider.create_playlist("mix").expect("playlist");
-        provider.add_to_playlist(&created.id, &ids).expect("add");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let created = rt
+            .block_on(provider.create_playlist("mix"))
+            .expect("playlist");
+        rt.block_on(provider.add_to_playlist(&created.id, &ids))
+            .expect("add");
 
         let mut session = test_session();
         session.providers.registry.register(provider.clone());
@@ -731,10 +753,6 @@ mod tests {
             }
         );
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("runtime");
         rt.block_on(async {
             let load = session.load_playlists().into_stream().expect("load");
             for event in load.collect::<Vec<_>>().await {
@@ -775,7 +793,7 @@ mod tests {
                 }
             }
             assert_eq!(titles(&session.playlists), ["b", "a"]);
-            let stored = provider.get_playlist(&created.id).expect("stored");
+            let stored = provider.get_playlist(&created.id).await.expect("stored");
             let stored: Vec<_> = stored.tracks.iter().map(|t| t.title.as_str()).collect();
             assert_eq!(stored, ["b", "a"]);
         });
