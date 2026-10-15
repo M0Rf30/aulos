@@ -378,6 +378,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         left_column(app, ui, tall(left), &track);
         right_column(app, ui, right, &track);
     }
+    // The "…" menu's Properties opens the same sheet the library chrome draws.
+    super::properties::show(app, &ui.ctx().clone());
 }
 
 /// The left column may use the strip between the header and the body top, and
