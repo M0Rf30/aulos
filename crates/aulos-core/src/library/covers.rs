@@ -102,13 +102,24 @@ impl ThumbStamp {
             max_dim: CoverThumb::max_dim(),
         })
     }
+
+    /// The stamp that vouches for "this album has no cover": like [`Self::of`],
+    /// but its time also covers the file's directory, so dropping a
+    /// `cover.jpg` next to the tracks makes the entry stale.
+    #[must_use]
+    pub fn of_coverless(path: &std::path::Path) -> Option<Self> {
+        let mut stamp = Self::of(path)?;
+        let dir = Self::of(path.parent()?)?;
+        stamp.mtime_ns = stamp.mtime_ns.max(dir.mtime_ns);
+        Some(stamp)
+    }
 }
 
-/// A thumbnail together with what it was made from, as persisted in the
-/// library database.
+/// What a previous launch found for an album, as persisted in the library
+/// database: its thumbnail, or `None` for "no cover".
 #[derive(Debug, Clone)]
 pub struct CachedThumb {
-    pub thumb: CoverThumb,
+    pub thumb: Option<CoverThumb>,
     pub stamp: ThumbStamp,
 }
 

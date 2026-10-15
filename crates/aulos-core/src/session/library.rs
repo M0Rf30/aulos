@@ -770,13 +770,41 @@ async fn load_local(
                 let _permit = permits.acquire_owned().await.ok()?;
                 tokio::task::spawn_blocking(move || {
                     let stamp = ThumbStamp::of(&path);
-                    if let (Some(hit), Some(stamp)) = (&hit, &stamp)
-                        && hit.stamp == *stamp
-                    {
-                        return Some((key, hit.thumb.clone(), None));
+                    // A cached "no cover" is vouched for by a stamp that
+                    // also covers the directory.
+                    let coverless = hit
+                        .as_ref()
+                        .is_some_and(|h| h.thumb.is_none())
+                        .then(|| ThumbStamp::of_coverless(&path))
+                        .flatten();
+                    match (&hit, &stamp) {
+                        (
+                            Some(CachedThumb {
+                                thumb: Some(thumb),
+                                stamp: old,
+                            }),
+                            Some(now),
+                        ) if old == now => {
+                            return Some((key, Some(thumb.clone()), None));
+                        }
+                        (
+                            Some(CachedThumb {
+                                thumb: None,
+                                stamp: old,
+                            }),
+                            _,
+                        ) if coverless.as_ref() == Some(old) => {
+                            return Some((key, None, None));
+                        }
+                        _ => {}
                     }
-                    let bytes = CoverArt::get_cover_art(&path)?;
-                    let thumb = CoverThumb::from_bytes(&bytes)?;
+                    let thumb = CoverArt::get_cover_art(&path)
+                        .and_then(|bytes| CoverThumb::from_bytes(&bytes));
+                    let stamp = if thumb.is_some() {
+                        stamp
+                    } else {
+                        ThumbStamp::of_coverless(&path)
+                    };
                     let fresh = stamp.map(|stamp| {
                         (
                             key.clone(),
@@ -799,7 +827,7 @@ async fn load_local(
     let mut fresh = Vec::new();
     for task in cover_tasks {
         if let Ok(Some((key, thumb, new))) = task.await {
-            covers.insert(key, thumb);
+            covers.extend(thumb.map(|t| (key, t)));
             fresh.extend(new);
         }
     }
@@ -1103,12 +1131,12 @@ mod tests {
             let first = load().await;
             let real = first[&key].fingerprint;
             let stored = persisted().await;
-            assert_eq!(stored[&key].thumb.fingerprint, real);
+            assert_eq!(stored[&key].thumb.as_ref().unwrap().fingerprint, real);
 
             // Swap in a marker thumbnail carrying the same stamp: a second
             // load that returns it never decoded the cover again.
             let mut marked = stored[&key].clone();
-            marked.thumb.fingerprint = 42;
+            marked.thumb.as_mut().unwrap().fingerprint = 42;
             provider.store_thumbs(&[(key.clone(), marked)], &[key.clone()].into());
             assert_eq!(load().await[&key].fingerprint, 42);
 
@@ -1122,6 +1150,72 @@ mod tests {
             let after = load().await;
             assert_ne!(after[&key].fingerprint, 42);
             assert_eq!(after[&key].fingerprint, real);
+        });
+    }
+
+    #[test]
+    fn local_load_remembers_coverless_albums_until_a_cover_appears() {
+        use crate::provider::local::LocalProvider;
+        let dir = super::super::test_support::scratch_dir("coverless");
+        let audio = dir.join("a.mp3");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/tagio/plain.mp3"
+            ),
+            &audio,
+        )
+        .unwrap();
+        let db = LibraryDb::open_memory().unwrap();
+        let mut t = track(1);
+        t.path = audio.clone();
+        t.source_uri = audio.to_string_lossy().into_owned();
+        db.upsert_track(&t, 0).unwrap();
+        let provider = Arc::new(LocalProvider::new(db, Vec::new()));
+        let key = CoverArt::album_key("", "album");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let load = || async {
+                let LibraryEvent::Loaded { covers, .. } =
+                    load_local(provider.clone(), 1, "local".into()).await
+                else {
+                    panic!("not a Loaded event");
+                };
+                covers
+            };
+            assert!(load().await.is_empty());
+            let mut stored = provider.cached_thumbs();
+            for _ in 0..200 {
+                if !stored.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                stored = provider.cached_thumbs();
+            }
+            assert!(
+                stored[&key].thumb.is_none(),
+                "no-cover result not persisted"
+            );
+
+            // Still coverless: the entry holds.
+            assert!(load().await.is_empty());
+
+            // A cover dropped next to the tracks makes the entry stale.
+            let mut png = Vec::new();
+            image::ImageEncoder::write_image(
+                image::codecs::png::PngEncoder::new(&mut png),
+                &[9u8; 8 * 8 * 3],
+                8,
+                8,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+            std::fs::write(dir.join("cover.png"), png).unwrap();
+            assert!(load().await.contains_key(&key));
         });
     }
 

@@ -759,8 +759,7 @@ impl LibraryDb {
                 "SELECT album_key, image_data, width, height, fingerprint,
                         src_path, src_mtime_ns, src_size, max_dim
                  FROM cover_cache
-                 WHERE image_data IS NOT NULL AND src_path IS NOT NULL
-                   AND width IS NOT NULL AND height IS NOT NULL AND fingerprint IS NOT NULL
+                 WHERE src_path IS NOT NULL
                    AND src_mtime_ns IS NOT NULL AND src_size IS NOT NULL
                    AND max_dim IS NOT NULL",
             )
@@ -768,12 +767,23 @@ impl LibraryDb {
         let rows = stmt
             .query_map([], |row| {
                 let key: String = row.get(0)?;
-                let data: Vec<u8> = row.get(1)?;
-                let thumb = CoverThumb {
-                    width: row.get(2)?,
-                    height: row.get(3)?,
-                    encoded: data.into(),
-                    fingerprint: row.get::<_, i64>(4)? as u64,
+                // A row without image data records an album with no cover.
+                let data: Option<Vec<u8>> = row.get(1)?;
+                let thumb = match (
+                    data,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ) {
+                    (Some(data), Some(width), Some(height), Some(fingerprint)) => {
+                        Some(CoverThumb {
+                            width,
+                            height,
+                            encoded: data.into(),
+                            fingerprint: fingerprint as u64,
+                        })
+                    }
+                    _ => None,
                 };
                 let stamp = ThumbStamp {
                     path: row.get(5)?,
@@ -813,10 +823,10 @@ impl LibraryDb {
                 insert
                     .execute(params![
                         key,
-                        cached.thumb.encoded.as_ref(),
-                        cached.thumb.width,
-                        cached.thumb.height,
-                        cached.thumb.fingerprint as i64,
+                        cached.thumb.as_ref().map(|t| t.encoded.as_ref()),
+                        cached.thumb.as_ref().map(|t| t.width),
+                        cached.thumb.as_ref().map(|t| t.height),
+                        cached.thumb.as_ref().map(|t| t.fingerprint as i64),
                         cached.stamp.path,
                         cached.stamp.mtime_ns,
                         cached.stamp.size as i64,
@@ -1790,12 +1800,12 @@ mod tests {
 
     fn cached(path: &str, mtime_ns: i64) -> CachedThumb {
         CachedThumb {
-            thumb: CoverThumb {
+            thumb: Some(CoverThumb {
                 width: 2,
                 height: 3,
                 encoded: vec![1, 2, 3].into(),
                 fingerprint: u64::MAX - 5,
-            },
+            }),
             stamp: ThumbStamp {
                 path: path.into(),
                 mtime_ns,
@@ -1821,9 +1831,10 @@ mod tests {
         let loaded = db.cached_thumbs().unwrap();
         assert_eq!(loaded.len(), 2);
         let a = &loaded["a"];
-        assert_eq!(a.thumb.fingerprint, u64::MAX - 5);
-        assert_eq!((a.thumb.width, a.thumb.height), (2, 3));
-        assert_eq!(a.thumb.encoded.as_ref(), [1, 2, 3]);
+        let thumb = a.thumb.as_ref().unwrap();
+        assert_eq!(thumb.fingerprint, u64::MAX - 5);
+        assert_eq!((thumb.width, thumb.height), (2, 3));
+        assert_eq!(thumb.encoded.as_ref(), [1, 2, 3]);
         assert_eq!(a.stamp, cached("/m/a.flac", -4).stamp);
 
         // `b` left the library; `a` is refreshed.
@@ -1840,6 +1851,18 @@ mod tests {
 
         db.remove_cached_cover("a").unwrap();
         assert!(db.cached_thumbs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn persisted_coverless_albums_round_trip() {
+        let db = LibraryDb::open_memory().unwrap();
+        let mut none = cached("/m/x.flac", 5);
+        none.thumb = None;
+        db.store_thumbs(&[("x".into(), none)], &HashSet::from(["x".to_string()]))
+            .unwrap();
+        let loaded = db.cached_thumbs().unwrap();
+        assert!(loaded["x"].thumb.is_none());
+        assert_eq!(loaded["x"].stamp.mtime_ns, 5);
     }
 
     #[test]
