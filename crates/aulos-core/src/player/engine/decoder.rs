@@ -964,7 +964,8 @@ mod tests {
     #[test]
     #[ignore = "network-dependent manual repro harness"]
     fn repro_live_stream_stops_after_a_few_seconds() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
+        use web_time::Instant;
 
         struct CountingReader<R> {
             inner: R,
@@ -1005,8 +1006,8 @@ mod tests {
 
         // Mirrors `PlaySource::LiveStream::open_decoder` exactly, including
         // the client (no explicit timeout — same as `LocalBackend`'s
-        // `reqwest::blocking::Client::new()`).
-        let client = reqwest::blocking::Client::new();
+        // `crate::http::blocking::Client::new()`).
+        let client = crate::http::blocking::Client::new();
         let response = client
             .get(&url)
             .header("Icy-MetaData", "1")

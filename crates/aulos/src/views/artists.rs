@@ -1014,8 +1014,8 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
                 let update = app.session.toggle_shuffle();
                 app.run(update);
             }
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as usize)
                 .unwrap_or(0);
             let start = nanos % tracks.len();

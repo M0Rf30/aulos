@@ -46,7 +46,7 @@ const MAX_EPISODES_PER_FEED: usize = 5_000;
 
 /// Fetch and parse a podcast feed, returning its metadata and episodes.
 pub fn fetch_feed(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     feed_url: &str,
 ) -> Result<(PodcastMeta, Vec<EpisodeMeta>), String> {
     let response = client
@@ -217,7 +217,7 @@ const MAX_ITUNES_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 /// Search the iTunes podcast directory. Results without a `feedUrl` are
 /// skipped since they can't be subscribed to.
 pub fn search_itunes(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     query: &str,
 ) -> Result<Vec<PodcastSearchResult>, String> {
     let url = format!(

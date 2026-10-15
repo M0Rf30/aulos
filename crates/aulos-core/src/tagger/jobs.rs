@@ -10,7 +10,8 @@ use crate::library::fingerprint::Fingerprint;
 use crate::online::acoustid::SubmissionStatus;
 use crate::online::musicbrainz::{ReleaseCandidate, ReleaseQuery};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Files read per background task.
 pub const LOAD_CHUNK: usize = 16;

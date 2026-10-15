@@ -39,7 +39,9 @@ use crate::library::artist_info::ArtistInfoOutcome;
 use crate::library::covers::CoverDelta;
 use crate::library::playlist_io::ImportSummary;
 use crate::provider::ProviderType;
-use crate::provider::mpd_events::{MpdEvent, MpdStatusUpdate, idle_stream, status_stream};
+use crate::provider::mpd_events::{MpdEvent, MpdStatusUpdate};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::provider::mpd_streams::{idle_stream, status_stream};
 use crate::task::{Effect, interval_stream};
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -390,6 +392,9 @@ impl Session {
     /// genres, podcasts, radio, ...); that is deliberately not part of the
     /// launch.
     pub fn start(&mut self) -> Effect<SessionEvent> {
+        // The jingle needs a sound device it can open on its own, which the
+        // browser (autoplay rules) does not give a page at load.
+        #[cfg(not(target_arch = "wasm32"))]
         if !self.config.config.intro_played {
             crate::player::intro::play();
             self.config.config.intro_played = true;
@@ -438,7 +443,7 @@ impl Session {
         }
         Effect::future(async move {
             let bytes =
-                tokio::task::spawn_blocking(move || provider.get_cover_art(&hint).ok().flatten())
+                crate::task::spawn_blocking(move || provider.get_cover_art(&hint).ok().flatten())
                     .await
                     .ok()
                     .flatten();
@@ -464,6 +469,7 @@ impl Session {
         // been polled yet) and `active_backend_type()` only flips to `Mpd`
         // once Aulos itself issued a `play` -- gating on either would mean
         // never polling a server that was already playing.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(player) = player
             && let Some(mpd) = player.mpd_backend_ref()
             && let Some(provider) = self.active_mpd_provider()
@@ -508,6 +514,7 @@ impl Session {
         // opens TWO TCP connections to its server (an idle one and the
         // command one stored in the provider), see `idle_stream`. Identified
         // by list position, so editing a server keeps its running source.
+        #[cfg(not(target_arch = "wasm32"))]
         for (idx, provider) in self.providers.mpd_providers.iter().enumerate() {
             streams.push((
                 BackgroundKey::MpdIdle(idx),

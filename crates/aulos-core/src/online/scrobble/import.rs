@@ -392,7 +392,10 @@ pub fn rate_limit_delay(remaining: Option<i64>, reset_in: Option<u64>) -> Option
     }
 }
 
-fn header_num<T: std::str::FromStr>(resp: &reqwest::blocking::Response, name: &str) -> Option<T> {
+fn header_num<T: std::str::FromStr>(
+    resp: &crate::http::blocking::Response,
+    name: &str,
+) -> Option<T> {
     resp.headers().get(name)?.to_str().ok()?.trim().parse().ok()
 }
 

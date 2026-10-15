@@ -3,10 +3,16 @@
 
 use crate::library::album_sort::AlbumSort;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 pub mod edit_state;
+// Settings persist to a file through a writer thread; in the browser they go
+// to `localStorage` (see `writer_web.rs`).
+#[cfg_attr(target_arch = "wasm32", path = "config/writer_web.rs")]
 pub mod writer;
 
 /// Application id the UI registers with the desktop (desktop entry, MPRIS,
@@ -402,15 +408,19 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        // Default music directory is ~/Music
-        let music_dir = dirs::audio_dir().unwrap_or_else(|| {
+        // Default music directory is ~/Music; a page has no home directory,
+        // its folders are picked by the user.
+        #[cfg(not(target_arch = "wasm32"))]
+        let music_dirs = vec![dirs::audio_dir().unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/"))
                 .join("Music")
-        });
+        })];
+        #[cfg(target_arch = "wasm32")]
+        let music_dirs = Vec::new();
 
         Self {
-            music_dirs: vec![music_dir],
+            music_dirs,
             split_artist_tags: true,
             artist_tag_delimiters: crate::library::artist_tags::DEFAULT_DELIMITERS
                 .iter()
@@ -507,25 +517,64 @@ pub fn startup_provider_preference<'a>(
 }
 
 /// File name of the settings inside [`crate::paths::config_dir`].
+#[cfg(not(target_arch = "wasm32"))]
 const SETTINGS_FILE: &str = "settings.ron";
 
 impl Config {
     /// Where the settings live: `settings.ron` in [`crate::paths::config_dir`].
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn path() -> PathBuf {
         crate::paths::config_dir().join(SETTINGS_FILE)
     }
 
     /// Loads the settings from [`Config::path`]; see [`Config::load_from`].
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn load() -> Config {
         Self::load_from(&Self::path())
+    }
+
+    /// Loads the settings kept in the browser's `localStorage`: defaults on
+    /// the first visit, or when the stored text is not valid settings (which
+    /// is then left in place until the next save replaces it).
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn load() -> Config {
+        let Some(text) = crate::web_storage::get(crate::web_storage::SETTINGS_KEY) else {
+            return Config::default();
+        };
+        Self::parse(&text).unwrap_or_else(|e| {
+            tracing::error!("Invalid stored settings ({e}); using defaults");
+            Config::default()
+        })
+    }
+
+    /// The settings in `text` (RON), with out-of-range values clamped.
+    ///
+    /// # Errors
+    /// When `text` is not valid RON for [`Config`].
+    pub fn parse(text: &str) -> Result<Config, ron::error::SpannedError> {
+        let mut config = ron::from_str::<Config>(text)?;
+        config.ui_scale = Self::clamp_ui_scale(config.ui_scale);
+        config.visualizer_sensitivity =
+            Self::clamp_visualizer_sensitivity(config.visualizer_sensitivity);
+        Ok(config)
+    }
+
+    /// The settings as RON text, the stored form.
+    ///
+    /// # Errors
+    /// When serialisation fails.
+    pub fn to_text(&self) -> Result<String, ron::Error> {
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
     }
 
     /// Loads the settings stored at `path`. Defaults when the file does not
     /// exist (first launch) or cannot be read; a file that is not valid RON
     /// is moved aside to `<path>.bad` (so the next save does not destroy it)
     /// and the defaults are used.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn load_from(path: &Path) -> Config {
         let text = match std::fs::read_to_string(path) {
@@ -537,13 +586,8 @@ impl Config {
                 return Config::default();
             }
         };
-        match ron::from_str::<Config>(&text) {
-            Ok(mut config) => {
-                config.ui_scale = Self::clamp_ui_scale(config.ui_scale);
-                config.visualizer_sensitivity =
-                    Self::clamp_visualizer_sensitivity(config.visualizer_sensitivity);
-                config
-            }
+        match Self::parse(&text) {
+            Ok(config) => config,
             Err(e) => {
                 let mut bad = path.as_os_str().to_owned();
                 bad.push(".bad");
@@ -591,9 +635,9 @@ impl Config {
     ///
     /// # Errors
     /// If the directory or the file cannot be written.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .map_err(std::io::Error::other)?;
+        let text = self.to_text().map_err(std::io::Error::other)?;
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(dir)?;
         let mut tmp_name = path.file_name().unwrap_or_default().to_owned();

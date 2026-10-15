@@ -608,8 +608,8 @@ pub fn apply(app: &mut App, action: MenuAction) {
                         let update = app.session.toggle_shuffle();
                         app.run(update);
                     }
-                    start = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    start = web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
                         .map_or(0, |d| d.subsec_nanos() as usize)
                         % tracks.len();
                 }

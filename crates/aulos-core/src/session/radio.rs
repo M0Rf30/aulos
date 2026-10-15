@@ -143,7 +143,7 @@ impl RadioState {
 
     fn load_saved() -> Effect<RadioEvent> {
         Effect::future(async move {
-            let stations = tokio::task::spawn_blocking(radio::load_saved)
+            let stations = crate::task::spawn_blocking(radio::load_saved)
                 .await
                 .unwrap_or_default();
             RadioEvent::StationsLoaded(stations)
@@ -196,7 +196,7 @@ impl RadioState {
     fn save(station: NewStation) -> Effect<RadioEvent> {
         Effect::future(async move {
             let event_name = station.name.clone();
-            let outcome = tokio::task::spawn_blocking(move || radio::save_station(station))
+            let outcome = crate::task::spawn_blocking(move || radio::save_station(station))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
             let (result, already_existed) = match outcome {
@@ -266,7 +266,7 @@ impl RadioState {
         let station = self.stations.iter().find(|s| s.id == id).cloned()?;
         self.stations.retain(|s| s.id != id);
         let effect = Effect::future(async move {
-            let stations = tokio::task::spawn_blocking(move || radio::remove_saved(id))
+            let stations = crate::task::spawn_blocking(move || radio::remove_saved(id))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
                 .unwrap_or_else(|e| {
@@ -285,7 +285,7 @@ impl RadioState {
             return Effect::none();
         }
         Effect::future(async move {
-            let stations = tokio::task::spawn_blocking(move || radio::rename_saved(id, &new_name))
+            let stations = crate::task::spawn_blocking(move || radio::rename_saved(id, &new_name))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
                 .unwrap_or_else(|e| {

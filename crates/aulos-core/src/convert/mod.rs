@@ -29,7 +29,8 @@ pub mod source;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub use channels::ChannelMode;
 pub use encoder::OutputFormat;
@@ -483,7 +484,7 @@ pub struct JobReport {
 /// otherwise.
 pub async fn run_job(job: ConvertJob) -> JobReport {
     let id = job.id;
-    let (state, output_bytes) = tokio::task::spawn_blocking(move || match pipeline::run(&job) {
+    let (state, output_bytes) = crate::task::spawn_blocking(move || match pipeline::run(&job) {
         Ok(bytes) => (JobState::Done, bytes),
         Err(ConvertError::Cancelled) => (JobState::Cancelled, 0),
         Err(e) => (JobState::Failed(e.to_string()), 0),

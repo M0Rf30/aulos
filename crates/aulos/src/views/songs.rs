@@ -273,8 +273,8 @@ fn shuffle_all(app: &mut App) {
         app.run(update);
     }
     let tracks = app.session.library.tracks.clone();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
     let start = nanos % tracks.len();

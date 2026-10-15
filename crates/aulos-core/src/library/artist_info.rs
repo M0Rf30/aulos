@@ -313,7 +313,10 @@ pub fn parse_deezer_image_url(json: &str, artist_name: &str) -> Option<String> {
         .cloned()
 }
 
-fn fetch_deezer_image_url(client: &reqwest::blocking::Client, artist_name: &str) -> Option<String> {
+fn fetch_deezer_image_url(
+    client: &crate::http::blocking::Client,
+    artist_name: &str,
+) -> Option<String> {
     let url = format!(
         "{DEEZER_SEARCH_URL}?q={}&limit=5",
         urlencoding::encode(artist_name)
@@ -351,7 +354,10 @@ pub fn parse_wikipedia_extract(json: &str) -> Option<String> {
     Some(crate::format::truncate_str(extract, MAX_BIO_CHARS))
 }
 
-fn fetch_wikipedia_bio(client: &reqwest::blocking::Client, artist_name: &str) -> Option<String> {
+fn fetch_wikipedia_bio(
+    client: &crate::http::blocking::Client,
+    artist_name: &str,
+) -> Option<String> {
     let url = format!(
         "{WIKIPEDIA_SUMMARY_URL}/{}",
         urlencoding::encode(artist_name)
@@ -371,20 +377,20 @@ fn fetch_wikipedia_bio(client: &reqwest::blocking::Client, artist_name: &str) ->
 /// A dedicated blocking client (distinct from `crate::app::HTTP_CLIENT`)
 /// so every request here carries an identifying User-Agent, as public
 /// APIs like Wikipedia's ask for.
-fn http_client() -> &'static reqwest::blocking::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+fn http_client() -> &'static crate::http::blocking::Client {
+    static CLIENT: std::sync::LazyLock<crate::http::blocking::Client> =
         std::sync::LazyLock::new(|| {
-            reqwest::blocking::Client::builder()
+            crate::http::blocking::Client::builder()
                 .user_agent(USER_AGENT)
                 .timeout(Duration::from_secs(10))
                 .connect_timeout(Duration::from_secs(8))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new())
+                .unwrap_or_else(|_| crate::http::blocking::Client::new())
         });
     &CLIENT
 }
 
-fn download_image(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
+fn download_image(client: &crate::http::blocking::Client, url: &str) -> Option<Vec<u8>> {
     let resp = client.get(url).send().ok()?;
     if !resp.status().is_success() {
         return None;

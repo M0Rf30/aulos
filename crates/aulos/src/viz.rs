@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use walkdir::WalkDir;
+use web_time::Instant;
 
 /// Frame period of the render loop (~60 fps).
 const FRAME_PERIOD: Duration = Duration::from_millis(16);
@@ -315,8 +316,8 @@ impl Renderer {
         settings: &Settings,
         size: [u32; 2],
     ) -> Result<Self, String> {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seed = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64);
         let mut engine = lactea::Engine::new(
             &device,

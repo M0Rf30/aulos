@@ -21,12 +21,12 @@ use std::time::Duration;
 /// requests reuse the connection pool and TLS session cache instead of
 /// paying a fresh handshake on every call, with an explicit timeout so a
 /// stalled server can't hang the blocking task forever.
-pub static HTTP_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-    reqwest::blocking::Client::builder()
+pub static HTTP_CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
+    crate::http::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+        .unwrap_or_else(|_| crate::http::blocking::Client::new())
 });
 
 /// Fetches a podcast artwork / station favicon URL and decodes it into RGBA
@@ -35,7 +35,7 @@ pub static HTTP_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
 /// work that must stay off the async reactor, and the raw bytes are only
 /// ever needed for decoding.
 pub async fn fetch_icon(url: String) -> Option<(u32, u32, Vec<u8>)> {
-    tokio::task::spawn_blocking(move || {
+    crate::task::spawn_blocking(move || {
         let bytes = HTTP_CLIENT.get(&url).send().ok()?.bytes().ok()?;
         crate::library::CoverArt::decode_thumbnail(
             &bytes,
@@ -74,7 +74,7 @@ pub fn validate_http_url(url: &str) -> Result<(), UrlError> {
 /// exhaust memory. Returns an error instead of the body once the cap is
 /// exceeded.
 pub(crate) fn read_capped_body(
-    response: reqwest::blocking::Response,
+    response: crate::http::blocking::Response,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
     use std::io::Read;

@@ -29,7 +29,8 @@
 
 use crate::app::{App, Route, Sheet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 #[derive(Clone, Copy, PartialEq)]
 enum DragKind {
@@ -70,6 +71,7 @@ pub struct Smoke {
 }
 
 /// The window size requested for smoke runs.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn window_size() -> Option<[f32; 2]> {
     let spec = std::env::var("AULOS_SMOKE_SIZE").ok()?;
     let (w, h) = spec.split_once('x')?;

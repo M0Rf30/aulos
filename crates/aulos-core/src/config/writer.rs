@@ -102,7 +102,7 @@ fn write(path: &Path, written: &mut Config, config: Config) {
     if *written == config {
         return;
     }
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     match config.save_to(path) {
         Ok(()) => tracing::debug!(
             "config saved in {:.1} ms",

@@ -12,8 +12,12 @@ repository.workspace = true
 # Settings persistence: one RON file (`settings.ron`, see `config`).
 ron = "0.12"
 
-# Async runtime
-tokio.workspace = true
+# Async primitives (channels, semaphores, `select!`). The runtime itself is
+# native only: see the target tables below and `task`.
+tokio = { workspace = true, features = ["sync", "macros"] }
+# `Instant`/`SystemTime` that also work in the browser (plain std types on
+# native targets).
+web-time = { version = "1", features = ["serde"] }
 # Channels/sinks for the UI-agnostic streams in `task` (and MPRIS).
 futures = "0.3"
 # Shared, reference-counted cover thumbnail pixels (`library::covers`),
@@ -40,7 +44,6 @@ symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "dd
 # Pure-Rust Chromaprint port: AcoustID fingerprints for the tag editor's
 # acoustic lookup/submission (`src/library/fingerprint.rs`).
 rusty-chromaprint = "0.3"
-cpal = "0.18"
 rubato = "5.0"
 audioadapter-buffers = "5.2"
 # Internal-only locks in the playback engine (e.g. the gapless/crossfade
@@ -49,9 +52,6 @@ audioadapter-buffers = "5.2"
 # better fit there. Not used for the visualizer's `PcmBuffer` mutex, whose
 # type is fixed by `Player`'s existing `std::sync::Mutex` signature.
 parking_lot = "0.12"
-
-mpd_client.workspace = true
-opensubsonic.workspace = true
 
 # Database for music library
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
@@ -69,7 +69,8 @@ serde_json = "1"
 # Image handling for cover art
 image.workspace = true
 
-# Internationalization (the translations live in the workspace-root `i18n/`)
+# Internationalization (the translations live in the workspace-root `i18n/`);
+# the language requester is per target, see below.
 i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 rust-embed = "8"
@@ -81,14 +82,12 @@ tracing.workspace = true
 keyring-core = "1"
 
 # Misc
-open.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
 urlencoding.workspace = true
 # `file://` URI <-> path conversion that is right on Windows drive letters too.
 url = "2"
 md5 = "0.8"
-notify = "8"
 thiserror = "2"
 # Calendar dates for podcast episode / refresh captions.
 chrono = "0.4"
@@ -106,6 +105,39 @@ regex = "1"
 # the one thing out of scope here.
 flacenc = "0.5"
 hound = "3.5"
+
+# Everything that needs an operating system underneath: the sound card, TCP
+# sockets, threads, blocking HTTP, file watching. None of it exists in the
+# browser, where the same seams (`player::local_backend`, `provider`, `http`,
+# `task`, `library::watcher`) have web stand-ins.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+cpal = "0.18"
+mpd_client.workspace = true
+opensubsonic.workspace = true
+notify = "8"
+# Opens URLs in the default browser (the web build uses `window.open`).
+open.workspace = true
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
+i18n-embed = { workspace = true, features = ["desktop-requester"] }
+
+# The browser: `wasm-bindgen` glue for timers, spawning and `localStorage`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Storage", "Navigator"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+send_wrapper = { version = "0.6", features = ["futures"] }
+i18n-embed = { workspace = true, features = ["web-sys-requester"] }
+# getrandom 0.2/0.3/0.4 each need their browser backend enabled explicitly
+# (0.3+ additionally via `--cfg getrandom_backend="wasm_js"`, see
+# `.cargo/config.toml`).
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# feed-rs pulls uuid, which has no randomness source of its own on wasm.
+uuid = { version = "1", features = ["js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 # Linux only: the desktop is reached over D-Bus and the kernel/keyring APIs.
 [target.'cfg(target_os = "linux")'.dependencies]

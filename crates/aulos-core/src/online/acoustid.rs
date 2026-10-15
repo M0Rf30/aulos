@@ -31,7 +31,7 @@ pub fn track_url(acoustid: &str) -> String {
 
 /// Opens an AcoustID's page in the default browser.
 pub fn open_track_page(acoustid: &str) -> Result<(), String> {
-    super::musicbrainz::open_in_browser(&track_url(acoustid))
+    crate::desktop::browser::open_in_browser(&track_url(acoustid))
 }
 
 fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -399,7 +399,7 @@ fn parse_envelope(http_status: u16, body: &str) -> Result<Envelope, String> {
     }
 }
 
-fn send(request: reqwest::blocking::RequestBuilder) -> Result<Envelope, String> {
+fn send(request: crate::http::blocking::RequestBuilder) -> Result<Envelope, String> {
     let response = request
         .send()
         .map_err(|e| format!("AcoustID request failed: {e}"))?;

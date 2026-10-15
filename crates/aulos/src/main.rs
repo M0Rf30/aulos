@@ -1,7 +1,11 @@
 //! Aulos: an egui player on top of `aulos-core`. All behaviour lives in the
 //! core [`Session`](aulos_core::session::Session); this crate runs the
-//! effects and background streams it hands out on a tokio runtime, feeds every
+//! effects and background streams it hands out on a [`Spawner`] (a tokio
+//! runtime natively, the browser's event loop on the web), feeds every
 //! resulting event back into it from `App::logic`, and paints the result.
+//!
+//! Two entry points: a desktop window (`eframe::run_native`) and, on
+//! `wasm32`, a canvas in a web page (`eframe::WebRunner`), built with Trunk.
 
 // A release build on Windows is a GUI program: no console window behind it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -33,6 +37,7 @@ fn tune_allocator() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     tune_allocator();
@@ -50,7 +55,7 @@ fn main() -> eframe::Result {
         .build()
         .expect("tokio runtime");
     let _guard = runtime.enter();
-    let handle = runtime.handle().clone();
+    let handle = aulos_core::task::Spawner::new(runtime.handle().clone());
 
     let size = smoke::window_size().unwrap_or([1280.0, 800.0]);
     let run = |backends| {
@@ -91,6 +96,7 @@ fn main() -> eframe::Result {
     run(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Default wgpu setup (restricted to `backends` when given) with small memory blocks (`MemoryHints::MemoryUsage`):
 /// about 160 MB less shared GPU memory than the performance default.
 fn low_memory_wgpu(
@@ -110,4 +116,66 @@ fn low_memory_wgpu(
         });
     }
     config
+}
+
+/// The `<canvas>` of `index.html` the app paints on.
+#[cfg(target_arch = "wasm32")]
+const CANVAS_ID: &str = "aulos_canvas";
+
+/// The web entry: logs to the browser console, then starts the app on the
+/// canvas of the page. The page's loading text is replaced by the error when
+/// start-up fails (no WebGL/WebGPU, say).
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(tracing_web::MakeWebConsoleWriter::new()),
+        )
+        .init();
+    aulos_core::i18n::init_from_system();
+
+    wasm_bindgen_futures::spawn_local(async {
+        use wasm_bindgen::JsCast;
+        let document = web_sys::window()
+            .and_then(|window| window.document())
+            .expect("a page with a document");
+        let canvas = document
+            .get_element_by_id(CANVAS_ID)
+            .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("the page has the canvas of index.html");
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| {
+                    Ok(Box::new(app::App::new(
+                        cc,
+                        aulos_core::task::Spawner::browser(),
+                    )))
+                }),
+            )
+            .await;
+        let loading = document.get_element_by_id("loading");
+        match started {
+            Ok(()) => {
+                if let Some(loading) = loading {
+                    loading.remove();
+                }
+            }
+            Err(error) => {
+                tracing::error!("Aulos failed to start: {error:?}");
+                if let Some(loading) = loading {
+                    loading.set_inner_html(
+                        "Aulos could not start: this browser needs WebGL2 or WebGPU.",
+                    );
+                }
+            }
+        }
+    });
 }

@@ -31,7 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long a fetched result stays fresh.
 pub const CACHE_TTL_SECS: i64 = 7 * 24 * 3600;

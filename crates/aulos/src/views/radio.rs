@@ -19,7 +19,8 @@ use egui::{
 };
 use egui_phosphor::{fill, regular};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long an empty saved list counts as "still loading".
 const LOADING_GRACE: Duration = Duration::from_millis(700);

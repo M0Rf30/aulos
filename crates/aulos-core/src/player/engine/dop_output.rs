@@ -17,7 +17,8 @@ use crate::player::engine::cpal_utils::CpalDeviceConfig;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 

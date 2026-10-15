@@ -88,7 +88,7 @@ impl Session {
 
         let db_path = crate::paths::library_db_path();
         Effect::future(async move {
-            let data = tokio::task::spawn_blocking(move || {
+            let data = crate::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path)
                     .and_then(|db| db.home_data(LOCAL_PROVIDER, crate::unix_now()))
             })
@@ -126,7 +126,7 @@ impl Session {
             && self.home.cache.is_fresh(
                 self.providers.registry.active_id(),
                 self.suggestions_enabled(),
-                std::time::Instant::now(),
+                web_time::Instant::now(),
             )
         {
             return Effect::none();
@@ -155,7 +155,7 @@ impl Session {
         let request = self.home.request;
         let db_path = crate::paths::library_db_path();
         Effect::future(async move {
-            let picks = tokio::task::spawn_blocking(move || {
+            let picks = crate::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path)
                     .and_then(|db| db.random_albums(LOCAL_PROVIDER, SHELF_LEN * 2))
             })
@@ -191,7 +191,7 @@ impl Session {
 
         let db_path = crate::paths::library_db_path();
         Effect::future(async move {
-            let albums = tokio::task::spawn_blocking(move || {
+            let albums = crate::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path).and_then(|db| db.albums_by_decade(LOCAL_PROVIDER, decade))
             })
             .await;
@@ -268,7 +268,7 @@ impl Session {
                     self.home.cache.mark_loaded(
                         self.providers.registry.active_id(),
                         self.suggestions_enabled(),
-                        std::time::Instant::now(),
+                        web_time::Instant::now(),
                     );
                     return self.load_similar();
                 }
@@ -348,7 +348,7 @@ impl Session {
 
         let db_path = crate::paths::library_db_path();
         Effect::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path).and_then(|db| db.record_play(id, crate::unix_now()))
             })
             .await;
@@ -372,7 +372,7 @@ fn similar_effect(
     Effect::stream(channel_stream(8, move |mut out| async move {
         use futures::SinkExt;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HomeEvent>();
-        let worker = tokio::task::spawn_blocking(move || {
+        let worker = crate::task::spawn_blocking(move || {
             let count = {
                 let mut on_shelf = |shelf| {
                     let _ = tx.send(HomeEvent::SimilarShelf {

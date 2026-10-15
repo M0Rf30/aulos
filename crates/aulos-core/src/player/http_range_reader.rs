@@ -21,8 +21,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 ///   the target byte offset via `Range: bytes=N-`.
 pub struct HttpRangeReader {
     url: String,
-    client: reqwest::blocking::Client,
-    response: Option<reqwest::blocking::Response>,
+    client: crate::http::blocking::Client,
+    response: Option<crate::http::blocking::Response>,
     /// Current byte position in the stream.
     position: u64,
     /// Total content length (from initial HEAD or first GET response).
@@ -35,7 +35,7 @@ impl HttpRangeReader {
     /// Makes an initial GET request to start streaming and reads
     /// `Content-Length` from the response. Returns an error if the
     /// request fails or the server doesn't provide Content-Length.
-    pub fn new(url: String, client: Option<reqwest::blocking::Client>) -> Result<Self, String> {
+    pub fn new(url: String, client: Option<crate::http::blocking::Client>) -> Result<Self, String> {
         let client = client.unwrap_or_default();
 
         // Start streaming from byte 0.

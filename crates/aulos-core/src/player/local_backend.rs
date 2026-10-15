@@ -29,7 +29,7 @@ pub struct LocalBackend {
     state: PlaybackState,
     volume: f32,
     /// Shared blocking HTTP client for HTTP stream / live radio playback.
-    http_client: reqwest::blocking::Client,
+    http_client: crate::http::blocking::Client,
     /// UI-side EQ controller (shares its coefficients/bypass flag with the
     /// engine's per-track `EqFilter`).
     eq_controller: EqController,
@@ -62,7 +62,7 @@ impl LocalBackend {
             engine,
             state: PlaybackState::Stopped,
             volume,
-            http_client: reqwest::blocking::Client::new(),
+            http_client: crate::http::blocking::Client::new(),
             eq_controller,
             replay_gain_db: None,
             icy_title: Arc::new(Mutex::new(None)),

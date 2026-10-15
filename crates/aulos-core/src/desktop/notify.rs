@@ -184,7 +184,7 @@ mod backend {
         let (summary, body) = (summary.to_owned(), body.to_owned());
         let image = image.map(|p| p.to_string_lossy().into_owned());
         // Showing a notification talks to the OS synchronously.
-        tokio::task::spawn_blocking(move || {
+        crate::task::spawn_blocking(move || {
             let mut notification = notify_rust::Notification::new();
             notification
                 .appname(APP_NAME)

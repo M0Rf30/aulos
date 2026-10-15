@@ -77,7 +77,11 @@ impl LibraryDb {
     /// connection and apply the per-connection PRAGMAs. If the file has
     /// disappeared in the meantime it is initialised again.
     pub fn open(db_path: &Path) -> Result<Self, String> {
-        let already_initialised = db_path.exists() && schema_is_ready(db_path);
+        // In the browser the database lives in memory (SQLite's default VFS
+        // there), shared by name between connections, so there is no file
+        // that could have disappeared.
+        let backing_present = cfg!(target_arch = "wasm32") || db_path.exists();
+        let already_initialised = backing_present && schema_is_ready(db_path);
         let conn = Connection::open(db_path).map_err(|e| format!("DB open error: {e}"))?;
         Self::configure_connection(&conn)?;
         if already_initialised {
@@ -1577,7 +1581,7 @@ impl LibraryDb {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

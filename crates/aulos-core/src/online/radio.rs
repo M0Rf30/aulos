@@ -211,7 +211,7 @@ fn build_search_url(query: &StationQuery) -> String {
 /// Search the radio-browser.info station directory by name/tag/country,
 /// sorted by `query.order` (most-popular/matching first).
 pub fn search_stations(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     query: &StationQuery,
 ) -> Result<Vec<StationSearchResult>, String> {
     fetch_stations(client, &build_search_url(query))
@@ -220,7 +220,7 @@ pub fn search_stations(
 /// Fetch the globally most-clicked stations, for a Discover "Popular"
 /// preset that needs no search terms.
 pub fn top_click_stations(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     limit: u32,
 ) -> Result<Vec<StationSearchResult>, String> {
     fetch_stations(client, &top_click_url(limit))
@@ -228,7 +228,7 @@ pub fn top_click_stations(
 
 /// Fetch the globally top-voted stations, for a Discover "Top voted" preset.
 pub fn top_vote_stations(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     limit: u32,
 ) -> Result<Vec<StationSearchResult>, String> {
     fetch_stations(client, &top_vote_url(limit))
@@ -443,7 +443,7 @@ fn top_vote_url(limit: u32) -> String {
 }
 
 fn fetch_stations(
-    client: &reqwest::blocking::Client,
+    client: &crate::http::blocking::Client,
     url: &str,
 ) -> Result<Vec<StationSearchResult>, String> {
     let response = client
@@ -587,7 +587,10 @@ const MAX_PLAYLIST_HOPS: u32 = 3;
 /// stopping as soon as a hop's result no longer looks like a playlist. If
 /// the chain is still unresolved at the cap, that's a clear error rather
 /// than silently handing back a playlist URL as if it were a direct stream.
-pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
+pub fn resolve_stream_url(
+    client: &crate::http::blocking::Client,
+    url: &str,
+) -> Result<String, String> {
     /// Playlist bodies (.pls/.m3u) are always small hand-written text
     /// files; a hostile or broken server returning an unbounded body must
     /// not be read into memory in full.

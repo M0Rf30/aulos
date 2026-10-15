@@ -21,9 +21,14 @@ pub fn init(requested_languages: &[LanguageIdentifier]) {
 }
 
 /// [`init`] with the desktop's preferred languages (locale environment
-/// variables, or the settings portal where there is one).
+/// variables, or the settings portal where there is one), or the browser's
+/// `navigator.languages`.
 pub fn init_from_system() {
-    init(&i18n_embed::DesktopLanguageRequester::requested_languages());
+    #[cfg(not(target_arch = "wasm32"))]
+    let requested = i18n_embed::DesktopLanguageRequester::requested_languages();
+    #[cfg(target_arch = "wasm32")]
+    let requested = i18n_embed::WebLanguageRequester::requested_languages();
+    init(&requested);
 }
 
 // Get the `Localizer` to be used for localizing this library.

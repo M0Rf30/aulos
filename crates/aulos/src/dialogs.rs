@@ -5,10 +5,18 @@
 //! (so sandboxed and native builds look the same), the Win32 common dialogs
 //! on Windows and `NSOpenPanel` on macOS. All are async and never block the
 //! UI thread; a cancelled dialog is simply `None` / an empty list.
+//!
+//! A browser cannot hand out filesystem paths, so there every picker reports
+//! a cancelled dialog until the web build reads files through the File System
+//! Access API instead.
 
 use std::path::PathBuf;
 
 /// A named set of file extensions (no leading dot) the dialog offers.
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the browser has no dialog to filter")
+)]
 pub struct Filter<'a> {
     pub name: &'a str,
     pub extensions: Vec<&'a str>,
@@ -23,50 +31,86 @@ impl<'a> Filter<'a> {
     }
 }
 
-fn dialog(title: &str, filter: Option<&Filter<'_>>) -> rfd::AsyncFileDialog {
-    let dialog = rfd::AsyncFileDialog::new().set_title(title);
-    match filter {
-        Some(filter) => dialog.add_filter(filter.name, &filter.extensions),
-        None => dialog,
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+
+    fn dialog(title: &str, filter: Option<&Filter<'_>>) -> rfd::AsyncFileDialog {
+        let dialog = rfd::AsyncFileDialog::new().set_title(title);
+        match filter {
+            Some(filter) => dialog.add_filter(filter.name, &filter.extensions),
+            None => dialog,
+        }
+    }
+
+    /// One or more files; empty when the dialog was cancelled.
+    pub async fn pick_files(title: &str, filter: Option<&Filter<'_>>) -> Vec<PathBuf> {
+        dialog(title, filter)
+            .pick_files()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| file.path().to_path_buf())
+            .collect()
+    }
+
+    /// A single file; `None` when cancelled.
+    pub async fn pick_file(title: &str, filter: Option<&Filter<'_>>) -> Option<PathBuf> {
+        dialog(title, filter)
+            .pick_file()
+            .await
+            .map(|file| file.path().to_path_buf())
+    }
+
+    /// A folder; `None` when cancelled.
+    pub async fn pick_folder(title: &str) -> Option<PathBuf> {
+        dialog(title, None)
+            .pick_folder()
+            .await
+            .map(|file| file.path().to_path_buf())
+    }
+
+    /// A file to write, pre-named `file_name`; `None` when cancelled.
+    pub async fn save_file(
+        title: &str,
+        file_name: &str,
+        filter: Option<&Filter<'_>>,
+    ) -> Option<PathBuf> {
+        dialog(title, filter)
+            .set_file_name(file_name)
+            .save_file()
+            .await
+            .map(|file| file.path().to_path_buf())
     }
 }
 
-/// One or more files; empty when the dialog was cancelled.
-pub async fn pick_files(title: &str, filter: Option<&Filter<'_>>) -> Vec<PathBuf> {
-    dialog(title, filter)
-        .pick_files()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|file| file.path().to_path_buf())
-        .collect()
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;
+
+/// One or more files; always empty in the browser (see the module docs).
+#[cfg(target_arch = "wasm32")]
+pub async fn pick_files(_title: &str, _filter: Option<&Filter<'_>>) -> Vec<PathBuf> {
+    Vec::new()
 }
 
-/// A single file; `None` when cancelled.
-pub async fn pick_file(title: &str, filter: Option<&Filter<'_>>) -> Option<PathBuf> {
-    dialog(title, filter)
-        .pick_file()
-        .await
-        .map(|file| file.path().to_path_buf())
+/// A single file; always `None` in the browser.
+#[cfg(target_arch = "wasm32")]
+pub async fn pick_file(_title: &str, _filter: Option<&Filter<'_>>) -> Option<PathBuf> {
+    None
 }
 
-/// A folder; `None` when cancelled.
-pub async fn pick_folder(title: &str) -> Option<PathBuf> {
-    dialog(title, None)
-        .pick_folder()
-        .await
-        .map(|file| file.path().to_path_buf())
+/// A folder; always `None` in the browser.
+#[cfg(target_arch = "wasm32")]
+pub async fn pick_folder(_title: &str) -> Option<PathBuf> {
+    None
 }
 
-/// A file to write, pre-named `file_name`; `None` when cancelled.
+/// A file to write; always `None` in the browser.
+#[cfg(target_arch = "wasm32")]
 pub async fn save_file(
-    title: &str,
-    file_name: &str,
-    filter: Option<&Filter<'_>>,
+    _title: &str,
+    _file_name: &str,
+    _filter: Option<&Filter<'_>>,
 ) -> Option<PathBuf> {
-    dialog(title, filter)
-        .set_file_name(file_name)
-        .save_file()
-        .await
-        .map(|file| file.path().to_path_buf())
+    None
 }

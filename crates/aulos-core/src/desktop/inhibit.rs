@@ -86,7 +86,7 @@ mod backend {
     }
 
     pub async fn acquire(reason: &str) -> Option<Inhibitor> {
-        match tokio::time::timeout(PORTAL_TIMEOUT, acquire_portal(reason)).await {
+        match crate::task::timeout(PORTAL_TIMEOUT, acquire_portal(reason)).await {
             Ok(Ok(request)) => {
                 tracing::debug!("inhibiting suspend/idle via the desktop portal");
                 return Some(Inhibitor::Portal(Box::new(request)));

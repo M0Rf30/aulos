@@ -204,7 +204,7 @@ impl PodcastsState {
 
     fn load_subscriptions() -> Effect<PodcastEvent> {
         Effect::future(async move {
-            let podcasts = tokio::task::spawn_blocking(podcast::load_subscriptions)
+            let podcasts = crate::task::spawn_blocking(podcast::load_subscriptions)
                 .await
                 .unwrap_or_default();
             PodcastEvent::PodcastsLoaded(podcasts)
@@ -213,7 +213,7 @@ impl PodcastsState {
 
     fn load_episodes(podcast_id: i64) -> Effect<PodcastEvent> {
         Effect::future(async move {
-            let episodes = tokio::task::spawn_blocking(move || podcast::load_episodes(podcast_id))
+            let episodes = crate::task::spawn_blocking(move || podcast::load_episodes(podcast_id))
                 .await
                 .unwrap_or_default();
             PodcastEvent::EpisodesLoaded {
@@ -233,7 +233,7 @@ impl PodcastsState {
         played: bool,
     ) -> Effect<PodcastEvent> {
         Effect::future(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::task::spawn_blocking(move || {
                 podcast::save_episode_position(episode_id, position_ms, played)
             })
             .await;
@@ -454,7 +454,7 @@ impl PodcastsState {
         );
         Effect::stream(channel_stream(8, move |mut events| async move {
             let mut progress = events.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
+            let outcome = crate::task::spawn_blocking(move || {
                 podcast::download_episode(&episode, &cancel, |received, total| {
                     // A full channel only drops an intermediate report.
                     let _ = progress.try_send(PodcastEvent::DownloadProgress {

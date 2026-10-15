@@ -1427,8 +1427,8 @@ fn apply(app: &mut App, intent: Intent) {
             });
         }
         Intent::OpenDir(dir) => {
-            if let Err(error) = open::that_detached(&dir) {
-                app.toast_error(format!("Could not open the folder: {error}"));
+            if let Err(error) = aulos_core::desktop::browser::open_path(&dir) {
+                app.toast_error(error);
             }
         }
         Intent::Format(format) => set_config(app, |c| c.convert_format = format),

@@ -205,7 +205,7 @@ impl SampleSink for FfmpegSink {
 
     fn finish(mut self: Box<Self>) -> Result<(), ConvertError> {
         // Close stdin first so ffmpeg sees EOF and starts flushing/exiting.
-        drop(self.stdin.take());
+        self.stdin = None;
 
         let status = self
             .child

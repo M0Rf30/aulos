@@ -24,8 +24,8 @@ use crate::online::acoustid::{self, Submission};
 use crate::online::musicbrainz::{self, FileForMatch};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
+use web_time::Instant;
 
 /// Files being read at once (in chunks of [`LOAD_CHUNK`]).
 static LOAD_PERMITS: Semaphore = Semaphore::const_new(4);
@@ -45,7 +45,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
+    crate::task::spawn_blocking(work)
         .await
         .map_err(|e| format!("background task failed: {e}"))?
 }
@@ -55,7 +55,7 @@ async fn wait_for_lookup_slot() {
     let mut last = LAST_LOOKUP.lock().await;
     let wait = jobs::throttle_wait(*last, Instant::now(), LOOKUP_MIN_GAP);
     if !wait.is_zero() {
-        tokio::time::sleep(wait).await;
+        crate::task::sleep(wait).await;
     }
     *last = Some(Instant::now());
 }
@@ -85,7 +85,7 @@ pub async fn read_image(path: PathBuf, kind: u8) -> TaggerEvent {
 
 /// Decodes the thumbnail of the picture with `hash`.
 pub async fn decode_thumb(hash: u64, bytes: Vec<u8>) -> TaggerEvent {
-    let pixels = tokio::task::spawn_blocking(move || thumbs::decode(&bytes))
+    let pixels = crate::task::spawn_blocking(move || thumbs::decode(&bytes))
         .await
         .ok()
         .flatten();
@@ -106,7 +106,7 @@ pub fn load(request: LoadRequest) -> impl Iterator<Item = impl Future<Output = T
 async fn load_chunk(generation: u64, chunk: Vec<PathBuf>) -> TaggerEvent {
     let permit = LOAD_PERMITS.acquire().await;
     let paths = chunk.clone();
-    let files = match tokio::task::spawn_blocking(move || {
+    let files = match crate::task::spawn_blocking(move || {
         chunk.into_iter().map(read_file).collect::<Vec<_>>()
     })
     .await
@@ -189,7 +189,7 @@ pub async fn open_seed(files: Vec<SeedFile>) -> TaggerEvent {
             })
             .collect();
         let page = musicbrainz::seed_release_add(&for_match)?;
-        open::that_detached(&page).map_err(|e| format!("Could not open the browser: {e}"))
+        crate::desktop::browser::open_path(&page)
     })
     .await;
     TaggerEvent::SeedOpened(result)
@@ -210,7 +210,7 @@ pub async fn save(job: SaveJob) -> TaggerEvent {
 /// the cached covers of the albums they belonged to. Returns the number of
 /// tracks updated.
 pub async fn refresh_library(written: Vec<PathBuf>, album_keys: Vec<String>) -> usize {
-    tokio::task::spawn_blocking(move || refresh_library_blocking(&written, &album_keys))
+    crate::task::spawn_blocking(move || refresh_library_blocking(&written, &album_keys))
         .await
         .unwrap_or(0)
 }
@@ -346,16 +346,12 @@ pub async fn submit(start: SubmitStart, app_key: String) -> TaggerEvent {
         };
 
     let files: Vec<FileId> = jobs.iter().map(|j| j.file).collect();
-    let mut set = tokio::task::JoinSet::new();
-    for (index, job) in jobs.into_iter().enumerate() {
-        set.spawn(async move { (index, prepare_submission(job).await) });
-    }
-    let mut prepared: Vec<Option<Prepared>> = files.iter().map(|_| None).collect();
-    while let Some(joined) = set.join_next().await {
-        if let Ok((index, item)) = joined {
-            prepared[index] = Some(item);
-        }
-    }
+    let prepared: Vec<Option<Prepared>> =
+        futures::future::join_all(jobs.into_iter().map(prepare_submission))
+            .await
+            .into_iter()
+            .map(Some)
+            .collect();
 
     let mut results: Vec<SubmitResult> = Vec::with_capacity(files.len());
     let mut ready: Vec<(FileId, Option<fingerprint::Fingerprint>, Submission)> = Vec::new();

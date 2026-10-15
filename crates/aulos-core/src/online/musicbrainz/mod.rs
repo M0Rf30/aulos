@@ -18,7 +18,8 @@ mod seed;
 mod tags;
 
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub use cover::fetch_front_cover;
 pub use matching::{FileForMatch, MIN_MATCH_SCORE, TrackMatch, match_files, title_similarity};
@@ -41,9 +42,9 @@ const SEARCH_LIMIT: u32 = 25;
 
 /// Shared blocking client. MusicBrainz asks every application to send a
 /// descriptive `User-Agent` with a contact URL and blocks generic ones.
-pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
-    static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-        reqwest::blocking::Client::builder()
+pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
+    static CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
+        crate::http::blocking::Client::builder()
             .user_agent(format!(
                 "Aulos/{} ( https://github.com/M0Rf30/aulos )",
                 env!("CARGO_PKG_VERSION")
@@ -381,17 +382,13 @@ pub fn release_group_url(mbid: &str) -> String {
 /// Opens a recording's MusicBrainz page in the default browser.
 pub fn open_recording_page(mbid: &str) -> Result<(), String> {
     require_mbid("recording", mbid)?;
-    open_in_browser(&recording_url(mbid))
+    crate::desktop::browser::open_in_browser(&recording_url(mbid))
 }
 
 /// Opens a release's MusicBrainz page in the default browser.
 pub fn open_release_page(mbid: &str) -> Result<(), String> {
     require_mbid("release", mbid)?;
-    open_in_browser(&release_url(mbid))
-}
-
-pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
-    open::that_detached(url).map_err(|e| format!("Could not open the browser: {e}"))
+    crate::desktop::browser::open_in_browser(&release_url(mbid))
 }
 
 #[cfg(test)]

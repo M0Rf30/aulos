@@ -42,7 +42,7 @@ impl Session {
         let provider = self.providers.registry.get_shared(&track.provider_id);
         Effect::future(async move {
             let result =
-                tokio::task::spawn_blocking(move || probe_track(&track, provider.as_deref()))
+                crate::task::spawn_blocking(move || probe_track(&track, provider.as_deref()))
                     .await
                     .map_or_else(|e| Err(e.to_string()), |r| r.map(Box::new));
             PropertiesEvent::Track { request_id, result }
@@ -54,7 +54,7 @@ impl Session {
         let tracks = album.tracks.clone();
         let request_id = self.properties.begin_album(album);
         Effect::future(async move {
-            let summary = tokio::task::spawn_blocking(move || tech_info::summarize_album(&tracks))
+            let summary = crate::task::spawn_blocking(move || tech_info::summarize_album(&tracks))
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!("album summary task failed: {e}");

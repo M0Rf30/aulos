@@ -10,8 +10,12 @@ pub mod eq_source;
 pub mod equalizer;
 pub mod extras;
 mod http_range_reader;
+#[cfg(not(target_arch = "wasm32"))]
 mod icy_reader;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod intro;
+// The browser's output is its own file behind the same module name.
+#[cfg_attr(target_arch = "wasm32", path = "web_backend.rs")]
 pub mod local_backend;
 pub mod mpd_backend;
 pub mod party;

@@ -125,7 +125,7 @@ impl ArtistInfoState {
                 let permit = semaphore.acquire_owned().await.ok();
                 let now = crate::unix_now();
                 let name_for_panic = name.clone();
-                tokio::task::spawn_blocking(move || {
+                crate::task::spawn_blocking(move || {
                     let _permit = permit;
                     if is_subsonic {
                         resolve_via_provider(&store, provider.as_ref(), &provider_id, &name, now)

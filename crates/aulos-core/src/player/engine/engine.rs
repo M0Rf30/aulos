@@ -37,7 +37,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::{BitOrder, ChannelDataLayout};
@@ -146,7 +147,7 @@ pub enum PlaySource {
     LocalFile(PathBuf),
     Reader {
         url: String,
-        client: reqwest::blocking::Client,
+        client: crate::http::blocking::Client,
         hint_extension: Option<String>,
     },
     /// An internet radio / Shoutcast-Icecast live stream. `icy_title` is
@@ -154,7 +155,7 @@ pub enum PlaySource {
     /// UI can read it back without threading a message through the engine.
     LiveStream {
         url: String,
-        client: reqwest::blocking::Client,
+        client: crate::http::blocking::Client,
         hint_extension: Option<String>,
         icy_title: Arc<Mutex<Option<String>>>,
     },
@@ -229,12 +230,12 @@ const MAX_LIVE_RECONNECT_ATTEMPTS: u32 = 5;
 /// means the TCP connection dropped, not that playback should stop, so
 /// `run_pcm` uses this to transparently re-`GET` the same URL instead of
 /// surfacing the drop as "finished" (see `try_reconnect`). Cheap to clone:
-/// `client` is a `reqwest::blocking::Client`, itself just a handle to a
+/// `client` is a `crate::http::blocking::Client`, itself just a handle to a
 /// shared connection pool.
 #[derive(Clone)]
 struct LiveRetry {
     url: String,
-    client: reqwest::blocking::Client,
+    client: crate::http::blocking::Client,
     hint_extension: Option<String>,
     icy_title: Arc<Mutex<Option<String>>>,
 }
@@ -300,8 +301,8 @@ fn reconnect_live(retry: &LiveRetry, ctx: &ThreadContext) -> Option<SymphoniaDec
                 // `stop()` fired mid-wait still takes effect promptly.
                 let backoff =
                     Duration::from_millis(300 * u64::from(attempt)).min(Duration::from_secs(3));
-                let deadline = std::time::Instant::now() + backoff;
-                while std::time::Instant::now() < deadline {
+                let deadline = web_time::Instant::now() + backoff;
+                while web_time::Instant::now() < deadline {
                     if ctx.stop_flag.load(Ordering::Acquire) {
                         return None;
                     }

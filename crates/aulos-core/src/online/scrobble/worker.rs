@@ -8,22 +8,30 @@
 //! [`Engine`] holds the (testable) logic; [`WorkerHandle`] is the cloneable
 //! front the app talks to.
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::audioscrobbler::{self, Audioscrobbler, Endpoint};
+#[cfg(not(target_arch = "wasm32"))]
+use super::keys;
+#[cfg(not(target_arch = "wasm32"))]
 use super::listenbrainz::ListenBrainz;
 use super::queue::Queue;
-use super::{ScrobbleError, ScrobbleTrack, Scrobbler, Service, keys};
+use super::{ScrobbleError, ScrobbleTrack, Scrobbler, Service};
 use crate::unix_now;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+use web_time::Instant;
 
 const BASE_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 /// Bad credentials won't fix themselves quickly: retry rarely.
 const AUTH_BACKOFF: Duration = Duration::from_secs(10 * 60);
+#[cfg(not(target_arch = "wasm32"))]
 /// Pause between bulk love/unlove calls (loved-track sync).
 const BULK_LOVE_PAUSE: Duration = Duration::from_millis(300);
 
@@ -74,6 +82,7 @@ pub struct WorkerHandle {
 
 impl WorkerHandle {
     /// Start the worker thread, loading the queue from `queue_path`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn(queue_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<Cmd>();
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -89,6 +98,18 @@ impl WorkerHandle {
             tracing::error!("failed to start scrobbler thread: {e}");
         }
         Self { tx, shared }
+    }
+
+    /// A handle with no worker behind it: a page has no thread to submit
+    /// scrobbles from (and no blocking HTTP to submit them with), so every
+    /// command is dropped and nothing is ever queued.
+    #[cfg(target_arch = "wasm32")]
+    pub fn spawn(_queue_path: PathBuf) -> Self {
+        let (tx, _rx) = mpsc::channel::<Cmd>();
+        Self {
+            tx,
+            shared: Arc::new(Mutex::new(Shared::default())),
+        }
     }
 
     pub fn send(&self, cmd: Cmd) {
@@ -109,6 +130,7 @@ impl WorkerHandle {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run(engine: &mut Engine, rx: mpsc::Receiver<Cmd>) {
     loop {
         let wait = engine
@@ -140,6 +162,7 @@ fn run(engine: &mut Engine, rx: mpsc::Receiver<Cmd>) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Instantiate a backend for every enabled service that has credentials.
 fn build_backends(settings: &WorkerSettings) -> Vec<Box<dyn Scrobbler>> {
     let secret = |id: String| {

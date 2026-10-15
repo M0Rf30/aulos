@@ -6,7 +6,8 @@
 use super::{AutoEQError, AutoEQProfile, AutoEQProfileMetadata, Result};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use web_time::SystemTime;
 
 const INDEX_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60); // 7 days
 const PROFILE_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
@@ -22,16 +23,33 @@ const MAX_PROFILE_RESPONSE_BYTES: usize = 256 * 1024;
 /// Uses `Response::chunk()` (always available, no `stream` feature
 /// needed) so a hostile or misbehaving server can't exhaust memory with
 /// an unbounded body.
-async fn read_capped_text(mut response: reqwest::Response, max_bytes: usize) -> Result<String> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        body.extend_from_slice(&chunk);
-        if body.len() > max_bytes {
-            return Err(AutoEQError::InvalidFormat(format!(
-                "Response exceeded {max_bytes} byte limit"
-            )));
+async fn read_capped_text(
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String> {
+    let too_big =
+        || AutoEQError::InvalidFormat(format!("Response exceeded {max_bytes} byte limit"));
+    #[cfg(not(target_arch = "wasm32"))]
+    let body = {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            body.extend_from_slice(&chunk);
+            if body.len() > max_bytes {
+                return Err(too_big());
+            }
         }
-    }
+        body
+    };
+    // A browser response has no chunked read without the `stream` feature;
+    // the cap is checked once the body is in.
+    #[cfg(target_arch = "wasm32")]
+    let body = {
+        let body = response.bytes().await?.to_vec();
+        if body.len() > max_bytes {
+            return Err(too_big());
+        }
+        body
+    };
     String::from_utf8(body)
         .map_err(|e| AutoEQError::InvalidFormat(format!("Response was not valid UTF-8: {e}")))
 }
@@ -47,13 +65,13 @@ pub struct AutoEQManager {
 
 struct CacheEntry {
     profile: AutoEQProfile,
-    last_accessed: std::time::Instant,
+    last_accessed: web_time::Instant,
 }
 
 impl AutoEQManager {
     /// Create a new AutoEQ manager.
     pub fn new(cache_dir: PathBuf, timeout: Duration) -> Result<Self> {
-        let http_client = reqwest::Client::builder().timeout(timeout).build()?;
+        let http_client = crate::http::client(timeout)?;
 
         // Ensure cache directory exists
         if !cache_dir.exists() {
@@ -113,7 +131,7 @@ impl AutoEQManager {
             let profile = entry.profile.clone();
             // Update access time and LRU in separate scope
             if let Some(entry) = self.memory_cache.get_mut(path) {
-                entry.last_accessed = std::time::Instant::now();
+                entry.last_accessed = web_time::Instant::now();
             }
             self.update_lru(path);
             return Ok(profile);
@@ -196,7 +214,7 @@ impl AutoEQManager {
             path.clone(),
             CacheEntry {
                 profile,
-                last_accessed: std::time::Instant::now(),
+                last_accessed: web_time::Instant::now(),
             },
         );
 
@@ -326,7 +344,7 @@ mod tests {
             "aulos-autoeq-test-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

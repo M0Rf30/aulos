@@ -20,7 +20,8 @@ use egui::{
 };
 use egui_phosphor::regular;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long an in-flight load shows the loading state before the page
 /// concludes there is nothing to show.

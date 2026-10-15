@@ -12,17 +12,25 @@
 //! unprocessed instead of risking corruption from an accidental shared
 //! mixing/DSP stage.
 
+// The decoding half (symphonia, resampling, filters, fades) is portable and
+// also serves tag reading, fingerprinting and the converter. What drives a
+// sound card (cpal, the playback thread) exists natively only; the browser's
+// output is `local_backend`'s business.
 pub mod conversion;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cpal_utils;
 pub mod crossfade;
 pub mod decoder;
 pub mod dop;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod dop_output;
 // `engine::engine` intentionally mirrors rmpd's module layout; renaming would
 // churn every `use` path across the crate (including app.rs).
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::module_inception)]
 pub mod engine;
 pub mod fade;
 pub mod filter;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod output;
 pub mod resampler;

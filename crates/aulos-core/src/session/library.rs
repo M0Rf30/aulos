@@ -21,8 +21,12 @@ use crate::library::state::SortField;
 use crate::library::top_tracks::{ArtistTop, TOP_TRACKS_LEN, rank_top_tracks};
 use crate::library::{Album, CoverArt, LibraryDb, LibraryScanner, Track};
 use crate::provider::{MusicProvider, ProviderType};
-use crate::task::{Effect, channel_stream};
+use crate::task::Effect;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::task::channel_stream;
+#[cfg(not(target_arch = "wasm32"))]
 use futures::SinkExt;
+#[cfg(not(target_arch = "wasm32"))]
 use futures::channel::mpsc;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +36,7 @@ use std::time::Duration;
 const COVER_DECODE_CONCURRENCY: usize = 4;
 
 /// Albums fetched per batch from a remote provider.
+#[cfg(not(target_arch = "wasm32"))]
 const BATCH_SIZE: usize = 50;
 
 /// Async results of the library workflows; feed them to
@@ -181,7 +186,7 @@ impl Session {
     pub fn set_search_query(&mut self, query: String) -> Effect<LibraryEvent> {
         match self.library.begin_search(query) {
             Some(generation) => Effect::future(async move {
-                tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
+                crate::task::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
                 LibraryEvent::SearchDebounced(generation)
             }),
             None => {
@@ -279,7 +284,7 @@ impl Session {
             ProviderType::Local => {
                 let progress = Arc::clone(&self.library.scan_progress);
                 Reload::effect(self.scan_with(async move {
-                    tokio::task::spawn_blocking(move || {
+                    crate::task::spawn_blocking(move || {
                         provider.sync_library(&progress).unwrap_or_else(|e| {
                             tracing::error!("sync_library failed: {e}");
                             0
@@ -346,7 +351,7 @@ impl Session {
         tracing::info!("Filesystem watcher detected {} changed paths", paths.len());
 
         let work = async move {
-            tokio::task::spawn_blocking(move || {
+            crate::task::spawn_blocking(move || {
                 // `LocalProvider` wraps its `LibraryDb` in a mutex; the
                 // incremental scan opens a connection of its own.
                 let db_path = crate::paths::library_db_path();
@@ -398,6 +403,13 @@ impl Session {
                     self.cover_bytes.clear();
                     self.library.covers.clear()
                 };
+                #[cfg(target_arch = "wasm32")]
+                let effect = {
+                    // No remote provider exists in the browser yet.
+                    _ = (provider, generation, provider_id);
+                    Effect::none()
+                };
+                #[cfg(not(target_arch = "wasm32"))]
                 let effect = Effect::stream(channel_stream(8, {
                     let mpd = self
                         .providers
@@ -580,7 +592,7 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let genres = tokio::task::spawn_blocking(move || {
+            let genres = crate::task::spawn_blocking(move || {
                 provider.list_genres().unwrap_or_else(|e| {
                     tracing::debug!("list_genres: {e}");
                     Vec::new()
@@ -605,7 +617,7 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let tracks = tokio::task::spawn_blocking(move || {
+            let tracks = crate::task::spawn_blocking(move || {
                 provider.get_tracks_by_genre(&genre).unwrap_or_default()
             })
             .await
@@ -629,7 +641,7 @@ impl Session {
             .collect();
         let uses_database = self.home_uses_database();
         Effect::future(async move {
-            let top = tokio::task::spawn_blocking(move || {
+            let top = crate::task::spawn_blocking(move || {
                 let plays = if uses_database {
                     let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
                     LibraryDb::open(&crate::paths::library_db_path())
@@ -665,7 +677,7 @@ impl Session {
         self.set_favorite_local(&track_id, optimistic);
         Effect::future(async move {
             let id = track_id.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::task::spawn_blocking(move || {
                 provider.toggle_favorite(&id).map_err(|e| e.to_string())
             })
             .await
@@ -690,7 +702,7 @@ impl Session {
         self.set_rating_local(&track_id, if rating == 0 { None } else { Some(rating) });
         Effect::future(async move {
             let id = track_id.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::task::spawn_blocking(move || {
                 provider.set_rating(&id, rating).map_err(|e| e.to_string())
             })
             .await
@@ -705,6 +717,7 @@ impl Session {
 }
 
 /// Fetch one album's cover through the provider (blocking).
+#[cfg(not(target_arch = "wasm32"))]
 fn provider_cover(provider: &dyn MusicProvider, album: &Album) -> Option<CoverThumb> {
     let bytes = provider.get_cover_art(album).ok().flatten()?;
     CoverThumb::from_bytes(&bytes)
@@ -718,7 +731,7 @@ async fn load_local(
     provider_id: String,
 ) -> LibraryEvent {
     let browsed = Arc::clone(&provider);
-    let (tracks, albums) = tokio::task::spawn_blocking(move || {
+    let (tracks, albums) = crate::task::spawn_blocking(move || {
         let provider = browsed;
         let tracks = provider.browse_tracks().unwrap_or_else(|e| {
             tracing::error!("browse_tracks failed: {e}");
@@ -739,7 +752,7 @@ async fn load_local(
     // is unchanged skips the full-size decode.
     let mut cached = {
         let provider = Arc::clone(&provider);
-        tokio::task::spawn_blocking(move || provider.cached_thumbs())
+        crate::task::spawn_blocking(move || provider.cached_thumbs())
             .await
             .unwrap_or_default()
     };
@@ -766,9 +779,9 @@ async fn load_local(
             // per thread behind.
             let permits = Arc::clone(&permits);
             let hit = cached.remove(&key);
-            tokio::spawn(async move {
+            async move {
                 let _permit = permits.acquire_owned().await.ok()?;
-                tokio::task::spawn_blocking(move || {
+                crate::task::spawn_blocking(move || {
                     let stamp = ThumbStamp::of(&path);
                     // A cached "no cover" is vouched for by a stamp that
                     // also covers the directory.
@@ -819,23 +832,27 @@ async fn load_local(
                 .await
                 .ok()
                 .flatten()
-            })
+            }
         })
         .collect();
 
     let mut covers = CoverSet::new();
     let mut fresh = Vec::new();
-    for task in cover_tasks {
-        if let Ok(Some((key, thumb, new))) = task.await {
-            covers.extend(thumb.map(|t| (key, t)));
-            fresh.extend(new);
-        }
+    // The decodes are bounded by `permits` and run on the blocking pool, so
+    // polling the futures together from this one task keeps them parallel.
+    for (key, thumb, new) in futures::future::join_all(cover_tasks)
+        .await
+        .into_iter()
+        .flatten()
+    {
+        covers.extend(thumb.map(|t| (key, t)));
+        fresh.extend(new);
     }
     if !fresh.is_empty() || stale_cache {
         // Not awaited: the library need not wait for the cache write.
-        drop(tokio::task::spawn_blocking(move || {
+        crate::task::run_detached(move || {
             provider.store_thumbs(&fresh, &keep);
-        }));
+        });
     }
 
     LibraryEvent::Loaded {
@@ -848,6 +865,7 @@ async fn load_local(
 }
 
 /// Covers of one batch of albums, fetched in parallel.
+#[cfg(not(target_arch = "wasm32"))]
 async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> CoverSet {
     let tasks: Vec<_> = albums
         .iter()
@@ -856,7 +874,7 @@ async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> Co
             let provider = Arc::clone(provider);
             let album = album.cover_hint();
             // Decode + downscale inside the blocking closure.
-            tokio::task::spawn_blocking(move || (key, provider_cover(provider.as_ref(), &album)))
+            crate::task::spawn_blocking(move || (key, provider_cover(provider.as_ref(), &album)))
         })
         .collect();
     let mut covers = CoverSet::new();
@@ -872,6 +890,7 @@ async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> Co
 /// [`BATCH_SIZE`], each sent as a [`LibraryEvent::Batch`] with its covers,
 /// then [`LibraryEvent::LoadComplete`]. `mpd`/`subsonic` are the concrete
 /// provider behind `provider` (whichever it is), for paged access.
+#[cfg(not(target_arch = "wasm32"))]
 async fn load_incremental(
     mut tx: mpsc::Sender<LibraryEvent>,
     provider: Arc<dyn MusicProvider>,
@@ -1123,7 +1142,7 @@ mod tests {
                     if !all.is_empty() {
                         return all;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    crate::task::sleep(Duration::from_millis(10)).await;
                 }
                 panic!("thumbnail never persisted");
             };
@@ -1193,7 +1212,7 @@ mod tests {
                 if !stored.is_empty() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                crate::task::sleep(Duration::from_millis(10)).await;
                 stored = provider.cached_thumbs();
             }
             assert!(

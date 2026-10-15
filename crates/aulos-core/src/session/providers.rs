@@ -8,11 +8,15 @@ use crate::config::{self, Config};
 use crate::fl;
 use crate::library::LibraryDb;
 use crate::player::PlaybackState;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::provider::MusicProvider;
 use crate::provider::local::LocalProvider;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::mpd_events::{IdleAction, IdleSubsystem, idle_action};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
-use crate::provider::{MusicProvider, ProviderRegistry, ProviderType};
+use crate::provider::{ProviderRegistry, ProviderType};
 use crate::task::Effect;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,8 +29,10 @@ pub type ProviderInitError = (String, String);
 pub struct ProvidersState {
     pub registry: ProviderRegistry,
     /// Shared references to MPD providers for idle event subscriptions.
+    #[cfg(not(target_arch = "wasm32"))]
     pub mpd_providers: Vec<Arc<MpdProvider>>,
     /// Shared references to Subsonic providers for scrobbling.
+    #[cfg(not(target_arch = "wasm32"))]
     pub subsonic_providers: Vec<Arc<SubsonicProvider>>,
     /// Ordered list of (provider_id, display_name) for the selector dropdown.
     pub provider_list: Vec<(String, String)>,
@@ -127,7 +133,9 @@ impl ProvidersState {
 
         let mut state = Self {
             registry,
+            #[cfg(not(target_arch = "wasm32"))]
             mpd_providers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             subsonic_providers: Vec::new(),
             provider_list: Vec::new(),
             active_index: None,
@@ -164,6 +172,7 @@ impl ProvidersState {
     }
 
     /// Registers one MPD provider per configured server.
+    #[cfg(not(target_arch = "wasm32"))]
     fn register_mpd(&mut self, config: &Config) {
         let rt_handle = tokio::runtime::Handle::current();
         for entry in &config.mpd_servers {
@@ -175,8 +184,14 @@ impl ProvidersState {
         }
     }
 
+    /// A browser page cannot open the TCP connection MPD speaks over: the
+    /// configured servers (their cards stay editable) have no provider.
+    #[cfg(target_arch = "wasm32")]
+    fn register_mpd(&mut self, _config: &Config) {}
+
     /// Registers one Subsonic provider per configured server; returns the
     /// ones that failed to construct.
+    #[cfg(not(target_arch = "wasm32"))]
     fn register_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
         let rt_handle = tokio::runtime::Handle::current();
         let mut errors = Vec::new();
@@ -197,6 +212,22 @@ impl ProvidersState {
             }
         }
         errors
+    }
+
+    /// No Subsonic client runs in the browser yet: every configured server
+    /// is reported as failed to construct.
+    #[cfg(target_arch = "wasm32")]
+    fn register_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
+        config
+            .subsonic_servers
+            .iter()
+            .map(|entry| {
+                let reason = "Subsonic is not available in the browser yet".to_string();
+                self.provider_errors
+                    .insert(entry.id.clone(), reason.clone());
+                (entry.name.clone(), reason)
+            })
+            .collect()
     }
 
     /// Rebuilds the settings cards' editing state (and clears their
@@ -268,6 +299,7 @@ impl ProvidersState {
     /// cards).
     fn reinit_mpd(&mut self, config: &Config) {
         self.registry.remove_by_type(ProviderType::Mpd);
+        #[cfg(not(target_arch = "wasm32"))]
         self.mpd_providers.clear();
         self.register_mpd(config);
         self.rebuild_list();
@@ -278,6 +310,7 @@ impl ProvidersState {
     /// Subsonic cards); returns the servers that failed to construct.
     fn reinit_subsonic(&mut self, config: &Config) -> Vec<ProviderInitError> {
         self.registry.remove_by_type(ProviderType::Subsonic);
+        #[cfg(not(target_arch = "wasm32"))]
         self.subsonic_providers.clear();
         for entry in self
             .subsonic_edit_states
@@ -306,6 +339,15 @@ impl ProvidersState {
     }
 
     /// Test the connection with the editing state of MPD card `i`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn test_mpd_connection(&self, i: usize) -> Effect<ProviderEvent> {
+        Effect::future(async move {
+            ProviderEvent::MpdTestResult(i, Err("MPD is not available in the browser yet".into()))
+        })
+    }
+
+    /// Test the connection with the editing state of MPD card `i`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn test_mpd_connection(&self, i: usize) -> Effect<ProviderEvent> {
         let Some(state) = self.mpd_edit_states.get(i) else {
             return Effect::none();
@@ -328,6 +370,18 @@ impl ProvidersState {
     }
 
     /// Test the connection with the editing state of Subsonic card `i`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn test_subsonic_connection(&self, i: usize) -> Effect<ProviderEvent> {
+        Effect::future(async move {
+            ProviderEvent::SubsonicTestResult(
+                i,
+                Err("Subsonic is not available in the browser yet".into()),
+            )
+        })
+    }
+
+    /// Test the connection with the editing state of Subsonic card `i`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn test_subsonic_connection(&self, i: usize) -> Effect<ProviderEvent> {
         let Some(state) = self.subsonic_edit_states.get(i) else {
             return Effect::none();

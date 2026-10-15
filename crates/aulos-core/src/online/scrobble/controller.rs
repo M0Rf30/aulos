@@ -17,7 +17,8 @@ use crate::unix_now;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 #[derive(Debug, Clone)]
 pub enum ScrobbleMessage {
@@ -388,8 +389,8 @@ impl ScrobbleController {
                                 "",
                             );
                             let url = audioscrobbler::auth_page_url(&endpoint, &key, &token);
-                            if let Err(e) = open::that_detached(&url) {
-                                tracing::warn!("could not open browser: {e}");
+                            if let Err(e) = crate::desktop::browser::open_in_browser(&url) {
+                                tracing::warn!("{e}");
                             }
                         }
                         self.pending.insert(service, token);
@@ -631,7 +632,7 @@ fn import_stream(
         8,
         move |mut out: futures::channel::mpsc::Sender<ScrobbleMessage>| async move {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScrobbleMessage>();
-            let worker = tokio::task::spawn_blocking(move || {
+            let worker = crate::task::spawn_blocking(move || {
                 let progress_tx = tx.clone();
                 let result = import::run_request(&request, &cancel, &mut |p| {
                     let _ = progress_tx.send(ScrobbleMessage::ImportProgress(service, p));

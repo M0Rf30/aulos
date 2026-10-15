@@ -262,14 +262,14 @@ impl PlaylistsState {
         let db_path = crate::paths::library_db_path();
         Effect::future(async move {
             let revision = request.revision;
-            tokio::time::sleep(MATCH_COUNT_DEBOUNCE).await;
+            crate::task::sleep(MATCH_COUNT_DEBOUNCE).await;
             if request.is_superseded() {
                 return PlaylistEvent::SmartMatchCount {
                     revision,
                     count: None,
                 };
             }
-            let count = tokio::task::spawn_blocking(move || {
+            let count = crate::task::spawn_blocking(move || {
                 LibraryDb::open(&db_path)
                     .and_then(|db| db.smart_playlist_match_count(&request.playlist))
                     .inspect_err(|e| tracing::warn!("smart_playlist_match_count failed: {e}"))
@@ -298,7 +298,7 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let playlists = tokio::task::spawn_blocking(move || {
+            let playlists = crate::task::spawn_blocking(move || {
                 let mut playlists = provider.list_playlists().unwrap_or_else(|e| {
                     tracing::warn!("list_playlists failed: {e}");
                     Vec::new()
@@ -503,7 +503,7 @@ fn smart_list_effect(
     f: impl FnOnce() -> Result<Vec<SmartPlaylist>, String> + Send + 'static,
 ) -> Effect<PlaylistEvent> {
     Effect::future(async move {
-        let playlists = tokio::task::spawn_blocking(move || {
+        let playlists = crate::task::spawn_blocking(move || {
             f().unwrap_or_else(|e| {
                 tracing::warn!("{what}: {e}");
                 Vec::new()
@@ -521,7 +521,7 @@ fn smart_list_effect(
 fn smart_detail_effect(playlist: SmartPlaylist) -> Effect<PlaylistEvent> {
     let db_path = crate::paths::library_db_path();
     Effect::future(async move {
-        let (tracks, total) = tokio::task::spawn_blocking(move || {
+        let (tracks, total) = crate::task::spawn_blocking(move || {
             LibraryDb::open(&db_path)
                 .and_then(|db| {
                     let tracks = db.smart_playlist_tracks(&playlist, None)?;
@@ -547,7 +547,7 @@ fn smart_tracks_effect(
 ) -> Effect<PlaylistEvent> {
     let db_path = crate::paths::library_db_path();
     Effect::future(async move {
-        let tracks = tokio::task::spawn_blocking(move || {
+        let tracks = crate::task::spawn_blocking(move || {
             LibraryDb::open(&db_path)
                 .and_then(|db| db.smart_playlist_tracks(&playlist, None))
                 .unwrap_or_else(|e| {
@@ -580,7 +580,7 @@ pub async fn export_playlist(
     path: PathBuf,
     relative: bool,
 ) -> Result<playlist_io::ExportOutcome, String> {
-    tokio::task::spawn_blocking(move || {
+    crate::task::spawn_blocking(move || {
         source.export(&path, &crate::paths::library_db_path(), relative)
     })
     .await

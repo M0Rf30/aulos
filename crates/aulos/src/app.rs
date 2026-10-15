@@ -14,13 +14,12 @@ use aulos_core::session::{
     BackgroundKey, ConvertNotice, PodcastNotice, RadioNotice, Session, SessionEvent, SessionNotice,
     SessionUpdate,
 };
-use aulos_core::task::Effect;
+use aulos_core::task::{Effect, Spawner, TaskHandle};
 use egui::{Color32, Context, TextureHandle, TextureOptions};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
 
 /// Where the user is. Detail routes carry what they show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,13 +148,13 @@ pub use crate::smoke::Smoke;
 
 pub struct App {
     pub session: Session,
-    pub handle: tokio::runtime::Handle,
+    pub handle: Spawner,
     pub ctx: Context,
     tx: mpsc::Sender<SessionEvent>,
     rx: mpsc::Receiver<SessionEvent>,
     app_tx: mpsc::Sender<AppEvent>,
     app_rx: mpsc::Receiver<AppEvent>,
-    streams: HashMap<BackgroundKey, JoinHandle<()>>,
+    streams: HashMap<BackgroundKey, TaskHandle>,
     streams_dirty: bool,
 
     /// Every texture the views draw.
@@ -258,7 +257,7 @@ fn native_window(_: &eframe::CreationContext<'_>) -> Option<NativeWindow> {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, handle: tokio::runtime::Handle) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, handle: Spawner) -> Self {
         theme::install_fonts(&cc.egui_ctx);
         // Zoom keys are handled in `shortcuts` so the choice persists.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);

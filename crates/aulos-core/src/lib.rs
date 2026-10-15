@@ -15,6 +15,7 @@ pub mod convert;
 pub mod credentials;
 pub mod desktop;
 pub mod format;
+pub mod http;
 pub mod i18n;
 pub mod library;
 pub mod menu;
@@ -30,6 +31,8 @@ pub mod tagger;
 pub mod task;
 #[cfg(feature = "visualizer")]
 pub mod visualizer;
+#[cfg(target_arch = "wasm32")]
+pub mod web_storage;
 
 /// Decodes a `file://` URI into a filesystem path (`file:///C:/Music/a.flac`
 /// becomes `C:\Music\a.flac` on Windows). Shared by `main`'s CLI-argument
@@ -37,22 +40,36 @@ pub mod visualizer;
 /// receives a URI rather than a bare path. Returns `None` for any other
 /// scheme or a URI naming a remote host, which callers should treat as
 /// unsupported.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     url::Url::parse(uri).ok()?.to_file_path().ok()
 }
 
+/// A browser has no filesystem paths to name with a `file://` URI.
+#[cfg(target_arch = "wasm32")]
+pub fn file_uri_to_path(_uri: &str) -> Option<PathBuf> {
+    None
+}
+
 /// The `file://` URI of `path` (made absolute first): the inverse of
 /// [`file_uri_to_path`]. `None` when the path cannot be expressed as a URI.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn path_to_file_uri(path: &std::path::Path) -> Option<String> {
     let path = std::path::absolute(path).ok()?;
     url::Url::from_file_path(path).ok().map(String::from)
 }
 
+/// See the native version: always `None` in a browser.
+#[cfg(target_arch = "wasm32")]
+pub fn path_to_file_uri(_path: &std::path::Path) -> Option<String> {
+    None
+}
+
 /// Seconds since the Unix epoch.
 #[must_use]
 pub fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }

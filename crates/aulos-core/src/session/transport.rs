@@ -10,10 +10,10 @@
 //! (its results are fed back through [`Session::apply_playback_event`]),
 //! whether the current track changed, and an optional notice for the user.
 
-use super::Session;
 use super::playback::{
-    PlaybackEvent, PlaybackNotice, PlaybackUpdate, QueuePlacement, capped_position, mpd_command,
+    PlaybackEvent, PlaybackNotice, PlaybackUpdate, QueuePlacement, capped_position,
 };
+use super::{Session, mpd};
 use crate::config::{RepeatMode, ReplayGainMode};
 use crate::desktop::{inhibit, notify};
 use crate::library::queue_source::QueueSource;
@@ -23,16 +23,19 @@ use crate::player::extras::{InhibitStep, toggle_party_genre, toggle_stop_after, 
 use crate::player::{
     ActiveBackend, PlaybackState as PlayerState, Player, PreviousResult, QueueEditOutcome,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::provider::MusicProvider;
-use crate::provider::mpd::MpdProvider;
 use crate::provider::mpd_events::MpdStatusUpdate;
 use crate::task::Effect;
 use std::path::PathBuf;
+#[cfg(feature = "visualizer")]
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// A track is scrobbled to Subsonic after half its length or this long,
 /// whichever comes first.
+#[cfg(not(target_arch = "wasm32"))]
 const SCROBBLE_MAX_THRESHOLD: Duration = Duration::from_secs(240);
 
 /// How far the seek shortcuts jump.
@@ -42,6 +45,7 @@ pub const SEEK_STEP: Duration = Duration::from_secs(5);
 pub const VOLUME_STEP: f32 = 0.05;
 
 /// Playback time after which a Subsonic play counts as a scrobble.
+#[cfg(not(target_arch = "wasm32"))]
 fn scrobble_threshold(duration: Duration) -> Duration {
     (duration / 2).min(SCROBBLE_MAX_THRESHOLD)
 }
@@ -77,17 +81,6 @@ fn mute_target(current: f32, pre_mute: &mut Option<f32>) -> f32 {
     } else {
         pre_mute.take().unwrap_or(1.0)
     }
-}
-
-fn mpd_seek(client: mpd_client::Client, target: Duration) -> Effect<PlaybackEvent> {
-    mpd_command(async move {
-        client
-            .command(mpd_client::commands::Seek(
-                mpd_client::commands::SeekMode::Absolute(target),
-            ))
-            .await
-            .map_err(|e| format!("MPD seek: {e}"))
-    })
 }
 
 fn release_inhibit(token: inhibit::InhibitToken) -> Effect<PlaybackEvent> {
@@ -217,8 +210,8 @@ impl Session {
                 player.set_shuffle(true);
             }
         }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as usize)
             .unwrap_or(0);
         let start = nanos % self.library.genre_tracks.len();
@@ -269,12 +262,7 @@ impl Session {
                 if let Err(e) = player.toggle_playback() {
                     tracing::error!("Playback toggle failed: {e}");
                 } else if let Some(client) = self.playback.mpd_client() {
-                    update = update.also(mpd_command(async move {
-                        client
-                            .command(mpd_client::commands::SetPause(was_playing))
-                            .await
-                            .map_err(|e| format!("MPD set_pause: {e}"))
-                    }));
+                    update = update.also(mpd::set_pause(client, was_playing));
                 }
             }
         }
@@ -305,7 +293,7 @@ impl Session {
                 // The MPD backend's `seek` only updates its cached position;
                 // the server needs the real command.
                 let seek = match self.playback.mpd_client() {
-                    Some(client) => mpd_seek(client, Duration::ZERO),
+                    Some(client) => mpd::seek(client, Duration::ZERO),
                     None => Effect::none(),
                 };
                 PlaybackUpdate::effect(seek).also(self.publish_mpris())
@@ -327,12 +315,7 @@ impl Session {
                 Ok(()) => {
                     self.playback.position = Duration::ZERO;
                     if let Some(client) = self.playback.mpd_client() {
-                        mpd = mpd_command(async move {
-                            client
-                                .command(mpd_client::commands::Stop)
-                                .await
-                                .map_err(|e| format!("MPD stop: {e}"))
-                        });
+                        mpd = mpd::stop(client);
                     }
                 }
                 Err(e) => tracing::error!("Stop failed: {e}"),
@@ -361,7 +344,7 @@ impl Session {
             Ok(()) => {
                 self.playback.position = target;
                 match self.playback.mpd_client() {
-                    Some(client) => PlaybackUpdate::effect(mpd_seek(client, target)),
+                    Some(client) => PlaybackUpdate::effect(mpd::seek(client, target)),
                     None => PlaybackUpdate::none(),
                 }
             }
@@ -405,12 +388,7 @@ impl Session {
         let mpd = match self.playback.mpd_client() {
             Some(client) => {
                 let level = (volume.clamp(0.0, 1.0) * 100.0) as u8;
-                mpd_command(async move {
-                    client
-                        .command(mpd_client::commands::SetVolume(level))
-                        .await
-                        .map_err(|e| format!("MPD set_volume: {e}"))
-                })
+                mpd::set_volume(client, level)
             }
             None => Effect::none(),
         };
@@ -721,6 +699,14 @@ impl Session {
                 .scrobble
                 .on_playback(&track, self.playback.position);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.scrobble_to_subsonic(&track);
+    }
+
+    /// The Subsonic half of [`Self::handle_scrobble`]: the server's own
+    /// "now playing" and scrobble, when `track` comes from a Subsonic server.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scrobble_to_subsonic(&mut self, track: &Track) {
         let Some(provider) = self
             .providers
             .subsonic_providers
@@ -946,13 +932,7 @@ impl Session {
             player.set_crossfade(secs);
         }
         match self.active_mpd_provider() {
-            Some(mpd) => {
-                let seconds = secs as u64;
-                mpd_command(async move {
-                    mpd.send_crossfade(seconds)
-                        .map_err(|e| format!("crossfade: {e}"))
-                })
-            }
+            Some(provider) => mpd::set_crossfade(provider, secs as u64),
             None => Effect::none(),
         }
     }
@@ -964,25 +944,14 @@ impl Session {
             player.set_replay_gain_mode(mode);
         }
         match self.active_mpd_provider() {
-            Some(mpd) => {
-                use mpd_client::commands::ReplayGainMode as MpdReplayGainMode;
-                let mpd_mode = match mode {
-                    ReplayGainMode::Off => MpdReplayGainMode::Off,
-                    ReplayGainMode::Track => MpdReplayGainMode::Track,
-                    ReplayGainMode::Album => MpdReplayGainMode::Album,
-                    ReplayGainMode::Auto => MpdReplayGainMode::Auto,
-                };
-                mpd_command(async move {
-                    mpd.send_replay_gain_mode(mpd_mode)
-                        .map_err(|e| format!("replay_gain_mode: {e}"))
-                })
-            }
+            Some(provider) => mpd::set_replay_gain_mode(provider, mode),
             None => Effect::none(),
         }
     }
 
     /// The active provider, if it is an MPD one.
-    pub fn active_mpd_provider(&self) -> Option<Arc<MpdProvider>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn active_mpd_provider(&self) -> Option<mpd::Provider> {
         let active_id = self.providers.registry.active_id();
         self.providers
             .mpd_providers
@@ -991,11 +960,18 @@ impl Session {
             .cloned()
     }
 
+    /// The browser has no MPD provider.
+    #[cfg(target_arch = "wasm32")]
+    pub fn active_mpd_provider(&self) -> Option<mpd::Provider> {
+        None
+    }
+
     /// Replaces the player with one using the active provider's backend
     /// (MPD when it is connected), re-applying the saved EQ, volume and
     /// extras settings.
     pub fn recreate_player(&mut self) {
         let active_id = self.providers.registry.active_id();
+        #[cfg(not(target_arch = "wasm32"))]
         let mpd_backend = self
             .providers
             .mpd_providers
@@ -1005,6 +981,11 @@ impl Session {
                 let client = mpd.client_clone()?;
                 Some(crate::player::mpd_backend::MpdBackend::new(client))
             });
+        #[cfg(target_arch = "wasm32")]
+        let mpd_backend: Option<crate::player::mpd_backend::MpdBackend> = {
+            _ = active_id;
+            None
+        };
         match Player::new(mpd_backend) {
             #[allow(unused_mut)]
             Ok(mut p) => {
@@ -1212,7 +1193,7 @@ impl Session {
 
         Effect::future(async move {
             let for_cover = track.clone();
-            let image = tokio::task::spawn_blocking(move || {
+            let image = crate::task::spawn_blocking(move || {
                 let loaded;
                 let bytes: Option<&[u8]> = match (&cached_cover, &lazy_cover) {
                     (Some(b), _) => Some(b.as_slice()),

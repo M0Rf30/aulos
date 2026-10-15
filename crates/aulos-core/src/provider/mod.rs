@@ -7,8 +7,15 @@
 //! and the [`ProviderRegistry`] that manages active providers.
 
 pub mod local;
+// MPD and Subsonic need TCP sockets and a tokio runtime; their browser
+// transports (a WebSocket bridge, `fetch`) are separate providers. The MPD
+// event types (`mpd_events`) are plain data and exist everywhere.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod mpd;
 pub mod mpd_events;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mpd_streams;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod subsonic;
 
 use crate::library::scan_progress::ScanProgress;
@@ -69,6 +76,7 @@ impl std::error::Error for ProviderError {}
 /// Container label for a file suffix reported by a remote server (Subsonic
 /// `suffix`, the extension of an MPD path), in the same spelling the local
 /// probe uses (`"FLAC"`, `"MPEG-4 (M4A)"`…). Unknown suffixes are upper-cased.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn container_from_suffix(suffix: &str) -> Option<String> {
     let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
     let label = match suffix.as_str() {
@@ -93,6 +101,7 @@ pub(crate) fn container_from_suffix(suffix: &str) -> Option<String> {
 
 /// Whether a file suffix denotes a lossless format; `None` when the suffix
 /// alone cannot tell (`m4a` may hold ALAC or AAC, `wv` may be hybrid).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
     match suffix
         .trim()
@@ -109,6 +118,7 @@ pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
 }
 
 /// Conventional channel-layout name for a channel count.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn channel_layout_name(channels: u32) -> Option<String> {
     Some(
         match channels {
@@ -135,6 +145,7 @@ impl From<String> for ProviderError {
 /// Wrap a network/protocol error into `ProviderError::Io`, labeled with the
 /// backend name and the failing operation. Shared by `mpd.rs` and
 /// `subsonic.rs`, whose per-backend `*_err` helpers differed only in prefix.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn wrap_err<E: fmt::Display>(
     backend: &str,
     op: &str,

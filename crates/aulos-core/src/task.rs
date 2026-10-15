@@ -7,9 +7,184 @@
 //! hand back an [`Effect`]: the asynchronous work the UI must run, whose
 //! messages it feeds back into the same `update`. The UI decides how to run
 //! it (a tokio task feeding a UI channel, a toolkit-native stream, …).
+//!
+//! This module is also the seam to the platform's executor: natively work
+//! runs on a tokio runtime ([`Spawner`]) and CPU/file-system work on its
+//! blocking pool ([`spawn_blocking`]); in the browser there are no threads, so
+//! tasks are `wasm-bindgen-futures` tasks and "blocking" work runs inline on
+//! the main thread. [`sleep`], [`timeout`] and [`interval_stream`] use the
+//! runtime's timers natively and `setTimeout` in the browser.
+
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::stream::{self, BoxStream, Stream, StreamExt};
+
+/// The work of [`spawn_blocking`] did not complete (it panicked, or the
+/// runtime shut down).
+#[derive(Debug)]
+pub struct JoinError(String);
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for JoinError {}
+
+/// Runs `f` on tokio's blocking pool (natively; it starts at once, the result
+/// is awaited). In the browser there is no other thread: `f` runs inline,
+/// when the future is first polled.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> impl Future<Output = Result<T, JoinError>> + Send {
+    let handle = tokio::task::spawn_blocking(f);
+    async move { handle.await.map_err(|e| JoinError(e.to_string())) }
+}
+
+/// See the native version.
+#[cfg(target_arch = "wasm32")]
+pub async fn spawn_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, JoinError> {
+    Ok(f())
+}
+
+/// Runs `f` off the calling thread without waiting for it (inline in the
+/// browser).
+pub fn run_detached(f: impl FnOnce() + Send + 'static) {
+    #[cfg(not(target_arch = "wasm32"))]
+    drop(tokio::task::spawn_blocking(f));
+    #[cfg(target_arch = "wasm32")]
+    f();
+}
+
+/// Resolves after `duration`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
+    tokio::time::sleep(duration)
+}
+
+/// See the native version.
+#[cfg(target_arch = "wasm32")]
+pub fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
+    // The timer future holds a JS closure, so it is not `Send`; there is a
+    // single thread in the browser, which makes the wrapper sound.
+    send_wrapper::SendWrapper::new(gloo_timers::future::sleep(duration))
+}
+
+/// `future`'s output, or `Err(Elapsed)` when it takes longer than `duration`.
+pub async fn timeout<F: Future>(duration: Duration, future: F) -> Result<F::Output, Elapsed> {
+    use futures::future::{Either, select};
+    futures::pin_mut!(future);
+    let timer = sleep(duration);
+    futures::pin_mut!(timer);
+    match select(future, timer).await {
+        Either::Left((output, _)) => Ok(output),
+        Either::Right(((), _)) => Err(Elapsed),
+    }
+}
+
+/// [`timeout`] ran out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elapsed;
+
+impl std::fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("deadline has elapsed")
+    }
+}
+
+impl std::error::Error for Elapsed {}
+
+/// Where the UI runs [`Effect`]s and streams: a tokio runtime natively, the
+/// browser's event loop on wasm.
+#[derive(Clone)]
+pub struct Spawner {
+    #[cfg(not(target_arch = "wasm32"))]
+    handle: tokio::runtime::Handle,
+}
+
+/// A task started by a [`Spawner`]; dropping it leaves the task running.
+pub struct TaskHandle {
+    #[cfg(not(target_arch = "wasm32"))]
+    task: tokio::task::JoinHandle<()>,
+    #[cfg(target_arch = "wasm32")]
+    abort: futures::future::AbortHandle,
+}
+
+impl TaskHandle {
+    /// Stops the task at its next await point.
+    pub fn abort(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.task.abort();
+        #[cfg(target_arch = "wasm32")]
+        self.abort.abort();
+    }
+
+    /// Waits for the task to end (it ends early when aborted).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn join(self) {
+        let _ = self.task.await;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Spawner {
+    /// A spawner running on `handle`'s runtime.
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self { handle }
+    }
+
+    /// A spawner on the runtime the caller is inside of.
+    ///
+    /// # Panics
+    /// Outside of a tokio runtime.
+    pub fn current() -> Self {
+        Self::new(tokio::runtime::Handle::current())
+    }
+
+    /// The runtime tasks run on.
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.handle
+    }
+
+    /// Runs `future` to completion in the background.
+    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) -> TaskHandle {
+        TaskHandle {
+            task: self.handle.spawn(future),
+        }
+    }
+
+    /// Runs `f` on the runtime's blocking pool.
+    pub fn spawn_blocking(&self, f: impl FnOnce() + Send + 'static) {
+        drop(self.handle.spawn_blocking(f));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Spawner {
+    /// The browser's event loop.
+    pub fn browser() -> Self {
+        Self {}
+    }
+
+    /// Runs `future` to completion in the background.
+    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) -> TaskHandle {
+        let (future, abort) = futures::future::abortable(future);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = future.await;
+        });
+        TaskHandle { abort }
+    }
+
+    /// Runs `f` inline: there is no blocking pool in the browser.
+    pub fn spawn_blocking(&self, f: impl FnOnce() + Send + 'static) {
+        f();
+    }
+}
 
 /// Asynchronous work producing zero or more messages of type `M`.
 #[must_use = "an Effect does nothing unless the UI runs it"]
@@ -22,8 +197,19 @@ impl<M: Send + 'static> Effect<M> {
     }
 
     /// One message, once `future` resolves.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn future(future: impl Future<Output = M> + Send + 'static) -> Self {
         Self(Some(stream::once(future).boxed()))
+    }
+
+    /// One message, once `future` resolves. Browser futures (`fetch`, JS
+    /// timers) hold JS handles and are not `Send`; the page has a single
+    /// thread, so the future is only ever polled where it was created.
+    #[cfg(target_arch = "wasm32")]
+    pub fn future(future: impl Future<Output = M> + 'static) -> Self {
+        Self(Some(
+            stream::once(send_wrapper::SendWrapper::new(future)).boxed(),
+        ))
     }
 
     /// Every message of `stream`, in order.
@@ -31,14 +217,14 @@ impl<M: Send + 'static> Effect<M> {
         Self(Some(stream.boxed()))
     }
 
-    /// Runs `f` on tokio's blocking pool and maps its result to a message.
+    /// Runs `f` on the blocking pool and maps its result to a message.
     pub fn blocking<T: Send + 'static>(
         f: impl FnOnce() -> Result<T, String> + Send + 'static,
         to_msg: impl FnOnce(Result<T, String>) -> M + Send + 'static,
     ) -> Self {
         Self::future(async move {
             to_msg(
-                tokio::task::spawn_blocking(f)
+                spawn_blocking(f)
                     .await
                     .unwrap_or_else(|e| Err(e.to_string())),
             )
@@ -71,18 +257,18 @@ impl<M: Send + 'static> Effect<M> {
         self.0
     }
 
-    /// Runs the work as a task on `runtime`, handing every message to
+    /// Runs the work as a task on `spawner`, handing every message to
     /// `sink` in order: for UIs that are not built around an executor of
     /// their own (a sink that pushes into a channel and wakes the UI, say).
     /// Returns the task, to abort it, or `None` when there was nothing to
     /// run. UIs with their own executor use [`Self::into_stream`] instead.
     pub fn spawn(
         self,
-        runtime: &tokio::runtime::Handle,
+        spawner: &Spawner,
         mut sink: impl FnMut(M) + Send + 'static,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> Option<TaskHandle> {
         let mut stream = self.0?;
-        Some(runtime.spawn(async move {
+        Some(spawner.spawn(async move {
             while let Some(message) = stream.next().await {
                 sink(message);
             }
@@ -110,17 +296,16 @@ where
 /// long as it is polled. UIs map it to a "redraw/refresh" message.
 ///
 /// Boxed (and so `Unpin`) because it is built to be stored and driven by
-/// whichever runtime a UI uses; it needs a tokio runtime to be entered
-/// while polled.
+/// whichever runtime a UI uses; natively it needs a tokio runtime to be
+/// entered while polled.
 pub fn interval_stream(period: std::time::Duration) -> BoxStream<'static, ()> {
     channel_stream(1, move |mut sender: mpsc::Sender<()>| async move {
         use futures::SinkExt;
-        let mut interval = tokio::time::interval(period);
         loop {
-            interval.tick().await;
             if sender.send(()).await.is_err() {
                 break;
             }
+            sleep(period).await;
         }
     })
     .boxed()
@@ -155,15 +340,15 @@ mod tests {
     async fn effect_spawn_delivers_every_message_to_the_sink() {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = Effect::stream(stream::iter([1, 2, 3]))
-            .spawn(&tokio::runtime::Handle::current(), move |n| {
+            .spawn(&Spawner::current(), move |n| {
                 tx.send(n).unwrap();
             })
             .expect("work to run");
-        handle.await.unwrap();
+        handle.join().await;
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert!(
             Effect::<u8>::none()
-                .spawn(&tokio::runtime::Handle::current(), |_| {})
+                .spawn(&Spawner::current(), |_| {})
                 .is_none()
         );
     }

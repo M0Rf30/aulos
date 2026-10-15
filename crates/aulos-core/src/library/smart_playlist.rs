@@ -1236,8 +1236,8 @@ mod tests {
                 .unwrap()
                 .id
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
         // /a: 3 plays, last one just now. /b: 1 play, 200 days ago. /c: never.

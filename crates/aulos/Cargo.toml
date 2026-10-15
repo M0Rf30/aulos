@@ -13,18 +13,13 @@ eframe = "0.36.2"
 egui = "0.36.2"
 egui_extras = "0.36.2"
 egui-phosphor = { version = "0.14.0", features = ["fill"] }
-tokio.workspace = true
 futures = "0.3"
-# Native file/folder dialogs (XDG portal on Linux, Win32 / NSOpenPanel
-# elsewhere). The portal backend needs no GTK.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 urlencoding.workspace = true
-# Opens folders and web pages (converter output dir, MusicBrainz pages).
-open.workspace = true
+# `Instant`/`SystemTime` that also work in the browser (std types natively).
+web-time = "1"
 # Local hour of day for the Home greeting.
 chrono = "0.4"
 tracing.workspace = true
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # MilkDrop visualizer (feature `visualizer`). 0.2 drives the host's own wgpu 30
 # device, the very one eframe renders with, so frames never leave the GPU.
 lactea = { version = "0.2.2", optional = true }
@@ -32,6 +27,23 @@ lactea = { version = "0.2.2", optional = true }
 walkdir = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+
+# Everything that needs an operating system: the tokio runtime the core's
+# effects run on, native dialogs, the console log.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+# Native file/folder dialogs (XDG portal on Linux, Win32 / NSOpenPanel
+# elsewhere). The portal backend needs no GTK.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# The browser: `WebRunner` entry (see `main.rs`) and `tracing` to the console.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Element"] }
+tracing-web = "0.1"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std", "fmt", "tracing-log"] }
 
 # Embeds the icon in the Windows executable (see `build.rs`).
 [target.'cfg(windows)'.build-dependencies]

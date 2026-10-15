@@ -125,6 +125,13 @@ pub struct NativeWindow(
 );
 
 /// A change of the published state, handed to the backend task.
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(
+        dead_code,
+        reason = "only the desktop backends publish media-session state"
+    )
+)]
 struct Update {
     previous: MprisSnapshot,
     next: MprisSnapshot,
@@ -143,6 +150,13 @@ struct SharedState {
 
 impl SharedState {
     /// A fresh shared state and the receiving end of its update channel.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(
+            dead_code,
+            reason = "only the desktop backends publish media-session state"
+        )
+    )]
     fn new() -> (Arc<Self>, futures::channel::mpsc::UnboundedReceiver<Update>) {
         let (updates, updates_rx) = futures::channel::mpsc::unbounded();
         let shared = Arc::new(Self {
@@ -214,7 +228,7 @@ pub fn resolve_art_url(
     path: std::path::PathBuf,
 ) -> crate::task::Effect<Option<String>> {
     crate::task::Effect::future(async move {
-        tokio::task::spawn_blocking(move || extract_art_url(track_id, &path))
+        crate::task::spawn_blocking(move || extract_art_url(track_id, &path))
             .await
             .unwrap_or(None)
     })

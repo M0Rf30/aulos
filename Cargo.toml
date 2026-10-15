@@ -15,7 +15,10 @@ repository = "https://github.com/M0Rf30/aulos"
 [workspace.dependencies]
 aulos-core = { path = "crates/aulos-core" }
 
-tokio = { version = "1", features = ["full"] }
+# Features are chosen per target by each crate: the native build uses "full",
+# the browser build only the runtime-free parts (`sync`, `macros`); there are
+# no threads, sockets or timers behind tokio on wasm32.
+tokio = { version = "1", default-features = false }
 
 # MPD protocol client. Pinned to the `aulos` branch of the M0Rf30 fork, which
 # merges the fixes submitted upstream (elomatreb/mpd_client#26-#33): argument
@@ -27,9 +30,11 @@ mpd_client = { git = "https://github.com/M0Rf30/mpd_client.git", rev = "49b12544
 # OpenSubsonic/Subsonic API client
 opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git", rev = "a43fb76058d4457c6d7d9b824fcdd90025652864" }
 
-reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
+# `blocking` and the rustls TLS stack are native only (core's manifest adds
+# them): in the browser reqwest is a thin layer over `fetch`.
+reqwest = { version = "0.13", features = ["json"], default-features = false }
 image = "0.25"
-i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed = { version = "0.16", features = ["fluent-system"] }
 i18n-embed-fl = "0.10"
 tracing = "0.1"
 

@@ -150,7 +150,7 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

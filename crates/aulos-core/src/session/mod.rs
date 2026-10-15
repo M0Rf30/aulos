@@ -24,6 +24,7 @@ mod events;
 mod home;
 mod icons;
 mod library;
+mod mpd;
 mod playback;
 mod playlists;
 mod podcasts;
@@ -123,7 +124,10 @@ impl Session {
             convert: ConvertState::new(),
             tagger: TaggerState::new(),
             properties: PropertiesState::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             config: ConfigState::new(Some(Config::path()), config),
+            #[cfg(target_arch = "wasm32")]
+            config: ConfigState::new(config),
         };
         session.library.music_dirs_present = music_dirs_present;
         (session, init_errors)

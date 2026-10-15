@@ -2,3 +2,12 @@
 # sccache is a per-machine choice: set `rustc-wrapper` in ~/.cargo/config.toml
 # or `RUSTC_WRAPPER=sccache` locally. Hard-coding it here breaks CI runners.
 rustflags = ["--cfg", "tokio_unstable"]
+
+# A target-specific `rustflags` replaces `build.rustflags`, so the cfg above is
+# repeated. `getrandom_backend` selects the browser's `crypto.getRandomValues`
+# for getrandom 0.3+ (0.2 uses its `js` feature, see aulos-core's manifest).
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "--cfg", "getrandom_backend=\"wasm_js\"",
+]

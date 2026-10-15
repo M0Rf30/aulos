@@ -10,7 +10,7 @@ use crate::task::Effect;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use web_time::Instant;
 
 /// Async results of the conversion workflows; feed them to
 /// [`ConvertState::apply_event`].
@@ -110,7 +110,7 @@ impl ConvertState {
                 ConvertJob::new(id, path.clone(), kind).with_pause_flag(Arc::clone(&self.pause)),
             );
             probes.push(Effect::future(async move {
-                let info = tokio::task::spawn_blocking(move || SourceInfo::probe(&path, kind))
+                let info = crate::task::spawn_blocking(move || SourceInfo::probe(&path, kind))
                     .await
                     .unwrap_or(None);
                 ConvertEvent::SourceProbed(id, info)
@@ -132,7 +132,7 @@ impl ConvertState {
         let settings = JobSettings::from_config(config);
         Effect::future(async move {
             let out_dir = settings.out_dir.clone();
-            let validation = tokio::task::spawn_blocking(move || convert::ensure_out_dir(&out_dir))
+            let validation = crate::task::spawn_blocking(move || convert::ensure_out_dir(&out_dir))
                 .await
                 .unwrap_or_else(|e| Err(format!("validation task panicked: {e}")));
             ConvertEvent::ReadyToStart(validation.map(|()| settings))
@@ -250,7 +250,7 @@ impl ConvertState {
             return Effect::none();
         }
         Effect::future(async {
-            let available = tokio::task::spawn_blocking(convert::ffmpeg::detect)
+            let available = crate::task::spawn_blocking(convert::ffmpeg::detect)
                 .await
                 .unwrap_or(false);
             ConvertEvent::FfmpegDetected(available)

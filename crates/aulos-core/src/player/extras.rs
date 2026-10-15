@@ -16,7 +16,8 @@ use crate::config::Config;
 use crate::desktop::{inhibit, notify};
 use crate::library::Track;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long to wait before retrying a failed inhibit request.
 pub const INHIBIT_RETRY: Duration = Duration::from_secs(60);

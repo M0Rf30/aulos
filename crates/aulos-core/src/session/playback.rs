@@ -6,8 +6,10 @@ use crate::desktop::inhibit::InhibitToken;
 use crate::library::{Lyrics, LyricsProvider, Track};
 use crate::mpris::MprisHandle;
 use crate::online::scrobble::ScrobbleController;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::ActiveBackend;
 use crate::player::extras::PlaybackExtrasState;
-use crate::player::{ActiveBackend, Player, clamp_display_position};
+use crate::player::{Player, clamp_display_position};
 use crate::task::Effect;
 #[cfg(feature = "visualizer")]
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
@@ -104,14 +106,6 @@ pub(super) fn capped_position(position: Duration, track: Option<&Track>) -> Dura
     }
 }
 
-/// Wraps an asynchronous MPD command as an effect; failures are reported
-/// through [`PlaybackEvent::MpdCommand`].
-pub(super) fn mpd_command(
-    command: impl Future<Output = Result<(), String>> + Send + 'static,
-) -> Effect<PlaybackEvent> {
-    Effect::future(async move { PlaybackEvent::MpdCommand(command.await) })
-}
-
 /// The audio player and what is currently playing.
 pub struct PlaybackState {
     pub player: Option<Player>,
@@ -175,12 +169,19 @@ impl PlaybackState {
     }
 
     /// The MPD client, if the active backend is MPD.
-    pub fn mpd_client(&self) -> Option<mpd_client::Client> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn mpd_client(&self) -> Option<super::mpd::Client> {
         let player = self.player.as_ref()?;
         if player.active_backend_type() != ActiveBackend::Mpd {
             return None;
         }
         Some(player.mpd_backend_ref()?.client())
+    }
+
+    /// There is no MPD backend in the browser.
+    #[cfg(target_arch = "wasm32")]
+    pub fn mpd_client(&self) -> Option<super::mpd::Client> {
+        None
     }
 
     /// Makes `track` the current one, from the start.
@@ -209,40 +210,12 @@ impl PlaybackState {
         Effect::none()
     }
 
-    /// Sends MPD one `ClearQueue + Add + Play` command list for `uri`.
-    ///
-    /// Aulos drives MPD one track at a time from its own [`crate::player`]
-    /// queue — shuffle/repeat live entirely in that queue, never in MPD
-    /// itself. Forcing `random`/`repeat`/`single` off on every dispatch
-    /// guards against a stale `repeat 1` (set by an external MPD client,
-    /// or left over from before Aulos started driving this server): with a
-    /// single-song MPD queue, `repeat 1` would otherwise loop that one
-    /// song forever and `is_finished()` would never fire, silently
-    /// freezing playback on the current track.
-    ///
-    /// Sent as one command list: one round trip, and no other client can
-    /// interleave commands between `clear` and `play`.
+    /// Sends MPD the command that plays `uri` (see [`super::mpd::play`]).
     fn mpd_play(&self, uri: String) -> Effect<PlaybackEvent> {
-        use mpd_client::commands::{
-            Add, ClearQueue, Play, SetRandom, SetRepeat, SetSingle, SingleMode,
-        };
-        let Some(client) = self.mpd_client() else {
-            return Effect::none();
-        };
-        mpd_command(async move {
-            client
-                .command_list((
-                    ClearQueue,
-                    Add::uri(&uri),
-                    SetRandom(false),
-                    SetRepeat(false),
-                    SetSingle(SingleMode::Disabled),
-                    Play::current(),
-                ))
-                .await
-                .map_err(|e| format!("MPD play {uri}: {e}"))?;
-            Ok(())
-        })
+        match self.mpd_client() {
+            Some(client) => super::mpd::play(client, uri),
+            None => Effect::none(),
+        }
     }
 
     /// Loads the current track's embedded or sidecar `.lrc` lyrics.

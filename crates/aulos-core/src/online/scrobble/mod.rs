@@ -148,20 +148,20 @@ pub trait Scrobbler: Send {
 }
 
 /// Shared blocking HTTP client for every scrobbling request.
-pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
-    static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-        reqwest::blocking::Client::builder()
+pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
+    static CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
+        crate::http::blocking::Client::builder()
             .user_agent(format!("{CLIENT_NAME}/{}", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+            .unwrap_or_else(|_| crate::http::blocking::Client::new())
     });
     &CLIENT
 }
 
 /// Map a transport-level failure to a [`ScrobbleError`].
-pub(crate) fn net_error(e: reqwest::Error) -> ScrobbleError {
+pub(crate) fn net_error(e: crate::http::Error) -> ScrobbleError {
     ScrobbleError::Transient(format!("network error: {e}"))
 }
 

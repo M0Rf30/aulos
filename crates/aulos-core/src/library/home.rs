@@ -10,7 +10,8 @@ use super::history::{
 };
 use super::state::names_match;
 use super::{Album, Track};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long loaded Home shelves are reused before a Home visit reloads them
 /// anyway (the "this month" windows are relative to the wall clock).
@@ -91,8 +92,8 @@ fn album_ref(album: &Album) -> AlbumRef {
 /// Fisher–Yates shuffle driven by a time-seeded xorshift: good enough for
 /// "random picks", and avoids a dependency.
 fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
-    let mut state = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let mut state = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
         | 1;

@@ -371,8 +371,8 @@ fn write_seed_page(files: &[FileForMatch<'_>], dir: &Path) -> Result<PathBuf, St
         return Err("Files have no album title: set one before adding the release".to_owned());
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let stamp = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let path = dir.join(format!("add-release-{stamp}.html"));
     std::fs::write(&path, seed_html(&fields))

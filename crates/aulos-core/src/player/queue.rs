@@ -501,7 +501,7 @@ impl XorShift64 {
     fn seeded() -> Self {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use web_time::{SystemTime, UNIX_EPOCH};
 
         let time_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)

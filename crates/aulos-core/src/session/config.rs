@@ -36,6 +36,7 @@ impl ConfigState {
     /// `config` must be exactly what is stored at `path` now: it is the
     /// writer's baseline for change detection. `path` `None`: the settings
     /// are never persisted.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn new(path: Option<PathBuf>, config: Config) -> Self {
         let writer = path
             .clone()
@@ -44,6 +45,18 @@ impl ConfigState {
             config,
             path,
             writer,
+            acoustid_key_stored: None,
+        }
+    }
+
+    /// `config` must be exactly what the browser has stored now (see
+    /// [`Config::load`]): it is the writer's baseline for change detection.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn new(config: Config) -> Self {
+        Self {
+            writer: Some(ConfigWriter::new(config.clone())),
+            config,
+            path: None,
             acoustid_key_stored: None,
         }
     }
@@ -72,7 +85,7 @@ impl ConfigState {
             let mpd_servers = self.config.mpd_servers.clone();
             let subsonic_servers = self.config.subsonic_servers.clone();
             Effect::future(async move {
-                let updates = tokio::task::spawn_blocking(move || {
+                let updates = crate::task::spawn_blocking(move || {
                     run_credential_check(
                         &mpd_servers,
                         &subsonic_servers,

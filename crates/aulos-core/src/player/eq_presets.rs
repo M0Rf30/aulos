@@ -4,24 +4,41 @@
 //! EQ preset manager for saving, loading, and deleting custom presets.
 //!
 //! Custom presets are stored as individual JSON files in a presets directory
-//! (typically `~/.config/aulos/eq_presets/`). Built-in presets are hardcoded
-//! and cannot be saved or deleted.
+//! (typically `~/.config/aulos/eq_presets/`); in the browser, as one JSON list
+//! in `localStorage`. Built-in presets are hardcoded and cannot be saved or
+//! deleted.
 
-use super::equalizer::{EqPreset, EqPresetData, PresetSource};
+#[cfg(not(target_arch = "wasm32"))]
+use super::equalizer::PresetSource;
+use super::equalizer::{EqPreset, EqPresetData};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
-/// Manages EQ presets (built-in + custom on disk).
+/// `localStorage` key of the custom presets.
+#[cfg(target_arch = "wasm32")]
+const STORAGE_KEY: &str = "aulos.eq_presets";
+
+/// Manages EQ presets (built-in + custom, stored per platform).
 pub struct EqPresetManager {
+    #[cfg(not(target_arch = "wasm32"))]
     presets_dir: PathBuf,
 }
 
 impl EqPresetManager {
     /// Create a new preset manager. Creates the presets directory if it doesn't exist.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(presets_dir: PathBuf) -> std::io::Result<Self> {
         if !presets_dir.exists() {
             std::fs::create_dir_all(&presets_dir)?;
         }
         Ok(Self { presets_dir })
+    }
+
+    /// A manager over the presets kept in the browser's `localStorage`.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn in_browser() -> Self {
+        Self {}
     }
 
     /// Load all presets: built-in first (sorted), then custom (sorted).
@@ -52,6 +69,11 @@ impl EqPresetManager {
             ));
         }
 
+        self.write_custom(preset)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_custom(&self, preset: &EqPresetData) -> Result<(), String> {
         let filename = sanitize_filename(&preset.name) + ".json";
         let path = self.presets_dir.join(filename);
 
@@ -63,12 +85,27 @@ impl EqPresetManager {
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn write_custom(&self, preset: &EqPresetData) -> Result<(), String> {
+        let mut presets = self.load_custom_presets();
+        presets.retain(|p| p.name != preset.name);
+        let mut preset = preset.clone();
+        preset.source = super::equalizer::PresetSource::Custom;
+        presets.push(preset);
+        store_presets(&presets)
+    }
+
     /// Delete a custom preset. Refuses to delete built-in presets.
     pub fn delete_preset(&self, name: &str) -> Result<(), String> {
         if self.is_builtin_name(name) {
             return Err(format!("Cannot delete built-in preset '{}'", name));
         }
 
+        self.remove_custom(name)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remove_custom(&self, name: &str) -> Result<(), String> {
         let filename = sanitize_filename(name) + ".json";
         let path = self.presets_dir.join(filename);
 
@@ -81,6 +118,17 @@ impl EqPresetManager {
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn remove_custom(&self, name: &str) -> Result<(), String> {
+        let mut presets = self.load_custom_presets();
+        let before = presets.len();
+        presets.retain(|p| p.name != name);
+        if presets.len() == before {
+            return Err(format!("Preset not found: '{}'", name));
+        }
+        store_presets(&presets)
+    }
+
     /// Check if a name matches any built-in preset (case-insensitive).
     pub fn is_builtin_name(&self, name: &str) -> bool {
         let lower = name.to_lowercase();
@@ -89,6 +137,18 @@ impl EqPresetManager {
             .any(|p| p.label().to_lowercase() == lower)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn load_custom_presets(&self) -> Vec<EqPresetData> {
+        let Some(json) = crate::web_storage::get(STORAGE_KEY) else {
+            return Vec::new();
+        };
+        serde_json::from_str(&json).unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse the stored EQ presets: {e}");
+            Vec::new()
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_custom_presets(&self) -> Vec<EqPresetData> {
         let mut presets = Vec::new();
 
@@ -129,7 +189,15 @@ impl EqPresetManager {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn store_presets(presets: &[EqPresetData]) -> Result<(), String> {
+    let json = serde_json::to_string(presets)
+        .map_err(|e| format!("Failed to serialize presets: {}", e))?;
+    crate::web_storage::set(STORAGE_KEY, &json)
+}
+
 /// Sanitize a string for use as a filename: keep only `[a-zA-Z0-9\-_ ]`.
+#[cfg(not(target_arch = "wasm32"))]
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')

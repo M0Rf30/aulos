@@ -16,7 +16,8 @@ use egui::{
 };
 use egui_phosphor::{fill, regular};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// How long an empty list counts as "still loading" (the session has no
 /// loaded flag for the store reads).
