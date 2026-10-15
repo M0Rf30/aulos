@@ -371,9 +371,8 @@ pub(crate) fn cover_track_row(
     }
     if let Some(q) = App::quality_of(track) {
         let badge = Rect::from_min_size(pos2(x, cy - 7.5), vec2(54.0, 15.0));
-        ui.scope_builder(UiBuilder::new().max_rect(badge), |ui| {
-            quality_badge(ui, q);
-        });
+        // Not a `scope_builder`: it would move the list's cursor back up.
+        quality_badge(&mut ui.new_child(UiBuilder::new().max_rect(badge)), q);
     }
     let dur = Rect::from_min_size(
         pos2(inner.right() - 44.0, inner.top()),

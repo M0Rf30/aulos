@@ -94,6 +94,15 @@ pub struct State {
     /// Slot under the pointer while dragging: the index the dragged row goes
     /// in front of, or the track count for the end.
     drop_slot: Option<usize>,
+    /// Index and screen rect of every track row drawn last frame (read by the
+    /// smoke drag script).
+    rows: Vec<(usize, Rect)>,
+}
+
+impl State {
+    pub fn rows(&self) -> &[(usize, Rect)] {
+        &self.rows
+    }
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -118,6 +127,39 @@ pub fn open(app: &mut App, smart: bool, id: &str) {
     let mut st = std::mem::take(&mut app.views.playlists);
     select_with(app, &mut st, sel);
     app.views.playlists = st;
+}
+
+/// Whether a plain playlist is selected (smoke drag script).
+pub fn has_open(app: &App) -> bool {
+    matches!(app.views.playlists.sel, Some(Sel::Plain(_)))
+}
+
+/// Selects the first plain playlist of at least `min` tracks (smoke drag
+/// script).
+pub fn open_first_with(app: &mut App, min: u32) {
+    let id = app
+        .session
+        .playlists
+        .playlists
+        .iter()
+        .find(|p| p.track_count >= min)
+        .map(|p| p.id.clone());
+    if let Some(id) = id {
+        open(app, false, &id);
+    }
+}
+
+/// The tracks of the selected plain playlist (smoke drag script).
+pub fn open_tracks(app: &App) -> Option<&[Track]> {
+    let Some(Sel::Plain(id)) = &app.views.playlists.sel else {
+        return None;
+    };
+    app.session
+        .playlists
+        .playlists
+        .iter()
+        .find(|p| p.id == *id)
+        .map(|p| p.tracks.as_slice())
 }
 
 /// Whether the playlist page currently shows this playlist (sidebar highlight).
@@ -1009,6 +1051,7 @@ fn track_rows(
     let first = (((viewport.min.y - rel) / ROW_H).floor().max(0.0) as usize).min(n);
     let last = (((viewport.max.y - rel) / ROW_H).ceil().max(0.0) as usize + 1).min(n);
     ui.add_space(first as f32 * ROW_H);
+    st.rows.clear();
     for (i, track) in tracks.iter().enumerate().take(last).skip(first) {
         let sense = if editing.reorder {
             Sense::click_and_drag()
@@ -1016,6 +1059,7 @@ fn track_rows(
             Sense::click()
         };
         let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), sense);
+        st.rows.push((i, rect));
         if resp.drag_started() {
             st.dragging = Some(i);
         }
@@ -1165,9 +1209,9 @@ fn track_rows(
                 pos2(quality.left(), rect.center().y - 7.5),
                 vec2(quality_w, 15.0),
             );
-            ui.scope_builder(UiBuilder::new().max_rect(badge), |ui| {
-                quality_badge(ui, q);
-            });
+            // Not a `scope_builder`: that would move the list's cursor back
+            // up to the badge and shrink the row pitch below `ROW_H`.
+            quality_badge(&mut ui.new_child(UiBuilder::new().max_rect(badge)), q);
         }
         paint_text(
             ui.painter(),

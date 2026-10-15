@@ -29,6 +29,15 @@ pub struct State {
     /// Absolute insert slot under the pointer while dragging: the row the
     /// dragged item goes in front of, or the queue length for the end.
     drop_slot: Option<usize>,
+    /// Absolute queue index and screen rect of every upcoming row drawn last
+    /// frame (read by the smoke drag script).
+    rows: Vec<(usize, Rect)>,
+}
+
+impl State {
+    pub fn rows(&self) -> &[(usize, Rect)] {
+        &self.rows
+    }
 }
 
 enum Intent {
@@ -240,6 +249,7 @@ fn body(
         }
     }
 
+    st.rows.clone_from(&rows);
     // Drop slot and indicator, from this frame's row rects.
     let pointer_y = ui.ctx().input(|i| i.pointer.interact_pos()).map(|p| p.y);
     st.drop_slot = match (st.dragging, pointer_y) {

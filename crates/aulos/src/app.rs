@@ -1106,7 +1106,13 @@ impl eframe::App for App {
                         | egui::Event::MouseWheel { .. }
                 )
             });
-            raw_input.events.push(egui::Event::PointerGone);
+            let scripted = self
+                .smoke
+                .as_mut()
+                .is_some_and(|smoke| smoke.drag_events(ctx, raw_input));
+            if !scripted {
+                raw_input.events.push(egui::Event::PointerGone);
+            }
             if let Some(smoke) = &self.smoke {
                 smoke.scroll(ctx, raw_input);
             }

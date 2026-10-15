@@ -18,6 +18,12 @@
 //! - `AULOS_SMOKE_SCROLL=<px>`: scroll the page down by `<px>` every frame until the shot
 //! - `AULOS_SMOKE_REPEAT=1`: repeat the playing track (short fixtures)
 //!
+//! - `AULOS_SMOKE_DRAG=<queue|playlist>`: run a scripted pointer drag
+//!   through the real views and check the resulting order before the
+//!   screenshot (queue: row 3 above row 1; playlist: row 2 to the end). Prints
+//!   `smoke drag: PASS|FAIL …` and exits non-zero on failure. Needs an album
+//!   of 5+ tracks (queue) or a plain playlist of 4+ tracks (playlist).
+//!
 //! `AULOS_SMOKE_PAGE=visualizer` opens the visualizer (feature `visualizer`);
 //! `AULOS_SMOKE_VIZ_LOCK=1` locks its preset.
 
@@ -25,7 +31,36 @@ use crate::app::{App, Route, Sheet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, PartialEq)]
+enum DragKind {
+    Queue,
+    Playlist,
+}
+
+enum DragPhase {
+    /// Waiting for the rows to be drawn and stop moving (the sheet slides
+    /// in); nothing injected yet. Holds the rows of the previous frame and
+    /// how many frames in a row they stayed put.
+    Prepare {
+        last: Vec<(usize, egui::Rect)>,
+        still: u32,
+    },
+    /// Injecting pointer events, `tick` frames in.
+    Run { tick: u32 },
+    /// Released; waiting for the session to reflect the move.
+    Settle { frames: u32 },
+}
+
+struct DragScript {
+    kind: DragKind,
+    phase: DragPhase,
+    src: egui::Pos2,
+    dst: egui::Pos2,
+    expected: Vec<PathBuf>,
+}
+
 pub struct Smoke {
+    drag: Option<DragScript>,
     out: PathBuf,
     started: Option<Instant>,
     launched: Instant,
@@ -78,7 +113,25 @@ fn route_of(spec: &str, app: &App) -> Option<Route> {
 impl Smoke {
     pub fn from_env() -> Option<Self> {
         let out = std::env::var_os("AULOS_SMOKE")?;
+        let drag = std::env::var("AULOS_SMOKE_DRAG")
+            .ok()
+            .and_then(|v| match v.as_str() {
+                "queue" => Some(DragKind::Queue),
+                "playlist" => Some(DragKind::Playlist),
+                _ => None,
+            })
+            .map(|kind| DragScript {
+                kind,
+                phase: DragPhase::Prepare {
+                    last: Vec::new(),
+                    still: 0,
+                },
+                src: egui::Pos2::ZERO,
+                dst: egui::Pos2::ZERO,
+                expected: Vec::new(),
+            });
         Some(Self {
+            drag,
             out: out.into(),
             started: None,
             launched: Instant::now(),
@@ -109,6 +162,148 @@ impl Smoke {
             modifiers: egui::Modifiers::NONE,
         });
         ctx.request_repaint();
+    }
+
+    /// Injects the scripted drag's pointer events; true while it owns the
+    /// pointer (the caller then must not add its own `PointerGone`).
+    pub fn drag_events(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) -> bool {
+        use egui::{Event, PointerButton};
+        let Some(drag) = &mut self.drag else {
+            return false;
+        };
+        let DragPhase::Run { tick } = &mut drag.phase else {
+            return false;
+        };
+        let (src, dst) = (drag.src, drag.dst);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        match *tick {
+            0 => raw_input.events.push(Event::PointerMoved(src)),
+            1 => raw_input.events.push(button(src, true)),
+            2..=5 => {
+                let t = (*tick - 1) as f32 / 5.0;
+                raw_input.events.push(Event::PointerMoved(src.lerp(dst, t)));
+            }
+            6 | 7 => raw_input.events.push(Event::PointerMoved(dst)),
+            _ => {
+                raw_input.events.push(button(dst, false));
+                drag.phase = DragPhase::Settle { frames: 0 };
+                ctx.request_repaint();
+                return true;
+            }
+        }
+        *tick += 1;
+        ctx.request_repaint();
+        true
+    }
+
+    /// Advances the drag script from the frame loop; `None` without a script.
+    fn drag_step(&mut self, app: &mut App) -> Option<bool> {
+        let drag = self.drag.as_mut()?;
+        let order = |app: &App| -> Vec<PathBuf> {
+            match drag.kind {
+                DragKind::Queue => app
+                    .session
+                    .playback
+                    .player
+                    .as_ref()
+                    .map_or_else(Vec::new, |p| {
+                        p.queue().iter().map(|t| t.path.clone()).collect()
+                    }),
+                DragKind::Playlist => crate::views::playlists::open_tracks(app)
+                    .map(|t| t.iter().map(|t| t.path.clone()).collect())
+                    .unwrap_or_default(),
+            }
+        };
+        match drag.phase {
+            DragPhase::Prepare { .. } => {
+                let rows: Vec<(usize, egui::Rect)> = match drag.kind {
+                    DragKind::Queue => app.views.queue.rows().to_vec(),
+                    DragKind::Playlist => {
+                        if !crate::views::playlists::has_open(app) {
+                            crate::views::playlists::open_first_with(app, 4);
+                        }
+                        app.views.playlists.rows().to_vec()
+                    }
+                };
+                let DragPhase::Prepare { last, still } = &mut drag.phase else {
+                    unreachable!()
+                };
+                if *last == rows && !rows.is_empty() {
+                    *still += 1;
+                } else {
+                    *still = 0;
+                    last.clone_from(&rows);
+                }
+                if *still < 20 {
+                    return Some(false);
+                }
+                let before = order(app);
+                match drag.kind {
+                    DragKind::Queue if rows.len() >= 3 => {
+                        let (a0, a2) = (rows[0].0, rows[2].0);
+                        let (r0, r2) = (rows[0].1, rows[2].1);
+                        let mut expected = before.clone();
+                        let moved = expected.remove(a2);
+                        expected.insert(a0, moved);
+                        drag.src = r2.center();
+                        drag.dst = egui::pos2(r2.center().x, r0.top() + 2.0);
+                        drag.expected = expected;
+                    }
+                    DragKind::Playlist
+                        if rows.len() >= 2
+                            && rows.last().map(|r| r.0) == Some(before.len() - 1) =>
+                    {
+                        let mut expected = before.clone();
+                        let moved = expected.remove(1);
+                        expected.push(moved);
+                        let src = rows.iter().find(|r| r.0 == 1)?.1;
+                        let last = rows.last()?.1;
+                        drag.src = src.center();
+                        drag.dst = egui::pos2(src.center().x, last.bottom() + 3.0);
+                        drag.expected = expected;
+                    }
+                    _ => return Some(false),
+                }
+                drag.phase = DragPhase::Run { tick: 0 };
+                Some(false)
+            }
+            DragPhase::Run { .. } => Some(false),
+            DragPhase::Settle { frames } => {
+                let actual = order(app);
+                let done = actual == drag.expected;
+                if !done && frames < 60 {
+                    drag.phase = DragPhase::Settle { frames: frames + 1 };
+                    return Some(false);
+                }
+                let name = |v: &[PathBuf]| {
+                    v.iter()
+                        .map(|p| {
+                            p.file_stem()
+                                .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                if done {
+                    println!("smoke drag: PASS {}", name(&actual));
+                    // Carry on to the usual screenshot of the result.
+                    self.drag = None;
+                    Some(false)
+                } else {
+                    println!(
+                        "smoke drag: FAIL\n  expected {}\n  actual   {}",
+                        name(&drag.expected),
+                        name(&actual)
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     /// Returns true once the screenshot is written and the app should close.
@@ -177,9 +372,29 @@ impl Smoke {
                 Ok("presets") => app.views.visualizer.open_browser(),
                 _ => {}
             }
+            if let Some(drag) = &self.drag {
+                match drag.kind {
+                    DragKind::Queue => {
+                        let big = app
+                            .session
+                            .library
+                            .visible_albums()
+                            .iter()
+                            .position(|a| a.tracks.len() >= 5);
+                        let update = app.session.play_album(big.unwrap_or(0), 0);
+                        app.run(update);
+                        app.sheet = Some(Sheet::Queue);
+                    }
+                    DragKind::Playlist => app.navigate(Route::Playlists),
+                }
+            }
             self.started = Some(Instant::now());
             return false;
         };
+        if self.drag.is_some() {
+            ctx.request_repaint();
+            return self.drag_step(app).unwrap_or(false);
+        }
         let delay = std::env::var("AULOS_SMOKE_DELAY_MS")
             .ok()
             .and_then(|v| v.parse().ok())
