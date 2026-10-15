@@ -27,19 +27,19 @@ The name comes from the *aulos*, the double pipe of ancient Greece; the logo's t
 
 **[m0rf30.github.io/aulos](https://m0rf30.github.io/aulos/)**: the same egui interface, compiled to WebAssembly. It runs entirely client-side (WebGPU, with a WebGL2 fallback) and nothing is sent to a server.
 
-The browser build is an early preview: the interface renders with an empty library, navigation and settings work, and settings persist in `localStorage`, but nothing plays yet.
+The browser build is a preview. Pick a music folder (Chromium keeps it across reloads and asks permission again; Firefox and Safari need the folder picked again after a reload) or connect a Subsonic/OpenSubsonic server, and play it with Web Audio and media keys. Podcasts, radio and MPD are not available yet.
 
 | Feature | Desktop | Browser |
 |---|---|---|
-| Local library | ✅ scans your folders | 🚧 pick folders with the File System Access API |
-| Playback | ✅ cpal, gapless, crossfade, DSD | 🚧 Web Audio |
-| Subsonic / OpenSubsonic | ✅ | 🚧 over `fetch`; the server must allow CORS |
+| Local library | ✅ scans your folders | ✅ pick folders with the File System Access API (`<input webkitdirectory>` fallback), kept in IndexedDB |
+| Playback | ✅ cpal, gapless, crossfade, DSD | ✅ Web Audio, gapless, EQ; no crossfade or DSD |
+| Subsonic / OpenSubsonic | ✅ | ✅ over `fetch`; the server must allow CORS and be served over HTTPS |
 | MPD | ✅ direct TCP | 🚧 through a WebSocket bridge such as websockify |
 | Podcasts and internet radio | ✅ | 🚧 with an optional CORS proxy |
 | Tag editor | ✅ | ❌ |
 | File converter | ✅ | ❌ |
 | Visualizer | ✅ | ❌ |
-| MPRIS, media keys, notifications | ✅ | 🚧 Media Session API; notifications ❌ |
+| MPRIS, media keys, notifications | ✅ | ✅ Media Session API; notifications ❌ |
 | Credential storage | ✅ system keyring | ✅ `localStorage` (not encrypted) |
 | Settings | ✅ | ✅ `localStorage` |
 
