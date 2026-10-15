@@ -334,7 +334,9 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, items: &[&str], height: f32)
     let t = Theme::get(ui.ctx());
     let p = &t.pal;
     let font = theme::medium(12.5);
-    let widths: Vec<f32> = items
+    // Text widths first: the cell padding (12pt a side) shrinks to 3pt when
+    // the whole control would not fit the row.
+    let text_w: Vec<f32> = items
         .iter()
         .map(|s| {
             if super::text::is_icon(s) {
@@ -343,9 +345,20 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, items: &[&str], height: f32)
                 layout(ui.painter(), s, font.clone(), Color32::WHITE, 300.0, 0.0)
                     .size()
                     .x
-                    + 24.0
             }
         })
+        .collect();
+    let labels = items.iter().filter(|s| !super::text::is_icon(s)).count();
+    let natural: f32 = text_w.iter().sum::<f32>() + 4.0 + 24.0 * labels as f32;
+    let pad = if labels == 0 || natural <= ui.available_width() {
+        24.0
+    } else {
+        (24.0 - (natural - ui.available_width()) / labels as f32).clamp(6.0, 24.0)
+    };
+    let widths: Vec<f32> = items
+        .iter()
+        .zip(&text_w)
+        .map(|(s, w)| if super::text::is_icon(s) { *w } else { w + pad })
         .collect();
     let total: f32 = widths.iter().sum::<f32>() + 4.0;
     let (rect, _) = ui.allocate_exact_size(vec2(total, height + 4.0), Sense::hover());

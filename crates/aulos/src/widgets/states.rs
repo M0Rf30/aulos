@@ -38,7 +38,14 @@ pub fn empty_state_tinted(
     let w = 360.0_f32.min(avail.width());
     let body_h = body_height(ui, body, theme::regular(13.5), w);
     let content_h = 56.0 + 14.0 + 26.0 + 2.0 + body_h + action.map_or(0.0, |_| 44.0);
-    let top = top_pad(avail.height(), content_h);
+    // Too short for the icon disc as well: drop it so the text and the
+    // action stay in view.
+    let compact = avail.height() < content_h + 16.0;
+    let top = if compact {
+        4.0
+    } else {
+        top_pad(avail.height(), content_h)
+    };
     ui.allocate_ui_with_layout(
         vec2(avail.width(), avail.height().max(120.0)),
         Layout::top_down(Align::Center),
@@ -50,11 +57,17 @@ pub fn empty_state_tinted(
                 .show(ui, |ui| {
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
                         ui.add_space(top);
-                        let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-                        ui.painter()
-                            .rect_filled(rect, CornerRadius::same(28), tint.alpha(0.12));
-                        paint_icon(ui.painter(), rect.center(), icon, 26.0, tint, false);
-                        ui.add_space(14.0);
+                        if !compact {
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::same(28),
+                                tint.alpha(0.12),
+                            );
+                            paint_icon(ui.painter(), rect.center(), icon, 26.0, tint, false);
+                            ui.add_space(14.0);
+                        }
                         ui.label(egui::RichText::new(title).font(theme::semibold(19.0)));
                         ui.add_space(2.0);
                         ui.allocate_ui(vec2(w, body_h), |ui| {
@@ -104,7 +117,14 @@ pub fn empty_state_actions(
     let w = 360.0_f32.min(avail.width());
     let body_h = body_height(ui, body, theme::regular(14.0), w);
     let content_h = 56.0 + 14.0 + 28.0 + 2.0 + body_h + 44.0;
-    let top = top_pad(avail.height(), content_h);
+    // Too short for the icon disc as well: drop it so the text and the
+    // action stay in view.
+    let compact = avail.height() < content_h + 16.0;
+    let top = if compact {
+        4.0
+    } else {
+        top_pad(avail.height(), content_h)
+    };
     ui.allocate_ui_with_layout(
         vec2(avail.width(), avail.height().max(120.0)),
         Layout::top_down(Align::Center),
@@ -116,10 +136,13 @@ pub fn empty_state_actions(
                 .show(ui, |ui| {
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
                         ui.add_space(top);
-                        let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-                        ui.painter().rect_filled(rect, CornerRadius::same(14), bg);
-                        paint_icon(ui.painter(), rect.center(), icon, 26.0, fg, false);
-                        ui.add_space(14.0);
+                        if !compact {
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+                            ui.painter().rect_filled(rect, CornerRadius::same(14), bg);
+                            paint_icon(ui.painter(), rect.center(), icon, 26.0, fg, false);
+                            ui.add_space(14.0);
+                        }
                         ui.label(egui::RichText::new(title).font(theme::semibold(20.0)));
                         ui.add_space(2.0);
                         ui.allocate_ui(vec2(w, body_h), |ui| {

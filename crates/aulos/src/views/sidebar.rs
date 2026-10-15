@@ -566,7 +566,7 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
                     .max_rect(nav_rect)
                     .layout(egui::Layout::top_down(Align::Center)),
                 |ui| {
-                    egui::ScrollArea::vertical()
+                    let area = egui::ScrollArea::vertical()
                         .auto_shrink(false)
                         .id_salt("rail-nav")
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -595,6 +595,17 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
                                 }
                             }
                         });
+                    // Rows cut by the viewport fade out so scrolling is evident.
+                    let top_hidden = area.state.offset.y > 1.0;
+                    let bottom_hidden =
+                        area.state.offset.y + area.inner_rect.height() < area.content_size.y - 1.0;
+                    scroll_fades(
+                        ui,
+                        area.inner_rect,
+                        pal.bg_sidebar,
+                        top_hidden,
+                        bottom_hidden,
+                    );
                 },
             );
             // Settings at the bottom.
@@ -619,4 +630,39 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
             }
         },
     );
+}
+
+/// Vertical `bg` fades over the top and bottom edges of `rect`.
+fn scroll_fades(ui: &Ui, rect: Rect, bg: egui::Color32, top: bool, bottom: bool) {
+    use egui::epaint::{Mesh, Vertex};
+    const H: f32 = 18.0;
+    let mut mesh = Mesh::default();
+    let mut band = |y0: f32, y1: f32, c0: egui::Color32, c1: egui::Color32| {
+        let i = mesh.vertices.len() as u32;
+        for (x, y, c) in [
+            (rect.left(), y0, c0),
+            (rect.right(), y0, c0),
+            (rect.right(), y1, c1),
+            (rect.left(), y1, c1),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos: pos2(x, y),
+                uv: egui::epaint::WHITE_UV,
+                color: c,
+            });
+        }
+        mesh.indices.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+    };
+    if top {
+        band(rect.top(), rect.top() + H, bg, egui::Color32::TRANSPARENT);
+    }
+    if bottom {
+        band(
+            rect.bottom() - H,
+            rect.bottom(),
+            egui::Color32::TRANSPARENT,
+            bg,
+        );
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
