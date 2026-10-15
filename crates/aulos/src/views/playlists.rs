@@ -18,6 +18,7 @@ use aulos_core::library::smart_playlist::{
     EditorState, MatchMode, OrderField, QualityTier, RuleField, RuleOp, SmartPlaylist,
 };
 use aulos_core::library::{Playlist, Track};
+use aulos_core::session::PlaylistEditing;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align, Color32, CornerRadius, Frame, Id, Image, Layout, Margin, Modal, Rect, Response,
@@ -88,6 +89,11 @@ pub struct State {
     mosaic: Vec<String>,
     mosaic_sig: u64,
     io: Option<Io>,
+    /// Index of the track row being dragged (plain playlists).
+    dragging: Option<usize>,
+    /// Slot under the pointer while dragging: the index the dragged row goes
+    /// in front of, or the track count for the end.
+    drop_slot: Option<usize>,
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -176,6 +182,15 @@ enum Act {
     CreateSmart(String),
     Rename(String, String),
     Delete(Sel),
+    RemoveTrack {
+        id: String,
+        index: usize,
+    },
+    MoveTrack {
+        id: String,
+        from: usize,
+        to: usize,
+    },
 }
 
 #[derive(Default)]
@@ -981,24 +996,54 @@ fn track_rows(
     }
 
     let sel = cur.sel();
-    let rel = ui.cursor().top() - origin;
+    let editing = match cur {
+        Cur::Plain(_) => app.session.playlist_editing(),
+        Cur::Smart(_) => PlaylistEditing {
+            remove: false,
+            reorder: false,
+        },
+    };
+    let list_top = ui.cursor().top();
+    let rel = list_top - origin;
     let n = tracks.len();
     let first = (((viewport.min.y - rel) / ROW_H).floor().max(0.0) as usize).min(n);
     let last = (((viewport.max.y - rel) / ROW_H).ceil().max(0.0) as usize + 1).min(n);
     ui.add_space(first as f32 * ROW_H);
     for (i, track) in tracks.iter().enumerate().take(last).skip(first) {
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
+        let sense = if editing.reorder {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), sense);
+        if resp.drag_started() {
+            st.dragging = Some(i);
+        }
+        if resp.drag_stopped()
+            && let (Cur::Plain(p), Some(from), Some(slot)) =
+                (cur, st.dragging.take(), st.drop_slot.take())
+        {
+            let to = if slot > from { slot - 1 } else { slot };
+            if to != from {
+                out.acts.push(Act::MoveTrack {
+                    id: p.id.clone(),
+                    from,
+                    to,
+                });
+            }
+        }
         let current = app
             .session
             .playback
             .current_track
             .as_ref()
             .is_some_and(|c| c.id == track.id && c.source_uri == track.source_uri);
-        let hovered = resp.hovered();
+        let dragging_row = st.dragging == Some(i);
+        let hovered = resp.hovered() && st.dragging.is_none();
         let radius = CornerRadius::same(6);
         if current {
             ui.painter().rect_filled(rect, radius, app.accent.row_tint);
-        } else if st.row_sel == Some(i) {
+        } else if st.row_sel == Some(i) || dragging_row {
             ui.painter().rect_filled(rect, radius, pal.row_sel);
         } else if hovered {
             ui.painter().rect_filled(rect, radius, pal.hover);
@@ -1043,8 +1088,37 @@ fn track_rows(
 
         let time_w = 44.0;
         let quality_w = 54.0;
+        // Room for the remove button.
+        let tail = if editing.remove { 30.0 } else { 0.0 };
+        let remove_rect =
+            Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(24.0, 24.0));
+        let remove = editing
+            .remove
+            .then(|| ui.interact(remove_rect, resp.id.with("remove"), Sense::click()));
+        if let (Some(remove), Cur::Plain(p)) = (&remove, cur) {
+            if hovered || dragging_row || remove.hovered() {
+                paint_icon(
+                    ui.painter(),
+                    remove_rect.center(),
+                    regular::X,
+                    13.0,
+                    if remove.hovered() {
+                        pal.text
+                    } else {
+                        pal.text_3
+                    },
+                    false,
+                );
+            }
+            if remove.clicked() {
+                out.acts.push(Act::RemoveTrack {
+                    id: p.id.clone(),
+                    index: i,
+                });
+            }
+        }
         let time = Rect::from_min_size(
-            pos2(rect.right() - 8.0 - time_w, rect.top()),
+            pos2(rect.right() - 8.0 - tail - time_w, rect.top()),
             vec2(time_w, ROW_H),
         );
         let quality = Rect::from_min_size(
@@ -1106,13 +1180,14 @@ fn track_rows(
             pal.text_2,
         );
 
-        if resp.double_clicked() {
+        let on_remove = remove.as_ref().is_some_and(|r| r.hovered());
+        if resp.double_clicked() && !on_remove {
             out.acts.push(Act::Play {
                 sel: sel.clone(),
                 shuffle: false,
                 from: Some(i),
             });
-        } else if resp.clicked() {
+        } else if resp.clicked() && !on_remove {
             st.row_sel = Some(i);
         }
         if let Some(menu) = menus::track_menu(&resp, track, &app.session.playlists.playlists) {
@@ -1120,6 +1195,29 @@ fn track_rows(
         }
     }
     ui.add_space((n - last) as f32 * ROW_H);
+
+    // Drop slot, indicator and edge auto-scroll while a row is dragged.
+    st.drop_slot = None;
+    if st.dragging.is_some()
+        && let Some(pointer) = ui.ctx().input(|i| i.pointer.interact_pos())
+    {
+        let slot = (((pointer.y - list_top) / ROW_H + 0.5).floor().max(0.0) as usize).min(n);
+        st.drop_slot = Some(slot);
+        let y = list_top + slot as f32 * ROW_H;
+        let clip = ui.clip_rect();
+        ui.painter().hline(
+            clip.left() + 8.0..=clip.right() - 8.0,
+            y,
+            Stroke::new(2.0, app.accent.fill),
+        );
+        let edge = 36.0;
+        if pointer.y < clip.top() + edge {
+            ui.scroll_with_delta(vec2(0.0, 12.0));
+        } else if pointer.y > clip.bottom() - edge {
+            ui.scroll_with_delta(vec2(0.0, -12.0));
+        }
+        ui.ctx().request_repaint();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1690,8 +1788,28 @@ fn apply(app: &mut App, out: Out) {
                 }
             }
             Act::Delete(sel) => delete(app, &sel),
+            Act::RemoveTrack { id, index } => {
+                if let Some(idx) = playlist_index(app, &id) {
+                    let effect = app.session.remove_track_from_playlist(idx, index);
+                    app.run(effect);
+                }
+            }
+            Act::MoveTrack { id, from, to } => {
+                if let Some(idx) = playlist_index(app, &id) {
+                    let effect = app.session.move_playlist_track(idx, from, to);
+                    app.run(effect);
+                }
+            }
         }
     }
+}
+
+fn playlist_index(app: &App, id: &str) -> Option<usize> {
+    app.session
+        .playlists
+        .playlists
+        .iter()
+        .position(|p| p.id == id)
 }
 
 enum Source {

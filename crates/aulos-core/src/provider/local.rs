@@ -139,6 +139,23 @@ impl MusicProvider for LocalProvider {
             .map_err(ProviderError::Database)
     }
 
+    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+        let db = self.lock_db()?;
+        db.remove_playlist_track(playlist_id, index)
+            .map_err(ProviderError::Database)
+    }
+
+    fn move_in_playlist(
+        &self,
+        playlist_id: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), ProviderError> {
+        let db = self.lock_db()?;
+        db.move_playlist_track(playlist_id, from, to)
+            .map_err(ProviderError::Database)
+    }
+
     // --- Favorites and Ratings ---
 
     fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {

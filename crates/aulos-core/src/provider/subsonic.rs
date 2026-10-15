@@ -750,6 +750,22 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+        let pid = playlist_id.to_string();
+        let index = i32::try_from(index)
+            .map_err(|_| ProviderError::Other(format!("Playlist index {index} out of range")))?;
+        self.block_on(async {
+            self.client
+                .update_playlist(
+                    &pid,
+                    &opensubsonic::UpdatePlaylistOptions::new().remove_index(index),
+                )
+                .await
+                .map_err(subsonic_err("updatePlaylist"))
+        })
+    }
+
     // --- Favorites and ratings ---
 
     #[tracing::instrument(skip(self), level = "debug")]

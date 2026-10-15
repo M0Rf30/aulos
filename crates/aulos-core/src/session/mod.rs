@@ -48,8 +48,8 @@ pub use icons::IconState;
 pub use library::{LibraryApplied, LibraryEvent, Reload};
 pub use playback::{PlaybackEvent, PlaybackNotice, PlaybackState, PlaybackUpdate, QueuePlacement};
 pub use playlists::{
-    PlaylistEvent, PlaylistOp, PlaylistOutcome, PlaylistUpdate, PlaylistsState, export_playlist,
-    import_playlist_files,
+    PlaylistEditing, PlaylistEvent, PlaylistOp, PlaylistOutcome, PlaylistUpdate, PlaylistsState,
+    export_playlist, import_playlist_files,
 };
 pub use podcasts::{EpisodePlayback, PodcastEvent, PodcastNotice, PodcastUpdate, PodcastsState};
 pub use properties::PropertiesEvent;

@@ -369,6 +369,14 @@ pub struct Playlist {
     pub total_duration: Duration,
 }
 
+impl Playlist {
+    /// Recomputes `track_count` and `total_duration` from `tracks`.
+    pub fn refresh_totals(&mut self) {
+        self.track_count = self.tracks.len() as u32;
+        self.total_duration = self.tracks.iter().map(|t| t.duration).sum();
+    }
+}
+
 /// A single line in synced lyrics.
 #[derive(Debug, Clone)]
 pub struct LyricLine {

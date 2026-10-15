@@ -1110,6 +1110,35 @@ impl MusicProvider for MpdProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+        let playlist = playlist_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(commands::RemoveFromPlaylist::position(&playlist, index))
+                .await
+                .map_err(mpd_err("playlistdelete"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn move_in_playlist(
+        &self,
+        playlist_id: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), ProviderError> {
+        let playlist = playlist_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(commands::MoveInPlaylist::new(&playlist, from, to))
+                .await
+                .map_err(mpd_err("playlistmove"))
+        })
+    }
+
     // --- Favorites and ratings via stickers (Tasks 52-53) ---
 
     fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {

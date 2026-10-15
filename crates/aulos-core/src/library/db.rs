@@ -1015,6 +1015,83 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// Removes the track at 0-based `index` of the playlist (rows after it
+    /// shift up). The same track can appear several times, so entries are
+    /// addressed by position, not by track.
+    pub fn remove_playlist_track(&self, playlist_id: &str, index: usize) -> Result<(), String> {
+        self.edit_playlist_order(playlist_id, |rows| {
+            if index >= rows.len() {
+                return Err(format!("No track at position {index}"));
+            }
+            rows.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Moves the track at `from` so it sits at `to` (both 0-based, `to` is
+    /// the final index).
+    pub fn move_playlist_track(
+        &self,
+        playlist_id: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), String> {
+        self.edit_playlist_order(playlist_id, |rows| {
+            if from >= rows.len() || to >= rows.len() {
+                return Err(format!("Cannot move {from} to {to}"));
+            }
+            let row = rows.remove(from);
+            rows.insert(to, row);
+            Ok(())
+        })
+    }
+
+    /// Reads the playlist's row ids in order, lets `edit` rearrange or drop
+    /// them, then rewrites positions densely (0..n) in one transaction.
+    fn edit_playlist_order(
+        &self,
+        playlist_id: &str,
+        edit: impl FnOnce(&mut Vec<i64>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let pid: i64 = playlist_id
+            .parse()
+            .map_err(|_| "Invalid playlist ID".to_string())?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Playlist edit transaction error: {e}"))?;
+        let mut rows: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT rowid FROM playlist_tracks WHERE playlist_id = ?1
+                     ORDER BY position, rowid",
+                )
+                .map_err(|e| format!("Playlist edit error: {e}"))?;
+            stmt.query_map(params![pid], |row| row.get(0))
+                .map_err(|e| format!("Playlist edit error: {e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("Playlist edit error: {e}"))?
+        };
+        let before = rows.clone();
+        edit(&mut rows)?;
+        for gone in before.iter().filter(|id| !rows.contains(id)) {
+            tx.execute(
+                "DELETE FROM playlist_tracks WHERE rowid = ?1",
+                params![gone],
+            )
+            .map_err(|e| format!("Playlist edit error: {e}"))?;
+        }
+        for (position, rowid) in rows.iter().enumerate() {
+            tx.execute(
+                "UPDATE playlist_tracks SET position = ?1 WHERE rowid = ?2",
+                params![position as i64, rowid],
+            )
+            .map_err(|e| format!("Playlist edit error: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Playlist edit commit error: {e}"))
+    }
+
     // ---- Favorites and Ratings ----
 
     /// Toggle the favorite status of a track. Returns the new status.
@@ -1518,6 +1595,75 @@ mod tests {
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
         assert_eq!(db.play_count(track_id).unwrap(), 1);
+    }
+
+    fn playlist_titles(db: &LibraryDb, id: &str) -> Vec<String> {
+        db.get_playlist(id)
+            .unwrap()
+            .tracks
+            .into_iter()
+            .map(|t| t.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn playlist_of(db: &LibraryDb, names: &[&str]) -> String {
+        let ids: Vec<String> = names
+            .iter()
+            .map(|n| insert_local(db, Path::new(&format!("/tmp/{n}.mp3"))).to_string())
+            .collect();
+        let playlist = db.create_playlist("p").unwrap();
+        db.add_to_playlist(&playlist.id, &ids).unwrap();
+        playlist.id
+    }
+
+    #[test]
+    fn playlist_track_removal_keeps_order_and_positions_dense() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = playlist_of(&db, &["a", "b", "c"]);
+        db.remove_playlist_track(&id, 1).unwrap();
+        assert_eq!(playlist_titles(&db, &id), ["/tmp/a.mp3", "/tmp/c.mp3"]);
+        let positions: Vec<i64> = db
+            .conn
+            .prepare("SELECT position FROM playlist_tracks ORDER BY position")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(positions, [0, 1]);
+        assert!(db.remove_playlist_track(&id, 5).is_err());
+    }
+
+    #[test]
+    fn playlist_track_removal_targets_one_duplicate() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = playlist_of(&db, &["a", "b"]);
+        let first: i64 = db
+            .conn
+            .query_row("SELECT track_id FROM playlist_tracks LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db.add_to_playlist(&id, &[first.to_string()]).unwrap();
+        db.remove_playlist_track(&id, 2).unwrap();
+        assert_eq!(playlist_titles(&db, &id), ["/tmp/a.mp3", "/tmp/b.mp3"]);
+    }
+
+    #[test]
+    fn playlist_track_move_reorders_in_both_directions() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = playlist_of(&db, &["a", "b", "c", "d"]);
+        db.move_playlist_track(&id, 0, 2).unwrap();
+        assert_eq!(
+            playlist_titles(&db, &id),
+            ["/tmp/b.mp3", "/tmp/c.mp3", "/tmp/a.mp3", "/tmp/d.mp3"]
+        );
+        db.move_playlist_track(&id, 3, 0).unwrap();
+        assert_eq!(
+            playlist_titles(&db, &id),
+            ["/tmp/d.mp3", "/tmp/b.mp3", "/tmp/c.mp3", "/tmp/a.mp3"]
+        );
+        assert!(db.move_playlist_track(&id, 0, 4).is_err());
     }
 
     #[test]

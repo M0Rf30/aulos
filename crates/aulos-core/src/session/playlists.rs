@@ -24,6 +24,15 @@ pub enum PlaylistOp {
     Create,
     Delete,
     Rename,
+    RemoveTrack,
+    MoveTrack,
+}
+
+/// What the active provider lets the UI do to the tracks of a playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaylistEditing {
+    pub remove: bool,
+    pub reorder: bool,
 }
 
 /// Async results of the playlist workflows.
@@ -115,6 +124,35 @@ impl PlaylistsState {
             .get(idx)
             .map(|p| p.tracks.as_slice())
             .filter(|t| !t.is_empty())
+    }
+
+    /// Drops the track at `track` of playlist `idx` from the loaded copy.
+    /// Returns false when either index is out of range.
+    pub fn remove_track_local(&mut self, idx: usize, track: usize) -> bool {
+        let Some(playlist) = self.playlists.get_mut(idx) else {
+            return false;
+        };
+        if track >= playlist.tracks.len() {
+            return false;
+        }
+        playlist.tracks.remove(track);
+        playlist.refresh_totals();
+        true
+    }
+
+    /// Moves a track of the loaded copy of playlist `idx` to final index
+    /// `to`. Returns false when an index is out of range or nothing moves.
+    pub fn move_track_local(&mut self, idx: usize, from: usize, to: usize) -> bool {
+        let Some(playlist) = self.playlists.get_mut(idx) else {
+            return false;
+        };
+        let len = playlist.tracks.len();
+        if from >= len || to >= len || from == to {
+            return false;
+        }
+        let track = playlist.tracks.remove(from);
+        playlist.tracks.insert(to, track);
+        true
     }
 
     /// What to export for the playlist at `idx`: its name and tracks.
@@ -343,11 +381,51 @@ impl Session {
         })
     }
 
-    /// Removing a track from a playlist needs provider-specific support that
-    /// isn't uniformly available yet: logs and reloads the playlists.
-    pub fn remove_playlist_track(&self) -> Effect<PlaylistEvent> {
-        tracing::info!("Track removal from playlist not yet implemented");
-        self.load_playlists()
+    /// What the active provider lets the UI do to a playlist's tracks.
+    #[must_use]
+    pub fn playlist_editing(&self) -> PlaylistEditing {
+        use crate::provider::ProviderType;
+        let remove = self.providers.active_is(ProviderType::Local)
+            || self.providers.active_is(ProviderType::Mpd)
+            || self.providers.active_is(ProviderType::Subsonic);
+        let reorder = self.providers.active_is(ProviderType::Local)
+            || self.providers.active_is(ProviderType::Mpd);
+        PlaylistEditing { remove, reorder }
+    }
+
+    /// Removes the track at `track` (0-based) from the playlist at `idx` of
+    /// `playlists.playlists`. The loaded copy changes at once; the provider
+    /// call then reloads the playlists (reverting the copy on failure).
+    pub fn remove_track_from_playlist(
+        &mut self,
+        idx: usize,
+        track: usize,
+    ) -> Effect<PlaylistEvent> {
+        if !self.playlist_editing().remove || !self.playlists.remove_track_local(idx, track) {
+            return Effect::none();
+        }
+        let id = self.playlists.playlists[idx].id.clone();
+        self.playlist_op(PlaylistOp::RemoveTrack, move |p| {
+            p.remove_from_playlist(&id, track)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Moves the track at `from` of the playlist at `idx` so it ends up at
+    /// `to` (0-based final index); same optimistic update as removal.
+    pub fn move_playlist_track(
+        &mut self,
+        idx: usize,
+        from: usize,
+        to: usize,
+    ) -> Effect<PlaylistEvent> {
+        if !self.playlist_editing().reorder || !self.playlists.move_track_local(idx, from, to) {
+            return Effect::none();
+        }
+        let id = self.playlists.playlists[idx].id.clone();
+        self.playlist_op(PlaylistOp::MoveTrack, move |p| {
+            p.move_in_playlist(&id, from, to).map_err(|e| e.to_string())
+        })
     }
 
     /// Applies an async playlist result. Replacing the playlists refreshes
@@ -369,13 +447,19 @@ impl Session {
                     PlaylistOp::Delete => {
                         PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::Deleted)
                     }
-                    PlaylistOp::Rename => {
+                    PlaylistOp::Rename | PlaylistOp::RemoveTrack | PlaylistOp::MoveTrack => {
                         PlaylistUpdate::new(self.load_playlists(), PlaylistOutcome::None)
                     }
                 },
                 Err(e) => {
                     tracing::error!("Playlist operation {op:?} failed: {e}");
-                    PlaylistUpdate::outcome(PlaylistOutcome::Failed(e))
+                    // A failed track edit leaves the optimistic copy wrong:
+                    // reload the real order.
+                    let effect = match op {
+                        PlaylistOp::RemoveTrack | PlaylistOp::MoveTrack => self.load_playlists(),
+                        _ => Effect::none(),
+                    };
+                    PlaylistUpdate::new(effect, PlaylistOutcome::Failed(e))
                 }
             },
             PlaylistEvent::SmartLoaded(playlists) => {
@@ -561,6 +645,140 @@ mod tests {
             state.export_tracks(0).map(|(n, _)| n).as_deref(),
             Some("empty")
         );
+    }
+
+    fn named(name: &str) -> Track {
+        Track {
+            path: PathBuf::from(format!("/m/{name}.flac")),
+            title: name.into(),
+            provider_id: "local".into(),
+            source_uri: format!("/m/{name}.flac"),
+            ..track()
+        }
+    }
+
+    fn titles(state: &PlaylistsState) -> Vec<String> {
+        state.playlists[0]
+            .tracks
+            .iter()
+            .map(|t| t.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn local_remove_and_move_update_the_loaded_copy_and_totals() {
+        let mut state = PlaylistsState {
+            playlists: vec![playlist("p", vec![named("a"), named("b"), named("c")])],
+            ..Default::default()
+        };
+        assert!(state.move_track_local(0, 2, 0));
+        assert_eq!(titles(&state), ["c", "a", "b"]);
+        assert!(state.remove_track_local(0, 1));
+        assert_eq!(titles(&state), ["c", "b"]);
+        assert_eq!(state.playlists[0].track_count, 2);
+        assert_eq!(state.playlists[0].total_duration, Duration::from_secs(2));
+        assert!(!state.remove_track_local(0, 2));
+        assert!(!state.remove_track_local(1, 0));
+        assert!(!state.move_track_local(0, 0, 0));
+        assert!(!state.move_track_local(0, 0, 2));
+    }
+
+    #[test]
+    fn edits_need_a_provider_that_supports_them() {
+        let mut session = test_session();
+        session.playlists.playlists = vec![playlist("p", vec![named("a"), named("b")])];
+        assert_eq!(
+            session.playlist_editing(),
+            PlaylistEditing {
+                remove: false,
+                reorder: false
+            }
+        );
+        assert!(session.remove_track_from_playlist(0, 0).is_none());
+        assert!(session.move_playlist_track(0, 0, 1).is_none());
+        assert_eq!(titles(&session.playlists), ["a", "b"]);
+    }
+
+    #[test]
+    fn session_edits_reach_the_local_database() {
+        use crate::provider::MusicProvider;
+        use crate::provider::local::LocalProvider;
+        use futures::StreamExt;
+        use std::sync::Arc;
+
+        let db = LibraryDb::open_memory().expect("db");
+        for name in ["a", "b", "c"] {
+            db.upsert_track(&named(name), 0).expect("track");
+        }
+        let ids: Vec<String> = db
+            .all_tracks(None)
+            .expect("tracks")
+            .iter()
+            .map(|t| t.id.to_string())
+            .collect();
+        let provider = Arc::new(LocalProvider::new(db, Vec::new()));
+        let created = provider.create_playlist("mix").expect("playlist");
+        provider.add_to_playlist(&created.id, &ids).expect("add");
+
+        let mut session = test_session();
+        session.providers.registry.register(provider.clone());
+        assert!(session.providers.registry.set_active("local"));
+        assert_eq!(
+            session.playlist_editing(),
+            PlaylistEditing {
+                remove: true,
+                reorder: true
+            }
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let load = session.load_playlists().into_stream().expect("load");
+            for event in load.collect::<Vec<_>>().await {
+                let _ = session.apply_playlist_event(event);
+            }
+            assert_eq!(titles(&session.playlists), ["a", "b", "c"]);
+
+            // Optimistic copy first, then the provider's own order.
+            let effect = session.move_playlist_track(0, 0, 2);
+            assert_eq!(titles(&session.playlists), ["b", "c", "a"]);
+            for event in effect
+                .into_stream()
+                .expect("move")
+                .collect::<Vec<_>>()
+                .await
+            {
+                let update = session.apply_playlist_event(event);
+                if let Some(reload) = update.effect.into_stream() {
+                    for event in reload.collect::<Vec<_>>().await {
+                        let _ = session.apply_playlist_event(event);
+                    }
+                }
+            }
+            assert_eq!(titles(&session.playlists), ["b", "c", "a"]);
+
+            let effect = session.remove_track_from_playlist(0, 1);
+            for event in effect
+                .into_stream()
+                .expect("remove")
+                .collect::<Vec<_>>()
+                .await
+            {
+                let update = session.apply_playlist_event(event);
+                if let Some(reload) = update.effect.into_stream() {
+                    for event in reload.collect::<Vec<_>>().await {
+                        let _ = session.apply_playlist_event(event);
+                    }
+                }
+            }
+            assert_eq!(titles(&session.playlists), ["b", "a"]);
+            let stored = provider.get_playlist(&created.id).expect("stored");
+            let stored: Vec<_> = stored.tracks.iter().map(|t| t.title.as_str()).collect();
+            assert_eq!(stored, ["b", "a"]);
+        });
     }
 
     #[test]

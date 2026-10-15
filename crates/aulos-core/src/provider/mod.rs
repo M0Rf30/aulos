@@ -225,6 +225,24 @@ pub trait MusicProvider: Send + Sync {
         Err(ProviderError::NotSupported("playlists".into()))
     }
 
+    /// Removes the track at 0-based `index` of a playlist. Entries are
+    /// addressed by position because a track can appear more than once.
+    fn remove_from_playlist(&self, playlist_id: &str, index: usize) -> Result<(), ProviderError> {
+        let _ = (playlist_id, index);
+        Err(ProviderError::NotSupported("playlist track removal".into()))
+    }
+
+    /// Moves the track at `from` to final index `to` (both 0-based).
+    fn move_in_playlist(
+        &self,
+        playlist_id: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), ProviderError> {
+        let _ = (playlist_id, from, to);
+        Err(ProviderError::NotSupported("playlist reordering".into()))
+    }
+
     // --- Favorites and ratings methods (optional, default: not supported) ---
 
     /// Toggle favorite status for a track (by source_uri or provider-specific ID).
