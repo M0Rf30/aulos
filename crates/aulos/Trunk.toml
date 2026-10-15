@@ -8,3 +8,5 @@
 target = "index.html"
 dist = "dist"
 public_url = "/aulos/"
+# lactea visualizer (WebGPU; hidden on the WebGL2 fallback).
+features = "visualizer"

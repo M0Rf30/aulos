@@ -410,18 +410,24 @@ impl Session {
     }
 
     /// Tells the session whether a visualizer is on screen and wants audio:
-    /// the capture of a local MPD server's audio runs only then. Only Linux
-    /// can capture it (see [`Self::visualizer_capture_supported`]); elsewhere
-    /// this does nothing.
+    /// the capture of a local MPD server's audio runs only then, and so does
+    /// the browser output's tap on its own audio (the desktop output taps
+    /// its audio all the time). The capture of MPD's audio needs Linux (see
+    /// [`Self::visualizer_capture_supported`]); elsewhere that part does
+    /// nothing.
     #[cfg(feature = "visualizer")]
     pub fn set_visualizer_capture(&mut self, wanted: bool) {
         self.playback.capture_wanted = wanted;
+        if let Some(player) = self.playback.player.as_mut() {
+            player.set_pcm_capture(wanted);
+        }
     }
 
     /// Whether this build can capture the audio of an MPD server for the
     /// visualizer: it needs PipeWire, so Linux with the `visualizer`
     /// feature only. Everywhere else the visualizer shows local playback
-    /// only, and MPD playback has nothing to draw from.
+    /// only, and MPD playback has nothing to draw from (the browser has no
+    /// MPD client at all).
     pub const fn visualizer_capture_supported() -> bool {
         cfg!(all(feature = "visualizer", target_os = "linux"))
     }

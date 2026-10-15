@@ -5,7 +5,7 @@
 //! scanning, search directories and display metadata.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// One `.milk` / `.milk2` preset file discovered by [`scan_presets`].
@@ -65,8 +65,8 @@ pub fn user_preset_dir() -> Option<PathBuf> {
 /// [`user_preset_dir`], the system-wide MilkDrop preset install locations of
 /// the platform (distro packages on Linux, Homebrew on macOS), and the
 /// lactea/projectM folders under `dirs::data_dir()` (the Flatpak location on
-/// Linux). Shared by the UI's `VizRenderer::new` and [`scan_presets`] so both
-/// always agree on where presets live.
+/// Linux). Presets and their textures are both looked up here (see
+/// [`super::source`]) so the two always agree on where they live.
 pub fn preset_search_dirs(user_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     dirs.extend(user_dir);
@@ -116,15 +116,9 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
                 continue;
             }
             let path = entry.path();
-            let is_milk = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("milk") || ext.eq_ignore_ascii_case("milk2")
-                });
             // Non-UTF-8 paths are skipped: preset identity and display
             // names are UTF-8 throughout the UI.
-            if !is_milk || path.to_str().is_none() {
+            if !is_preset_file(path) || path.to_str().is_none() {
                 continue;
             }
             let path = path.to_path_buf();
@@ -134,8 +128,22 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
             entries.push(PresetEntry::from_path(path));
         }
     }
-    // Case-insensitive, with the path as a total-order tiebreak so the list
-    // (and therefore every row's position) is stable between scans.
+    sort_entries(&mut entries);
+    entries
+}
+
+/// Whether `path` names a MilkDrop preset: a `.milk` or MilkDrop 3 `.milk2`
+/// file (case-insensitive extension).
+pub fn is_preset_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("milk") || ext.eq_ignore_ascii_case("milk2"))
+}
+
+/// Orders a preset list for display: by category, then name, both
+/// case-insensitive, with the path as a total-order tiebreak so the list
+/// (and therefore every row's position) is stable between scans.
+pub fn sort_entries(entries: &mut [PresetEntry]) {
     entries.sort_by_cached_key(|e| {
         (
             e.category.to_lowercase(),
@@ -143,7 +151,6 @@ pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
             e.path.clone(),
         )
     });
-    entries
 }
 
 #[cfg(test)]

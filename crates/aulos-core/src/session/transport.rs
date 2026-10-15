@@ -1027,6 +1027,7 @@ impl Session {
                 {
                     tracing::debug!("Reconnecting PCM buffer to new player instance");
                     p.set_pcm_buffer(Arc::clone(&self.playback.pcm_buffer));
+                    p.set_pcm_capture(self.playback.capture_wanted);
                 }
 
                 // Apply saved EQ state to the new player's DSP.

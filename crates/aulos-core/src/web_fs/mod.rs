@@ -15,6 +15,7 @@
 mod idb;
 pub mod persist;
 mod roots;
+mod stash;
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +24,54 @@ use std::future::Future;
 use send_wrapper::SendWrapper;
 
 pub use roots::{
-    ListedFile, Listing, RootStatus, forget_root, info_of, keeps_access_across_reloads, list_audio,
-    list_dir, open_file, read_range, status,
+    ListedFile, Listing, Picked, RootStatus, forget_root, info_of, keeps_access_across_reloads,
+    list_audio, list_dir, open_file, read_range, status,
 };
+
+/// Lets the user pick files of the kinds in `accept` (extensions, comma
+/// separated: `.milk,.png`) and reads those up to `limit` bytes each; nothing
+/// is picked on cancel. Must be called from a user gesture. Sendable like
+/// [`pick_folder`].
+///
+/// # Errors
+/// A message when the dialog cannot be opened or a file cannot be read.
+pub fn pick_files(
+    accept: &'static str,
+    limit: u64,
+) -> impl Future<Output = Result<Picked, String>> + Send {
+    SendWrapper::new(roots::pick_files(accept, limit))
+}
+
+/// The named files [`store_files`] kept under `key`. Sendable like
+/// [`pick_folder`].
+///
+/// # Errors
+/// A message when IndexedDB is unavailable or the read failed.
+pub fn load_files(
+    key: &'static str,
+) -> impl Future<Output = Result<Vec<(String, Vec<u8>)>, String>> + Send {
+    SendWrapper::new(stash::load(key))
+}
+
+/// Keeps `files` (name, contents) in IndexedDB under `key`, replacing what
+/// was there. Sendable like [`pick_folder`].
+///
+/// # Errors
+/// A message when IndexedDB is unavailable, full, or refused the value.
+pub fn store_files(
+    key: &'static str,
+    files: Vec<(String, Vec<u8>)>,
+) -> impl Future<Output = Result<(), String>> + Send {
+    SendWrapper::new(async move {
+        stash::store(
+            key,
+            files
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
+        )
+        .await
+    })
+}
 
 /// Lets the user pick a music folder and returns its root path (see
 /// [`crate::virtual_path`]); `Ok(None)` when cancelled. Must be called from a

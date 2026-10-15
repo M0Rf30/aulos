@@ -430,7 +430,7 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
 
     // The visualizer toggle sits left of the mini-player button.
     #[cfg(feature = "visualizer")]
-    let buttons_left = {
+    let buttons_left = if app.viz_available() {
         let viz = Rect::from_min_size(pos2(pip.left() - 4.0 - 32.0, pip.top()), vec2(32.0, 32.0));
         let toggle = ui.scope_builder(UiBuilder::new().max_rect(viz), |ui| {
             IconBtn::new(regular::WAVEFORM)
@@ -444,6 +444,8 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
             app.set_visualizer(true);
         }
         viz.left()
+    } else {
+        pip.left()
     };
     #[cfg(not(feature = "visualizer"))]
     let buttons_left = pip.left();

@@ -23,10 +23,6 @@ tracing.workspace = true
 # MilkDrop visualizer (feature `visualizer`). 0.2 drives the host's own wgpu 30
 # device, the very one eframe renders with, so frames never leave the GPU.
 lactea = { version = "0.2.2", optional = true }
-# Preset texture lookup for the visualizer.
-walkdir = { workspace = true, optional = true }
-dirs = { workspace = true, optional = true }
-image = { workspace = true, optional = true }
 
 # Everything that needs an operating system: the tokio runtime the core's
 # effects run on, native dialogs, the console log.
@@ -63,7 +59,7 @@ short_description = "A modern music player"
 [features]
 default = []
 # MilkDrop visualizer: the backend's PCM capture plus the lactea renderer.
-visualizer = ["aulos-core/visualizer", "dep:lactea", "dep:walkdir", "dep:dirs", "dep:image"]
+visualizer = ["aulos-core/visualizer", "dep:lactea"]
 
 # The `HWND` the Windows media controls (SMTC) attach to.
 [target.'cfg(windows)'.dependencies]

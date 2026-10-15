@@ -672,6 +672,17 @@ impl App {
         self.viz.is_some()
     }
 
+    /// Whether lactea can run here: a GPU renderer exists and, in the browser,
+    /// it is WebGPU (lactea's shaders need compute-class features the WebGL2
+    /// path lacks).
+    #[cfg(feature = "visualizer")]
+    pub fn viz_available(&self) -> bool {
+        self.render_state.as_ref().is_some_and(|rs| {
+            !cfg!(target_arch = "wasm32")
+                || rs.adapter.get_info().backend != eframe::wgpu::Backend::Gl
+        })
+    }
+
     /// Opens or closes the visualizer. Opening starts the render thread and,
     /// for MPD, the audio capture; closing stops both.
     #[cfg(feature = "visualizer")]

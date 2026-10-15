@@ -26,6 +26,9 @@ pub mod queue;
 // The browser output's clock arithmetic; plain code, so it is tested natively.
 #[cfg(any(target_arch = "wasm32", test))]
 mod web_timeline;
+// The same for the visualizer's tap on that output.
+#[cfg(all(feature = "visualizer", any(target_arch = "wasm32", test)))]
+mod web_tap;
 
 use crate::config::{RepeatMode, ReplayGainMode};
 use crate::library::{Track, TrackSource};
@@ -172,6 +175,14 @@ impl Player {
         buffer: std::sync::Arc<std::sync::Mutex<crate::player::pcm::PcmBuffer>>,
     ) {
         self.local_backend.set_pcm_buffer(buffer);
+    }
+
+    /// Tells the local backend whether a visualizer is on screen and reads
+    /// the PCM buffer: the browser output then taps its audio, and stops
+    /// doing so (and costs nothing) when it no longer is.
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_capture(&mut self, wanted: bool) {
+        self.local_backend.set_pcm_capture(wanted);
     }
 
     /// Get a reference to the currently active backend.

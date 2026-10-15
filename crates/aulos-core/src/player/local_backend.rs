@@ -116,6 +116,13 @@ impl LocalBackend {
         self.engine.set_pcm_buffer(Some(buffer));
     }
 
+    /// Whether a visualizer wants the PCM buffer filled. Nothing to do here:
+    /// the engine's output callback copies every block into the buffer it
+    /// was given (see [`Self::set_pcm_buffer`]) whether or not anyone reads
+    /// it. Only the browser output has to be told (`web_backend.rs`).
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_capture(&mut self, _wanted: bool) {}
+
     /// Internal: play a local file.
     fn play_local_file(&mut self, path: PathBuf) -> Result<(), PlayerError> {
         self.engine

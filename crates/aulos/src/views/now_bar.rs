@@ -425,6 +425,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     }
     #[cfg(feature = "visualizer")]
     if !app.narrow
+        && app.viz_available()
         && IconBtn::new(regular::WAVEFORM)
             .icon_size(16.0)
             .tip("Visualizer")

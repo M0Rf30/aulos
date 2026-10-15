@@ -1,29 +1,40 @@
 //! The MilkDrop visualizer engine (feature `visualizer`).
 //!
 //! lactea 0.2 renders with a host-provided wgpu 30 device, which is the very
-//! one eframe draws with, so a frame never leaves the GPU: a render thread
-//! drives [`lactea::Engine`] into one `Rgba8Unorm` texture, and the UI shows
-//! that texture through a registered native egui texture (re-pointed in place
+//! one eframe draws with, so a frame never leaves the GPU: [`Loop`] drives a
+//! [`lactea::Engine`] into one `Rgba8Unorm` texture, and the UI shows that
+//! texture through a registered native egui texture (re-pointed in place
 //! when the render size changes, never reallocated per frame).
 //!
-//! The thread exists only while the visualizer is on screen: [`Viz::start`]
-//! spawns it, [`Viz::stop`] (or drop) joins it and frees the egui texture.
-//! Audio comes from the session's [`PcmBuffer`] (local engine, or the MPD
-//! PipeWire capture which the session runs while `set_visualizer_capture` is on).
+//! What runs the loop depends on the platform (`viz/native.rs`, `viz/web.rs`):
+//! a render thread on the desktop, spawned by [`Viz::start`] and joined by
+//! [`Viz::stop`] (or drop); the page's one thread in the browser, which steps
+//! the loop from [`Viz::poll`], i.e. once per UI frame. Either way it exists
+//! only while the visualizer is on screen, and [`Viz::stop`] frees the egui
+//! texture. Audio comes from the session's [`PcmBuffer`] (the local output,
+//! or the MPD PipeWire capture which the session runs while
+//! `set_visualizer_capture` is on). Presets and textures come from
+//! [`aulos_core::visualizer::source`]: files on the desktop, the bundled and
+//! imported ones in the browser.
 
 use aulos_core::player::pcm::PcmBuffer;
 use aulos_core::visualizer::playlist::PresetPlaylist;
-use aulos_core::visualizer::presets::{PresetEntry, preset_search_dirs, scan_presets};
+use aulos_core::visualizer::presets::PresetEntry;
+use aulos_core::visualizer::source::{self, Textures};
 use aulos_core::visualizer::{PCM_FEED_SAMPLES, VizCommand};
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
+use host::Host;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread::JoinHandle;
 use std::time::Duration;
-use walkdir::WalkDir;
 use web_time::Instant;
+
+// What runs the render loop: a thread, or the page's frame callback.
+#[cfg_attr(target_arch = "wasm32", path = "viz/web.rs")]
+#[cfg_attr(not(target_arch = "wasm32"), path = "viz/native.rs")]
+mod host;
 
 /// Frame period of the render loop (~60 fps).
 const FRAME_PERIOD: Duration = Duration::from_millis(16);
@@ -49,8 +60,6 @@ const PCM_SAMPLE_RATE: u32 = 44_100;
 const PCM_STALE_TIMEOUT: Duration = Duration::from_millis(100);
 /// One frame's worth of stereo silence.
 const SILENCE_SAMPLES: usize = (PCM_SAMPLE_RATE as usize / 60) * 2;
-/// Image extensions a preset `sampler_*` texture may use.
-const TEXTURE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "tga", "bmp", "dib"];
 
 /// What the visualizer remembers between openings (stored in the config via
 /// `Session::set_visualizer_prefs`).
@@ -78,7 +87,7 @@ impl Settings {
     }
 }
 
-/// What the render thread tells the UI.
+/// What the render loop tells the UI.
 #[derive(Default)]
 struct Published {
     /// Bumped whenever `view` is replaced.
@@ -93,7 +102,6 @@ struct Published {
 
 struct Shared {
     published: Mutex<Published>,
-    stop: AtomicBool,
     /// Wanted render size, `width << 32 | height`.
     want: AtomicU64,
 }
@@ -107,18 +115,29 @@ pub struct Frame {
     pub failure: Option<String>,
 }
 
+/// What the render loop owns; handed to the [`Host`] that runs it.
+struct Inputs {
+    shared: Arc<Shared>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pcm: Arc<Mutex<PcmBuffer>>,
+    commands: mpsc::Receiver<VizCommand>,
+    ctx: egui::Context,
+    settings: Settings,
+}
+
 /// UI-side handle of a running visualizer.
 pub struct Viz {
     shared: Arc<Shared>,
     commands: mpsc::Sender<VizCommand>,
-    thread: Option<JoinHandle<()>>,
+    host: Host,
     render_state: RenderState,
     texture: Option<egui::TextureId>,
     seen_generation: u64,
 }
 
 impl Viz {
-    /// Starts the render thread.
+    /// Starts the render loop.
     pub fn start(
         render_state: RenderState,
         ctx: egui::Context,
@@ -128,42 +147,43 @@ impl Viz {
     ) -> Self {
         let shared = Arc::new(Shared {
             published: Mutex::new(Published::default()),
-            stop: AtomicBool::new(false),
             want: AtomicU64::new(pack(fit(size))),
         });
         let (commands, rx) = mpsc::channel();
-        let thread = {
-            let shared = Arc::clone(&shared);
-            let (device, queue) = (render_state.device.clone(), render_state.queue.clone());
-            std::thread::Builder::new()
-                .name("lactea-render".into())
-                .spawn(move || run(&shared, device, queue, &pcm, &rx, &ctx, settings))
-                .map_err(|e| tracing::error!("lactea: cannot spawn the render thread: {e}"))
-                .ok()
-        };
+        let host = Host::start(Inputs {
+            shared: Arc::clone(&shared),
+            device: render_state.device.clone(),
+            queue: render_state.queue.clone(),
+            pcm,
+            commands: rx,
+            ctx,
+            settings,
+        });
         Self {
             shared,
             commands,
-            thread,
+            host,
             render_state,
             texture: None,
             seen_generation: 0,
         }
     }
 
-    /// Sends a command to the render thread.
+    /// Sends a command to the render loop.
     pub fn send(&self, command: VizCommand) {
         let _ = self.commands.send(command);
     }
 
-    /// Tells the thread how many physical pixels the view covers.
+    /// Tells the loop how many physical pixels the view covers.
     pub fn want_size(&self, size: [u32; 2]) {
         self.shared.want.store(pack(fit(size)), Ordering::Relaxed);
     }
 
     /// The latest published state; keeps the egui texture pointing at the
-    /// current render target.
+    /// current render target. Where the loop has no thread of its own, this
+    /// is also what runs it.
     pub fn poll(&mut self) -> Frame {
+        self.host.drive();
         let (view, generation, preset, entries, failure) = {
             let published = self
                 .shared
@@ -223,12 +243,9 @@ impl Viz {
         settings
     }
 
-    /// Stops the render thread and frees the egui texture.
+    /// Stops the render loop and frees the egui texture.
     pub fn stop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.host.stop();
         if let Some(id) = self.texture.take() {
             self.render_state.renderer.write().free_texture(&id);
         }
@@ -301,6 +318,7 @@ struct Renderer {
     control: lactea::PresetControl,
     presets: PresetPlaylist,
     entries: Arc<Vec<PresetEntry>>,
+    seed: u64,
     current: Option<PathBuf>,
     target: Target,
     started: Instant,
@@ -342,23 +360,16 @@ impl Renderer {
         control.set_preset_locked(settings.locked);
         control.set_beat_sensitivity(settings.sensitivity);
 
-        let dirs = preset_search_dirs(None);
-        let entries = settings.entries.clone().unwrap_or_else(|| {
-            let found = scan_presets(&dirs);
-            tracing::info!("lactea: {} presets from {dirs:?}", found.len());
-            Arc::new(found)
-        });
-        let mut texture_roots = dirs.clone();
-        texture_roots.extend(
-            dirs.iter()
-                .filter_map(|d| d.parent().map(|p| p.join("textures"))),
-        );
-        engine.set_texture_provider(Box::new(DirTextures::scan(&texture_roots)));
+        let entries = settings
+            .entries
+            .clone()
+            .unwrap_or_else(|| Arc::new(source::find_presets()));
+        engine.set_texture_provider(Box::new(CoreTextures(Textures::find())));
 
-        let items = entries.iter().map(|e| e.path.clone()).collect();
         Ok(Self {
-            presets: PresetPlaylist::new(items, seed),
+            presets: PresetPlaylist::new(paths(&entries), seed),
             entries,
+            seed,
             control,
             target: Target::new(&device, size),
             device,
@@ -398,7 +409,7 @@ impl Renderer {
     }
 
     fn try_load(&mut self, path: &Path, smooth: bool) -> bool {
-        let bytes = match std::fs::read(path) {
+        let bytes = match source::read_preset(path) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("lactea: cannot read {}: {e}", path.display());
@@ -442,7 +453,17 @@ impl Renderer {
                 self.control.set_beat_sensitivity(s);
                 self.gain = s.clamp(0.0, 2.0);
             }
+            VizCommand::RescanPresets => self.rescan(),
         }
+    }
+
+    /// Takes stock of the presets and textures again; the preset on screen
+    /// stays, the rotation starts over on the new list.
+    fn rescan(&mut self) {
+        self.entries = Arc::new(source::find_presets());
+        self.presets = PresetPlaylist::new(paths(&self.entries), self.seed);
+        self.engine
+            .set_texture_provider(Box::new(CoreTextures(Textures::find())));
     }
 
     /// Moves to `size`; returns whether a new target was made.
@@ -493,92 +514,119 @@ impl Renderer {
     }
 }
 
-fn run(
-    shared: &Shared,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pcm: &Mutex<PcmBuffer>,
-    commands: &mpsc::Receiver<VizCommand>,
-    ctx: &egui::Context,
-    settings: Settings,
-) {
-    let publish = |f: &mut dyn FnMut(&mut Published)| {
-        f(&mut shared
-            .published
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner));
-        ctx.request_repaint();
-    };
-    let mut size = unpack(shared.want.load(Ordering::Relaxed));
-    let mut renderer = match Renderer::new(device, queue, &settings, size) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("lactea: {e}");
-            publish(&mut |p| p.failure = Some(e.clone()));
-            return;
-        }
-    };
-    renderer.start_preset(settings.preset.as_deref());
-    publish(&mut |p| {
-        p.view = Some(renderer.target.view.clone());
-        p.size = size;
-        p.generation += 1;
-        p.entries = Some(Arc::clone(&renderer.entries));
-        p.preset.clone_from(&renderer.current);
-    });
+/// The render loop's state: what one thread's locals were when the loop had
+/// one. [`Loop::tick`] is one turn of it; the [`Host`] decides when.
+struct Loop {
+    shared: Arc<Shared>,
+    renderer: Renderer,
+    commands: mpsc::Receiver<VizCommand>,
+    pcm: Arc<Mutex<PcmBuffer>>,
+    ctx: egui::Context,
+    /// The render size in force.
+    size: [u32; 2],
+    /// How much of the PCM buffer has been read.
+    cursor: u64,
+    last_pcm: Instant,
+    /// The size the view asked for last, and since when.
+    wanted_since: ([u32; 2], Instant),
+    /// What the UI was last told about the preset and the list.
+    shown: Option<PathBuf>,
+    listed: Arc<Vec<PresetEntry>>,
+}
 
-    let mut cursor = 0u64;
-    let mut last_pcm = Instant::now();
-    let mut wanted_since = (size, Instant::now());
-    let mut shown = renderer.current.clone();
-    let mut next_frame = Instant::now() + FRAME_PERIOD;
-    while !shared.stop.load(Ordering::Acquire) {
-        let now = Instant::now();
-        if let Some(wait) = next_frame.checked_duration_since(now) {
-            std::thread::sleep(wait);
-            next_frame += FRAME_PERIOD;
-        } else {
-            next_frame = now + FRAME_PERIOD;
-        }
+impl Loop {
+    /// Starts the engine and puts the first preset on screen. When the
+    /// engine cannot start, the UI is told why and there is no loop.
+    fn new(inputs: Inputs) -> Option<Self> {
+        let Inputs {
+            shared,
+            device,
+            queue,
+            pcm,
+            commands,
+            ctx,
+            settings,
+        } = inputs;
+        let size = unpack(shared.want.load(Ordering::Relaxed));
+        let mut renderer = match Renderer::new(device, queue, &settings, size) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("lactea: {e}");
+                publish(&shared, &ctx, |p| p.failure = Some(e.clone()));
+                return None;
+            }
+        };
+        renderer.start_preset(settings.preset.as_deref());
+        publish(&shared, &ctx, |p| {
+            p.view = Some(renderer.target.view.clone());
+            p.size = size;
+            p.generation += 1;
+            p.entries = Some(Arc::clone(&renderer.entries));
+            p.preset.clone_from(&renderer.current);
+        });
+        Some(Self {
+            shown: renderer.current.clone(),
+            listed: Arc::clone(&renderer.entries),
+            shared,
+            renderer,
+            commands,
+            pcm,
+            ctx,
+            size,
+            cursor: 0,
+            last_pcm: Instant::now(),
+            wanted_since: (size, Instant::now()),
+        })
+    }
+
+    /// One turn: commands, resize, then (unless the GPU is behind) the next
+    /// frame from the audio that arrived since the last one.
+    fn tick(&mut self) {
         // Lets finished-work callbacks run.
-        let _ = renderer.device.poll(wgpu::PollType::Poll);
-        while let Ok(command) = commands.try_recv() {
-            renderer.command(command);
+        let _ = self.renderer.device.poll(wgpu::PollType::Poll);
+        while let Ok(command) = self.commands.try_recv() {
+            self.renderer.command(command);
         }
-        let want = unpack(shared.want.load(Ordering::Relaxed));
-        if want != wanted_since.0 {
-            wanted_since = (want, Instant::now());
+        let want = unpack(self.shared.want.load(Ordering::Relaxed));
+        if want != self.wanted_since.0 {
+            self.wanted_since = (want, Instant::now());
         }
         let mut resized = false;
-        if want != size && wanted_since.1.elapsed() >= RESIZE_SETTLE {
-            size = want;
-            resized = renderer.resize(size);
+        if want != self.size && self.wanted_since.1.elapsed() >= RESIZE_SETTLE {
+            self.size = want;
+            resized = self.renderer.resize(want);
         }
-        if renderer.in_flight.load(Ordering::Acquire) >= MAX_IN_FLIGHT {
-            continue;
+        if self.renderer.in_flight.load(Ordering::Acquire) >= MAX_IN_FLIGHT {
+            return;
         }
 
-        let fresh = pcm
+        let fresh = self
+            .pcm
             .lock()
             .ok()
-            .map(|buf| buf.read_since(&mut cursor, PCM_FEED_SAMPLES))
+            .map(|buf| buf.read_since(&mut self.cursor, PCM_FEED_SAMPLES))
             .unwrap_or_default();
         let samples = if !fresh.is_empty() {
-            last_pcm = Instant::now();
+            self.last_pcm = Instant::now();
             fresh
-        } else if last_pcm.elapsed() >= PCM_STALE_TIMEOUT {
+        } else if self.last_pcm.elapsed() >= PCM_STALE_TIMEOUT {
             // Nothing is playing: explicit zeros let the analyser decay to idle.
             vec![0.0; SILENCE_SAMPLES]
         } else {
             Vec::new()
         };
-        renderer.render(&samples);
+        self.renderer.render(&samples);
 
-        let preset_changed = shown != renderer.current;
+        let preset_changed = self.shown != self.renderer.current;
         if preset_changed {
-            shown.clone_from(&renderer.current);
+            self.shown.clone_from(&self.renderer.current);
         }
-        publish(&mut |p| {
+        let list_changed = !Arc::ptr_eq(&self.listed, &self.renderer.entries);
+        if list_changed {
+            self.listed = Arc::clone(&self.renderer.entries);
+        }
+        let (renderer, size) = (&self.renderer, self.size);
+        publish(&self.shared, &self.ctx, |p| {
             if resized {
                 p.view = Some(renderer.target.view.clone());
                 p.size = size;
@@ -587,64 +635,44 @@ fn run(
             if preset_changed {
                 p.preset.clone_from(&renderer.current);
             }
+            if list_changed {
+                p.entries = Some(Arc::clone(&renderer.entries));
+            }
         });
     }
 }
 
-/// Directory-backed [`lactea::TextureProvider`]: user textures found under
-/// the preset search directories (and their sibling `textures` dirs), keyed
-/// by lowercase file stem; lactea supplies its own noise textures.
-struct DirTextures {
-    /// `(lowercase stem, path)`, sorted.
-    files: Vec<(String, PathBuf)>,
+/// Changes what the UI sees and wakes it.
+fn publish(shared: &Shared, ctx: &egui::Context, change: impl FnOnce(&mut Published)) {
+    change(
+        &mut shared
+            .published
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    ctx.request_repaint();
 }
 
-impl DirTextures {
-    fn scan(roots: &[PathBuf]) -> Self {
-        let mut files = Vec::new();
-        for root in roots.iter().filter(|r| r.is_dir()) {
-            for entry in WalkDir::new(root).follow_links(true).into_iter().flatten() {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_ascii_lowercase);
-                if let (Some(ext), Some(stem)) = (ext, path.file_stem().and_then(|s| s.to_str()))
-                    && TEXTURE_EXTENSIONS.contains(&ext.as_str())
-                {
-                    files.push((stem.to_ascii_lowercase(), path.to_path_buf()));
-                }
-            }
-        }
-        files.sort();
-        files.dedup();
-        tracing::info!("lactea: {} user textures", files.len());
-        Self { files }
-    }
+/// The paths of `entries`, in order: the rotation's items.
+fn paths(entries: &[PresetEntry]) -> Vec<PathBuf> {
+    entries.iter().map(|e| e.path.clone()).collect()
 }
 
-impl lactea::TextureProvider for DirTextures {
+/// The textures of [`source`] as lactea's [`lactea::TextureProvider`].
+struct CoreTextures(Textures);
+
+impl lactea::TextureProvider for CoreTextures {
     fn load(&mut self, name: &str) -> Option<lactea::Image> {
-        let lower = name.to_ascii_lowercase();
-        self.files
-            .iter()
-            .filter(|(stem, _)| *stem == lower)
-            .find_map(|(_, path)| {
-                let rgba = image::open(path).ok()?.to_rgba8();
-                let (width, height) = rgba.dimensions();
-                Some(lactea::Image {
-                    width,
-                    height,
-                    rgba8: rgba.into_raw(),
-                })
-            })
+        let image = self.0.load(name)?;
+        Some(lactea::Image {
+            width: image.width,
+            height: image.height,
+            rgba8: image.rgba8,
+        })
     }
 
     fn random_pool(&self) -> Vec<String> {
-        self.files.iter().map(|(stem, _)| stem.clone()).collect()
+        self.0.names()
     }
 }
 

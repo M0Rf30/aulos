@@ -147,6 +147,9 @@ fn main() {
         // The saved library and music folders come back before the session
         // opens its database.
         aulos_core::web_fs::init().await;
+        // So do the presets the user imported for the visualizer.
+        #[cfg(feature = "visualizer")]
+        aulos_core::visualizer::source::restore().await;
         let document = web_sys::window()
             .and_then(|window| window.document())
             .expect("a page with a document");

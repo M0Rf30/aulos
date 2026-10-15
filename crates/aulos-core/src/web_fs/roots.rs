@@ -306,7 +306,7 @@ fn relative_path(file: &File) -> String {
 }
 
 async fn pick_with_input() -> Result<Option<PathBuf>, String> {
-    let files = choose_files().await?;
+    let files = choose_files(None).await?;
     let Some(files) = files else {
         return Ok(None);
     };
@@ -350,8 +350,10 @@ async fn pick_with_input() -> Result<Option<PathBuf>, String> {
     Ok(Some(virtual_path::root_path(&name)))
 }
 
-/// Opens the `<input type=file webkitdirectory>` dialog; `None` on cancel.
-async fn choose_files() -> Result<Option<Vec<File>>, String> {
+/// Opens an `<input type=file multiple>` dialog; `None` on cancel. With
+/// `accept` (a comma-separated list of extensions) it picks files of those
+/// kinds, without it a whole folder (`webkitdirectory`).
+async fn choose_files(accept: Option<&str>) -> Result<Option<Vec<File>>, String> {
     let document = web_sys::window()
         .and_then(|w| w.document())
         .ok_or("no document")?;
@@ -362,9 +364,12 @@ async fn choose_files() -> Result<Option<Vec<File>>, String> {
         .map_err(|_| "no input element".to_owned())?;
     input.set_type("file");
     input.set_multiple(true);
-    input
-        .set_attribute("webkitdirectory", "")
-        .map_err(|e| describe(&e))?;
+    match accept {
+        Some(accept) => input.set_accept(accept),
+        None => input
+            .set_attribute("webkitdirectory", "")
+            .map_err(|e| describe(&e))?,
+    }
     input
         .set_attribute("style", "display:none")
         .map_err(|e| describe(&e))?;
@@ -400,6 +405,38 @@ async fn choose_files() -> Result<Option<Vec<File>>, String> {
         .filter_map(|f| f.dyn_into().ok())
         .collect();
     Ok((!files.is_empty()).then_some(files))
+}
+
+/// Files the user picked one by one, read whole.
+pub struct Picked {
+    /// File name and contents.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// How many were left unread for being larger than the limit.
+    pub too_large: usize,
+}
+
+/// Lets the user pick files of the kinds in `accept` (extensions, comma
+/// separated: `.milk,.png`) and reads those up to `limit` bytes; nothing
+/// is picked on cancel. Must be called from a user gesture.
+///
+/// # Errors
+/// A message when the dialog cannot be opened or a file cannot be read.
+pub async fn pick_files(accept: &str, limit: u64) -> Result<Picked, String> {
+    let mut picked = Picked {
+        files: Vec::new(),
+        too_large: 0,
+    };
+    for file in choose_files(Some(accept)).await?.unwrap_or_default() {
+        let size = info_of(&file).0;
+        if size > limit {
+            picked.too_large += 1;
+            continue;
+        }
+        picked
+            .files
+            .push((file.name(), read_range(&file, 0, size).await?));
+    }
+    Ok(picked)
 }
 
 /// Where a virtual path points, before the file itself is fetched.

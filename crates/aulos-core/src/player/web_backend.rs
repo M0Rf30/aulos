@@ -27,6 +27,14 @@
 //! failures that happen after `play` returned (a missing file, an unreachable
 //! server, an undecodable format) through [`PlaybackBackend::take_error`].
 //!
+//! The visualizer (feature `visualizer`) is fed by reading back the chunks
+//! already scheduled: while one is on screen ([`LocalBackend::set_pcm_capture`])
+//! a timer hands it, every few milliseconds, the frames whose turn at the
+//! output device came since the last time (the clock arithmetic is in
+//! [`super::web_tap`]). That is the audio as it is *heard* -- decode runs
+//! seconds ahead -- taken before the equaliser and the volume (replay gain
+//! is already in it), and it costs nothing while no visualizer is open.
+//!
 //! Not provided in the browser: live internet radio, crossfade and the
 //! fade-in/out settings (pause, resume, stop and seeks are de-clicked with a
 //! few milliseconds' ramp regardless).
@@ -38,6 +46,10 @@ use super::engine::decoder::SymphoniaDecoder;
 use super::engine::resampler::{ResamplerQuality, StreamResampler};
 use super::eq_source::{EqController, NUM_BANDS, new_shared_coeffs};
 use super::equalizer::BAND_FREQUENCIES;
+#[cfg(feature = "visualizer")]
+use super::pcm::PcmBuffer;
+#[cfg(feature = "visualizer")]
+use super::web_tap;
 use super::web_timeline::Timeline;
 use crate::library::TrackSource;
 use std::cell::RefCell;
@@ -134,6 +146,22 @@ impl LocalBackend {
     /// Sets the replay gain to apply to the next track.
     pub fn set_replay_gain_db(&mut self, gain_db: Option<f32>) {
         self.shared.borrow_mut().replay_gain_db = gain_db;
+    }
+
+    /// Sets the buffer the visualizer reads; filled only while
+    /// [`Self::set_pcm_capture`] says it is wanted.
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_buffer(&mut self, buffer: Arc<std::sync::Mutex<PcmBuffer>>) {
+        self.shared.borrow_mut().tap.sink = Some(buffer);
+    }
+
+    /// Starts or stops filling the visualizer's buffer. Starting does not
+    /// replay what was heard before: the buffer follows the output from now.
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_capture(&mut self, wanted: bool) {
+        let mut shared = self.shared.borrow_mut();
+        shared.tap.wanted = wanted;
+        shared.tap.cursor.reset();
     }
 }
 
@@ -558,6 +586,31 @@ impl Graph {
         self.ctx.current_time()
     }
 
+    /// The context time of the sample the speakers are playing now: the
+    /// clock runs ahead of it by the output latency.
+    #[cfg(feature = "visualizer")]
+    fn heard(&self) -> f64 {
+        let ctx: &JsValue = self.ctx.as_ref();
+        let number = |object: &JsValue, key: &str| {
+            js_sys::Reflect::get(object, &JsValue::from_str(key))
+                .ok()
+                .and_then(|v| v.as_f64())
+        };
+        // `getOutputTimestamp` and the two latencies are missing from
+        // web-sys, and from some browsers.
+        let stamp = js_sys::Reflect::get(ctx, &JsValue::from_str("getOutputTimestamp"))
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+            .and_then(|f| f.call0(ctx).ok())
+            .and_then(|stamp| number(&stamp, "contextTime"));
+        web_tap::heard_time(
+            self.now(),
+            stamp,
+            number(ctx, "baseLatency").unwrap_or(0.0),
+            number(ctx, "outputLatency").unwrap_or(0.0),
+        )
+    }
+
     /// Starts (or restarts) the clock: browsers only allow it from a gesture,
     /// hence the calls from the play/resume/seek paths too.
     fn resume(&self) {
@@ -625,6 +678,26 @@ struct Chunk {
     start_frame: u64,
     /// Context time it ends at.
     end_time: f64,
+    /// The audio itself and the context time it starts at, for the
+    /// visualizer tap to read back.
+    #[cfg(feature = "visualizer")]
+    buffer: AudioBuffer,
+    #[cfg(feature = "visualizer")]
+    start_time: f64,
+}
+
+/// The visualizer's tap on the output: what it feeds, whether anyone is
+/// watching, and the scratch the read-back works in.
+#[cfg(feature = "visualizer")]
+#[derive(Default)]
+struct Tap {
+    sink: Option<Arc<std::sync::Mutex<PcmBuffer>>>,
+    wanted: bool,
+    cursor: web_tap::Cursor,
+    /// One channel of a window, then the second, then both interleaved.
+    left: Vec<f32>,
+    right: Vec<f32>,
+    stereo: Vec<f32>,
 }
 
 /// The track queued behind the current one.
@@ -666,6 +739,8 @@ struct Shared {
     error: Option<String>,
     /// Planar scratch for building `AudioBuffer`s.
     planar: Vec<f32>,
+    #[cfg(feature = "visualizer")]
+    tap: Tap,
 }
 
 impl Shared {
@@ -689,6 +764,8 @@ impl Shared {
             pause_epoch: 0,
             error: None,
             planar: Vec::new(),
+            #[cfg(feature = "visualizer")]
+            tap: Tap::default(),
         }
     }
 
@@ -956,6 +1033,17 @@ impl Shared {
     /// One turn of the pump: follows the clock, the equaliser and the page
     /// visibility, tops up the scheduled audio, and says when to come back.
     fn pump(&mut self) -> Duration {
+        #[cfg(feature = "visualizer")]
+        if self.tap.wanted {
+            let wait = self.top_up();
+            self.feed_tap();
+            return wait.min(web_tap::TICK);
+        }
+        self.top_up()
+    }
+
+    /// The part of a pump turn that keeps the output fed.
+    fn top_up(&mut self) -> Duration {
         self.poll_clock();
         if let Some(graph) = self.graph.as_mut() {
             graph.sync_eq(&self.eq);
@@ -983,6 +1071,66 @@ impl Shared {
             PUMP_BUSY
         } else {
             PUMP_IDLE
+        }
+    }
+
+    /// Hands the visualizer the audio that was heard since the last turn:
+    /// the frames of the scheduled chunks that fall between the two
+    /// readings of the output clock.
+    #[cfg(feature = "visualizer")]
+    fn feed_tap(&mut self) {
+        let Tap {
+            sink: Some(sink),
+            cursor,
+            left,
+            right,
+            stereo,
+            ..
+        } = &mut self.tap
+        else {
+            return;
+        };
+        let Some(graph) = &self.graph else {
+            return;
+        };
+        let Some((from, to)) = cursor.advance(graph.heard()) else {
+            return;
+        };
+        stereo.clear();
+        for chunk in &self.chunks {
+            let buffer = &chunk.buffer;
+            let range = web_tap::frames_within(
+                chunk.start_time,
+                buffer.length() as usize,
+                f64::from(buffer.sample_rate()),
+                from,
+                to,
+            );
+            if range.is_empty() {
+                continue;
+            }
+            let start = range.start as u32;
+            left.resize(range.len(), 0.0);
+            if buffer
+                .copy_from_channel_with_start_in_channel(left, 0, start)
+                .is_err()
+            {
+                continue;
+            }
+            // Mono is heard on both sides.
+            right.clear();
+            right.extend_from_slice(left);
+            if buffer.number_of_channels() > 1 {
+                let _ = buffer.copy_from_channel_with_start_in_channel(right, 1, start);
+            }
+            for (l, r) in left.iter().zip(right.iter()) {
+                stereo.extend([*l, *r]);
+            }
+        }
+        if !stereo.is_empty()
+            && let Ok(mut buffer) = sink.lock()
+        {
+            buffer.write_interleaved(stereo, 2);
         }
     }
 
@@ -1101,6 +1249,10 @@ impl Shared {
             node,
             start_frame: self.timeline.frames(),
             end_time: start + frames as f64 / f64::from(graph.rate),
+            #[cfg(feature = "visualizer")]
+            buffer,
+            #[cfg(feature = "visualizer")]
+            start_time: start,
         });
         self.timeline.commit(frames as u64);
         Ok(())

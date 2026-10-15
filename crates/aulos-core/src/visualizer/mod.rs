@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Backend for the lactea visualizer: the command protocol between the UI
-//! and the render thread, preset discovery, and the shuffled preset rotation.
-//! The wgpu/lactea renderer itself is UI-side.
+//! and the renderer, preset discovery ([`source`] says where presets come
+//! from on each platform), and the shuffled preset rotation. The wgpu/lactea
+//! renderer itself is UI-side.
 
 pub mod browser;
 pub mod playlist;
 pub mod presets;
+pub mod source;
 
 use std::path::PathBuf;
 
-/// Commands sent from the UI thread to the dedicated lactea render
-/// thread (see `lactea_render_stream` in the UI crate). Drained via
-/// `try_recv()` once per frame, before rendering.
+/// Commands sent from the UI to the lactea renderer (see `viz.rs` in the UI
+/// crate). Drained once per frame, before rendering.
 #[derive(Debug, Clone)]
 pub enum VizCommand {
     /// Advance to the next preset via the shuffled playlist (hard cut).
@@ -29,6 +30,10 @@ pub enum VizCommand {
     SetLocked(bool),
     /// Adjust beat-reactivity sensitivity (typical range 0.0-2.0).
     SetBeatSensitivity(f32),
+    /// Look for presets (and textures) again, because the set changed
+    /// (the browser's import): the list the UI shows and the rotation are
+    /// rebuilt; the preset on screen stays.
+    RescanPresets,
 }
 
 /// Interleaved stereo f32 samples read from the PCM ring per render frame:
