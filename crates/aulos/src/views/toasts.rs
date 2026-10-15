@@ -114,6 +114,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     let effect = app.session.radio.restore(station);
                     app.run(effect);
                 }
+                Some(ToastAction::AllowMusicFolders) => {
+                    super::settings::allow_pending_folders(app);
+                }
                 None => {}
             }
         }

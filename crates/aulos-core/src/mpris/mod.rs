@@ -259,7 +259,7 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
 /// backend about: any field but the position changed, or the position
 /// jumped (see [`seek_target`]). Plain ticks of a playing track are not:
 /// the OS extrapolates them.
-fn changed_beyond_ticking(previous: &MprisSnapshot, next: &MprisSnapshot) -> bool {
+pub fn changed_beyond_ticking(previous: &MprisSnapshot, next: &MprisSnapshot) -> bool {
     let mut ticked = previous.clone();
     ticked.position_us = next.position_us;
     ticked != *next || seek_target(previous, next).is_some()

@@ -49,12 +49,15 @@ pub enum PlaybackEvent {
 }
 
 /// Something the UI should tell the user about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaybackNotice {
     /// This many tracks were queued behind the current one (nothing started).
     Queued(usize),
     /// None of the opened files could be played.
     OpenFilesFailed,
+    /// The backend could not play a track after accepting it (a file or
+    /// server that cannot be read, an undecodable format); the reason.
+    PlayFailed(String),
 }
 
 /// Where [`Session::queue_tracks`](super::Session::queue_tracks) inserts.

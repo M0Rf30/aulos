@@ -7,8 +7,9 @@
 //! UI thread; a cancelled dialog is simply `None` / an empty list.
 //!
 //! A browser cannot hand out filesystem paths, so there every picker reports
-//! a cancelled dialog until the web build reads files through the File System
-//! Access API instead.
+//! a cancelled dialog, except [`pick_music_folder`]: a music folder is
+//! granted through the browser and named by a virtual path (see
+//! `aulos_core::web_fs`).
 
 use std::path::PathBuf;
 
@@ -105,6 +106,21 @@ pub async fn pick_folder(_title: &str) -> Option<PathBuf> {
     None
 }
 
+/// A music folder to add to the library: `Ok(None)` when cancelled, a message
+/// when the browser refused to share the folder.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn pick_music_folder(title: &str) -> Result<Option<PathBuf>, String> {
+    Ok(pick_folder(title).await)
+}
+
+/// A music folder to add to the library: `Ok(None)` when cancelled, a message
+/// when the browser refused to share the folder. The folder is named by a
+/// virtual path (`/<folder name>`).
+#[cfg(target_arch = "wasm32")]
+pub async fn pick_music_folder(_title: &str) -> Result<Option<PathBuf>, String> {
+    aulos_core::web_fs::pick_folder().await
+}
+
 /// A file to write; always `None` in the browser.
 #[cfg(target_arch = "wasm32")]
 pub async fn save_file(
@@ -113,4 +129,21 @@ pub async fn save_file(
     _filter: Option<&Filter<'_>>,
 ) -> Option<PathBuf> {
     None
+}
+
+/// Asks the browser to let the page read the music folder `path` again (it
+/// forgets permissions between visits). Must run from a click.
+#[cfg(target_arch = "wasm32")]
+pub async fn allow_music_folder(path: PathBuf) -> Result<(), String> {
+    use aulos_core::web_fs::{RootStatus, request_access};
+    match request_access(path).await? {
+        RootStatus::Ready => Ok(()),
+        _ => Err("Folder access was not granted".to_owned()),
+    }
+}
+
+/// Nothing to ask for: a desktop build reads every folder.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn allow_music_folder(_path: PathBuf) -> Result<(), String> {
+    Ok(())
 }

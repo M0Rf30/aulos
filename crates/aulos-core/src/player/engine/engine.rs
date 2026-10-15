@@ -43,6 +43,7 @@ use web_time::Instant;
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::{BitOrder, ChannelDataLayout};
 
+use super::conversion::db_to_linear;
 use super::cpal_utils;
 use super::crossfade;
 use super::decoder::{AudioFormat as DecoderFormat, SymphoniaDecoder};
@@ -1560,10 +1561,6 @@ fn apply_seek(
         }
         Err(e) => tracing::error!("seek failed: {e}"),
     }
-}
-
-fn db_to_linear(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
 }
 
 /// Convert a running unit count (samples or DSD bytes) at `units_per_second`

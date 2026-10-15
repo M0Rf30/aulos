@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Concurrent cover decodes while loading the local library.
+#[cfg(not(target_arch = "wasm32"))]
 const COVER_DECODE_CONCURRENCY: usize = 4;
 
 /// Albums fetched per batch from a remote provider.
@@ -283,7 +284,29 @@ impl Session {
         match provider.provider_type() {
             ProviderType::Local => {
                 let progress = Arc::clone(&self.library.scan_progress);
-                Reload::effect(self.scan_with(async move {
+                // The browser reads its files asynchronously (see
+                // `library::web_scanner`), so it scans outside the provider.
+                #[cfg(target_arch = "wasm32")]
+                let scan = {
+                    _ = provider;
+                    let dirs = self.config.config.music_dirs.clone();
+                    // One thread in the page: the future is only ever polled
+                    // where it was created.
+                    send_wrapper::SendWrapper::new(async move {
+                        crate::library::web_scanner::scan(
+                            &crate::paths::library_db_path(),
+                            &dirs,
+                            &progress,
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!("library scan failed: {e}");
+                            0
+                        })
+                    })
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let scan = async move {
                     crate::task::spawn_blocking(move || {
                         provider.sync_library(&progress).unwrap_or_else(|e| {
                             tracing::error!("sync_library failed: {e}");
@@ -292,7 +315,8 @@ impl Session {
                     })
                     .await
                     .unwrap_or(0)
-                }))
+                };
+                Reload::effect(self.scan_with(scan))
             }
             // Subsonic providers connect on demand: no idle subscription.
             ProviderType::Subsonic => self.reload_library(),
@@ -746,8 +770,6 @@ async fn load_local(
     .await
     .unwrap_or_default();
 
-    let permits = Arc::new(tokio::sync::Semaphore::new(COVER_DECODE_CONCURRENCY));
-
     // Thumbnails persisted by earlier launches: an album whose cover file
     // is unchanged skips the full-size decode.
     let mut cached = {
@@ -762,21 +784,88 @@ async fn load_local(
         .collect();
     let stale_cache = cached.keys().any(|k| !keep.contains(k));
 
-    let cover_tasks: Vec<_> = albums
+    let first_tracks: Vec<(String, PathBuf)> = albums
         .iter()
         .filter_map(|album| {
             let key = CoverArt::album_key(&album.artist, &album.name);
             album.tracks.first().map(|track| (key, track.path.clone()))
         })
+        .collect();
+    let results = album_covers(first_tracks, &mut cached).await;
+
+    let mut covers = CoverSet::new();
+    let mut fresh = Vec::new();
+    for (key, thumb, new) in results {
+        covers.extend(thumb.map(|t| (key, t)));
+        fresh.extend(new);
+    }
+    if !fresh.is_empty() || stale_cache {
+        // Not awaited: the library need not wait for the cache write.
+        crate::task::run_detached(move || {
+            provider.store_thumbs(&fresh, &keep);
+        });
+    }
+
+    LibraryEvent::Loaded {
+        generation,
+        provider_id,
+        tracks,
+        albums,
+        covers,
+    }
+}
+
+/// One album's cover as [`album_covers`] finds it: the album key, its
+/// thumbnail (`None` for "no cover"), and the cache entry to store when what
+/// the cache held was missing or stale.
+type AlbumCover = (String, Option<CoverThumb>, Option<(String, CachedThumb)>);
+
+/// What the persisted cache says about an album's cover, given the current
+/// `stamp` of its first track and (when the cache holds "no cover") the
+/// `coverless` stamp: `Some(thumb)` when the entry is still valid, `None`
+/// when the cover must be read again.
+fn cache_verdict(
+    hit: Option<&CachedThumb>,
+    stamp: Option<&ThumbStamp>,
+    coverless: Option<&ThumbStamp>,
+) -> Option<Option<CoverThumb>> {
+    match (hit, stamp) {
+        (
+            Some(CachedThumb {
+                thumb: Some(thumb),
+                stamp: old,
+            }),
+            Some(now),
+        ) if old == now => Some(Some(thumb.clone())),
+        (
+            Some(CachedThumb {
+                thumb: None,
+                stamp: old,
+            }),
+            _,
+        ) if coverless == Some(old) => Some(None),
+        _ => None,
+    }
+}
+
+/// The covers of the albums whose first track is at the given path, from the
+/// persisted `cached` thumbnails (consumed) or the files.
+///
+/// Decode + downscale run on the blocking pool: CPU-bound work must not run
+/// on an async worker shared with other futures. The full-size bytes are
+/// dropped right there; they are re-read lazily for whichever album needs
+/// them (blur, hero, notification). At most `COVER_DECODE_CONCURRENCY`
+/// full-size decodes run at once: an unbounded burst peaks at GBs and leaves
+/// one malloc arena per thread behind.
+#[cfg(not(target_arch = "wasm32"))]
+async fn album_covers(
+    albums: Vec<(String, PathBuf)>,
+    cached: &mut std::collections::HashMap<String, CachedThumb>,
+) -> Vec<AlbumCover> {
+    let permits = Arc::new(tokio::sync::Semaphore::new(COVER_DECODE_CONCURRENCY));
+    let tasks: Vec<_> = albums
+        .into_iter()
         .map(|(key, path)| {
-            // Decode + downscale on the blocking pool: CPU-bound work must
-            // not run on an async worker shared with other futures. The
-            // full-size bytes are dropped right here; they are re-read
-            // lazily for whichever album needs them (blur, hero,
-            // notification).
-            // At most `COVER_DECODE_CONCURRENCY` full-size decodes at once:
-            // an unbounded burst peaks at GBs and leaves one malloc arena
-            // per thread behind.
             let permits = Arc::clone(&permits);
             let hit = cached.remove(&key);
             async move {
@@ -790,26 +879,10 @@ async fn load_local(
                         .is_some_and(|h| h.thumb.is_none())
                         .then(|| ThumbStamp::of_coverless(&path))
                         .flatten();
-                    match (&hit, &stamp) {
-                        (
-                            Some(CachedThumb {
-                                thumb: Some(thumb),
-                                stamp: old,
-                            }),
-                            Some(now),
-                        ) if old == now => {
-                            return Some((key, Some(thumb.clone()), None));
-                        }
-                        (
-                            Some(CachedThumb {
-                                thumb: None,
-                                stamp: old,
-                            }),
-                            _,
-                        ) if coverless.as_ref() == Some(old) => {
-                            return Some((key, None, None));
-                        }
-                        _ => {}
+                    if let Some(thumb) =
+                        cache_verdict(hit.as_ref(), stamp.as_ref(), coverless.as_ref())
+                    {
+                        return Some((key, thumb, None));
                     }
                     let thumb = CoverArt::get_cover_art(&path)
                         .and_then(|bytes| CoverThumb::from_bytes(&bytes));
@@ -835,33 +908,65 @@ async fn load_local(
             }
         })
         .collect();
-
-    let mut covers = CoverSet::new();
-    let mut fresh = Vec::new();
     // The decodes are bounded by `permits` and run on the blocking pool, so
     // polling the futures together from this one task keeps them parallel.
-    for (key, thumb, new) in futures::future::join_all(cover_tasks)
+    futures::future::join_all(tasks)
         .await
         .into_iter()
         .flatten()
-    {
-        covers.extend(thumb.map(|t| (key, t)));
-        fresh.extend(new);
-    }
-    if !fresh.is_empty() || stale_cache {
-        // Not awaited: the library need not wait for the cache write.
-        crate::task::run_detached(move || {
-            provider.store_thumbs(&fresh, &keep);
-        });
-    }
+        .collect()
+}
 
-    LibraryEvent::Loaded {
-        generation,
-        provider_id,
-        tracks,
-        albums,
-        covers,
+/// The browser's [`album_covers`]: the files are read through `web_fs`, one
+/// album at a time with the event loop given a turn between them (decoding
+/// happens on the page's only thread). A folder the page cannot read now
+/// (permission pending after a reload) cannot validate the cache, so its
+/// albums keep their cached thumbnails.
+#[cfg(target_arch = "wasm32")]
+async fn album_covers(
+    albums: Vec<(String, PathBuf)>,
+    cached: &mut std::collections::HashMap<String, CachedThumb>,
+) -> Vec<AlbumCover> {
+    use crate::library::web_covers;
+    let mut yielder = crate::web_fs::Yielder::new();
+    let mut found = Vec::with_capacity(albums.len());
+    for (key, path) in albums {
+        let hit = cached.remove(&key);
+        if !web_covers::files_available(&path) {
+            if let Some(hit) = hit {
+                found.push((key, hit.thumb, None));
+            }
+            continue;
+        }
+        let stamp = web_covers::thumb_stamp(&path).await;
+        let coverless = if hit.as_ref().is_some_and(|h| h.thumb.is_none()) {
+            web_covers::coverless_stamp(&path).await
+        } else {
+            None
+        };
+        if let Some(thumb) = cache_verdict(hit.as_ref(), stamp.as_ref(), coverless.as_ref()) {
+            found.push((key, thumb, None));
+            continue;
+        }
+        let thumb = web_covers::cover_thumb(&path).await;
+        let stamp = if thumb.is_some() {
+            stamp
+        } else {
+            web_covers::coverless_stamp(&path).await
+        };
+        let fresh = stamp.map(|stamp| {
+            (
+                key.clone(),
+                CachedThumb {
+                    thumb: thumb.clone(),
+                    stamp,
+                },
+            )
+        });
+        found.push((key, thumb, fresh));
+        yielder.tick().await;
     }
+    found
 }
 
 /// Covers of one batch of albums, fetched in parallel.

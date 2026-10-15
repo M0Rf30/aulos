@@ -23,6 +23,9 @@ pub mod pcm;
 #[cfg(all(feature = "visualizer", target_os = "linux"))]
 pub mod pw_capture;
 pub mod queue;
+// The browser output's clock arithmetic; plain code, so it is tested natively.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_timeline;
 
 use crate::config::{RepeatMode, ReplayGainMode};
 use crate::library::{Track, TrackSource};
@@ -722,6 +725,12 @@ impl Player {
     /// that don't embed metadata.
     pub fn icy_title(&self) -> Option<String> {
         self.local_backend.icy_title()
+    }
+
+    /// The error of a local play that failed after it had started (the
+    /// browser reads and decodes in the background), taken once.
+    pub fn take_playback_error(&mut self) -> Option<String> {
+        self.local_backend.take_error()
     }
 
     /// Set crossfade duration on the local backend.

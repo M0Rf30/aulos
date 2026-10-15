@@ -74,4 +74,27 @@ pub trait PlaybackBackend: Send {
     fn queue_next(&mut self, _source: crate::library::TrackSource) -> Result<(), PlayerError> {
         Ok(())
     }
+
+    /// Takes the error of a play that failed after `play` had returned (the
+    /// browser loads and decodes asynchronously). `None` when there is none;
+    /// backends that report every failure from `play` keep the default.
+    fn take_error(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// Best-effort file-extension hint for Symphonia's format probe, extracted
+/// from the URL path (ignoring any query string). Streaming API endpoints
+/// (e.g. Subsonic's `/rest/stream`) often have no extension at all, in
+/// which case Symphonia falls back to content sniffing — this is purely a
+/// probe speed-up, never required for correctness.
+pub(super) fn extension_hint(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next()?;
+    let (_, ext) = name.rsplit_once('.')?;
+    if ext.is_empty() || ext.len() > 8 {
+        None
+    } else {
+        Some(ext.to_string())
+    }
 }

@@ -16,6 +16,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTag, Tag as SymTag};
 
+use super::sparse::PositionalRead;
 use super::{Track, tags};
 use crate::player::engine::decoder::local_file_format_options;
 
@@ -133,9 +134,9 @@ pub fn bitrate_kbps(payload_bytes: u64, duration: Duration) -> Option<u32> {
         .then(|| (payload_bytes as f64 * 8.0 / secs / 1000.0).round() as u32)
 }
 
-/// Audio payload bytes of an open file (see [`layout`] for what counts as
-/// payload per container). Header-only reads; used by the scanner.
-pub(crate) fn payload_bytes(file: &File, size: u64) -> u64 {
+/// Audio payload bytes of `size` bytes of data (see [`layout`] for what counts
+/// as payload per container). Header-only reads; used by the scanner.
+pub(crate) fn payload_bytes(file: &dyn PositionalRead, size: u64) -> u64 {
     layout::measure(file, size, false).map_or(size, |l| l.payload_bytes)
 }
 

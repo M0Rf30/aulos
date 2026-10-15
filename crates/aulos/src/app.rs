@@ -106,12 +106,15 @@ pub enum ToastKind {
 pub enum ToastAction {
     /// Re-save a removed radio station.
     RestoreStation(aulos_core::online::store::RadioStation),
+    /// Ask the browser for access to the music folders waiting for it.
+    AllowMusicFolders,
 }
 
 impl ToastAction {
     pub fn label(&self) -> &'static str {
         match self {
             Self::RestoreStation(_) => "Undo",
+            Self::AllowMusicFolders => "Allow",
         }
     }
 }
@@ -333,6 +336,7 @@ impl App {
         for (name, reason) in &init_errors {
             views::overlays::on_connect_failed(&mut app, name, reason);
         }
+        views::settings::notify_folders_needing_access(&mut app);
         app.start_media_session(native_window(cc));
         let start = app.session.start();
         app.run(start);
@@ -430,6 +434,9 @@ impl App {
             }
             SessionNotice::Playback(PlaybackNotice::OpenFilesFailed) => {
                 self.toast_error("Could not open those files")
+            }
+            SessionNotice::Playback(PlaybackNotice::PlayFailed(reason)) => {
+                self.toast_error(format!("Playback failed: {reason}"))
             }
             SessionNotice::ProviderActionFailed(reason) => {
                 self.toast_error(format!("Action failed: {reason}"))
@@ -1139,6 +1146,10 @@ impl eframe::App for App {
             self.apply_zoom();
         }
         self.covers.upload_pending(&self.session.library.covers);
+        #[cfg(target_arch = "wasm32")]
+        for command in crate::media_session::sync(ctx, &mut self.session) {
+            self.media_command(command);
+        }
         views::tagger::pump(self);
         views::settings::pump(self);
         self.update_art();

@@ -555,7 +555,11 @@ impl Session {
     /// MPRIS and the extras housekeeping.
     pub fn playback_tick(&mut self) -> PlaybackUpdate {
         let mut update = PlaybackUpdate::none();
+        let mut failure = None;
         if let Some(player) = &mut self.playback.player {
+            // Backends that load asynchronously (the browser's) report a
+            // failed load here, after `play` returned.
+            failure = player.take_playback_error();
             if !self.playback.seeking {
                 self.playback.position =
                     capped_position(player.position(), self.playback.current_track.as_ref());
@@ -571,6 +575,10 @@ impl Session {
                 let result = player.advance_on_finish();
                 update = self.start_or_log(result, "Advance on finish failed");
             }
+        }
+
+        if let Some(reason) = failure {
+            update.notice = Some(PlaybackNotice::PlayFailed(reason));
         }
 
         let mut position_save = Effect::none();
@@ -809,19 +817,6 @@ impl Session {
         let Some(handle) = self.playback.mpris.as_ref() else {
             return Effect::none();
         };
-        let player = self.playback.player.as_ref();
-
-        let status = match player.map(Player::state) {
-            Some(PlayerState::Playing) => MprisStatus::Playing,
-            Some(PlayerState::Paused) => MprisStatus::Paused,
-            Some(PlayerState::Stopped) | None => MprisStatus::Stopped,
-        };
-        let loop_mode = match self.config.config.repeat_mode {
-            RepeatMode::None => LoopMode::None,
-            RepeatMode::All => LoopMode::Playlist,
-            RepeatMode::One => LoopMode::Track,
-        };
-
         let track = self.playback.current_track.as_ref();
         let (art_url, art_effect) = match track {
             Some(t) => match handle.cached_art_url(t.id) {
@@ -838,7 +833,26 @@ impl Session {
             None => (None, Effect::none()),
         };
 
-        handle.publish(MprisSnapshot {
+        handle.publish(self.media_snapshot(art_url));
+        art_effect
+    }
+
+    /// What the media session shows and offers right now; `art_url` is the
+    /// current track's resolved cover, if any.
+    pub fn media_snapshot(&self, art_url: Option<String>) -> MprisSnapshot {
+        let player = self.playback.player.as_ref();
+        let status = match player.map(Player::state) {
+            Some(PlayerState::Playing) => MprisStatus::Playing,
+            Some(PlayerState::Paused) => MprisStatus::Paused,
+            Some(PlayerState::Stopped) | None => MprisStatus::Stopped,
+        };
+        let loop_mode = match self.config.config.repeat_mode {
+            RepeatMode::None => LoopMode::None,
+            RepeatMode::All => LoopMode::Playlist,
+            RepeatMode::One => LoopMode::Track,
+        };
+        let track = self.playback.current_track.as_ref();
+        MprisSnapshot {
             status,
             title: track.map(|t| t.title.clone()).unwrap_or_default(),
             artist: track.map(|t| t.artist.clone()).unwrap_or_default(),
@@ -856,8 +870,7 @@ impl Session {
             can_go_previous: player.is_some_and(Player::has_previous),
             can_seek: track.is_some_and(|t| &*t.provider_id != "radio"),
             can_play: track.is_some(),
-        });
-        art_effect
+        }
     }
 
     /// Takes over the media-session handle the backend announced

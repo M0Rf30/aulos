@@ -21,13 +21,14 @@ use std::time::Duration;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatId, MediaInfo, Track, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{
     Metadata, MetadataOptions, MetadataRevision, StandardTag, StandardVisualKey, Tag as SymTag,
     Visual,
 };
 use symphonia::core::units::Duration as SymDuration;
 
+use super::sparse::SparseFile;
 use crate::player::engine::decoder::{chain_duration_secs, local_file_format_options};
 
 /// An embedded picture (cover art), as extracted from a tag.
@@ -111,13 +112,33 @@ pub fn probe(path: &Path, want_pictures: bool) -> Option<ProbedFile> {
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
     // Positional header reads only (no seek), so the stream below still starts at 0.
     let payload_bytes = super::tech_info::payload_bytes(&file, file_size);
+    probe_source(Box::new(file), payload_bytes, path, want_pictures)
+}
 
+/// [`probe`] for a file of which only the ranges the probe needs were loaded
+/// (see [`SparseFile`]); `path` only supplies the extension hint. `None`
+/// when the probe fails. A `Some` can still rest on guesses when the probe
+/// read bytes that were not loaded: take [`SparseFile::hole_flag`] before the
+/// call and distrust the result when it is raised.
+pub fn probe_sparse(path: &Path, file: SparseFile, want_pictures: bool) -> Option<ProbedFile> {
+    let payload_bytes = super::tech_info::payload_bytes(&file, file.size());
+    probe_source(Box::new(file), payload_bytes, path, want_pictures)
+}
+
+/// Probes `source`, a file (or a stand-in for one) named `path`, whose audio
+/// payload measures `payload_bytes`.
+fn probe_source(
+    source: Box<dyn MediaSource>,
+    payload_bytes: u64,
+    path: &Path,
+    want_pictures: bool,
+) -> Option<ProbedFile> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
 
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = MediaSourceStream::new(source, Default::default());
 
     let mut reader = symphonia::default::get_probe()
         .probe(
@@ -413,6 +434,36 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file probed from memory (the browser's way) reads like one probed
+    /// from disk, whether it was loaded whole or in two overlapping chunks.
+    #[test]
+    fn probing_sparse_memory_matches_probing_the_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagio");
+        for entry in std::fs::read_dir(dir).expect("fixtures") {
+            let path = entry.expect("entry").path();
+            let bytes = std::fs::read(&path).expect("read");
+            let expected = format!("{:?}", probe(&path, true));
+            let whole = SparseFile::whole(bytes.clone());
+            assert_eq!(
+                format!("{:?}", probe_sparse(&path, whole, true)),
+                expected,
+                "{}",
+                path.display()
+            );
+            let mid = bytes.len() / 2;
+            let mut chunks = SparseFile::new(bytes.len() as u64);
+            chunks.insert(0, bytes[..=mid].to_vec());
+            chunks.insert(mid as u64, bytes[mid..].to_vec());
+            assert!(chunks.is_complete());
+            assert_eq!(
+                format!("{:?}", probe_sparse(&path, chunks, true)),
+                expected,
+                "{}",
+                path.display()
+            );
+        }
+    }
 
     /// MPEG-1 layer 3 frames between a leading ID3v2.4 tag with only `TIT2`,
     /// and an ID3v1 tag with a (30-char truncated) title and an artist.

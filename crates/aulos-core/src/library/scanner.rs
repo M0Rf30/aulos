@@ -12,7 +12,7 @@ use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Supported audio file extensions.
-const AUDIO_EXTENSIONS: &[&str] = &[
+pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "ape", "wv", "dsf", "dff",
 ];
 
@@ -199,7 +199,7 @@ impl LibraryScanner {
     }
 
     /// Check if a path is a supported audio file.
-    fn is_audio_file(path: &Path) -> bool {
+    pub(crate) fn is_audio_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
@@ -208,6 +208,13 @@ impl LibraryScanner {
     /// Read metadata from an audio file via symphonia (see `super::tags`).
     pub fn read_metadata(path: &Path) -> Result<Track, String> {
         let probed = tags::probe(path, false).ok_or_else(|| "Cannot probe file".to_string())?;
+        Ok(Self::track_from_probed(path, probed))
+    }
+
+    /// The library [`Track`] of the file `path` (the title falls back to the
+    /// file name) from what probing it found. Shared by the native scan and
+    /// the browser's, which probes through other means.
+    pub(crate) fn track_from_probed(path: &Path, probed: tags::ProbedFile) -> Track {
         let t = probed.tags;
 
         // Use filename as title if tag is missing.
@@ -230,7 +237,7 @@ impl LibraryScanner {
         });
 
         let source_uri = path.to_string_lossy().to_string();
-        Ok(Track {
+        Track {
             id: 0,
             path: path.to_path_buf(),
             title,
@@ -254,7 +261,7 @@ impl LibraryScanner {
             release_type: t.release_type,
             added_at: 0,
             favorited_at: 0,
-        })
+        }
     }
 }
 

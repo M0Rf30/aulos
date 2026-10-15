@@ -10,7 +10,7 @@
 //! [`AudioFilter`]: crate::player::engine::filter::AudioFilter
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::equalizer::BAND_FREQUENCIES;
 
@@ -80,6 +80,21 @@ impl BiquadCoeffs {
     }
 }
 
+/// `alpha = sin(w0) * sinh(ln(2)/2 * BW * w0/sin(w0))` of the cookbook's
+/// peaking filter, `w0` the normalised centre frequency in radians.
+fn peaking_alpha(w0: f32, bandwidth_octaves: f32) -> f32 {
+    let sin_w0 = w0.sin();
+    sin_w0 * (2.0_f32.ln() / 2.0 * bandwidth_octaves * w0 / sin_w0).sinh()
+}
+
+/// The `Q` that gives a peaking filter (`alpha = sin(w0) / (2Q)`, the form
+/// behind Web Audio's `BiquadFilterNode`) the same shape as
+/// [`compute_peaking_eq`] with `bandwidth_octaves`.
+pub fn peaking_q(freq_hz: f32, sample_rate: f32, bandwidth_octaves: f32) -> f32 {
+    let w0 = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
+    w0.sin() / (2.0 * peaking_alpha(w0, bandwidth_octaves))
+}
+
 /// Compute peaking EQ biquad coefficients.
 ///
 /// Based on the Audio EQ Cookbook by Robert Bristow-Johnson.
@@ -101,10 +116,8 @@ pub fn compute_peaking_eq(
 
     let a = 10.0_f32.powf(gain_db / 40.0); // sqrt(10^(dB/20))
     let w0 = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
-    let sin_w0 = w0.sin();
     let cos_w0 = w0.cos();
-    // alpha = sin(w0) * sinh(ln(2)/2 * BW * w0/sin(w0))
-    let alpha = sin_w0 * (2.0_f32.ln() / 2.0 * bandwidth_octaves * w0 / sin_w0).sinh();
+    let alpha = peaking_alpha(w0, bandwidth_octaves);
 
     let b0 = 1.0 + alpha * a;
     let b1 = -2.0 * cos_w0;
@@ -178,6 +191,10 @@ pub struct EqController {
     bypass: Arc<AtomicBool>,
     /// Current sample rate — needed to recompute coefficients.
     sample_rate: f32,
+    /// The band gains last set, as `f32` bits, for outputs that configure
+    /// their own filters (the browser's Web Audio graph) instead of running
+    /// the shared coefficients.
+    gains: Arc<[AtomicU32; NUM_BANDS]>,
 }
 
 impl EqController {
@@ -187,7 +204,19 @@ impl EqController {
             coeffs,
             bypass,
             sample_rate,
+            gains: Arc::new(std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits()))),
         }
+    }
+
+    /// The band gains (dB) last set.
+    pub fn gains(&self) -> [f32; NUM_BANDS] {
+        std::array::from_fn(|i| f32::from_bits(self.gains[i].load(Ordering::Acquire)))
+    }
+
+    /// The `Q` of a band's peaking filter at `sample_rate`, matching the
+    /// shape of the coefficients [`Self::set_band`] computes.
+    pub fn band_q(index: usize, sample_rate: f32) -> f32 {
+        peaking_q(BAND_FREQUENCIES[index], sample_rate, BANDWIDTH_OCTAVES)
     }
 
     /// Set the gain for a single band and recompute its coefficients.
@@ -195,6 +224,7 @@ impl EqController {
         if index >= NUM_BANDS {
             return;
         }
+        self.gains[index].store(gain_db.to_bits(), Ordering::Release);
         let c = compute_peaking_eq(
             BAND_FREQUENCIES[index],
             gain_db,
@@ -207,6 +237,7 @@ impl EqController {
     /// Set all 10 bands at once.
     pub fn set_all(&self, gains: &[f32; NUM_BANDS]) {
         for (i, &gain_db) in gains.iter().enumerate() {
+            self.gains[i].store(gain_db.to_bits(), Ordering::Release);
             let c = compute_peaking_eq(
                 BAND_FREQUENCIES[i],
                 gain_db,
@@ -349,6 +380,37 @@ mod tests {
         assert!((c.b2 - loaded.b2).abs() < 1e-6);
         assert!((c.a1 - loaded.a1).abs() < 1e-6);
         assert!((c.a2 - loaded.a2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn peaking_q_reproduces_the_coefficients_of_a_q_form_peaking_filter() {
+        // Web Audio's peaking filter uses `alpha = sin(w0) / (2Q)`: with the
+        // Q of `peaking_q` it must give the cookbook coefficients above.
+        for (freq, gain, rate) in [(125.0, 6.0, 44100.0), (4000.0, -9.0, 48000.0)] {
+            let c = compute_peaking_eq(freq, gain, rate, 1.0);
+            let q = peaking_q(freq, rate, 1.0);
+            let a = 10.0_f32.powf(gain / 40.0);
+            let w0 = 2.0 * std::f32::consts::PI * freq / rate;
+            let alpha = w0.sin() / (2.0 * q);
+            let a0 = 1.0 + alpha / a;
+            assert!((c.b0 - (1.0 + alpha * a) / a0).abs() < 1e-5);
+            assert!((c.b2 - (1.0 - alpha * a) / a0).abs() < 1e-5);
+            assert!((c.a2 - (1.0 - alpha / a) / a0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn controller_remembers_the_gains_it_was_given() {
+        let controller = EqController::new(
+            new_shared_coeffs(),
+            Arc::new(AtomicBool::new(true)),
+            44100.0,
+        );
+        controller.set_band(2, 4.5);
+        assert_eq!(controller.gains()[2], 4.5);
+        let all = [1.0, -2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -6.0];
+        controller.set_all(&all);
+        assert_eq!(controller.gains(), all);
     }
 
     #[test]

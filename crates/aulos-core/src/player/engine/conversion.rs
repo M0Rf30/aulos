@@ -26,6 +26,11 @@ pub fn samples_to_s16le(samples: &[f32]) -> Vec<u8> {
     buf
 }
 
+/// Linear amplitude factor of a gain in decibels (replay gain).
+pub fn db_to_linear(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
 /// Clamp and scale a single f32 sample to `i16` range.
 #[inline]
 pub fn f32_to_i16(val: f32) -> i16 {

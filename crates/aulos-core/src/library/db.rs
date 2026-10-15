@@ -127,6 +127,13 @@ impl LibraryDb {
         }
         super::smart_playlist::register_sql_functions(conn)
             .map_err(|e| format!("DB function registration error: {e}"))?;
+        // The browser keeps the database in memory; every commit is a reason
+        // to save a new snapshot of it.
+        #[cfg(target_arch = "wasm32")]
+        let _ = conn.commit_hook(Some(|| {
+            crate::web_fs::persist::mark_dirty();
+            false
+        }));
         Ok(())
     }
 
@@ -545,6 +552,24 @@ impl LibraryDb {
     /// Remove missing local tracks beneath successfully scanned roots.
     #[tracing::instrument(skip(self, roots), level = "debug")]
     pub fn remove_missing_tracks(&self, roots: &[PathBuf]) -> Result<usize, String> {
+        self.remove_local_tracks_beneath(roots, |path| match std::fs::metadata(path) {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                tracing::warn!("Skipping inaccessible track {}: {error}", path.display());
+                false
+            }
+        })
+    }
+
+    /// Remove the local tracks beneath `roots` for which `is_missing` holds.
+    /// The scanners' (native and browser) way to drop vanished files; they
+    /// differ only in how a file's absence is known.
+    pub fn remove_local_tracks_beneath(
+        &self,
+        roots: &[PathBuf],
+        is_missing: impl Fn(&Path) -> bool,
+    ) -> Result<usize, String> {
         if roots.is_empty() {
             return Ok(0);
         }
@@ -567,14 +592,7 @@ impl LibraryDb {
                 if !roots.iter().any(|root| path.starts_with(root)) {
                     return None;
                 }
-                match std::fs::metadata(&path) {
-                    Ok(_) => None,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(id),
-                    Err(error) => {
-                        tracing::warn!("Skipping inaccessible track {}: {error}", path.display());
-                        None
-                    }
-                }
+                is_missing(&path).then_some(id)
             })
             .collect();
 

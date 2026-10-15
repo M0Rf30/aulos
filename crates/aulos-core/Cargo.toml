@@ -126,7 +126,60 @@ i18n-embed = { workspace = true, features = ["desktop-requester"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Navigator"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Storage",
+    "Navigator",
+    # Web Audio playback (`player/web_backend.rs`).
+    "Document",
+    "EventTarget",
+    "AudioContext",
+    "AudioContextOptions",
+    "AudioContextState",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioParam",
+    "AudioScheduledSourceNode",
+    "BaseAudioContext",
+    "BiquadFilterNode",
+    "BiquadFilterType",
+    "GainNode",
+    # Fetching HTTP tracks.
+    "Response",
+    # Local files (`web_fs`): folder pickers and their permissions, the
+    # `<input type=file>` fallback, reading `File`s, IndexedDB persistence of
+    # the folder handles and the library snapshot, flushing on page hide.
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Event",
+    "FileList",
+    "File",
+    "Blob",
+    "FileSystemHandle",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemHandleKind",
+    "FileSystemHandlePermissionDescriptor",
+    "FileSystemPermissionMode",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "VisibilityState",
+    "DomException",
+] }
+# The browser's in-memory SQLite file system (the library database), to save
+# and restore snapshots of it (`web_fs::persist`). Same version rusqlite
+# resolves, so there is one copy of SQLite in the module.
+sqlite-wasm-rs = { version = "0.5", default-features = false }
+# Commit hook: tells `web_fs::persist` that the database changed.
+rusqlite = { version = "0.40", features = ["hooks"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 send_wrapper = { version = "0.6", features = ["futures"] }
 i18n-embed = { workspace = true, features = ["web-sys-requester"] }

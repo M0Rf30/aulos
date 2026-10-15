@@ -663,13 +663,24 @@ impl Session {
         }
         let removed = self.config.config.music_dirs.remove(index);
         tracing::info!("Removed music directory: {}", removed.display());
+        // The browser keeps no access to the folder once it is not listed;
+        // the rescan the caller starts drops its tracks.
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            crate::web_fs::forget_root(&removed).await;
+        });
         self.music_dirs_changed();
         true
     }
 
     fn music_dirs_changed(&mut self) {
         self.config.save();
-        self.library.music_dirs_present = self.config.config.music_dirs.iter().any(|d| d.is_dir());
+        self.library.music_dirs_present = self
+            .config
+            .config
+            .music_dirs
+            .iter()
+            .any(|d| crate::library::music_dir_exists(d));
         self.providers.reinit_local(&self.config.config);
     }
 

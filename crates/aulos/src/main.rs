@@ -12,6 +12,8 @@
 
 mod app;
 mod dialogs;
+#[cfg(target_arch = "wasm32")]
+mod media_session;
 mod smoke;
 mod theme;
 mod views;
@@ -142,6 +144,9 @@ fn main() {
 
     wasm_bindgen_futures::spawn_local(async {
         use wasm_bindgen::JsCast;
+        // The saved library and music folders come back before the session
+        // opens its database.
+        aulos_core::web_fs::init().await;
         let document = web_sys::window()
             .and_then(|window| window.document())
             .expect("a page with a document");

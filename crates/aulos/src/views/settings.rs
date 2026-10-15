@@ -2,7 +2,7 @@
 //! themselves in a scroll area on the right. Every control reads and writes
 //! the real [`aulos_core::config::Config`] through the session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use aulos_core::autoeq;
@@ -212,8 +212,39 @@ impl Sec {
 /// Results of off-thread work the page started.
 enum Msg {
     Scrobble(ScrobbleMessage),
-    /// The chosen music folder; `None` when the dialog was cancelled.
-    Folder(Option<PathBuf>),
+    /// The chosen music folder; `Ok(None)` when the dialog was cancelled.
+    Folder(Result<Option<PathBuf>, String>),
+    /// The outcome of asking the browser for access to music folders.
+    Access(Result<(), String>),
+}
+
+/// Whether the files of a music folder can be read right now. Only the
+/// browser ever lacks access (see `aulos_core::web_fs`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only the browser lacks access to its folders")
+)]
+enum Access {
+    Granted,
+    /// Saved from an earlier visit; the browser asks again on a click.
+    NeedsPermission,
+    /// Picked in a browser that cannot save folders: pick it again.
+    NeedsRepick,
+}
+
+fn access_of(dir: &Path) -> Access {
+    #[cfg(target_arch = "wasm32")]
+    match aulos_core::web_fs::status(dir) {
+        aulos_core::web_fs::RootStatus::Ready => Access::Granted,
+        aulos_core::web_fs::RootStatus::NeedsPermission => Access::NeedsPermission,
+        aulos_core::web_fs::RootStatus::NeedsRepick => Access::NeedsRepick,
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        _ = dir;
+        Access::Granted
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -905,6 +936,7 @@ pub fn pump(app: &mut App) {
         match msg {
             Msg::Scrobble(m) => scrobble_update(app, m),
             Msg::Folder(result) => folder_picked(app, result),
+            Msg::Access(result) => access_asked(app, result),
         }
     }
 }
@@ -1003,24 +1035,93 @@ fn pick_folder(app: &mut App) {
     let tx = app.views.settings.sender();
     let ctx = app.ctx.clone();
     app.handle.spawn(async move {
-        let result = dialogs::pick_folder("Select Music Directory").await;
+        let result = dialogs::pick_music_folder("Select Music Directory").await;
         if tx.send(Msg::Folder(result)).is_ok() {
             ctx.request_repaint();
         }
     });
 }
 
-fn folder_picked(app: &mut App, result: Option<PathBuf>) {
+fn folder_picked(app: &mut App, result: Result<Option<PathBuf>, String>) {
     app.views.settings.picking_folder = false;
-    // Dismissing the dialog is not worth a toast.
-    if let Some(path) = result {
-        add_folder(app, path);
+    match result {
+        Ok(Some(path)) => add_folder(app, path),
+        // Dismissing the dialog is not worth a toast.
+        Ok(None) => {}
+        Err(reason) => app.toast_error(format!("Could not add the folder: {reason}")),
     }
 }
 
 fn add_folder(app: &mut App, path: PathBuf) {
-    if app.session.add_music_dir(path) {
+    let added = app.session.add_music_dir(path);
+    // In the browser a folder picked again (to hand its files back after a
+    // reload) is already listed, but still has to be read.
+    if added || cfg!(target_arch = "wasm32") {
         rescan(app);
+    }
+}
+
+/// Asks the browser for access to the music folder `path`, then rescans.
+fn allow_folder(app: &mut App, path: PathBuf) {
+    allow_folders(app, vec![path]);
+}
+
+/// Asks the browser for access to every music folder still waiting for it
+/// (one click, so one gesture, grants all), then rescans.
+pub fn allow_pending_folders(app: &mut App) {
+    let pending = pending_permission(app);
+    allow_folders(app, pending);
+}
+
+fn allow_folders(app: &mut App, paths: Vec<PathBuf>) {
+    let tx = app.views.settings.sender();
+    let ctx = app.ctx.clone();
+    app.handle.spawn(async move {
+        let mut result = Ok(());
+        for path in paths {
+            if let Err(reason) = dialogs::allow_music_folder(path).await {
+                result = Err(reason);
+            }
+        }
+        if tx.send(Msg::Access(result)).is_ok() {
+            ctx.request_repaint();
+        }
+    });
+}
+
+fn access_asked(app: &mut App, result: Result<(), String>) {
+    if let Err(reason) = result {
+        app.toast_error(reason);
+    }
+    // What was granted can be read (and shown) now.
+    rescan(app);
+}
+
+fn pending_permission(app: &App) -> Vec<PathBuf> {
+    app.session
+        .config
+        .config
+        .music_dirs
+        .iter()
+        .filter(|d| access_of(d) == Access::NeedsPermission)
+        .cloned()
+        .collect()
+}
+
+/// At startup: tells the user what a music folder needs before its files can
+/// be played again (the browser forgets permissions between visits).
+pub fn notify_folders_needing_access(app: &mut App) {
+    let dirs = &app.session.config.config.music_dirs;
+    if !pending_permission(app).is_empty() {
+        app.toast_rich(
+            ph::FOLDER_SIMPLE,
+            "",
+            "Music folders",
+            " need your permission to be read again",
+            Some(crate::app::ToastAction::AllowMusicFolders),
+        );
+    } else if dirs.iter().any(|d| access_of(d) == Access::NeedsRepick) {
+        app.toast("Pick your music folder again in Settings › Library to play your files");
     }
 }
 
@@ -1048,7 +1149,7 @@ fn refresh_folder_cache(app: &mut App) {
                     .iter()
                     .filter(|t| t.path.starts_with(d))
                     .count(),
-                d.is_dir(),
+                aulos_core::library::music_dir_exists(d),
             )
         })
         .collect();
@@ -1062,6 +1163,10 @@ fn refresh_folder_cache(app: &mut App) {
 enum FolderAct {
     Rescan,
     Remove(usize),
+    /// Ask the browser for access to folder `usize`.
+    Allow(usize),
+    /// Pick the folder again to hand its files back to the browser.
+    PickAgain,
 }
 
 fn sec_library(app: &mut App, ui: &mut Ui) {
@@ -1081,14 +1186,14 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     ui.add_space(10.0);
 
     let mut act = None;
-    let rows: Vec<(String, usize, bool)> = app
+    let rows: Vec<(String, usize, bool, Access)> = app
         .views
         .settings
         .folders
         .dirs
         .iter()
         .zip(&app.views.settings.folders.info)
-        .map(|(d, (n, ok))| (d.display().to_string(), *n, *ok))
+        .map(|(d, (n, ok))| (d.display().to_string(), *n, *ok, access_of(d)))
         .collect();
     if rows.is_empty() {
         small_text(
@@ -1098,7 +1203,7 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         );
         ui.add_space(8.0);
     }
-    for (i, (path, tracks, exists)) in rows.iter().enumerate() {
+    for (i, (path, tracks, exists, access)) in rows.iter().enumerate() {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
         card_bg(ui, &pal, rect, pal.stroke);
         paint_icon(
@@ -1125,18 +1230,28 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         {
             act = Some(FolderAct::Remove(i));
         }
+        let (label, icon, next) = match access {
+            Access::Granted => ("Rescan", ph::ARROWS_CLOCKWISE, FolderAct::Rescan),
+            Access::NeedsPermission => ("Allow access", ph::LOCK_KEY_OPEN, FolderAct::Allow(i)),
+            Access::NeedsRepick => ("Pick again", ph::FOLDER_OPEN, FolderAct::PickAgain),
+        };
+        let enabled = match access {
+            Access::Granted => !scanning,
+            Access::NeedsPermission => true,
+            Access::NeedsRepick => !app.views.settings.picking_folder,
+        };
         if pill_button_enabled(
             &mut child,
-            "Rescan",
-            Some(ph::ARROWS_CLOCKWISE),
+            label,
+            Some(icon),
             PillKind::Secondary,
             28.0,
             0.0,
-            !scanning,
+            enabled,
         )
         .clicked()
         {
-            act = Some(FolderAct::Rescan);
+            act = Some(next);
         }
         let text_right = child.min_rect().left() - 12.0;
         let tx = rect.left() + 12.0 + 18.0 + 12.0;
@@ -1156,7 +1271,17 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
             theme::mono(12.5),
             pal.text,
         );
-        let (meta, color) = if *exists {
+        let (meta, color) = if *access == Access::NeedsPermission {
+            (
+                format!("{tracks} tracks · allow access to play them"),
+                pal.warn,
+            )
+        } else if *access == Access::NeedsRepick {
+            (
+                format!("{tracks} tracks · pick the folder again to play them"),
+                pal.warn,
+            )
+        } else if *exists {
             (format!("{tracks} tracks"), pal.text_2)
         } else {
             (
@@ -1190,23 +1315,26 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         {
             pick_folder(app);
         }
-        let st = &mut app.views.settings;
-        // Leave room for the "Add" pill and the field margins; the field
-        // shrinks on narrow pages.
-        let field_w = (ui.available_width() - 100.0).clamp(40.0, 240.0);
-        input(
-            ui,
-            &pal,
-            &mut st.path_input,
-            "…or type a path",
-            field_w,
-            false,
-        );
-        let path = PathBuf::from(st.path_input.trim());
-        let ok = !st.path_input.trim().is_empty() && path.is_dir();
-        if pill_button_enabled(ui, "Add", None, PillKind::Secondary, 28.0, 0.0, ok).clicked() {
-            st.path_input.clear();
-            add_folder(app, path);
+        // A page has no paths to type.
+        if !cfg!(target_arch = "wasm32") {
+            let st = &mut app.views.settings;
+            // Leave room for the "Add" pill and the field margins; the field
+            // shrinks on narrow pages.
+            let field_w = (ui.available_width() - 100.0).clamp(40.0, 240.0);
+            input(
+                ui,
+                &pal,
+                &mut st.path_input,
+                "…or type a path",
+                field_w,
+                false,
+            );
+            let path = PathBuf::from(st.path_input.trim());
+            let ok = !st.path_input.trim().is_empty() && path.is_dir();
+            if pill_button_enabled(ui, "Add", None, PillKind::Secondary, 28.0, 0.0, ok).clicked() {
+                st.path_input.clear();
+                add_folder(app, path);
+            }
         }
     });
 
@@ -1214,19 +1342,28 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         Some(FolderAct::Rescan) => rescan(app),
         Some(FolderAct::Remove(i)) if app.session.remove_music_dir(i) => rescan(app),
         Some(FolderAct::Remove(_)) => {}
+        Some(FolderAct::Allow(i)) => {
+            if let Some(path) = app.session.config.config.music_dirs.get(i).cloned() {
+                allow_folder(app, path);
+            }
+        }
+        Some(FolderAct::PickAgain) => pick_folder(app),
         None => {}
     }
 
-    let watch = app.session.config.config.watch_for_changes;
-    if let Some(on) = toggle_row(
-        ui,
-        &pal,
-        "Watch for changes",
-        "Rescan automatically when files in your music folders change.",
-        false,
-        watch,
-    ) {
-        app.set_watch_for_changes(on);
+    // A page cannot watch a folder for changes.
+    if !cfg!(target_arch = "wasm32") {
+        let watch = app.session.config.config.watch_for_changes;
+        if let Some(on) = toggle_row(
+            ui,
+            &pal,
+            "Watch for changes",
+            "Rescan automatically when files in your music folders change.",
+            false,
+            watch,
+        ) {
+            app.set_watch_for_changes(on);
+        }
     }
 
     ui.add_space(SECTION_GAP);

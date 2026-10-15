@@ -108,7 +108,10 @@ impl Session {
     /// If the equalizer presets directory cannot be created.
     pub fn new(config: Config) -> (Self, Vec<ProviderInitError>) {
         let (providers, init_errors) = ProvidersState::new(&config);
-        let music_dirs_present = config.music_dirs.iter().any(|d| d.is_dir());
+        let music_dirs_present = config
+            .music_dirs
+            .iter()
+            .any(|d| crate::library::music_dir_exists(d));
         let mut session = Self {
             providers,
             library: LibraryState::default(),

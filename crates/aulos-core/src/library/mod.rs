@@ -30,14 +30,19 @@ pub mod scan_progress;
 mod scanner;
 pub mod search;
 pub mod smart_playlist;
+pub mod sparse;
 pub mod state;
 pub mod tagio;
 pub mod tags;
 pub mod tech_info;
 pub mod top_tracks;
 pub mod watcher;
+#[cfg(target_arch = "wasm32")]
+pub mod web_covers;
+#[cfg(target_arch = "wasm32")]
+pub mod web_scanner;
 
-pub use cover_art::CoverArt;
+pub use cover_art::{CoverArt, pick_cover_file};
 pub use db::LibraryDb;
 pub use lyrics::{LyricsProvider, find_current_line_index, parse_lrc};
 pub use scanner::LibraryScanner;
@@ -45,6 +50,14 @@ pub use scanner::LibraryScanner;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Whether the configured music folder `dir` exists. In the browser a folder
+/// is a virtual root (see [`crate::virtual_path`]) that exists by definition;
+/// whether it can be read now is [`crate::web_fs::status`].
+#[must_use]
+pub fn music_dir_exists(dir: &std::path::Path) -> bool {
+    cfg!(target_arch = "wasm32") || dir.is_dir()
+}
 
 /// Resolved audio source for the playback backend.
 #[derive(Debug, Clone)]

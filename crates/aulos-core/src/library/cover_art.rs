@@ -10,6 +10,31 @@ use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::Path;
 
+/// File names (without extension) of a folder's cover image, best first.
+const COVER_NAMES: [&str; 7] = [
+    "cover", "folder", "front", "album", "artwork", "art", "thumb",
+];
+
+/// Extensions of a folder's cover image, best first.
+const COVER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "bmp"];
+
+/// The name, among the `names` of a folder's files, of its cover image: the
+/// best by [`COVER_NAMES`] then [`COVER_EXTENSIONS`], ignoring case. For
+/// sources that list a folder instead of probing for each candidate name.
+#[must_use]
+pub fn pick_cover_file(names: &[String]) -> Option<&str> {
+    let lowered: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    COVER_NAMES.iter().find_map(|name| {
+        COVER_EXTENSIONS.iter().find_map(|ext| {
+            let wanted = format!("{name}.{ext}");
+            lowered
+                .iter()
+                .position(|n| *n == wanted)
+                .map(|i| names[i].as_str())
+        })
+    })
+}
+
 /// Handles cover art extraction and caching.
 pub struct CoverArt;
 
@@ -29,16 +54,19 @@ impl CoverArt {
     /// Extract embedded cover art from an audio file.
     /// Returns the raw image bytes (JPEG/PNG) if found.
     pub fn extract_from_file(path: &Path) -> Option<Vec<u8>> {
-        let probed = tags::probe(path, true)?;
-        let pictures = probed.tags.pictures;
+        Self::embedded_picture(tags::probe(path, true)?)
+    }
 
-        // Prefer front cover, but take any picture.
-        let pic = pictures
+    /// The embedded cover of a probed file (probed with pictures wanted):
+    /// the front cover, else any picture.
+    #[must_use]
+    pub fn embedded_picture(probed: tags::ProbedFile) -> Option<Vec<u8>> {
+        let mut pictures = probed.tags.pictures;
+        let index = pictures
             .iter()
-            .find(|p| p.is_front_cover)
-            .or_else(|| pictures.first())?;
-
-        Some(pic.data.clone())
+            .position(|p| p.is_front_cover)
+            .or_else(|| (!pictures.is_empty()).then_some(0))?;
+        Some(pictures.swap_remove(index).data)
     }
 
     /// Look for cover art files in the same directory as the audio file.
@@ -46,13 +74,8 @@ impl CoverArt {
     pub fn find_in_directory(audio_path: &Path) -> Option<Vec<u8>> {
         let dir = audio_path.parent()?;
 
-        let cover_names = [
-            "cover", "folder", "front", "album", "artwork", "art", "thumb",
-        ];
-        let extensions = ["jpg", "jpeg", "png", "webp", "bmp"];
-
-        for name in &cover_names {
-            for ext in &extensions {
+        for name in &COVER_NAMES {
+            for ext in &COVER_EXTENSIONS {
                 let candidate = dir.join(format!("{name}.{ext}"));
                 if candidate.exists() {
                     return std::fs::read(&candidate).ok();
@@ -372,5 +395,24 @@ mod thumbnail_tests {
         let b = CoverArt::artist_avatar_color("Air");
         assert_eq!(a1, a2, "same name must always produce the same color");
         assert_ne!(a1, b, "different names should (almost always) differ");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn picks_the_best_cover_file_ignoring_case() {
+        let files = names(&["01 Song.flac", "Folder.PNG", "COVER.jpeg", "back.jpg"]);
+        assert_eq!(pick_cover_file(&files), Some("COVER.jpeg"));
+        let files = names(&["cover.png", "cover.jpg"]);
+        assert_eq!(pick_cover_file(&files), Some("cover.jpg"));
+        assert_eq!(pick_cover_file(&names(&["notes.txt", "back.jpg"])), None);
+        assert_eq!(pick_cover_file(&[]), None);
     }
 }

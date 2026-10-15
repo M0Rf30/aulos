@@ -28,10 +28,10 @@
 //! * ASF/WMA: file size minus the ASF header object (the data object's 50-byte
 //!   header stays in the payload).
 
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 
 use super::BitrateMode;
+use crate::library::sparse::PositionalRead;
 
 /// What [`measure`] found.
 #[derive(Debug, Default)]
@@ -62,29 +62,17 @@ pub(super) struct Mp3Info {
     pub mode: BitrateMode,
 }
 
-// Positional reads on a shared `&File` (seek, then read), portable where
-// `read_at`/`seek_read` are not: the file is never read concurrently here.
-fn read_at(mut file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    file.seek(SeekFrom::Start(off))?;
-    file.read_exact(&mut buf)?;
-    Ok(buf)
+fn read_at(file: &dyn PositionalRead, off: u64, len: usize) -> io::Result<Vec<u8>> {
+    let buf = file.read_up_to(off, len);
+    if buf.len() == len {
+        Ok(buf)
+    } else {
+        Err(io::ErrorKind::UnexpectedEof.into())
+    }
 }
 
-fn read_at_most(mut file: &File, off: u64, len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    let mut got = 0;
-    if file.seek(SeekFrom::Start(off)).is_err() {
-        return Vec::new();
-    }
-    while got < len {
-        match file.read(&mut buf[got..]) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => got += n,
-        }
-    }
-    buf.truncate(got);
-    buf
+fn read_at_most(file: &dyn PositionalRead, off: u64, len: usize) -> Vec<u8> {
+    file.read_up_to(off, len)
 }
 
 fn synchsafe(b: &[u8]) -> u64 {
@@ -121,7 +109,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Measures `file` (of `size` bytes). `full == false` skips everything that is
 /// not needed for the payload size (vendor strings, MP3 header analysis).
-pub(super) fn measure(file: &File, size: u64, full: bool) -> io::Result<Layout> {
+pub(super) fn measure(file: &dyn PositionalRead, size: u64, full: bool) -> io::Result<Layout> {
     let mut layout = Layout::default();
 
     // Leading ID3v2 tags (some files stack more than one).
@@ -275,7 +263,13 @@ pub(super) fn measure(file: &File, size: u64, full: bool) -> io::Result<Layout> 
 // --- FLAC -------------------------------------------------------------------
 
 /// Returns `(end of metadata blocks, walked ok)`.
-fn walk_flac(file: &File, mut pos: u64, end: u64, full: bool, layout: &mut Layout) -> (u64, bool) {
+fn walk_flac(
+    file: &dyn PositionalRead,
+    mut pos: u64,
+    end: u64,
+    full: bool,
+    layout: &mut Layout,
+) -> (u64, bool) {
     let mut seen_comment = false;
     for _ in 0..4096 {
         let Ok(h) = read_at(file, pos, 4) else {
@@ -330,7 +324,13 @@ fn clean_text(bytes: &[u8]) -> Option<String> {
 // --- Ogg --------------------------------------------------------------------
 
 /// Walks the leading header pages; returns the offset of the first audio page.
-fn walk_ogg(file: &File, start: u64, size: u64, full: bool, layout: &mut Layout) -> u64 {
+fn walk_ogg(
+    file: &dyn PositionalRead,
+    start: u64,
+    size: u64,
+    full: bool,
+    layout: &mut Layout,
+) -> u64 {
     let mut pos = start;
     for index in 0..64 {
         let Ok(h) = read_at(file, pos, 27) else { break };
@@ -405,7 +405,7 @@ fn parse_ogg_comment_vendor(data: &[u8], layout: &mut Layout) {
 // --- MP4 --------------------------------------------------------------------
 
 /// A box header: `(type, payload start, box end)`.
-fn box_header(file: &File, pos: u64, limit: u64) -> Option<([u8; 4], u64, u64)> {
+fn box_header(file: &dyn PositionalRead, pos: u64, limit: u64) -> Option<([u8; 4], u64, u64)> {
     if pos + 8 > limit {
         return None;
     }
@@ -426,7 +426,12 @@ fn box_header(file: &File, pos: u64, limit: u64) -> Option<([u8; 4], u64, u64)> 
     Some((kind, pos + header, pos + size))
 }
 
-fn find_child(file: &File, start: u64, end: u64, name: &[u8; 4]) -> Option<(u64, u64)> {
+fn find_child(
+    file: &dyn PositionalRead,
+    start: u64,
+    end: u64,
+    name: &[u8; 4],
+) -> Option<(u64, u64)> {
     let mut pos = start;
     for _ in 0..512 {
         let (kind, data, box_end) = box_header(file, pos, end)?;
@@ -438,7 +443,13 @@ fn find_child(file: &File, start: u64, end: u64, name: &[u8; 4]) -> Option<(u64,
     None
 }
 
-fn walk_mp4(file: &File, size: u64, full: bool, head: &[u8], layout: &mut Layout) -> Option<u64> {
+fn walk_mp4(
+    file: &dyn PositionalRead,
+    size: u64,
+    full: bool,
+    head: &[u8],
+    layout: &mut Layout,
+) -> Option<u64> {
     layout.container = Some(
         match &head[8..12] {
             b"M4A " => "MPEG-4 Audio (M4A)",
@@ -468,7 +479,7 @@ fn walk_mp4(file: &File, size: u64, full: bool, head: &[u8], layout: &mut Layout
     found_mdat.then_some(mdat)
 }
 
-fn walk_moov(file: &File, start: u64, end: u64, full: bool, layout: &mut Layout) {
+fn walk_moov(file: &dyn PositionalRead, start: u64, end: u64, full: bool, layout: &mut Layout) {
     let Some((udta, udta_end)) = find_child(file, start, end, b"udta") else {
         return;
     };
@@ -496,7 +507,7 @@ fn walk_moov(file: &File, start: u64, end: u64, full: bool, layout: &mut Layout)
 
 /// Walks IFF-style chunks from `pos`; returns the size of `data_id`.
 fn walk_chunks(
-    file: &File,
+    file: &dyn PositionalRead,
     mut pos: u64,
     size: u64,
     big_endian: bool,
@@ -546,7 +557,7 @@ fn walk_chunks(
     data
 }
 
-fn walk_dsf(file: &File, size: u64, layout: &mut Layout) -> Option<u64> {
+fn walk_dsf(file: &dyn PositionalRead, size: u64, layout: &mut Layout) -> Option<u64> {
     let h = read_at(file, 0, 28).ok()?;
     let metadata_ptr = u64_le(&h[20..28]);
     if metadata_ptr != 0 && metadata_ptr < size {
@@ -567,7 +578,7 @@ fn walk_dsf(file: &File, size: u64, layout: &mut Layout) -> Option<u64> {
     None
 }
 
-fn walk_dff(file: &File, size: u64, layout: &mut Layout) -> Option<u64> {
+fn walk_dff(file: &dyn PositionalRead, size: u64, layout: &mut Layout) -> Option<u64> {
     let mut pos = 16u64;
     let mut data = None;
     for _ in 0..64 {
@@ -697,7 +708,7 @@ impl FrameHeader {
 /// Finds the first valid MP3 frame at or after `from` and reads its Xing/Info/
 /// VBRI/LAME header; without one, compares the bitrates of the next frames to
 /// tell CBR from VBR. Returns the facts and the encoder string.
-fn mp3_info(file: &File, from: u64, end: u64) -> Option<(Mp3Info, Option<String>)> {
+fn mp3_info(file: &dyn PositionalRead, from: u64, end: u64) -> Option<(Mp3Info, Option<String>)> {
     let window = read_at_most(file, from, 16 * 1024);
     // Sync + a second header at the computed frame length rules out false syncs.
     let (offset, first) = (0..window.len().saturating_sub(4)).find_map(|i| {
@@ -767,7 +778,7 @@ fn mp3_info(file: &File, from: u64, end: u64) -> Option<(Mp3Info, Option<String>
 }
 
 /// Reads the encoder string and VBR method after a Xing/Info header at `at`.
-fn read_lame(file: &File, at: u64) -> Option<(Option<String>, Option<u8>)> {
+fn read_lame(file: &dyn PositionalRead, at: u64) -> Option<(Option<String>, Option<u8>)> {
     let h = read_at(file, at + 4, 4).ok()?;
     let flags = u32_be(&h);
     let mut pos = at + 8;
@@ -802,6 +813,7 @@ fn read_lame(file: &File, at: u64) -> Option<(Option<String>, Option<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     fn tmp(label: &str, bytes: &[u8]) -> (std::path::PathBuf, File) {

@@ -13,7 +13,7 @@
 //! own itself.
 
 use super::PlaybackState;
-use super::backend::{PlaybackBackend, PlayerError};
+use super::backend::{PlaybackBackend, PlayerError, extension_hint};
 use super::engine::engine::{PlaySource, PlaybackEngine};
 use super::eq_source::{EqController, new_shared_coeffs};
 use crate::library::TrackSource;
@@ -280,21 +280,5 @@ impl PlaybackBackend for LocalBackend {
                 Err(PlayerError("MPD files should use MpdBackend".to_string()))
             }
         }
-    }
-}
-
-/// Best-effort file-extension hint for Symphonia's format probe, extracted
-/// from the URL path (ignoring any query string). Streaming API endpoints
-/// (e.g. Subsonic's `/rest/stream`) often have no extension at all, in
-/// which case Symphonia falls back to content sniffing — this is purely a
-/// probe speed-up, never required for correctness.
-fn extension_hint(url: &str) -> Option<String> {
-    let path = url.split(['?', '#']).next().unwrap_or(url);
-    let name = path.rsplit('/').next()?;
-    let (_, ext) = name.rsplit_once('.')?;
-    if ext.is_empty() || ext.len() > 8 {
-        None
-    } else {
-        Some(ext.to_string())
     }
 }

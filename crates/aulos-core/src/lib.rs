@@ -29,8 +29,11 @@ pub mod session;
 pub mod settings_search;
 pub mod tagger;
 pub mod task;
+pub mod virtual_path;
 #[cfg(feature = "visualizer")]
 pub mod visualizer;
+#[cfg(target_arch = "wasm32")]
+pub mod web_fs;
 #[cfg(target_arch = "wasm32")]
 pub mod web_storage;
 
