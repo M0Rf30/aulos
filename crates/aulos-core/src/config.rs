@@ -411,9 +411,11 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        // Default music directory is ~/Music; a page has no home directory,
+        // Default music directory is ~/Music (the shared Music folder on Android); a page has no home directory,
         // its folders are picked by the user.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(target_os = "android")]
+        let music_dirs = vec![PathBuf::from("/storage/emulated/0/Music")];
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let music_dirs = vec![dirs::audio_dir().unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/"))

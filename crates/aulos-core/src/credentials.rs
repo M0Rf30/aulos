@@ -8,14 +8,24 @@
 //! or the D-Bus secret service (GNOME Keyring, KDE Wallet) on Linux, the
 //! Credential Manager on Windows, the Keychain on macOS. The web build has no
 //! keyring: its store keeps passwords **unencrypted** in the browser's
-//! `localStorage` (see [`web_store`]). Other targets have no store, so every
-//! call reports the keyring as unavailable. Each password is keyed by
+//! `localStorage` (see [`web_store`]); Android's keeps them in unencrypted
+//! files of the app-private directory (see [`file_store`]). Other targets have
+//! no store, so every call reports the keyring as unavailable. Each password is keyed by
 //! `(SERVICE, provider_id)`.
 
 use std::sync::{Arc, Once};
 
 use keyring_core::api::CredentialStore;
 
+#[cfg(any(target_os = "android", all(test, unix)))]
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(
+        dead_code,
+        reason = "only Android builds its store; the tests exercise it"
+    )
+)]
+mod file_store;
 #[cfg(target_arch = "wasm32")]
 mod web_store;
 
@@ -66,8 +76,17 @@ fn platform_store() -> Option<Arc<CredentialStore>> {
     Some(web_store::Store::new())
 }
 
+/// App-private files (Android has no keyring).
+#[cfg(target_os = "android")]
+fn platform_store() -> Option<Arc<CredentialStore>> {
+    Some(file_store::Store::new(
+        crate::paths::data_dir().join("credentials"),
+    ))
+}
+
 /// No credential store on this target.
 #[cfg(not(any(
+    target_os = "android",
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",

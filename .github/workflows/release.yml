@@ -9,7 +9,8 @@ name: Release
 # are kept as workflow artifacts.
 #
 # Targets: Linux x86_64/aarch64 (.tar.gz), Windows x86_64 MSVC (.zip) and macOS
-# aarch64/x86_64 (.tar.gz). Linux is glibc only (a GUI app that dlopen()s
+# aarch64/x86_64 (.tar.gz) and Android (one universal .apk, when the signing
+# secrets are set). Linux is glibc only (a GUI app that dlopen()s
 # wayland/GPU libraries cannot be statically linked with musl). All builds are
 # native, there is no cross-compilation.
 #
@@ -212,12 +213,82 @@ jobs:
             ${{ env.TARBALL }}.sha256
           if-no-files-found: error
 
+  # One universal, release-signed APK (arm64-v8a + x86_64) so Obtainium and
+  # other updaters see a single asset and can update silently. The signing key
+  # must never change between releases, or Android refuses the update: it comes
+  # from the ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD secrets, and
+  # the job is skipped (never debug-signed) while they are not set.
+  android:
+    name: Build (Android)
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check signing key
+        id: key
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$CARGO_APK_RELEASE_KEYSTORE_PASSWORD" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD not set: no Android APK in this release"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust toolchain
+        if: steps.key.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Setup Rust cache
+        if: steps.key.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-android
+
+      - name: Install cargo-apk
+        if: steps.key.outputs.present == 'true'
+        run: cargo install cargo-apk --locked
+
+      - name: Build APK
+        if: steps.key.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" >/dev/null || true
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/aulos.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/aulos.keystore"
+          cargo apk build --release -p aulos --lib --features visualizer
+          mkdir -p dist
+          # Named after the tag so Obtainium's version detection and the other
+          # assets line up.
+          cp target/release/apk/aulos.apk "dist/aulos-${VERSION}-android.apk"
+          (cd dist && sha256sum "aulos-${VERSION}-android.apk" > "aulos-${VERSION}-android.apk.sha256")
+          rm "$RUNNER_TEMP/aulos.keystore"
+
+      - name: Upload artifact
+        if: steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: aulos-android
+          path: dist/aulos-${{ needs.test.outputs.version }}-android.apk*
+          if-no-files-found: error
+
   release:
     name: Create Release
     # `workflow_dispatch` has no tag to attach a Release to; tarballs stay as
     # artifacts.
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [test, build]
+    needs: [test, build, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -265,6 +336,9 @@ jobs:
             echo "| Windows | x86_64 | \`${win}.zip\` |"
             echo "| macOS | aarch64 (Apple silicon) | \`${macarm}.tar.gz\` |"
             echo "| macOS | x86_64 (Intel) | \`${macx86}.tar.gz\` |"
+            if ls artifacts/*.apk >/dev/null 2>&1; then
+              echo "| Android | arm64-v8a, x86_64 | \`${base}-android.apk\` |"
+            fi
             echo
             echo "A \`.sha256\` file is published next to each archive."
             echo
@@ -294,6 +368,15 @@ jobs:
             echo
             echo "The binary is not code-signed; if Gatekeeper blocks it, run"
             echo "\`xattr -d com.apple.quarantine aulos\` once."
+            if ls artifacts/*.apk >/dev/null 2>&1; then
+              echo
+              echo "### Android"
+              echo
+              echo "Install \`${base}-android.apk\` (Android 8.0+). Updates through"
+              echo "[Obtainium](https://github.com/ImranR98/Obtainium): add this repository"
+              echo "and it picks the single APK of each release. The package id is"
+              echo "\`io.github.m0rf30.aulos\`; the signing certificate is listed in the README."
+            fi
           } > release-notes.md
           cat release-notes.md
 
@@ -307,4 +390,6 @@ jobs:
             artifacts/*.tar.gz.sha256
             artifacts/*.zip
             artifacts/*.zip.sha256
+            artifacts/*.apk
+            artifacts/*.apk.sha256
           generate_release_notes: false

@@ -71,7 +71,7 @@ pub struct Smoke {
 }
 
 /// The window size requested for smoke runs.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn window_size() -> Option<[f32; 2]> {
     let spec = std::env::var("AULOS_SMOKE_SIZE").ok()?;
     let (w, h) = spec.split_once('x')?;

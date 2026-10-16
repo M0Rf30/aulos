@@ -107,6 +107,52 @@ jobs:
       - name: Run clippy
         run: cargo clippy --target wasm32-unknown-unknown -p aulos --locked -- -D warnings
 
+  # The egui app also builds as an Android APK (NativeActivity, `cargo apk`).
+  # Ubuntu runners ship the SDK and NDK; cargo-apk signs with the debug key.
+  android:
+    name: Build (Android)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+          cache-on-failure: true
+
+      - name: Clippy
+        run: |
+          export PATH="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          export CC_aarch64_linux_android=aarch64-linux-android26-clang
+          export AR_aarch64_linux_android=llvm-ar
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android26-clang
+          cargo clippy --target aarch64-linux-android -p aulos --lib --locked -- -D warnings
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" >/dev/null || true
+          cargo apk build -p aulos --lib
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aulos-android-debug
+          path: target/debug/apk/aulos.apk
+
   test:
     name: Test Suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

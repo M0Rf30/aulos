@@ -6,11 +6,18 @@ license.workspace = true
 description = "A music player built on the Aulos backend (egui front end, early prototype)"
 repository.workspace = true
 
+[lib]
+# `cdylib` is the Android activity (`libaulos.so`, packaged by `cargo apk`);
+# `rlib` is what the desktop and web binary links.
+crate-type = ["cdylib", "rlib"]
+
 # UI-only crate: depends on `aulos-core` (the backend), never the other way round.
 [dependencies]
 aulos-core.workspace = true
 i18n-embed-fl.workspace = true
-eframe = "0.36.2"
+# eframe's default features pull in the X11/Wayland backends, which Android
+# does not have: they are listed per target below instead.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "links", "wgpu"] }
 egui = "0.36.2"
 egui_extras = "0.36.2"
 egui-phosphor = { version = "0.14.0", features = ["fill"] }
@@ -29,9 +36,23 @@ lactea = { version = "0.2.2", optional = true }
 # effects run on, native dialogs, the console log.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "wayland", "web_screen_reader", "x11"] }
+
 # Native file/folder dialogs (XDG portal on Linux, Win32 / NSOpenPanel
-# elsewhere). The portal backend needs no GTK.
+# elsewhere). The portal backend needs no GTK. Android has no such dialog.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+# Android: the NativeActivity glue `android_main` receives, and logcat output.
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+tracing-android = "0.2"
+# Runtime permission request (the activity is reached over JNI).
+jni = "0.21"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # The browser: `WebRunner` entry (see `main.rs`) and `tracing` to the console.
@@ -65,3 +86,38 @@ visualizer = ["aulos-core/visualizer", "dep:lactea"]
 # The `HWND` the Windows media controls (SMTC) attach to.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
+
+# `cargo apk build --release -p aulos --lib` (needs the Android SDK/NDK).
+[package.metadata.android]
+package = "io.github.m0rf30.aulos"
+apk_name = "aulos"
+resources = "android/res"
+# arm64 phones; x86_64 is the emulator and Chromebooks.
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+# The shared Music folder: audio permission on Android 13+, storage before.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_AUDIO"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Aulos"
+icon = "@mipmap/icon"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|uiMode|density|locale|layoutDirection|fontScale"
+launch_mode = "singleTask"
