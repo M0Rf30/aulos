@@ -5,10 +5,10 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-    aulos::run()
+    aulos_app::run()
 }
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    aulos::run_web();
+    aulos_app::run_web();
 }

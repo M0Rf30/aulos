@@ -7,6 +7,9 @@ description = "A music player built on the Aulos backend (egui front end, early 
 repository.workspace = true
 
 [lib]
+# Not `aulos`: the browser build (trunk) finds its artifact by name, and the
+# `cdylib` would otherwise share it with the binary.
+name = "aulos_app"
 # `cdylib` is the Android activity (`libaulos.so`, packaged by `cargo apk`);
 # `rlib` is what the desktop and web binary links.
 crate-type = ["cdylib", "rlib"]
