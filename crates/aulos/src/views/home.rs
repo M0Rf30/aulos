@@ -73,6 +73,8 @@ enum Act {
 struct Out {
     act: Option<Act>,
     photos: Vec<String>,
+    /// Suggested artists outside the library, which only get a public photo.
+    suggested_photos: Vec<String>,
     menu: Option<menus::MenuAction>,
 }
 
@@ -98,6 +100,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 fn apply(app: &mut App, out: Out) {
     for name in out.photos {
         let effect = app.session.fetch_artist_info_for(&name);
+        app.run(effect);
+    }
+    for name in out.suggested_photos {
+        let effect = app.session.fetch_suggested_artist_photo(&name);
         app.run(effect);
     }
     if let Some(menu) = out.menu {
@@ -889,9 +895,13 @@ fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind
     let resp = ui.interact(rect, ui.id().with(("artist", name)), Sense::click());
     let art = Rect::from_min_size(rect.min, vec2(CARD, CARD));
     let library = matches!(kind, ArtistKind::Library);
-    if library && cx.app.covers.photo(name).is_none() && !cx.asked.contains(name) {
+    if cx.app.covers.photo(name).is_none() && !cx.asked.contains(name) {
         cx.asked.insert(name.to_owned());
-        cx.out.photos.push(name.to_owned());
+        if library {
+            cx.out.photos.push(name.to_owned());
+        } else {
+            cx.out.suggested_photos.push(name.to_owned());
+        }
     }
     avatar_tile(
         ui,

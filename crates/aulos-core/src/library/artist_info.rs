@@ -153,6 +153,12 @@ impl ArtistInfoWanted {
         photo: true,
     };
 
+    /// The photo only.
+    pub const PHOTO: Self = Self {
+        bio: false,
+        photo: true,
+    };
+
     /// Whether anything is wanted at all.
     pub fn any(self) -> bool {
         self.bio || self.photo

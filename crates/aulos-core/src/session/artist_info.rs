@@ -111,6 +111,7 @@ impl ArtistInfoState {
         provider: &Arc<dyn MusicProvider>,
         is_subsonic: bool,
         wanted: ArtistInfoWanted,
+        online_photo: bool,
         names: Vec<String>,
     ) -> Effect<ArtistInfoOutcome> {
         let provider_id = provider.id().to_string();
@@ -125,10 +126,30 @@ impl ArtistInfoState {
                 let permit = semaphore.acquire_owned().await.ok();
                 let now = crate::unix_now();
                 if is_subsonic {
-                    let outcome =
-                        resolve_via_provider(store, provider.as_ref(), &provider_id, &name, now)
-                            .await;
-                    drop(permit);
+                    let outcome = resolve_via_provider(
+                        Arc::clone(&store),
+                        provider.as_ref(),
+                        &provider_id,
+                        &name,
+                        now,
+                    )
+                    .await;
+                    // A server often has no picture for an artist: fall back to
+                    // the public sources when the user allows them.
+                    if outcome.image.is_some() || !online_photo {
+                        drop(permit);
+                        return outcome;
+                    }
+                    let mut outcome = outcome;
+                    let photo_name = name.clone();
+                    let image = crate::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        resolve_via_agents(&store, &photo_name, now, ArtistInfoWanted::PHOTO).image
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    outcome.image = image;
                     return outcome;
                 }
                 let name_for_panic = name.clone();
@@ -202,8 +223,9 @@ impl Session {
         if names.is_empty() {
             return Effect::none();
         }
+        let online_photo = self.config.config.fetch_artist_photos;
         self.artist_info
-            .dispatch(&provider, is_subsonic, wanted, names)
+            .dispatch(&provider, is_subsonic, wanted, online_photo, names)
     }
 
     /// Fetches artist info for a single artist immediately (e.g. when
@@ -217,8 +239,38 @@ impl Session {
         if !self.artist_info.wanted(name) {
             return Effect::none();
         }
-        self.artist_info
-            .dispatch(&provider, is_subsonic, wanted, vec![name.to_string()])
+        let online_photo = self.config.config.fetch_artist_photos;
+        self.artist_info.dispatch(
+            &provider,
+            is_subsonic,
+            wanted,
+            online_photo,
+            vec![name.to_string()],
+        )
+    }
+
+    /// Fetches the photo of an artist that is not in the library (a
+    /// suggestion on Home) from the public sources. A no-op unless the user
+    /// allows fetching artist photos; no library provider is involved.
+    pub fn fetch_suggested_artist_photo(&mut self, name: &str) -> Effect<ArtistInfoOutcome> {
+        if !self.config.config.fetch_artist_photos || !self.artist_info.wanted(name) {
+            return Effect::none();
+        }
+        let store = Arc::clone(&self.artist_info.store);
+        let semaphore = Arc::clone(&self.artist_info.semaphore);
+        self.artist_info.pending.insert(name.to_string());
+        let name = name.to_string();
+        Effect::future(async move {
+            let permit = semaphore.acquire_owned().await.ok();
+            let now = crate::unix_now();
+            let fallback = name.clone();
+            crate::task::spawn_blocking(move || {
+                let _permit = permit;
+                resolve_via_agents(&store, &name, now, ArtistInfoWanted::PHOTO)
+            })
+            .await
+            .unwrap_or_else(|_| ArtistInfoOutcome::empty(fallback))
+        })
     }
 }
 
