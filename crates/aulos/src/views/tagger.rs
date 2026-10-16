@@ -1173,6 +1173,44 @@ fn page(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     if body.height() < 60.0 {
         return;
     }
+    if app.compact() {
+        // Phones: the file list or the tag cards, one at a time.
+        let id = Id::new("tagger-pane");
+        let mut pane: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+        if crate::widgets::segmented(
+            ui,
+            &mut pane,
+            &[
+                aulos_core::fl!("tagger-pane-files").as_str(),
+                aulos_core::fl!("tagger-metadata-title").as_str(),
+            ],
+            34.0,
+        ) {
+            ui.data_mut(|d| d.insert_temp(id, pane));
+        }
+        let body = ui.available_rect_before_wrap();
+        if body.height() < 60.0 {
+            return;
+        }
+        if pane == 0 {
+            files_panel(app, ui, body, &facts, acts);
+        } else {
+            let mut cui = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(body)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            ScrollArea::vertical()
+                .id_salt("tagger-stacked")
+                .auto_shrink([false, false])
+                .show(&mut cui, |ui| {
+                    ui.spacing_mut().item_spacing.y = GAP;
+                    meta_card(app, ui, &facts, false, acts);
+                    side_cards(app, ui, &facts, acts);
+                });
+        }
+        return;
+    }
     let narrow = body.width() < NARROW_BELOW;
     let files_w = if narrow { FILES_W_NARROW } else { FILES_W };
     let files_rect = Rect::from_min_max(body.min, pos2(body.left() + files_w, body.bottom()));

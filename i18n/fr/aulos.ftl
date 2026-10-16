@@ -954,6 +954,7 @@ tagger-submission-submitted = Soumis ({ $status })
 tagger-submission-failed = Échec de la soumission : { $error }
 
 ## Tag editor: metadata
+tagger-pane-files = Fichiers
 tagger-metadata-title = Métadonnées
 tagger-metadata-selection =
     { $count ->
@@ -1538,6 +1539,7 @@ converter-dir-error = Impossible d’utiliser le dossier de sortie : { $error }
 converter-change-folder = Changer de dossier
 converter-ffmpeg-missing = { $format } nécessite ffmpeg, introuvable sur ce système. Installez-le pour convertir vers ce format.
 converter-checking-ffmpeg = Recherche de ffmpeg…
+converter-pane-output = Sortie
 converter-queue-title = File d’attente
 converter-summary = { $jobs ->
     [one] { $jobs } tâche · { $done } terminée(s)
@@ -1922,6 +1924,7 @@ nowbar-lyrics = Paroles
 nowbar-queue = File d’attente
 
 # sidebar
+tabbar-more = Plus
 sidebar-home = Accueil
 sidebar-albums = Albums
 sidebar-artists = Artistes

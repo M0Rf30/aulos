@@ -1092,8 +1092,10 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
 fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
     let pal = a.pal;
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 144.0), Sense::hover());
-    let photo_rect = Rect::from_min_size(rect.min, vec2(144.0, 144.0));
+    let compact = a.compact();
+    let photo = if compact { 96.0 } else { 144.0 };
+    let (rect, _) = ui.allocate_exact_size(vec2(w, photo), Sense::hover());
+    let photo_rect = Rect::from_min_size(rect.min, vec2(photo, photo));
     ui.painter().add(
         egui::Shadow {
             offset: [0, 14],
@@ -1101,7 +1103,7 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
             spread: 0,
             color: Color32::BLACK.alpha(0.45),
         }
-        .as_shape(photo_rect, CornerRadius::same(72)),
+        .as_shape(photo_rect, CornerRadius::same((photo / 2.0) as u8)),
     );
     avatar_tile(
         ui,
@@ -1130,7 +1132,10 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
         summary.push_str(genres);
     }
 
-    let block = Rect::from_min_max(pos2(rect.left() + 168.0, rect.top()), rect.right_bottom());
+    let block = Rect::from_min_max(
+        pos2(rect.left() + photo + 24.0, rect.top()),
+        rect.right_bottom(),
+    );
     ui.scope_builder(
         UiBuilder::new()
             .max_rect(block)
@@ -1138,51 +1143,73 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
         |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if pill_button(
-                    ui,
-                    &aulos_core::fl!("play"),
-                    Some(regular::PLAY),
-                    PillKind::Primary,
-                    34.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    out.play = true;
-                }
-                if pill_button(
-                    ui,
-                    &aulos_core::fl!("shuffle"),
-                    Some(regular::SHUFFLE),
-                    PillKind::Secondary,
-                    34.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    out.shuffle = true;
-                }
-                let circle = Rect::from_min_size(ui.cursor().min, vec2(34.0, 34.0));
-                ui.painter()
-                    .circle_filled(circle.center(), 17.0, egui::Color32::WHITE.alpha(0.12));
-                let more = IconBtn::new(regular::DOTS_THREE)
-                    .size(34.0)
-                    .icon_size(17.0)
-                    .round(true)
-                    .tip(aulos_core::fl!("artists-more"))
-                    .show(ui);
-                if let Some(action) = menus::artist_menu_click(&more, &artist.name) {
-                    out.action = Some(action);
-                }
-            });
-            ui.add_space(14.0);
-            label_text(ui, &summary, theme::regular(13.0), pal.text_15);
-            ui.add_space(8.0);
-            label_text(ui, &artist.name, theme::bold(42.0), pal.text);
+            if !compact {
+                hero_buttons(ui, artist, out);
+                ui.add_space(14.0);
+            }
+            label_text(
+                ui,
+                &summary,
+                theme::regular(if compact { 12.0 } else { 13.0 }),
+                pal.text_15,
+            );
+            ui.add_space(if compact { 4.0 } else { 8.0 });
+            label_text(
+                ui,
+                &artist.name,
+                theme::bold(if compact { 26.0 } else { 42.0 }),
+                pal.text,
+            );
         },
     );
+    if compact {
+        // Phones: the buttons get the full width under the photo.
+        ui.add_space(12.0);
+        hero_buttons(ui, artist, out);
+    }
+}
+
+/// Play, Shuffle and the "more" menu.
+fn hero_buttons(ui: &mut Ui, artist: &Artist, out: &mut DetailOut) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if pill_button(
+            ui,
+            &aulos_core::fl!("play"),
+            Some(regular::PLAY),
+            PillKind::Primary,
+            34.0,
+            0.0,
+        )
+        .clicked()
+        {
+            out.play = true;
+        }
+        if pill_button(
+            ui,
+            &aulos_core::fl!("shuffle"),
+            Some(regular::SHUFFLE),
+            PillKind::Secondary,
+            34.0,
+            0.0,
+        )
+        .clicked()
+        {
+            out.shuffle = true;
+        }
+        let circle = Rect::from_min_size(ui.cursor().min, vec2(34.0, 34.0));
+        ui.painter()
+            .circle_filled(circle.center(), 17.0, egui::Color32::WHITE.alpha(0.12));
+        let more = IconBtn::new(regular::DOTS_THREE)
+            .size(34.0)
+            .icon_size(17.0)
+            .round(true)
+            .tip(aulos_core::fl!("artists-more"))
+            .show(ui);
+        if let Some(action) = menus::artist_menu_click(&more, &artist.name) {
+            out.action = Some(action);
+        }
+    });
 }
 
 fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {

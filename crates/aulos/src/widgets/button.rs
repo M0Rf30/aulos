@@ -17,6 +17,34 @@ pub fn focus_ring(ui: &Ui, resp: &Response, rect: Rect, radius: CornerRadius) {
     }
 }
 
+/// The phone layout's "back to the list" row: a touch-high caret + `label`
+/// filling `rect`. True when tapped.
+pub fn back_row(ui: &mut Ui, rect: Rect, label: &str) -> bool {
+    let t = Theme::get(ui.ctx());
+    let resp = ui.interact(rect, ui.id().with(("back-row", label)), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), t.pal.text.alpha(0.05));
+    }
+    paint_icon(
+        ui.painter(),
+        pos2(rect.left() + 20.0, rect.center().y),
+        egui_phosphor::regular::CARET_LEFT,
+        18.0,
+        t.pal.text,
+        false,
+    );
+    super::text::paint_text(
+        ui.painter(),
+        Rect::from_min_max(pos2(rect.left() + 40.0, rect.top()), rect.right_bottom()),
+        egui::Align::Min,
+        label,
+        theme::semibold(16.0),
+        t.pal.text,
+    );
+    resp.clicked()
+}
+
 /// A square icon button: transparent, tinted on hover, accent when `active`.
 pub struct IconBtn<'a> {
     glyph: &'a str,
@@ -88,8 +116,14 @@ impl<'a> IconBtn<'a> {
 
     pub fn show(self, ui: &mut Ui) -> Response {
         let t = Theme::get(ui.ctx());
+        // Finger-sized hit box on touch layouts.
+        let size = if theme::touch(ui.ctx()) {
+            self.size.max(theme::size::TOUCH - 4.0)
+        } else {
+            self.size
+        };
         let (rect, mut resp) = ui.allocate_exact_size(
-            Vec2::splat(self.size),
+            Vec2::splat(size),
             if self.enabled {
                 Sense::click()
             } else {

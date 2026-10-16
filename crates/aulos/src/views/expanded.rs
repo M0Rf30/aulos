@@ -1,7 +1,7 @@
 //! The expanded now-playing view (replaces the whole window), plus the
 //! backdrop / seek / transport helpers the mini player shares.
 
-use crate::app::App;
+use crate::app::{App, Sheet};
 use crate::theme::{self, ColorExt, Theme, hex};
 use crate::widgets::{
     Covers, IconBtn, PillKind, cover_image, paint_icon, paint_text, paint_text_spaced, pill_button,
@@ -383,7 +383,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         right_column(app, ui, right, &track);
     }
     // The "…" menu's Properties opens the same sheet the library chrome draws.
-    super::properties::show(app, &ui.ctx().clone());
+    let ctx = ui.ctx().clone();
+    super::queue::show(app, &ctx);
+    super::properties::show(app, &ctx);
 }
 
 /// The left column may use the strip between the header and the body top, and
@@ -412,6 +414,25 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
     });
     if collapse.inner.clicked() {
         app.expanded = false;
+    }
+
+    // One column (phones): the upcoming list is not on the page, so the
+    // queue sheet gets a button here.
+    if rect.width() < 760.0 {
+        let q = Rect::from_min_size(pos2(btn.right() + 4.0, btn.top()), vec2(32.0, 32.0));
+        let open = app.sheet == Some(Sheet::Queue);
+        let queue = ui.scope_builder(UiBuilder::new().max_rect(q), |ui| {
+            IconBtn::new(regular::QUEUE)
+                .size(32.0)
+                .icon_size(17.0)
+                .active(open)
+                .color(SOFT)
+                .tip(aulos_core::fl!("nowbar-queue"))
+                .show(ui)
+        });
+        if queue.inner.clicked() {
+            app.sheet = if open { None } else { Some(Sheet::Queue) };
+        }
     }
 
     let pip = Rect::from_min_size(

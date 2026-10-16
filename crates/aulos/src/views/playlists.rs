@@ -74,6 +74,9 @@ struct Io {
 #[derive(Default)]
 pub struct State {
     sel: Option<Sel>,
+    /// Phone layout: the selected playlist's page is showing instead of the
+    /// list.
+    detail: bool,
     dialog: Option<Dialog>,
     dialog_fresh: bool,
     /// The selected row of the track list.
@@ -108,6 +111,7 @@ impl State {
 /// Called when the route is entered: start loading what the page needs.
 pub fn enter(app: &mut App) {
     app.views.playlists.select_new = None;
+    app.views.playlists.detail = false;
     let effect = app.session.load_playlists();
     app.run(effect);
     let effect = app.session.playlists.load_smart_playlists();
@@ -429,7 +433,35 @@ fn refresh_mosaic(app: &App, st: &mut State) {
 fn page(app: &App, ui: &mut Ui, st: &mut State, ed: Option<&mut EditorState>, out: &mut Out) {
     let pad = app.page_pad();
     let rect = ui.available_rect_before_wrap();
-    let left_w = if app.narrow { 220.0 } else { 260.0 };
+    if app.compact() {
+        // One pane at a time: the list, or the selected playlist under a
+        // back row (a new / edited playlist always shows its page).
+        let new_editor = ed.as_ref().is_some_and(|e| e.playlist.id == 0);
+        let selected = st.sel.as_ref().and_then(|s| resolve(app, s)).is_some();
+        if new_editor || ed.is_some() || (st.detail && selected) {
+            let back = Rect::from_min_size(
+                pos2(rect.left() + pad - 8.0, rect.top() + 4.0),
+                vec2(rect.width() - pad, theme::size::TOUCH),
+            );
+            if crate::widgets::back_row(ui, back, &aulos_core::fl!("playlists")) {
+                st.detail = false;
+            }
+            let body = Rect::from_min_max(pos2(rect.left() + pad, back.bottom() + 4.0), rect.max);
+            ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+                right_column(app, ui, st, ed, out)
+            });
+        } else {
+            let list = Rect::from_min_max(
+                pos2(rect.left() + pad, rect.top() + 4.0),
+                pos2(rect.right() - pad, rect.bottom() - 24.0),
+            );
+            ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+                left_column(app, ui, st, false, out)
+            });
+        }
+        return;
+    }
+    let left_w = if app.narrow() { 220.0 } else { 260.0 };
     let left = Rect::from_min_max(
         pos2(rect.left() + pad, rect.top() + 4.0),
         pos2(rect.left() + pad + left_w, rect.bottom() - 24.0),
@@ -1885,6 +1917,7 @@ fn apply(app: &mut App, out: Out) {
             Act::Select(sel) => {
                 let mut st = std::mem::take(&mut app.views.playlists);
                 select_with(app, &mut st, sel);
+                st.detail = true;
                 app.views.playlists = st;
             }
             Act::BeginCreate => begin_create(app),

@@ -4,7 +4,7 @@
 use crate::app::App;
 use crate::theme;
 use crate::views::menus::{self, MenuAction};
-use crate::widgets::{self, Columns, HEADER_HEIGHT, PillKind, ROW_HEIGHT};
+use crate::widgets::{self, Columns, HEADER_HEIGHT, PillKind, row_height};
 use aulos_core::library::state::SortField;
 use egui::{Frame, Margin, ScrollArea, Sense, Ui, vec2};
 use egui_phosphor::regular;
@@ -149,7 +149,8 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
             );
         }
     } else {
-        let cols = Columns::songs(app.narrow);
+        let cols = Columns::songs(app.class);
+        let row_h = row_height(ui.ctx());
         let sorted = state.sort.unwrap_or(SortField::Title);
         Frame::NONE.inner_margin(margin).show(ui, |ui| {
             if let Some(field) = widgets::track_header_sortable(
@@ -165,7 +166,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
         ui.spacing_mut().item_spacing.y = 0.0;
         ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, tracks.len(), |ui, range| {
+            .show_rows(ui, row_h, tracks.len(), |ui, range| {
                 Frame::NONE.inner_margin(margin).show(ui, |ui| {
                     for i in range {
                         let track = &tracks[i];
@@ -215,10 +216,10 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
 fn loading(ui: &mut Ui, pad: f32) {
     let width = ui.available_width() - pad * 2.0;
     ui.add_space(HEADER_HEIGHT);
-    let rows = ((ui.available_height() / ROW_HEIGHT) as usize).clamp(4, 16);
+    let row_h = row_height(ui.ctx());
+    let rows = ((ui.available_height() / row_h) as usize).clamp(4, 16);
     for _ in 0..rows {
-        let (rect, _) =
-            ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
         let inner = egui::Rect::from_min_size(
             rect.min + vec2(pad + 10.0, 11.0),
             vec2((width - 20.0).max(0.0), 14.0),

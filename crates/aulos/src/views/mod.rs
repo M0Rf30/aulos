@@ -24,6 +24,7 @@ pub mod radio;
 pub mod settings;
 pub mod sidebar;
 pub mod songs;
+pub mod tabbar;
 pub mod tagger;
 pub mod toasts;
 pub mod toolbar;
@@ -54,6 +55,32 @@ pub struct State {
     pub menus: menus::State,
     #[cfg(feature = "visualizer")]
     pub visualizer: visualizer::State,
+}
+
+/// Where a side sheet (queue, properties) sits: `(width, top, bottom)` in
+/// screen points. Desktop sheets float at the right edge between the toolbar
+/// and the now bar; phone sheets span the width and stop above the player
+/// strip and tab bar.
+pub fn sheet_extent(app: &App, content: egui::Rect, top_gap: f32) -> (f32, f32, f32) {
+    use crate::theme::size;
+    if app.compact() {
+        (
+            content.width() - 16.0,
+            content.top() + 8.0,
+            // The full-screen player has no bars under it.
+            if app.expanded {
+                content.bottom() - 8.0
+            } else {
+                content.bottom() - size::MINI_BAR - size::TAB_BAR - 8.0
+            },
+        )
+    } else {
+        (
+            if app.narrow() { 340.0 } else { 360.0 },
+            content.top() + size::TOOLBAR + top_gap,
+            content.bottom() - size::NOW_BAR - 8.0,
+        )
+    }
 }
 
 /// Starts whatever loading the page of `route` needs.

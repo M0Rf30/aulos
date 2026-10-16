@@ -86,9 +86,7 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
     };
 
     let content = ctx.content_rect();
-    let width = if app.narrow { 340.0 } else { 360.0 };
-    let top = content.top() + theme::size::TOOLBAR;
-    let bottom = content.bottom() - theme::size::NOW_BAR - 8.0;
+    let (width, top, bottom) = super::sheet_extent(app, content, 0.0);
     let height = (bottom - top).max(0.0);
     // Slides in from the right edge.
     let slide = theme::motion::slide_in(ctx, Id::new("aulos_queue_sheet_slide"), true);

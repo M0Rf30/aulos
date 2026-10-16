@@ -24,45 +24,43 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         |ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
 
-            // History.
+            let compact = app.compact();
+            let btn = if compact {
+                theme::size::TOUCH - 8.0
+            } else {
+                28.0
+            };
+
+            // History. Phones keep only Back (and only when there is
+            // somewhere to go); forward is a desktop affordance.
             ui.spacing_mut().item_spacing.x = 2.0;
-            let back = IconBtn::new(regular::CARET_LEFT)
-                .size(28.0)
-                .icon_size(15.0)
-                .enabled(app.can_go_back())
-                .color(t.pal.text_1)
-                .tip(aulos_core::fl!("toolbar-back"))
-                .show(ui);
-            if back.clicked() {
-                app.go_back();
+            if !compact || app.can_go_back() {
+                let back = IconBtn::new(regular::CARET_LEFT)
+                    .size(btn)
+                    .icon_size(15.0)
+                    .enabled(app.can_go_back())
+                    .color(t.pal.text_1)
+                    .tip(aulos_core::fl!("toolbar-back"))
+                    .show(ui);
+                if back.clicked() {
+                    app.go_back();
+                }
             }
-            let fwd = IconBtn::new(regular::CARET_RIGHT)
-                .size(28.0)
-                .icon_size(15.0)
-                .enabled(app.can_go_forward())
-                .color(t.pal.text_1)
-                .tip(aulos_core::fl!("toolbar-forward"))
-                .show(ui);
-            if fwd.clicked() {
-                app.go_forward();
+            if !compact {
+                let fwd = IconBtn::new(regular::CARET_RIGHT)
+                    .size(btn)
+                    .icon_size(15.0)
+                    .enabled(app.can_go_forward())
+                    .color(t.pal.text_1)
+                    .tip(aulos_core::fl!("toolbar-forward"))
+                    .show(ui);
+                if fwd.clicked() {
+                    app.go_forward();
+                }
             }
             ui.spacing_mut().item_spacing.x = 10.0;
 
-            // Search: min(320, 42%).
-            let width = 320.0_f32.min(inner.width() * 0.42);
-            let hint = if app.narrow {
-                aulos_core::fl!("toolbar-search-short")
-            } else {
-                aulos_core::fl!("toolbar-search-long")
-            };
-            let id = app.search_id;
-            let resp = search_field(ui, &mut app.search, &hint, width, id);
-            if resp.changed() {
-                let effect = app.session.set_search_query(app.search.clone());
-                app.run(effect);
-            }
-
-            // View controls on the browsing pages.
+            // View controls only exist on the browsing pages.
             let root = app.route.root();
             let browse = matches!(root, Route::Albums | Route::Artists | Route::Genres);
             let populated = match root {
@@ -74,7 +72,37 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 app.route,
                 Route::Album(_) | Route::Artist(_) | Route::Genre(_)
             );
+
+            // Search: min(320, 42%) on desktop; the room the controls leave
+            // on phones.
+            let width = if compact {
+                let multi = app.session.providers.provider_list.len() > 1;
+                let controls = if browse && populated && !detail {
+                    // view toggle + sort icon + sources icon + gaps
+                    70.0 + 2.0 * (btn + 6.0)
+                } else if browse && !detail && multi {
+                    btn + 6.0
+                } else {
+                    0.0
+                };
+                (ui.available_width() - controls - 10.0).max(80.0)
+            } else {
+                320.0_f32.min(inner.width() * 0.42)
+            };
+            let hint = if app.narrow() {
+                aulos_core::fl!("toolbar-search-short")
+            } else {
+                aulos_core::fl!("toolbar-search-long")
+            };
+            let id = app.search_id;
+            let resp = search_field(ui, &mut app.search, &hint, width, id);
+            if resp.changed() {
+                let effect = app.session.set_search_query(app.search.clone());
+                app.run(effect);
+            }
+
             if browse && populated && !detail {
+                let seg_h = if compact { 32.0 } else { 26.0 };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let cfg = &mut app.session.config.config;
@@ -84,7 +112,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         _ => &mut cfg.genres_view_mode,
                     };
                     let mut idx = usize::from(*mode == ViewMode::List);
-                    if segmented(ui, &mut idx, &[regular::SQUARES_FOUR, regular::LIST], 26.0) {
+                    if segmented(ui, &mut idx, &[regular::SQUARES_FOUR, regular::LIST], seg_h) {
                         *mode = if idx == 1 {
                             ViewMode::List
                         } else {
@@ -107,8 +135,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 }
 
 /// A toolbar dropdown trigger: icon, label and caret in a 30px hover pill.
-fn dropdown_button(ui: &mut Ui, icon: &str, label: &str) -> egui::Response {
+fn dropdown_button(ui: &mut Ui, icon: &str, label: &str, icon_only: bool) -> egui::Response {
     let t = Theme::get(ui.ctx());
+    if icon_only {
+        // Phones: a square, touch-sized icon; the label is the tooltip.
+        let side = theme::size::TOUCH - 8.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), t.pal.text.alpha(0.06));
+        }
+        paint_icon(ui.painter(), rect.center(), icon, 16.0, t.pal.text_1, false);
+        return resp.on_hover_text(label);
+    }
     let font = theme::regular(13.0);
     let w = ui
         .painter()
@@ -164,12 +203,12 @@ fn sort_menu(app: &mut App, ui: &mut Ui, root: &Route) {
         Route::Artists => cfg.artists_sort,
         _ => cfg.genres_sort,
     };
-    let label = if app.narrow {
+    let label = if app.narrow() {
         current.short_label()
     } else {
         current.label()
     };
-    let resp = dropdown_button(ui, regular::ARROWS_DOWN_UP, &label);
+    let resp = dropdown_button(ui, regular::ARROWS_DOWN_UP, &label, app.compact());
     let mut chosen = None;
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(150.0);
@@ -206,7 +245,7 @@ fn sources_menu(app: &mut App, ui: &mut Ui) {
             || aulos_core::fl!("toolbar-all-sources"),
             |(_, name)| name.clone(),
         );
-    let resp = dropdown_button(ui, regular::HARD_DRIVES, &label);
+    let resp = dropdown_button(ui, regular::HARD_DRIVES, &label, app.compact());
 
     let entries: Vec<(usize, String, bool)> = {
         let p = &app.session.providers;

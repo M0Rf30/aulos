@@ -561,37 +561,43 @@ fn no_history(ui: &mut Ui, cx: &mut Cx) {
         });
         ui.add_space(8.0);
         let width = 170.0 + 130.0 + 8.0;
-        ui.allocate_ui_with_layout(
-            vec2(width, 34.0),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if pill_button(
-                    ui,
-                    &aulos_core::fl!("home-shuffle-everything"),
-                    Some(regular::SHUFFLE),
-                    PillKind::Accent,
-                    34.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    cx.out.act = Some(Act::ShuffleAll);
-                }
-                if pill_button(
-                    ui,
-                    &aulos_core::fl!("home-browse-albums"),
-                    None,
-                    PillKind::Secondary,
-                    34.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    cx.out.act = Some(Act::Goto(Route::Albums));
-                }
-            },
-        );
+        // Phones: one button per line (the labels outgrow a shared row).
+        let stacked = cx.app.compact();
+        let (size, layout) = if stacked {
+            (
+                vec2(ui.available_width(), 34.0 * 2.0 + 8.0),
+                Layout::top_down(Align::Center),
+            )
+        } else {
+            (vec2(width, 34.0), Layout::left_to_right(Align::Center))
+        };
+        ui.allocate_ui_with_layout(size, layout, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            if pill_button(
+                ui,
+                &aulos_core::fl!("home-shuffle-everything"),
+                Some(regular::SHUFFLE),
+                PillKind::Accent,
+                34.0,
+                0.0,
+            )
+            .clicked()
+            {
+                cx.out.act = Some(Act::ShuffleAll);
+            }
+            if pill_button(
+                ui,
+                &aulos_core::fl!("home-browse-albums"),
+                None,
+                PillKind::Secondary,
+                34.0,
+                0.0,
+            )
+            .clicked()
+            {
+                cx.out.act = Some(Act::Goto(Route::Albums));
+            }
+        });
         ui.add_space(24.0);
     });
 }

@@ -11,6 +11,10 @@ use egui::{Align, Layout, Rect, Sense, Ui, pos2, vec2};
 use egui_phosphor::{fill, regular};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
+    if app.compact() {
+        mini_bar(app, ui);
+        return;
+    }
     let bar = ui.max_rect();
     let inner = Rect::from_min_max(
         pos2(bar.left() + 12.0, bar.top() + 1.0),
@@ -18,7 +22,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     );
     let gap = 16.0;
     let right_auto = 3.0 * 30.0 + 2.0 * 2.0 + 6.0 + 30.0;
-    let (left_w, mid_w, right_w) = if app.narrow {
+    let (left_w, mid_w, right_w) = if app.narrow() {
         let flex = inner.width() - 2.0 * gap - right_auto;
         (flex / 2.2, flex * 1.2 / 2.2, right_auto)
     } else {
@@ -48,6 +52,130 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             .layout(Layout::right_to_left(Align::Center)),
         |ui| side_controls(app, ui),
     );
+}
+
+/// The phone's player strip: cover and title (tap opens the full player),
+/// play/pause, next, and a hairline progress rail on top.
+fn mini_bar(app: &mut App, ui: &mut Ui) {
+    let t = Theme::get(ui.ctx());
+    let bar = ui.max_rect();
+    let track = app.session.playback.current_track.clone();
+    let has_track = track.is_some();
+    let playing = app.session.playback.is_playing();
+    let live = track.as_ref().is_some_and(|t| t.is_live_stream());
+    let duration = track.as_ref().map_or(Duration::ZERO, |t| t.duration);
+
+    // Progress hairline (the seek bar lives in the full player).
+    let frac = if live || duration.is_zero() {
+        0.0
+    } else {
+        (app.session.playback.position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
+    };
+    let rail = Rect::from_min_size(bar.left_top() + vec2(0.0, 1.0), vec2(bar.width(), 2.0));
+    ui.painter().rect_filled(rail, 0.0, t.pal.surface_2);
+    ui.painter().rect_filled(
+        Rect::from_min_size(rail.min, vec2(rail.width() * frac, rail.height())),
+        0.0,
+        t.accent.fill,
+    );
+
+    let btn = theme::size::TOUCH;
+    let cy = bar.center().y + 1.0;
+    let cover = Rect::from_center_size(pos2(bar.left() + 12.0 + 22.0, cy), vec2(44.0, 44.0));
+    let buttons_w = 2.0 * btn + 8.0;
+    let text = Rect::from_min_max(
+        pos2(cover.right() + 10.0, bar.top() + 4.0),
+        pos2(bar.right() - buttons_w, bar.bottom()),
+    );
+
+    // Whole left block opens the expanded player.
+    let tap = ui.interact(
+        Rect::from_min_max(cover.left_top(), pos2(text.right(), bar.bottom())),
+        ui.id().with("mini-open"),
+        Sense::click(),
+    );
+    if let Some(track) = &track {
+        let key = track.cover_key();
+        cover_image(ui, &app.covers, cover, app.covers.thumb(&key), &key, 6);
+        paint_text(
+            ui.painter(),
+            Rect::from_min_size(pos2(text.left(), cy - 18.0), vec2(text.width(), 18.0)),
+            Align::Min,
+            &track.title,
+            theme::semibold(13.5),
+            t.pal.text,
+        );
+        paint_text(
+            ui.painter(),
+            Rect::from_min_size(pos2(text.left(), cy), vec2(text.width(), 16.0)),
+            Align::Min,
+            &track.artist,
+            theme::regular(12.0),
+            t.pal.text_2,
+        );
+    } else {
+        ui.painter().rect_filled(cover, 6.0, t.pal.surface_2);
+        paint_icon(
+            ui.painter(),
+            cover.center(),
+            regular::MUSIC_NOTES,
+            20.0,
+            t.pal.text_4,
+            false,
+        );
+        paint_text(
+            ui.painter(),
+            Rect::from_min_size(pos2(text.left(), cy - 9.0), vec2(text.width(), 18.0)),
+            Align::Min,
+            &aulos_core::fl!("nowbar-nothing-playing"),
+            theme::semibold(13.5),
+            t.pal.text_2,
+        );
+    }
+    if tap.clicked() && has_track {
+        app.expanded = true;
+    }
+
+    let next_rect = Rect::from_center_size(pos2(bar.right() - 8.0 - btn / 2.0, cy), vec2(btn, btn));
+    let play_rect = next_rect.translate(vec2(-btn, 0.0));
+    let play = ui.interact(play_rect, ui.id().with("mini-play"), Sense::click());
+    ui.painter().circle_filled(
+        play_rect.center(),
+        18.0,
+        if has_track {
+            t.accent.fill
+        } else {
+            t.pal.surface_2
+        },
+    );
+    paint_icon(
+        ui.painter(),
+        play_rect.center(),
+        if playing { fill::PAUSE } else { fill::PLAY },
+        17.0,
+        if has_track {
+            t.accent.on_fill
+        } else {
+            t.pal.text_4
+        },
+        true,
+    );
+    if play.clicked() {
+        app.toggle_play();
+    }
+    let next = ui.interact(next_rect, ui.id().with("mini-next"), Sense::click());
+    paint_icon(
+        ui.painter(),
+        next_rect.center(),
+        fill::SKIP_FORWARD,
+        18.0,
+        if has_track { t.pal.text } else { t.pal.text_4 },
+        true,
+    );
+    if next.clicked() && has_track {
+        let u = app.session.next_track();
+        app.run(u);
+    }
 }
 
 fn track_info(app: &mut App, ui: &mut Ui) {
@@ -184,7 +312,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
 
     ui.add_space(((col.height() - (36.0 + 6.0 + 16.0)) / 2.0).max(0.0));
     // Buttons row, centred.
-    let n = if app.narrow { 5.0 } else { 6.0 };
+    let n = if app.narrow() { 5.0 } else { 6.0 };
     let row_w = (n - 1.0) * 30.0 + 36.0 + n * 6.0 - 6.0;
     let (row, _) = ui.allocate_exact_size(vec2(row_w, 36.0), Sense::hover());
     ui.scope_builder(
@@ -241,7 +369,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
             {
                 app.toggle_play();
             }
-            if !app.narrow
+            if !app.narrow()
                 && IconBtn::new(fill::STOP)
                     .filled(true)
                     .icon_size(15.0)
@@ -358,7 +486,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     let t = Theme::get(ui.ctx());
     ui.spacing_mut().item_spacing.x = 2.0;
     // Right-to-left: volume first, then the buttons.
-    if !app.narrow {
+    if !app.narrow() {
         let vol = app.volume();
         let (resp, new) = slider_bar(ui, vol, vec2(84.0, 20.0), t.pal.text_1);
         if let Some(v) = new {
@@ -378,7 +506,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         regular::SPEAKER_HIGH
     };
     let muted = vol <= 0.001;
-    let mut speaker_btn = IconBtn::new(speaker).icon_size(16.0).tip(if app.narrow {
+    let mut speaker_btn = IconBtn::new(speaker).icon_size(16.0).tip(if app.narrow() {
         aulos_core::fl!("nowbar-volume")
     } else {
         aulos_core::fl!("nowbar-mute")
@@ -387,7 +515,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         speaker_btn = speaker_btn.color(t.pal.danger);
     }
     let speaker_resp = speaker_btn.show(ui);
-    if app.narrow {
+    if app.narrow() {
         // Narrow: the speaker opens a volume popover (with a mute button).
         egui::Popup::menu(&speaker_resp).show(|ui| {
             ui.set_min_width(150.0);
@@ -433,7 +561,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         app.expanded = true;
     }
     #[cfg(feature = "visualizer")]
-    if !app.narrow
+    if !app.narrow()
         && app.viz_available()
         && IconBtn::new(regular::WAVEFORM)
             .icon_size(16.0)
@@ -443,7 +571,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     {
         app.set_visualizer(true);
     }
-    if !app.narrow {
+    if !app.narrow() {
         let open = app.sheet == Some(Sheet::Properties);
         if IconBtn::new(regular::INFO)
             .icon_size(16.0)

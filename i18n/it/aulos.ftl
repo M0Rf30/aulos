@@ -954,6 +954,7 @@ tagger-submission-submitted = Inviato ({ $status })
 tagger-submission-failed = Invio non riuscito: { $error }
 
 ## Tag editor: metadata
+tagger-pane-files = File
 tagger-metadata-title = Metadati
 tagger-metadata-selection =
     { $count ->
@@ -1538,6 +1539,7 @@ converter-dir-error = Impossibile usare la cartella di output: { $error }
 converter-change-folder = Cambia cartella
 converter-ffmpeg-missing = { $format } richiede ffmpeg, che non è stato trovato su questo sistema. Installalo per convertire in questo formato.
 converter-checking-ffmpeg = Ricerca di ffmpeg…
+converter-pane-output = Uscita
 converter-queue-title = Coda
 converter-summary = { $jobs ->
     [one] { $jobs } attività · { $done } completate
@@ -1895,8 +1897,6 @@ app-toast-station-saved = { $name } salvata
 app-toast-station-already-saved = { $name } è già salvata
 app-toast-station-save-failed = Impossibile salvare la stazione: { $reason }
 app-toast-station-play-failed = Impossibile riprodurre la stazione: { $reason }
-
-app-toast-station-play-failed = Impossibile riprodurre la stazione: { $reason }
 app-toast-visualizer-needs-gpu = Il visualizzatore richiede il renderer GPU
 app-web-start-failed = Impossibile avviare Aulos: questo browser richiede WebGL2 o WebGPU.
 
@@ -1923,6 +1923,7 @@ nowbar-lyrics = Testo
 nowbar-queue = Coda
 
 # sidebar
+tabbar-more = Altro
 sidebar-home = Home
 sidebar-albums = Album
 sidebar-artists = Artisti

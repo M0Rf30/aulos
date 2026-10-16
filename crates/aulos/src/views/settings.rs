@@ -241,6 +241,8 @@ pub struct State {
     /// Per section: how many of its strings match the query (0: hidden while searching).
     hits: Vec<usize>,
     current: usize,
+    /// Phone layout: the sections list is showing (`false`) or one section.
+    open: bool,
     scroll_to: Option<usize>,
     folders: FolderCache,
     path_input: String,
@@ -294,10 +296,19 @@ pub fn enter(app: &mut App) {
     let st = &mut app.views.settings;
     st.edit = None;
     st.edit_error = None;
+    st.open = false;
     st.delimiters_input = app.session.config.config.artist_tag_delimiters.join(" | ");
     pump(app);
     let genres = app.session.load_genres();
     app.run(genres);
+}
+
+/// Opens the `n`-th section (the smoke runs' `settings:<n>`).
+pub fn open_section(app: &mut App, n: usize) {
+    let st = &mut app.views.settings;
+    st.current = n.min(SECTIONS.len() - 1);
+    st.scroll_to = Some(st.current);
+    st.open = true;
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -305,9 +316,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     app.views.settings.ensure_search();
     let pal = app.pal;
     let pad = app.page_pad();
-    let nav_w = if app.narrow { 190.0 } else { 220.0 };
+    let nav_w = if app.narrow() { 190.0 } else { 220.0 };
     let full = ui.available_rect_before_wrap();
     let top = full.top() + 4.0;
+
+    if app.compact() {
+        show_compact(app, ui, full, pad);
+        return;
+    }
 
     let nav_rect = Rect::from_min_max(
         pos2(full.left() + pad, top),
@@ -331,6 +347,45 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.advance_cursor_after_rect(full);
 }
 
+/// Phones: the section list fills the page; picking one swaps it for that
+/// section's settings under a back row.
+fn show_compact(app: &mut App, ui: &mut egui::Ui, full: Rect, pad: f32) {
+    let pal = app.pal;
+    let top = full.top() + 4.0;
+    if !app.views.settings.open {
+        let rect = Rect::from_min_max(
+            pos2(full.left() + pad, top),
+            full.right_bottom() - vec2(pad, 0.0),
+        );
+        let mut nav_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        nav(app, &mut nav_ui);
+        ui.advance_cursor_after_rect(full);
+        return;
+    }
+    let row = Rect::from_min_size(
+        pos2(full.left() + pad - 8.0, top),
+        vec2(full.width() - pad, theme::size::TOUCH),
+    );
+    if crate::widgets::back_row(ui, row, &aulos_core::fl!("settings")) {
+        app.views.settings.open = false;
+    }
+    let content_rect = Rect::from_min_max(
+        pos2(full.left() + pad, row.bottom() + 4.0),
+        full.right_bottom(),
+    );
+    let mut content_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    content(app, &mut content_ui, pal, pad);
+    ui.advance_cursor_after_rect(full);
+}
+
 // ----------------------------------------------------------------- navigation
 
 fn nav(app: &mut App, ui: &mut Ui) {
@@ -345,6 +400,11 @@ fn nav(app: &mut App, ui: &mut Ui) {
     search_box(ui, &pal, &mut app.views.settings.query);
     ui.add_space(8.0);
 
+    let row_h = if app.compact() {
+        theme::size::TOUCH
+    } else {
+        30.0
+    };
     let st = &mut app.views.settings;
     let searching = !st.parsed.is_empty();
     let mut clicked = None;
@@ -357,7 +417,7 @@ fn nav(app: &mut App, ui: &mut Ui) {
                 let hit = st.hits.get(i).copied().unwrap_or(0);
                 let miss = searching && hit == 0;
                 let (rect, resp) = ui.allocate_exact_size(
-                    vec2(ui.available_width(), 30.0),
+                    vec2(ui.available_width(), row_h),
                     if miss { Sense::hover() } else { Sense::click() },
                 );
                 let on = i == st.current && !searching;
@@ -412,6 +472,7 @@ fn nav(app: &mut App, ui: &mut Ui) {
     if let Some(i) = clicked {
         st.scroll_to = Some(i);
         st.current = i;
+        st.open = true;
     }
 }
 
@@ -481,20 +542,33 @@ fn content(app: &mut App, ui: &mut Ui, _pal: Palette, pad: f32) {
                 }
                 any = true;
                 let top = ui.cursor().min;
+                // Each section lays out in a fixed-width child: a widget wider
+                // than the column (the zoom steps, the EQ bands) would
+                // otherwise widen this ui, and with it every later row.
+                let mut section = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(Rect::from_min_size(top, vec2(w, f32::MAX / 4.0)))
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                let ui_s = &mut section;
                 match sec {
-                    Sec::Library => sec_library(app, ui),
-                    Sec::Sources => sec_sources(app, ui),
-                    Sec::Playback => sec_playback(app, ui),
-                    Sec::Equalizer => sec_equalizer(app, ui),
-                    Sec::Scrobbling => sec_scrobbling(app, ui),
-                    Sec::Online => sec_online(app, ui),
-                    Sec::Tagger => sec_tagger(app, ui),
-                    Sec::Appearance => sec_appearance(app, ui),
-                    Sec::Startup => sec_startup(app, ui),
-                    Sec::Desktop => sec_desktop(app, ui),
-                    Sec::Experimental => sec_experimental(app, ui),
-                    Sec::About => sec_about(app, ui),
+                    Sec::Library => sec_library(app, ui_s),
+                    Sec::Sources => sec_sources(app, ui_s),
+                    Sec::Playback => sec_playback(app, ui_s),
+                    Sec::Equalizer => sec_equalizer(app, ui_s),
+                    Sec::Scrobbling => sec_scrobbling(app, ui_s),
+                    Sec::Online => sec_online(app, ui_s),
+                    Sec::Tagger => sec_tagger(app, ui_s),
+                    Sec::Appearance => sec_appearance(app, ui_s),
+                    Sec::Startup => sec_startup(app, ui_s),
+                    Sec::Desktop => sec_desktop(app, ui_s),
+                    Sec::Experimental => sec_experimental(app, ui_s),
+                    Sec::About => sec_about(app, ui_s),
                 }
+                ui.advance_cursor_after_rect(Rect::from_min_size(
+                    top,
+                    vec2(w, section.min_rect().height()),
+                ));
                 if scroll_to == Some(i) {
                     ui.scroll_to_rect(Rect::from_min_size(top, vec2(w, 24.0)), Some(Align::TOP));
                     jumped = true;
@@ -554,7 +628,14 @@ fn row(
     control: impl FnOnce(&mut Ui),
 ) {
     let w = ui.available_width();
-    let text_w = (w - reserve - 16.0).max(80.0);
+    // A wide control (segmented, slider) would squeeze the text to a sliver on
+    // a phone: it drops under the text instead.
+    let stacked = w - reserve - 16.0 < 140.0 && reserve > 100.0;
+    let text_w = if stacked {
+        w
+    } else {
+        (w - reserve - 16.0).max(80.0)
+    };
     let pad = if desc.is_empty() { 10.0 } else { 11.0 };
     let title_g = ui
         .painter()
@@ -564,9 +645,14 @@ fn row(
             .layout(desc.to_owned(), theme::regular(12.0), pal.text_2, text_w)
     });
     let text_h = title_g.size().y + desc_g.as_ref().map_or(0.0, |g| g.size().y + 2.0);
-    let h = text_h.max(30.0) + pad * 2.0;
+    let control_h = if stacked { 36.0 } else { 0.0 };
+    let h = text_h.max(30.0) + pad * 2.0 + control_h;
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let top = rect.top() + (h - text_h) / 2.0;
+    let top = if stacked {
+        rect.top() + pad
+    } else {
+        rect.top() + (h - text_h) / 2.0
+    };
     let title_w = title_g.size().x;
     ui.painter()
         .galley(pos2(rect.left(), top), title_g.clone(), pal.text);
@@ -608,11 +694,18 @@ fn row(
         rect.bottom() - 0.5,
         Stroke::new(1.0, pal.stroke.alpha(0.6)),
     );
-    let mut child = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::right_to_left(Align::Center)),
-    );
+    let (area, layout) = if stacked {
+        (
+            Rect::from_min_max(
+                pos2(rect.left(), rect.bottom() - pad - control_h),
+                pos2(rect.right(), rect.bottom() - pad),
+            ),
+            Layout::left_to_right(Align::Center),
+        )
+    } else {
+        (rect, Layout::right_to_left(Align::Center))
+    };
+    let mut child = ui.new_child(UiBuilder::new().max_rect(area).layout(layout));
     child.spacing_mut().item_spacing.x = 10.0;
     control(&mut child);
 }

@@ -211,8 +211,38 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
 
     // Queue | Output card.
     let body = ui.available_rect_before_wrap();
+    if app.compact() {
+        // Phones: one pane at a time behind a Queue | Output switch.
+        let id = Id::new("converter-pane");
+        let mut pane: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+        ui.add_space(4.0);
+        if crate::widgets::segmented(
+            ui,
+            &mut pane,
+            &[
+                aulos_core::fl!("converter-queue-title").as_str(),
+                aulos_core::fl!("converter-pane-output").as_str(),
+            ],
+            34.0,
+        ) {
+            ui.data_mut(|d| d.insert_temp(id, pane));
+        }
+        ui.add_space(10.0);
+        let body = ui.available_rect_before_wrap();
+        let mut pane_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(body)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        if pane == 0 {
+            queue(app, &mut pane_ui, out);
+        } else {
+            output_card(app, &mut pane_ui, out);
+        }
+        return;
+    }
     // The card gives up width before the queue is squeezed under ~half.
-    let right_w = (if app.narrow { 300.0_f32 } else { 340.0 }).min(body.width() * 0.48);
+    let right_w = (if app.narrow() { 300.0_f32 } else { 340.0 }).min(body.width() * 0.48);
     let left = Rect::from_min_max(body.min, pos2(body.right() - right_w - 20.0, body.bottom()));
     let right = Rect::from_min_max(pos2(left.right() + 20.0, body.top()), body.max);
     let mut queue_ui = ui.new_child(

@@ -9,6 +9,7 @@ pub mod sp {
     pub const S3: f32 = 6.0;
     pub const S4: f32 = 8.0;
     pub const S6: f32 = 12.0;
+    pub const S7: f32 = 16.0;
     pub const S9: f32 = 24.0;
     pub const S10: f32 = 32.0;
 }
@@ -25,8 +26,42 @@ pub mod size {
     pub const SIDEBAR: f32 = 245.0;
     pub const RAIL: f32 = 65.0;
     pub const COLLAPSE_BELOW: f32 = 1040.0;
+    /// Below this width the phone layout applies (bottom tab bar, one pane).
+    pub const COMPACT_BELOW: f32 = 640.0;
+    /// The narrowest logical width the interface is ever laid out at; the
+    /// zoom is capped so a phone never drops under it.
+    pub const MIN_WIDTH: f32 = 320.0;
     pub const TOOLBAR: f32 = 56.0;
     pub const NOW_BAR: f32 = 76.0;
+    /// The compact layout's mini player (cover, title, play/pause, seek rail).
+    pub const MINI_BAR: f32 = 64.0;
+    /// The compact layout's bottom tab bar.
+    pub const TAB_BAR: f32 = 56.0;
+    /// Minimum hit height of a tappable row on touch layouts.
+    pub const TOUCH: f32 = 44.0;
+}
+
+/// The window width class every page lays itself out by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidthClass {
+    /// Phones: under [`size::COMPACT_BELOW`].
+    Compact,
+    /// Tablets and small windows: the sidebar is a rail.
+    Medium,
+    /// Desktop windows: the full sidebar.
+    Expanded,
+}
+
+impl WidthClass {
+    pub fn of(width: f32) -> Self {
+        if width < size::COMPACT_BELOW {
+            Self::Compact
+        } else if width < size::COLLAPSE_BELOW {
+            Self::Medium
+        } else {
+            Self::Expanded
+        }
+    }
 }
 
 pub mod motion {
@@ -71,6 +106,18 @@ pub mod motion {
     pub fn animate(ctx: &egui::Context, id: egui::Id, on: bool, secs: f32) -> f32 {
         ctx.animate_bool_with_time(id, on, if reduced(ctx) { 0.0 } else { secs })
     }
+}
+
+const TOUCH_KEY: &str = "touch_layout";
+
+/// Published once a frame: rows and buttons use their finger-sized metrics.
+pub fn set_touch(ctx: &egui::Context, touch: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(TOUCH_KEY), touch));
+}
+
+pub fn touch(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(egui::Id::new(TOUCH_KEY)))
+        .unwrap_or(false)
 }
 
 pub const fn hex(rgb: u32) -> Color32 {

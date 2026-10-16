@@ -762,7 +762,7 @@ fn list_cols(row: Rect, narrow: bool) -> ListCols {
 fn list(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<Action>) {
     let pal = app.pal;
     let accent = app.accent;
-    let narrow = app.narrow;
+    let narrow = app.narrow();
     let lib = &app.session.library;
     let albums = lib.visible_albums();
 
@@ -1056,7 +1056,6 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
     };
 
     let pal = app.pal;
-    let narrow = app.narrow;
     let lib = &app.session.library;
     let Some(album) = lib.albums.get(idx) else {
         return;
@@ -1073,7 +1072,7 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                 hero(app, ui, album, idx, actions);
                 ui.add_space(24.0);
 
-                let cols = Columns::album_detail(narrow);
+                let cols = Columns::album_detail(app.class);
                 track_header(ui, cols, "#");
                 let multi_disc = album.tracks.iter().any(|t| t.disc_number > 1);
                 let mut last_disc = None;
@@ -1147,7 +1146,11 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
 fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Action>) {
     let pal = app.pal;
     let accent = app.accent;
-    let size = if app.narrow { 150.0 } else { 184.0 };
+    if app.compact() {
+        hero_compact(app, ui, album, idx, actions);
+        return;
+    }
+    let size = if app.narrow() { 150.0 } else { 184.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), size), Sense::hover());
     let cover = Rect::from_min_size(rect.min, vec2(size, size));
     ui.painter().rect_filled(
@@ -1196,7 +1199,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
         title,
         Align::Min,
         &album_title(&album.name),
-        theme::bold(if app.narrow { 28.0 } else { 34.0 }),
+        theme::bold(if app.narrow() { 28.0 } else { 34.0 }),
         pal.text,
     );
 
@@ -1262,65 +1265,187 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
         UiBuilder::new()
             .max_rect(brect)
             .layout(Layout::left_to_right(Align::Center)),
+        |ui| hero_buttons(ui, idx, actions),
+    );
+}
+
+/// Play / Shuffle / Play next / Add to queue.
+fn hero_buttons(ui: &mut Ui, idx: usize, actions: &mut Vec<Action>) {
+    ui.spacing_mut().item_spacing.x = 8.0;
+    if pill_button(
+        ui,
+        &aulos_core::fl!("play"),
+        Some(regular::PLAY),
+        PillKind::Primary,
+        34.0,
+        0.0,
+    )
+    .clicked()
+    {
+        actions.push(Action::PlayAlbum {
+            album: idx,
+            start: 0,
+        });
+    }
+    if pill_button(
+        ui,
+        &aulos_core::fl!("shuffle"),
+        Some(regular::SHUFFLE),
+        PillKind::Secondary,
+        34.0,
+        0.0,
+    )
+    .clicked()
+    {
+        actions.push(Action::ShuffleAlbum(idx));
+    }
+    if pill_button(
+        ui,
+        &aulos_core::fl!("queue-play-next"),
+        Some(regular::QUEUE),
+        PillKind::Secondary,
+        34.0,
+        0.0,
+    )
+    .clicked()
+    {
+        actions.push(Action::QueueAlbum {
+            album: idx,
+            next: true,
+        });
+    }
+    if pill_button(
+        ui,
+        &aulos_core::fl!("queue-add"),
+        Some(regular::LIST_PLUS),
+        PillKind::Secondary,
+        34.0,
+        0.0,
+    )
+    .clicked()
+    {
+        actions.push(Action::QueueAlbum {
+            album: idx,
+            next: false,
+        });
+    }
+}
+
+/// The phone hero: a small cover beside the title block, the actions
+/// wrapping underneath.
+fn hero_compact(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Action>) {
+    let pal = app.pal;
+    let accent = app.accent;
+    let size = 112.0;
+    let (full, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), size + 12.0 + 76.0),
+        Sense::hover(),
+    );
+    let rect = Rect::from_min_size(full.min, vec2(full.width(), size));
+    let cover = Rect::from_min_size(rect.min, vec2(size, size));
+    cover_image(
+        ui,
+        &app.covers,
+        cover,
+        app.covers.thumb(&album.cover_key),
+        &album.cover_key,
+        8,
+    );
+    let cover_resp = ui.interact(cover, ui.id().with("album-hero-cover"), Sense::click());
+    if let Some(m) = menus::album_menu(&cover_resp, album, &app.session.playlists.playlists) {
+        actions.push(Action::Menu(m));
+    }
+
+    let x = cover.right() + 14.0;
+    let w = (rect.right() - x).max(60.0);
+    let line = |y: f32, h: f32| Rect::from_min_size(pos2(x, rect.top() + y), vec2(w, h));
+    paint_text_spaced(
+        ui.painter(),
+        line(2.0, 14.0),
+        Align::Min,
+        &if album.is_compilation() {
+            aulos_core::fl!("albums-kind-compilation")
+        } else {
+            aulos_core::fl!("albums-kind-album")
+        }
+        .to_uppercase(),
+        theme::semibold(10.5),
+        pal.text_3,
+        0.66,
+    );
+    paint_text(
+        ui.painter(),
+        line(18.0, 30.0),
+        Align::Min,
+        &album_title(&album.name),
+        theme::bold(22.0),
+        pal.text,
+    );
+    let artist = line(50.0, 20.0);
+    let aw = text_width(ui, &album.artist, theme::medium(14.0)).min(w);
+    let ar = ui.interact(
+        Rect::from_min_size(artist.min, vec2(aw, artist.height())),
+        ui.id().with("album-hero-artist"),
+        Sense::click(),
+    );
+    paint_text(
+        ui.painter(),
+        artist,
+        Align::Min,
+        &album.artist,
+        theme::medium(14.0),
+        if ar.hovered() {
+            accent.text
+        } else {
+            pal.text_15
+        },
+    );
+    if ar.clicked() && !album.artist.is_empty() {
+        actions.push(Action::Go(Route::Artist(album.artist.clone())));
+    }
+    let mut parts = Vec::new();
+    if album.year > 0 {
+        parts.push(album.year.to_string());
+    }
+    parts.push(aulos_core::fl!(
+        "albums-song-count",
+        count = album.tracks.len()
+    ));
+    parts.push(duration_text(album.total_secs));
+    let meta = line(74.0, 18.0);
+    let mw = paint_text(
+        ui.painter(),
+        meta,
+        Align::Min,
+        &parts.join(" · "),
+        theme::regular(12.5),
+        pal.text_2,
+    );
+    if let Some(q) = quality_of(album.quality)
+        && mw + 50.0 < w
+    {
+        let r = Rect::from_min_max(
+            pos2(meta.left() + mw + 8.0, meta.top()),
+            pos2(rect.right(), meta.bottom()),
+        );
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(r)
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                quality_badge(ui, q);
+            },
+        );
+    }
+
+    let brect = Rect::from_min_max(pos2(full.left(), rect.bottom() + 12.0), full.right_bottom());
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(brect)
+            .layout(Layout::left_to_right(Align::Min).with_main_wrap(true)),
         |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if pill_button(
-                ui,
-                &aulos_core::fl!("play"),
-                Some(regular::PLAY),
-                PillKind::Primary,
-                34.0,
-                0.0,
-            )
-            .clicked()
-            {
-                actions.push(Action::PlayAlbum {
-                    album: idx,
-                    start: 0,
-                });
-            }
-            if pill_button(
-                ui,
-                &aulos_core::fl!("shuffle"),
-                Some(regular::SHUFFLE),
-                PillKind::Secondary,
-                34.0,
-                0.0,
-            )
-            .clicked()
-            {
-                actions.push(Action::ShuffleAlbum(idx));
-            }
-            if pill_button(
-                ui,
-                &aulos_core::fl!("queue-play-next"),
-                Some(regular::QUEUE),
-                PillKind::Secondary,
-                34.0,
-                0.0,
-            )
-            .clicked()
-            {
-                actions.push(Action::QueueAlbum {
-                    album: idx,
-                    next: true,
-                });
-            }
-            if pill_button(
-                ui,
-                &aulos_core::fl!("queue-add"),
-                Some(regular::LIST_PLUS),
-                PillKind::Secondary,
-                34.0,
-                0.0,
-            )
-            .clicked()
-            {
-                actions.push(Action::QueueAlbum {
-                    album: idx,
-                    next: false,
-                });
-            }
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            hero_buttons(ui, idx, actions);
         },
     );
 }

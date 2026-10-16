@@ -11,7 +11,16 @@ use aulos_core::library::state::SortField;
 use egui::{Align, CornerRadius, Rect, Response, Sense, Ui, pos2, vec2};
 use egui_phosphor::{fill, regular};
 
-pub const ROW_HEIGHT: f32 = 36.0;
+const ROW_HEIGHT: f32 = 36.0;
+
+/// Height of a track row: finger-sized on touch layouts.
+pub fn row_height(ctx: &egui::Context) -> f32 {
+    if crate::theme::touch(ctx) {
+        crate::theme::size::TOUCH
+    } else {
+        ROW_HEIGHT
+    }
+}
 pub const HEADER_HEIGHT: f32 = 32.0;
 const NUM_W: f32 = 28.0;
 const QUALITY_W: f32 = 54.0;
@@ -31,22 +40,25 @@ pub struct Columns {
 }
 
 impl Columns {
-    /// The Songs layout: everything on wide windows; no artist/rating when narrow.
-    pub fn songs(narrow: bool) -> Self {
+    /// The Songs layout: everything on wide windows; no artist/rating when
+    /// narrow; on phones just title, heart and time.
+    pub fn songs(class: crate::theme::WidthClass) -> Self {
+        use crate::theme::WidthClass;
         Self {
-            artist: !narrow,
-            album: true,
-            quality: true,
-            rating: !narrow,
+            artist: class == WidthClass::Expanded,
+            album: class != WidthClass::Compact,
+            quality: class != WidthClass::Compact,
+            rating: class == WidthClass::Expanded,
         }
     }
     /// Track lists inside an album detail (title, quality, heart, rating, time).
-    pub fn album_detail(narrow: bool) -> Self {
+    pub fn album_detail(class: crate::theme::WidthClass) -> Self {
+        use crate::theme::WidthClass;
         Self {
             artist: false,
             album: false,
-            quality: true,
-            rating: !narrow,
+            quality: class != WidthClass::Compact,
+            rating: class == WidthClass::Expanded,
         }
     }
 }
@@ -301,8 +313,9 @@ pub fn track_row(
 ) -> RowOutput {
     let t = Theme::get(ui.ctx());
     let pal = t.pal;
+    let row_h = row_height(ui.ctx());
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
     let l = layout(rect, cols);
     let hovered = response.hovered();
     let r = CornerRadius::same(6);
@@ -396,7 +409,13 @@ pub fn track_row(
         .library
         .favorite_state(None, &track.id.to_string())
         .unwrap_or(track.is_favorite);
-    let heart_hit = Rect::from_center_size(l.heart.center(), vec2(HEART_W + 6.0, ROW_HEIGHT - 6.0));
+    let heart_hit = Rect::from_center_size(
+        l.heart.center(),
+        vec2(
+            HEART_W + if theme::touch(ui.ctx()) { 16.0 } else { 6.0 },
+            row_h - 6.0,
+        ),
+    );
     let heart = ui.interact(heart_hit, response.id.with("heart"), Sense::click());
     let (glyph, filled, color) = if fav {
         (
@@ -423,7 +442,7 @@ pub fn track_row(
         let current_rating = track.rating.unwrap_or(0);
         for i in 0..5u8 {
             let c = pos2(r.left() + 6.5 + f32::from(i) * 13.0, r.center().y);
-            let hit = Rect::from_center_size(c, vec2(13.0, ROW_HEIGHT - 6.0));
+            let hit = Rect::from_center_size(c, vec2(13.0, row_h - 6.0));
             let star = ui.interact(hit, response.id.with(("star", i)), Sense::click());
             let on = i < current_rating;
             let (g, f, col) = if on {

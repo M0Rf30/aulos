@@ -5,7 +5,7 @@
 use crate::app::App;
 use crate::theme::{self, Theme};
 use crate::views::menus::{self, MenuAction};
-use crate::widgets::{self, Columns, PillKind, ROW_HEIGHT, paint_icon, paint_text};
+use crate::widgets::{self, Columns, PillKind, paint_icon, paint_text, row_height};
 use aulos_core::library::folder_tree::{FolderState, FolderTree};
 use aulos_core::session::QueuePlacement;
 use egui::{
@@ -96,7 +96,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
 
     if !has_tracks {
         if library.scanning {
-            loading(ui, pad, app.narrow);
+            loading(ui, pad, app.narrow());
         } else {
             widgets::empty_state(
                 ui,
@@ -115,37 +115,27 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
 
     // Breadcrumb + folder actions.
     Frame::NONE.inner_margin(margin).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            breadcrumbs(ui, &crumbs, &mut intents);
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if widgets::pill_button(
-                    ui,
-                    &aulos_core::fl!("queue-add"),
-                    Some(regular::LIST_PLUS),
-                    PillKind::Secondary,
-                    30.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    intents.push(Intent::QueueFolder);
-                }
-                if widgets::pill_button(
-                    ui,
-                    &aulos_core::fl!("play-folder"),
-                    Some(regular::PLAY),
-                    PillKind::Primary,
-                    30.0,
-                    0.0,
-                )
-                .clicked()
-                {
-                    intents.push(Intent::PlayFolder);
-                }
+        if app.compact() {
+            // Phones: the actions get a row of their own under the crumbs.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                breadcrumbs(ui, &crumbs, &mut intents);
             });
-        });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                folder_actions(ui, &mut intents, false);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                breadcrumbs(ui, &crumbs, &mut intents);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    folder_actions(ui, &mut intents, true);
+                });
+            });
+        }
     });
     ui.add_space(14.0);
 
@@ -158,10 +148,21 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
             (avail.bottom() - 24.0).max(avail.top()),
         ),
     );
-    let tree_w: f32 = if app.narrow { 220.0 } else { 260.0 };
+    // Phones drop the tree: the breadcrumbs and the folder rows of the
+    // listing already navigate.
+    let tree_w: f32 = if app.compact() {
+        0.0
+    } else if app.narrow() {
+        220.0
+    } else {
+        260.0
+    };
     let tree_rect = Rect::from_min_size(area.min, vec2(tree_w.min(area.width()), area.height()));
     let list_rect = Rect::from_min_max(
-        pos2((tree_rect.right() + 16.0).min(area.right()), area.top()),
+        pos2(
+            (tree_rect.right() + if tree_w > 0.0 { 16.0 } else { 0.0 }).min(area.right()),
+            area.top(),
+        ),
         area.max,
     );
 
@@ -174,14 +175,56 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
         state.rows_key = Some(key);
     }
 
-    ui.scope_builder(UiBuilder::new().max_rect(tree_rect), |ui| {
-        tree_panel(ui, app, state, &current, &mut intents)
-    });
+    if tree_w > 0.0 {
+        ui.scope_builder(UiBuilder::new().max_rect(tree_rect), |ui| {
+            tree_panel(ui, app, state, &current, &mut intents)
+        });
+    }
     ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| {
         listing(ui, app, state, &current, &mut intents)
     });
     ui.allocate_rect(avail, Sense::hover());
     intents
+}
+
+/// "Play folder" and "Add to queue", in reading order (`rtl`: the layout
+/// places the first one rightmost, so Play goes last).
+fn folder_actions(ui: &mut Ui, intents: &mut Vec<Intent>, rtl: bool) {
+    let add = |ui: &mut Ui, intents: &mut Vec<Intent>| {
+        if widgets::pill_button(
+            ui,
+            &aulos_core::fl!("queue-add"),
+            Some(regular::LIST_PLUS),
+            PillKind::Secondary,
+            30.0,
+            0.0,
+        )
+        .clicked()
+        {
+            intents.push(Intent::QueueFolder);
+        }
+    };
+    let play = |ui: &mut Ui, intents: &mut Vec<Intent>| {
+        if widgets::pill_button(
+            ui,
+            &aulos_core::fl!("play-folder"),
+            Some(regular::PLAY),
+            PillKind::Primary,
+            30.0,
+            0.0,
+        )
+        .clicked()
+        {
+            intents.push(Intent::PlayFolder);
+        }
+    };
+    if rtl {
+        add(ui, intents);
+        play(ui, intents);
+    } else {
+        play(ui, intents);
+        add(ui, intents);
+    }
 }
 
 fn flatten(
@@ -441,6 +484,7 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
     let tree = state.folder.tree();
     let dirs = tree.child_dirs(current);
     let direct = tree.direct_tracks(current);
+    let row_h = row_height(ui.ctx());
     if dirs.is_empty() && direct.is_empty() {
         widgets::empty_state(
             ui,
@@ -453,9 +497,9 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
     }
     let cols = Columns {
         artist: false,
-        album: true,
-        quality: true,
-        rating: !app.narrow,
+        album: !app.compact(),
+        quality: !app.compact(),
+        rating: !app.narrow(),
     };
     widgets::track_header(ui, cols, &aulos_core::fl!("songs-column-number"));
     let total = dirs.len() + direct.len();
@@ -464,14 +508,12 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
     ScrollArea::vertical()
         .id_salt("folders-list")
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, total, |ui, range| {
+        .show_rows(ui, row_h, total, |ui, range| {
             for i in range {
                 if i < dirs.len() {
                     let dir = &dirs[i];
-                    let (r, resp) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), ROW_HEIGHT),
-                        Sense::click(),
-                    );
+                    let (r, resp) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
                     if resp.hovered() {
                         ui.painter()
                             .rect_filled(r, CornerRadius::same(6), pal.hover);
@@ -517,7 +559,7 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                     let n = i - dirs.len();
                     let real = direct[n];
                     let Some(track) = library.tracks.get(real) else {
-                        ui.allocate_space(vec2(ui.available_width(), ROW_HEIGHT));
+                        ui.allocate_space(vec2(ui.available_width(), row_h));
                         continue;
                     };
                     let number = (n + 1).to_string();
@@ -586,11 +628,9 @@ fn loading(ui: &mut Ui, pad: f32, narrow: bool) {
         area.top() + 30.0,
         Stroke::new(1.0, pal.stroke),
     );
-    for i in 0..((area.height() / ROW_HEIGHT) as usize)
-        .saturating_sub(1)
-        .min(12)
-    {
-        let y = area.top() + 40.0 + i as f32 * ROW_HEIGHT;
+    let row_h = row_height(ui.ctx());
+    for i in 0..((area.height() / row_h) as usize).saturating_sub(1).min(12) {
+        let y = area.top() + 40.0 + i as f32 * row_h;
         widgets::skeleton(
             ui,
             Rect::from_min_size(pos2(list_left + 50.0, y), vec2(list_w * 0.4, 14.0)),

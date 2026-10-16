@@ -4,7 +4,7 @@
 //! else on screen is read) and exits.
 //!
 //! Knobs (all optional):
-//! - `AULOS_SMOKE_PAGE=<home|albums|album:<n>|artists|artist:<name>|songs|genres|genre:<name>|folders|playlists|podcasts|radio|tagger|converter|settings|expanded|mini>`
+//! - `AULOS_SMOKE_PAGE=<home|albums|album:<n>|artists|artist:<name>|songs|genres|genre:<name>|folders|playlists|podcasts|radio|tagger|converter|settings|settings:<n>|expanded|mini>`
 //! - `AULOS_SMOKE_TAB=songs` (alias of `AULOS_SMOKE_PAGE=songs`)
 //! - `AULOS_SMOKE_SEARCH=<text>`: type into the search box
 //! - `AULOS_SMOKE_OVERLAY=<queue|props|presets>`: open a side sheet (`presets`: the visualizer's browser)
@@ -383,6 +383,13 @@ impl Smoke {
                 Some(spec) => {
                     if let Some(route) = route_of(spec, app) {
                         app.navigate(route);
+                    }
+                    // `settings:<n>` opens the n-th section (phone layout).
+                    if let Some(n) = spec
+                        .strip_prefix("settings:")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    {
+                        crate::views::settings::open_section(app, n);
                     }
                 }
                 None => {}

@@ -194,7 +194,7 @@ pub struct App {
     history_pos: usize,
     pub search: String,
     pub search_id: egui::Id,
-    pub narrow: bool,
+    pub class: theme::WidthClass,
     /// The sidebar was collapsed to the icon rail by hand.
     pub sidebar_collapsed: bool,
     pub sheet: Option<Sheet>,
@@ -314,7 +314,7 @@ impl App {
             history_pos: 0,
             search: String::new(),
             search_id: egui::Id::new("aulos-search"),
-            narrow: false,
+            class: theme::WidthClass::Expanded,
             sidebar_collapsed: false,
             sheet: None,
             expanded: false,
@@ -736,13 +736,24 @@ impl App {
         self.ctx.request_repaint();
     }
 
-    /// Horizontal page padding of the current layout (32px wide, 24px narrow).
+    /// Horizontal page padding of the current layout (32px wide, 24px
+    /// narrow, 16px on phones).
     pub fn page_pad(&self) -> f32 {
-        if self.narrow {
-            theme::sp::S9
-        } else {
-            theme::sp::S10
+        match self.class {
+            theme::WidthClass::Compact => theme::sp::S7,
+            theme::WidthClass::Medium => theme::sp::S9,
+            theme::WidthClass::Expanded => theme::sp::S10,
         }
+    }
+
+    /// The window is narrower than the desktop layout (rail, trimmed panes).
+    pub fn narrow(&self) -> bool {
+        self.class != theme::WidthClass::Expanded
+    }
+
+    /// The phone layout: bottom tab bar, one pane, full-width sheets.
+    pub fn compact(&self) -> bool {
+        self.class == theme::WidthClass::Compact
     }
 
     // -- cover-derived art ----------------------------------------------------
@@ -964,10 +975,21 @@ impl App {
         self.ctx.request_repaint();
     }
 
+    /// Applies `ui_scale` on top of the density base, capped so the layout
+    /// never gets narrower than [`theme::size::MIN_WIDTH`] logical points (a
+    /// 200% zoom on a phone would otherwise leave ~190pt).
     fn apply_zoom(&self) {
         let base = self.zoom_base.unwrap_or(1.0);
-        self.ctx
-            .set_zoom_factor(self.session.config.config.ui_scale * base);
+        let mut zoom = self.session.config.config.ui_scale * base;
+        if let Some(native) = self.ctx.native_pixels_per_point() {
+            let px_width = self.ctx.content_rect().width() * self.ctx.pixels_per_point();
+            if px_width > 0.0 {
+                zoom = zoom.min(px_width / (native * theme::size::MIN_WIDTH));
+            }
+        }
+        if (self.ctx.zoom_factor() - zoom).abs() > 1e-3 {
+            self.ctx.set_zoom_factor(zoom);
+        }
     }
 
     /// Moves the interface zoom one step along [`UI_SCALE_STEPS`] (`0` resets).
@@ -1194,8 +1216,9 @@ impl eframe::App for App {
             && let Some(native) = ctx.native_pixels_per_point()
         {
             self.zoom_base = Some(1.0 / native);
-            self.apply_zoom();
         }
+        // Every frame: a rotation or a window resize changes the cap.
+        self.apply_zoom();
         self.covers.upload_pending(&self.session.library.covers);
         #[cfg(target_arch = "wasm32")]
         for command in crate::media_session::sync(ctx, &mut self.session) {
@@ -1234,7 +1257,8 @@ impl eframe::App for App {
         }
         .publish(&ctx);
         theme::motion::set_reduced(&ctx, self.session.config.config.reduce_motion);
-        self.narrow = ctx.content_rect().width() < theme::size::COLLAPSE_BELOW;
+        self.class = theme::WidthClass::of(ctx.content_rect().width());
+        theme::set_touch(&ctx, self.compact() || cfg!(target_os = "android"));
         self.shortcuts(&ctx);
         // Hero pages announce their tint while drawing; the toolbar, drawn
         // before the page, uses last frame's value.

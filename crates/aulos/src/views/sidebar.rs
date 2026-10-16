@@ -6,15 +6,15 @@ use crate::widgets::{paint_icon, paint_text};
 use egui::{Align, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use egui_phosphor::{fill, regular};
 
-struct Item {
-    route: Route,
-    icon: &'static str,
-    icon_fill: &'static str,
-    label: fn() -> String,
-    key: Option<&'static str>,
+pub(super) struct Item {
+    pub(super) route: Route,
+    pub(super) icon: &'static str,
+    pub(super) icon_fill: &'static str,
+    pub(super) label: fn() -> String,
+    pub(super) key: Option<&'static str>,
 }
 
-const LIBRARY: [Item; 7] = [
+pub(super) const LIBRARY: [Item; 7] = [
     Item {
         route: Route::Home,
         icon: regular::HOUSE,
@@ -66,7 +66,7 @@ const LIBRARY: [Item; 7] = [
     },
 ];
 
-const LISTEN: [Item; 2] = [
+pub(super) const LISTEN: [Item; 2] = [
     Item {
         route: Route::Podcasts,
         icon: regular::MICROPHONE_STAGE,
@@ -202,7 +202,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let rail_mode: bool = ui
         .ctx()
         .data(|d| d.get_temp(egui::Id::new("sidebar_rail")))
-        .unwrap_or(app.narrow || app.sidebar_collapsed);
+        .unwrap_or(app.narrow() || app.sidebar_collapsed);
     if rail_mode {
         rail(app, ui, &pal);
         return;
@@ -553,7 +553,7 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
                 t.accent.fill,
                 pal.text,
             );
-            if !app.narrow {
+            if !app.narrow() {
                 let resp = ui
                     .interact(row, ui.id().with("expand"), Sense::click())
                     .on_hover_text(aulos_core::fl!("sidebar-expand"));
