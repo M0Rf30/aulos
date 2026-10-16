@@ -4,8 +4,9 @@
 //! Podcast feed fetching (via `feed-rs`) and the iTunes podcast directory
 //! search used by the "Add podcast" search field, plus the blocking
 //! subscribe / refresh / unsubscribe / download operations that combine them
-//! with the [`OnlineStore`]. Everything here blocks: a UI runs it on a
-//! worker thread.
+//! with the [`OnlineStore`]. Network calls are async (so they run in the
+//! browser too) and store access runs on the blocking pool; only
+//! [`download_episode`] blocks and is native-only in practice.
 
 use super::store::{Episode, OnlineStore, Podcast};
 use feed_rs::model::{Entry, Feed};
@@ -45,18 +46,19 @@ const MAX_FEED_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_EPISODES_PER_FEED: usize = 5_000;
 
 /// Fetch and parse a podcast feed, returning its metadata and episodes.
-pub fn fetch_feed(
-    client: &crate::http::blocking::Client,
+pub async fn fetch_feed(
+    client: &reqwest::Client,
     feed_url: &str,
 ) -> Result<(PodcastMeta, Vec<EpisodeMeta>), String> {
     let response = client
         .get(feed_url)
         .send()
-        .map_err(|e| format!("Failed to fetch feed: {e}"))?;
+        .await
+        .map_err(|e| super::request_error("Failed to fetch feed", feed_url, &e))?;
     if !response.status().is_success() {
         return Err(format!("Failed to fetch feed: HTTP {}", response.status()));
     }
-    let bytes = super::read_capped_body(response, MAX_FEED_RESPONSE_BYTES)?;
+    let bytes = super::read_capped_response(response, MAX_FEED_RESPONSE_BYTES).await?;
     let feed =
         feed_rs::parser::parse(&bytes[..]).map_err(|e| format!("Failed to parse feed: {e}"))?;
 
@@ -216,8 +218,8 @@ const MAX_ITUNES_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Search the iTunes podcast directory. Results without a `feedUrl` are
 /// skipped since they can't be subscribed to.
-pub fn search_itunes(
-    client: &crate::http::blocking::Client,
+pub async fn search_itunes(
+    client: &reqwest::Client,
     query: &str,
 ) -> Result<Vec<PodcastSearchResult>, String> {
     let url = format!(
@@ -227,19 +229,20 @@ pub fn search_itunes(
     let response = client
         .get(&url)
         .send()
-        .map_err(|e| format!("iTunes search failed: {e}"))?;
+        .await
+        .map_err(|e| super::request_error("iTunes search failed", &url, &e))?;
     if !response.status().is_success() {
         return Err(format!("iTunes search returned HTTP {}", response.status()));
     }
-    let bytes = super::read_capped_body(response, MAX_ITUNES_RESPONSE_BYTES)?;
+    let bytes = super::read_capped_response(response, MAX_ITUNES_RESPONSE_BYTES).await?;
     let body: ItunesResponse =
         serde_json::from_slice(&bytes).map_err(|e| format!("iTunes response parse failed: {e}"))?;
     Ok(map_itunes_results(body.results))
 }
 
 /// Searches the iTunes podcast directory with the shared HTTP client.
-pub fn search(query: &str) -> Result<Vec<PodcastSearchResult>, String> {
-    search_itunes(&super::HTTP_CLIENT, query)
+pub async fn search(query: &str) -> Result<Vec<PodcastSearchResult>, String> {
+    search_itunes(super::http(), query).await
 }
 
 /// Loads the subscribed podcasts from the online store. A store error is
@@ -280,23 +283,28 @@ pub fn save_episode_position(
 /// Subscribes to the podcast at `feed_url`: fetches and parses the feed,
 /// then upserts the show and its episodes into the online store. Returns
 /// the show's title for the confirmation toast.
-pub fn subscribe(feed_url: &str) -> Result<String, String> {
-    let (meta, episodes) = fetch_feed(&super::HTTP_CLIENT, feed_url)?;
-    let store = OnlineStore::open_default()?;
-    let id = store.add_podcast(feed_url, &meta)?;
-    store.upsert_episodes(id, &episodes)?;
-    store.touch_podcast_refresh(id, &meta, crate::unix_now())?;
-    Ok(meta.title)
+pub async fn subscribe(feed_url: &str) -> Result<String, String> {
+    let (meta, episodes) = fetch_feed(super::http(), feed_url).await?;
+    let feed_url = feed_url.to_owned();
+    OnlineStore::run(move |store| {
+        let id = store.add_podcast(&feed_url, &meta)?;
+        store.upsert_episodes(id, &episodes)?;
+        store.touch_podcast_refresh(id, &meta, crate::unix_now())?;
+        Ok(meta.title)
+    })
+    .await
 }
 
 /// Re-fetches a subscribed podcast's feed and updates its metadata and
 /// episodes in the online store.
-pub fn refresh(id: i64, feed_url: &str) -> Result<(), String> {
-    let (meta, episodes) = fetch_feed(&super::HTTP_CLIENT, feed_url)?;
-    let store = OnlineStore::open_default()?;
-    store.touch_podcast_refresh(id, &meta, crate::unix_now())?;
-    store.upsert_episodes(id, &episodes)?;
-    Ok(())
+pub async fn refresh(id: i64, feed_url: &str) -> Result<(), String> {
+    let (meta, episodes) = fetch_feed(super::http(), feed_url).await?;
+    OnlineStore::run(move |store| {
+        store.touch_podcast_refresh(id, &meta, crate::unix_now())?;
+        store.upsert_episodes(id, &episodes)?;
+        Ok(())
+    })
+    .await
 }
 
 /// Unsubscribes from a podcast: deletes its downloaded episode files, then

@@ -1073,7 +1073,7 @@ fn episode_row(
     );
     let dl_resp = dl_resp.on_hover_text(dl_tip);
 
-    if play_resp.clicked() || resp.double_clicked() {
+    if play_resp.clicked() || (resp.clicked() && !dl_resp.clicked()) {
         intents.push(Intent::Play(e.id));
     }
     if dl_resp.clicked() {
@@ -1141,7 +1141,7 @@ fn paint_badge(
 ) -> f32 {
     let galley = p.layout_no_wrap(text.to_owned(), theme::mono_semibold(9.5), fg);
     let size = galley.size() + vec2(8.0, 6.0);
-    let rect = Rect::from_min_size(pos2(pos.x, pos.y - size.y / 2.0 + 10.0), size);
+    let rect = Rect::from_min_size(pos2(pos.x, pos.y - size.y / 2.0), size);
     p.rect_filled(rect, CornerRadius::same(3), bg);
     p.galley(rect.center() - galley.size() / 2.0, galley, fg);
     size.x

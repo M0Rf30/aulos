@@ -1006,8 +1006,8 @@ mod tests {
 
         // Mirrors `PlaySource::LiveStream::open_decoder` exactly, including
         // the client (no explicit timeout — same as `LocalBackend`'s
-        // `crate::http::blocking::Client::new()`).
-        let client = crate::http::blocking::Client::new();
+        // `crate::http::blocking_client()`).
+        let client = crate::http::blocking_client();
         let response = client
             .get(&url)
             .header("Icy-MetaData", "1")

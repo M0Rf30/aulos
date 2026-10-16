@@ -181,13 +181,13 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                             cols,
                         );
                         let real = library.track_index(i);
-                        if out.response.double_clicked() {
-                            intents.push(Intent::Play(real));
-                        } else if out.response.clicked()
+                        if out.response.clicked()
                             && !out.toggle_favorite
                             && out.set_rating.is_none()
+                            && !out.more.clicked()
                         {
                             intents.push(Intent::Select(track.id));
+                            intents.push(Intent::Play(real));
                         }
                         if out.toggle_favorite {
                             intents.push(Intent::Favorite(real));

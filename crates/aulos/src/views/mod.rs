@@ -8,6 +8,8 @@ pub mod albums;
 pub mod artists;
 pub mod chrome;
 pub mod converter;
+#[cfg(target_os = "android")]
+pub mod edit_bar;
 pub mod expanded;
 pub mod folders;
 pub mod genres;

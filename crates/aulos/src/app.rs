@@ -1259,6 +1259,8 @@ impl eframe::App for App {
         theme::motion::set_reduced(&ctx, self.session.config.config.reduce_motion);
         self.class = theme::WidthClass::of(ctx.content_rect().width());
         theme::set_touch(&ctx, self.compact() || cfg!(target_os = "android"));
+        #[cfg(target_os = "android")]
+        views::edit_bar::begin(&ctx);
         self.shortcuts(&ctx);
         // Hero pages announce their tint while drawing; the toolbar, drawn
         // before the page, uses last frame's value.
@@ -1292,6 +1294,8 @@ impl eframe::App for App {
         }
         views::toasts::show(self, &ctx);
         views::overlays::show(self, &ctx);
+        #[cfg(target_os = "android")]
+        views::edit_bar::show(&ctx);
     }
 
     fn on_exit(&mut self) {

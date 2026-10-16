@@ -381,12 +381,12 @@ fn fetch_wikipedia_bio(
 fn http_client() -> &'static crate::http::blocking::Client {
     static CLIENT: std::sync::LazyLock<crate::http::blocking::Client> =
         std::sync::LazyLock::new(|| {
-            crate::http::blocking::Client::builder()
+            crate::http::blocking_builder()
                 .user_agent(USER_AGENT)
                 .timeout(Duration::from_secs(10))
                 .connect_timeout(Duration::from_secs(8))
                 .build()
-                .unwrap_or_else(|_| crate::http::blocking::Client::new())
+                .unwrap_or_else(|_| crate::http::blocking_client())
         });
     &CLIENT
 }

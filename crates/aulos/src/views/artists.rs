@@ -1249,10 +1249,9 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
                 selected: a.views.artists.selected == Some(track.id),
             },
         );
-        if resp.double_clicked() {
-            out.play_track = Some(track.id);
-        } else if resp.clicked() {
+        if resp.clicked() {
             out.select = Some(track.id);
+            out.play_track = Some(track.id);
         }
         if let Some(action) = action {
             out.action = Some(action);

@@ -71,7 +71,9 @@ fn build_client(
     password: &str,
     accept_invalid_certs: bool,
 ) -> Result<Client, opensubsonic::Error> {
-    let client = Client::new(url, Auth::token(username, password))?.with_client_name("aulos");
+    let client = Client::new(url, Auth::token(username, password))?
+        .with_client_name("aulos")
+        .with_http_client(crate::http::async_client());
     #[cfg(not(target_arch = "wasm32"))]
     if accept_invalid_certs {
         return client.with_danger_accept_invalid_certs();
@@ -193,7 +195,7 @@ impl SubsonicProvider {
         .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?;
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
-        let http_client = reqwest::Client::new();
+        let http_client = crate::http::async_client();
         Ok(Self {
             config,
             provider_id,

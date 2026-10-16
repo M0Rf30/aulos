@@ -196,9 +196,7 @@ impl RadioState {
     fn save(station: NewStation) -> Effect<RadioEvent> {
         Effect::future(async move {
             let event_name = station.name.clone();
-            let outcome = crate::task::spawn_blocking(move || radio::save_station(station))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            let outcome = radio::save_station(station).await;
             let (result, already_existed) = match outcome {
                 Ok((id, existed)) => (Ok(id), existed),
                 Err(e) => (Err(e), false),
@@ -246,15 +244,14 @@ impl RadioState {
     /// resolution rewrites the actual stream URL.
     fn resolve(name: String, favicon: String, key: String) -> Effect<RadioEvent> {
         let url = key.clone();
-        Effect::blocking(
-            move || radio::resolve_stream(&url),
-            move |result| RadioEvent::StreamResolved {
+        Effect::future(async move {
+            RadioEvent::StreamResolved {
+                result: radio::resolve_stream(&url).await,
                 name,
                 favicon,
                 key,
-                result,
-            },
-        )
+            }
+        })
     }
 
     /// Removes a saved station: drops it from the in-memory list right away
@@ -299,22 +296,24 @@ impl RadioState {
     /// Searches the station directory. Supersedes any search still in flight.
     pub fn search(&mut self, query: StationQuery) -> Effect<RadioEvent> {
         let generation = self.begin_search();
-        Effect::blocking(
-            move || radio::search(&query),
-            move |result| RadioEvent::SearchResults { generation, result },
-        )
+        Effect::future(async move {
+            RadioEvent::SearchResults {
+                generation,
+                result: radio::search(&query).await,
+            }
+        })
     }
 
     /// Fetches a Discover preset list. Supersedes any search still in flight.
     pub fn preset(&mut self, preset: DiscoverPreset) -> Effect<RadioEvent> {
         let generation = self.begin_search();
-        Effect::blocking(
-            move || match preset {
-                DiscoverPreset::Popular => radio::popular(),
-                DiscoverPreset::TopVoted => radio::top_voted(),
-            },
-            move |result| RadioEvent::SearchResults { generation, result },
-        )
+        Effect::future(async move {
+            let result = match preset {
+                DiscoverPreset::Popular => radio::popular().await,
+                DiscoverPreset::TopVoted => radio::top_voted().await,
+            };
+            RadioEvent::SearchResults { generation, result }
+        })
     }
 
     fn begin_search(&mut self) -> u64 {
@@ -417,9 +416,8 @@ impl RadioState {
     /// Reads the codec/bitrate of the saved station `key` from its stream
     /// headers, for stations saved without them.
     fn learn_format(key: String) -> Effect<RadioEvent> {
-        Effect::blocking(
-            move || radio::learn_station_format(&key),
-            RadioEvent::FormatLearned,
+        Effect::future(
+            async move { RadioEvent::FormatLearned(radio::learn_station_format(&key).await) },
         )
     }
 }

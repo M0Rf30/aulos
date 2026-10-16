@@ -2126,3 +2126,9 @@ tagger-ui-lookup-cover-off = Das Frontcover wird nicht automatisch abgerufen (si
 tagger-ui-identified = { $identified } von { $total } Dateien identifiziert.
 tagger-ui-and-more = und { $count } weitere
 tagger-ui-recording-link = Aufnahme
+
+# Text field bar (Android)
+edit-paste = Einfügen
+edit-select-all = Alles auswählen
+edit-copy = Kopieren
+edit-cut = Ausschneiden

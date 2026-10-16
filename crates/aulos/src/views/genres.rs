@@ -751,10 +751,9 @@ fn track_list(ui: &mut Ui, a: &App, tracks: &[aulos_core::library::Track], out: 
                 selected: selected == Some(track.id),
             },
         );
-        if resp.double_clicked() {
-            out.play = Some(i);
-        } else if resp.clicked() {
+        if resp.clicked() {
             out.select = Some(track.id);
+            out.play = Some(i);
         }
         if let Some(action) = action {
             out.action = Some(action);

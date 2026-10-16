@@ -2128,3 +2128,9 @@ tagger-ui-lookup-cover-off = La pochette de face n’est pas récupérée automa
 tagger-ui-identified = { $identified } fichiers identifiés sur { $total }.
 tagger-ui-and-more = et { $count } de plus
 tagger-ui-recording-link = Enregistrement
+
+# Text field bar (Android)
+edit-paste = Coller
+edit-select-all = Tout sélectionner
+edit-copy = Copier
+edit-cut = Couper

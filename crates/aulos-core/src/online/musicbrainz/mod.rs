@@ -44,7 +44,7 @@ const SEARCH_LIMIT: u32 = 25;
 /// descriptive `User-Agent` with a contact URL and blocks generic ones.
 pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
     static CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
-        crate::http::blocking::Client::builder()
+        crate::http::blocking_builder()
             .user_agent(format!(
                 "Aulos/{} ( https://github.com/M0Rf30/aulos )",
                 env!("CARGO_PKG_VERSION")

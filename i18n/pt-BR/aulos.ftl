@@ -2128,3 +2128,9 @@ tagger-ui-lookup-cover-off = A capa frontal não é buscada automaticamente (vej
 tagger-ui-identified = { $identified } de { $total } arquivos identificados.
 tagger-ui-and-more = e mais { $count }
 tagger-ui-recording-link = Gravação
+
+# Text field bar (Android)
+edit-paste = Colar
+edit-select-all = Selecionar tudo
+edit-copy = Copiar
+edit-cut = Recortar

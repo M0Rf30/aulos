@@ -2127,3 +2127,9 @@ tagger-ui-lookup-cover-off = La copertina frontale non viene scaricata automatic
 tagger-ui-identified = Identificati { $identified } file su { $total }.
 tagger-ui-and-more = e altri { $count }
 tagger-ui-recording-link = Registrazione
+
+# Text field bar (Android)
+edit-paste = Incolla
+edit-select-all = Seleziona tutto
+edit-copy = Copia
+edit-cut = Taglia

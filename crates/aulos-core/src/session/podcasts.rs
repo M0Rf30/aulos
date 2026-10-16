@@ -266,10 +266,11 @@ impl PodcastsState {
     /// The URL is empty or not `http(s)`; nothing was started.
     pub fn subscribe(&self, feed_url: String) -> Result<Effect<PodcastEvent>, UrlError> {
         validate_http_url(&feed_url)?;
-        Ok(Effect::blocking(
-            move || podcast::subscribe(&feed_url),
-            |result| PodcastEvent::Subscribed { result },
-        ))
+        Ok(Effect::future(async move {
+            PodcastEvent::Subscribed {
+                result: podcast::subscribe(&feed_url).await,
+            }
+        }))
     }
 
     /// Re-fetches a podcast's feed. A no-op for an unknown id or one that is
@@ -282,10 +283,12 @@ impl PodcastsState {
             return Effect::none();
         }
         let feed_url = podcast.feed_url.clone();
-        Effect::blocking(
-            move || podcast::refresh(id, &feed_url),
-            move |result| PodcastEvent::Refreshed { id, result },
-        )
+        Effect::future(async move {
+            PodcastEvent::Refreshed {
+                id,
+                result: podcast::refresh(id, &feed_url).await,
+            }
+        })
     }
 
     /// Refreshes every subscription.
@@ -354,10 +357,12 @@ impl PodcastsState {
         let generation = self.search_generation;
         self.search_loading = true;
         self.search_error = None;
-        Effect::blocking(
-            move || podcast::search(&query),
-            move |result| PodcastEvent::SearchResults { generation, result },
-        )
+        Effect::future(async move {
+            PodcastEvent::SearchResults {
+                generation,
+                result: podcast::search(&query).await,
+            }
+        })
     }
 
     /// Decides how to start `episode_id` of the open show: toggle if it is

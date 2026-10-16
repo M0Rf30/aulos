@@ -106,6 +106,19 @@ impl OnlineStore {
         Self::open(&crate::paths::library_db_path())
     }
 
+    /// Runs `f` on a fresh connection to the shared database, on the
+    /// blocking pool (inline in the browser).
+    ///
+    /// # Errors
+    /// The store could not be opened, `f` failed, or its task did not finish.
+    pub async fn run<T: Send + 'static>(
+        f: impl FnOnce(Self) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        crate::task::spawn_blocking(move || Self::open_default().and_then(f))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+    }
+
     /// Open a connection to the shared library database. Never runs
     /// migrations — assumes [`crate::library::db::LibraryDb::open`] already
     /// created/migrated the schema.

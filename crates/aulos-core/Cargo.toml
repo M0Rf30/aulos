@@ -124,6 +124,12 @@ open.workspace = true
 reqwest = { workspace = true, features = ["blocking", "rustls"] }
 i18n-embed = { workspace = true, features = ["desktop-requester"] }
 
+# Android: reqwest's default rustls verifier (rustls-platform-verifier) needs a
+# Java helper class that a NativeActivity APK does not ship and panics without
+# it, so every client trusts the bundled Mozilla roots instead (see `http`).
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1"
+
 # The browser: `wasm-bindgen` glue for timers, spawning and `localStorage`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

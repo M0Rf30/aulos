@@ -88,6 +88,111 @@ fn ensure_audio_permission(base: Option<&std::path::Path>) {
     }
 }
 
+/// The text on the system clipboard. winit's Android backend has no system
+/// clipboard (egui keeps a private one), so a copy made in another app only
+/// reaches a text field through this. `None` when the clipboard is empty or
+/// holds no text.
+pub fn clipboard_text() -> Option<String> {
+    use jni::objects::{JObject, JString, JValue};
+    let (vm, activity) = host()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let read = env.with_local_frame(16, |env| -> jni::errors::Result<Option<String>> {
+        let service = env.new_string("clipboard")?;
+        let manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let clip = env
+            .call_method(
+                &manager,
+                "getPrimaryClip",
+                "()Landroid/content/ClipData;",
+                &[],
+            )?
+            .l()?;
+        if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? == 0 {
+            return Ok(None);
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        let text = env
+            .call_method(
+                &item,
+                "coerceToText",
+                "(Landroid/content/Context;)Ljava/lang/CharSequence;",
+                &[JValue::Object(&activity)],
+            )?
+            .l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text: JObject = env
+            .call_method(&text, "toString", "()Ljava/lang/String;", &[])?
+            .l()?;
+        Ok(Some(env.get_string(&JString::from(text))?.into()))
+    });
+    match read {
+        Ok(text) => text.filter(|t| !t.is_empty()),
+        Err(error) => {
+            tracing::warn!("reading the clipboard failed: {error}");
+            let _ = env.exception_clear();
+            None
+        }
+    }
+}
+
+/// Puts `text` on the system clipboard, so a copy made in Aulos can be pasted
+/// into other apps.
+pub fn set_clipboard_text(text: &str) {
+    use jni::objects::JValue;
+    let Some((vm, activity)) = host() else { return };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let result = env.with_local_frame(16, |env| -> jni::errors::Result<()> {
+        let service = env.new_string("clipboard")?;
+        let manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let label = env.new_string("Aulos")?;
+        let body = env.new_string(text)?;
+        let clip = env
+            .call_static_method(
+                "android/content/ClipData",
+                "newPlainText",
+                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                &[JValue::Object(&label), JValue::Object(&body)],
+            )?
+            .l()?;
+        env.call_method(
+            &manager,
+            "setPrimaryClip",
+            "(Landroid/content/ClipData;)V",
+            &[JValue::Object(&clip)],
+        )?;
+        Ok(())
+    });
+    if let Err(error) = result {
+        tracing::warn!("writing the clipboard failed: {error}");
+        let _ = env.exception_clear();
+    }
+}
+
 /// The system bars and display cutout, in pixels: `[left, top, right, bottom]`.
 /// The activity draws edge to edge, so the app keeps its content out of them.
 /// The deprecated `getSystemWindowInset*` getters are the ones that exist on

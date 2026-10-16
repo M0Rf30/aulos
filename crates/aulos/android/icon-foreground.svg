@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Aulos adaptive-icon foreground: the reed mark of the app icon, sized to
+       the 66dp safe zone of the 108dp canvas. The background layer is the
+       flat ink colour from res/values/colors.xml. Render with
+       rsvg-convert -w <px> into res/mipmap-*/icon_foreground.png
+       (mdpi 108, hdpi 162, xhdpi 216, xxhdpi 324, xxxhdpi 432). -->
+  <g transform="translate(54 54) scale(0.78) translate(-64 -63)">
+    <g transform="translate(56 96) skewX(-14) translate(-64 -96)">
+      <rect x="45" y="30" width="15" height="66" rx="7.5" fill="#E07A5F"/>
+      <rect x="68" y="48" width="15" height="48" rx="7.5" fill="#F4F1EC"/>
+    </g>
+  </g>
+</svg>

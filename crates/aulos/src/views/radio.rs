@@ -711,7 +711,7 @@ fn station_row(
         if d.current && name_x + 50.0 < text_r {
             badge(
                 ui.painter(),
-                pos2(name_x, rect.center().y - 10.0),
+                pos2(name_x, rect.center().y - 19.0),
                 &aulos_core::fl!("radio-on-air"),
                 cx.accent.text,
                 cx.accent.fill.alpha(0.16),

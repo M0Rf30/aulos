@@ -2126,3 +2126,9 @@ tagger-ui-lookup-cover-off = La carátula frontal no se obtiene automáticamente
 tagger-ui-identified = { $identified } de { $total } archivos identificados.
 tagger-ui-and-more = y { $count } más
 tagger-ui-recording-link = Grabación
+
+# Text field bar (Android)
+edit-paste = Pegar
+edit-select-all = Seleccionar todo
+edit-copy = Copiar
+edit-cut = Cortar

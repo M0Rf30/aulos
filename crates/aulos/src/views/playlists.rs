@@ -1301,14 +1301,13 @@ fn track_rows(
         );
 
         let on_remove = remove.as_ref().is_some_and(|r| r.hovered());
-        if resp.double_clicked() && !on_remove {
+        if resp.clicked() && !on_remove {
+            st.row_sel = Some(i);
             out.acts.push(Act::Play {
                 sel: sel.clone(),
                 shuffle: false,
                 from: Some(i),
             });
-        } else if resp.clicked() && !on_remove {
-            st.row_sel = Some(i);
         }
         if let Some(menu) = menus::track_menu(&resp, track, &app.session.playlists.playlists) {
             out.menu = Some(menu);

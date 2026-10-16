@@ -150,12 +150,12 @@ pub trait Scrobbler: Send {
 /// Shared blocking HTTP client for every scrobbling request.
 pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
     static CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
-        crate::http::blocking::Client::builder()
+        crate::http::blocking_builder()
             .user_agent(format!("{CLIENT_NAME}/{}", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| crate::http::blocking::Client::new())
+            .unwrap_or_else(|_| crate::http::blocking_client())
     });
     &CLIENT
 }

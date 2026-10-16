@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Blocking HTTP for the worker threads of the backend (radio, podcasts,
-//! scrobbling, artist info, stream playback).
+//! HTTP clients of the backend: the blocking ones for the worker threads
+//! (scrobbling, artist info, stream playback, episode downloads) and the
+//! async ones (Subsonic, radio and podcast directories and feeds, icons).
 //!
 //! Natively this is `reqwest::blocking`. A browser has no blocking requests
 //! (a synchronous `fetch` would freeze the page, and there is no thread to
@@ -19,13 +20,57 @@ pub use reqwest::blocking;
 #[cfg(target_arch = "wasm32")]
 pub use web::{Error, blocking};
 
+/// The Mozilla root set, bundled. On Android reqwest's default verifier
+/// (`rustls-platform-verifier`) calls into a Java class the NativeActivity
+/// APK does not ship and panics ("Expect rustls-platform-verifier to be
+/// initialized") on the first TLS client it builds, so there every client
+/// trusts exactly these roots. A server with a private CA needs the
+/// "accept invalid certificates" source setting.
+#[cfg(target_os = "android")]
+fn android_roots() -> Vec<reqwest::Certificate> {
+    static ROOTS: std::sync::LazyLock<Vec<reqwest::Certificate>> = std::sync::LazyLock::new(|| {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+            .collect()
+    });
+    ROOTS.clone()
+}
+
+/// The async client builder every request in the app starts from, so the
+/// per-platform TLS setup lives in one place (see `android_roots`).
+pub fn async_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_certs_only(android_roots());
+    builder
+}
+
+/// The blocking counterpart of [`async_builder`].
+pub fn blocking_builder() -> blocking::ClientBuilder {
+    let builder = blocking::Client::builder();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_certs_only(android_roots());
+    builder
+}
+
+/// A ready async client with default settings.
+pub fn async_client() -> reqwest::Client {
+    async_builder().build().unwrap_or_default()
+}
+
+/// A ready blocking client with default settings.
+pub fn blocking_client() -> blocking::Client {
+    blocking_builder().build().unwrap_or_default()
+}
+
 /// An async client whose requests give up after `timeout`. The browser
 /// manages `fetch` timeouts itself, so there it is not applied.
 ///
 /// # Errors
 /// When the client cannot be built.
 pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
-    let builder = reqwest::Client::builder();
+    let builder = async_builder();
     #[cfg(not(target_arch = "wasm32"))]
     let builder = builder.timeout(timeout);
     #[cfg(target_arch = "wasm32")]

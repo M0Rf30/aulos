@@ -27,7 +27,7 @@ The name comes from the *aulos*, the double pipe of ancient Greece; the logo's t
 
 **[m0rf30.github.io/aulos](https://m0rf30.github.io/aulos/)**: the same egui interface, compiled to WebAssembly. It runs entirely client-side (WebGPU, with a WebGL2 fallback) and nothing is sent to a server.
 
-The browser build is a preview. Pick a music folder (Chromium keeps it across reloads and asks permission again; Firefox and Safari need the folder picked again after a reload) or connect a Subsonic/OpenSubsonic server, and play it with Web Audio and media keys. Podcasts, radio and MPD are not available yet.
+The browser build is a preview. Pick a music folder (Chromium keeps it across reloads and asks permission again; Firefox and Safari need the folder picked again after a reload) or connect a Subsonic/OpenSubsonic server, and play it with Web Audio and media keys. Podcast and radio directories, feeds and station playlists work over `fetch` (a feed must allow CORS), but live radio audio and MPD are not available yet.
 
 | Feature | Desktop | Browser |
 |---|---|---|
@@ -35,7 +35,7 @@ The browser build is a preview. Pick a music folder (Chromium keeps it across re
 | Playback | ✅ cpal, gapless, crossfade, DSD | ✅ Web Audio, gapless, EQ; no crossfade or DSD |
 | Subsonic / OpenSubsonic | ✅ | ✅ over `fetch`; the server must allow CORS and be served over HTTPS |
 | MPD | ✅ direct TCP | 🚧 through a WebSocket bridge such as websockify |
-| Podcasts and internet radio | ✅ | 🚧 with an optional CORS proxy |
+| Podcasts and internet radio | ✅ | 🚧 search, subscribe and podcast playback over `fetch` (the feed and audio hosts must allow CORS and be served over HTTPS); live radio audio is not played yet |
 | Tag editor | ✅ | ❌ |
 | File converter | ✅ | ❌ |
 | Visualizer | ✅ | ❌ |

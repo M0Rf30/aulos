@@ -210,28 +210,28 @@ fn build_search_url(query: &StationQuery) -> String {
 
 /// Search the radio-browser.info station directory by name/tag/country,
 /// sorted by `query.order` (most-popular/matching first).
-pub fn search_stations(
-    client: &crate::http::blocking::Client,
+pub async fn search_stations(
+    client: &reqwest::Client,
     query: &StationQuery,
 ) -> Result<Vec<StationSearchResult>, String> {
-    fetch_stations(client, &build_search_url(query))
+    fetch_stations(client, &build_search_url(query)).await
 }
 
 /// Fetch the globally most-clicked stations, for a Discover "Popular"
 /// preset that needs no search terms.
-pub fn top_click_stations(
-    client: &crate::http::blocking::Client,
+pub async fn top_click_stations(
+    client: &reqwest::Client,
     limit: u32,
 ) -> Result<Vec<StationSearchResult>, String> {
-    fetch_stations(client, &top_click_url(limit))
+    fetch_stations(client, &top_click_url(limit)).await
 }
 
 /// Fetch the globally top-voted stations, for a Discover "Top voted" preset.
-pub fn top_vote_stations(
-    client: &crate::http::blocking::Client,
+pub async fn top_vote_stations(
+    client: &reqwest::Client,
     limit: u32,
 ) -> Result<Vec<StationSearchResult>, String> {
-    fetch_stations(client, &top_vote_url(limit))
+    fetch_stations(client, &top_vote_url(limit)).await
 }
 
 /// How many results a Discover search/preset fetch asks for.
@@ -239,25 +239,25 @@ pub const DISCOVER_LIMIT: u32 = 50;
 
 /// Searches the directory with the shared HTTP client (see
 /// [`search_stations`]).
-pub fn search(query: &StationQuery) -> Result<Vec<StationSearchResult>, String> {
-    search_stations(&super::HTTP_CLIENT, query)
+pub async fn search(query: &StationQuery) -> Result<Vec<StationSearchResult>, String> {
+    search_stations(super::http(), query).await
 }
 
 /// The Discover "Popular" preset: the [`DISCOVER_LIMIT`] most-clicked stations.
-pub fn popular() -> Result<Vec<StationSearchResult>, String> {
-    top_click_stations(&super::HTTP_CLIENT, DISCOVER_LIMIT)
+pub async fn popular() -> Result<Vec<StationSearchResult>, String> {
+    top_click_stations(super::http(), DISCOVER_LIMIT).await
 }
 
 /// The Discover "Top voted" preset: the [`DISCOVER_LIMIT`] top-voted stations.
-pub fn top_voted() -> Result<Vec<StationSearchResult>, String> {
-    top_vote_stations(&super::HTTP_CLIENT, DISCOVER_LIMIT)
+pub async fn top_voted() -> Result<Vec<StationSearchResult>, String> {
+    top_vote_stations(super::http(), DISCOVER_LIMIT).await
 }
 
 /// Resolves a station URL to a playable stream with the shared HTTP client,
 /// following a `.pls`/`.m3u`/`.m3u8` playlist if needed (see
 /// [`resolve_stream_url`]).
-pub fn resolve_stream(url: &str) -> Result<String, String> {
-    resolve_stream_url(&super::HTTP_CLIENT, url)
+pub async fn resolve_stream(url: &str) -> Result<String, String> {
+    resolve_stream_url(super::http(), url).await
 }
 
 /// Derives a two-letter upper-case country code from the `LC_ALL`/`LANG`
@@ -363,13 +363,12 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// Opens `url` just long enough to read the response headers and reports
 /// the stream's announced codec and bitrate (the body is never read). A
 /// `.pls`/`.m3u` playlist is resolved first.
-pub fn probe_stream_format(url: &str) -> Result<StreamFormat, String> {
-    let stream_url = resolve_stream(url)?;
-    let response = super::HTTP_CLIENT
-        .get(&stream_url)
-        .timeout(PROBE_TIMEOUT)
-        .send()
-        .map_err(|e| format!("Stream probe failed: {e}"))?;
+pub async fn probe_stream_format(url: &str) -> Result<StreamFormat, String> {
+    let stream_url = resolve_stream(url).await?;
+    let response = crate::task::timeout(PROBE_TIMEOUT, super::http().get(&stream_url).send())
+        .await
+        .map_err(|_| "Stream probe timed out".to_string())?
+        .map_err(|e| super::request_error("Stream probe failed", &stream_url, &e))?;
     if !response.status().is_success() {
         return Err(format!("Stream probe returned HTTP {}", response.status()));
     }
@@ -380,9 +379,9 @@ pub fn probe_stream_format(url: &str) -> Result<StreamFormat, String> {
 /// A station without a known codec/bitrate (added by URL) is probed first
 /// (best effort: an unreachable stream is saved without a format).
 /// Returns the row id and whether the station already existed.
-pub fn save_station(mut station: NewStation) -> Result<(i64, bool), String> {
+pub async fn save_station(mut station: NewStation) -> Result<(i64, bool), String> {
     if station.codec.is_empty() && station.bitrate_kbps == 0 {
-        match probe_stream_format(&station.stream_url) {
+        match probe_stream_format(&station.stream_url).await {
             Ok(format) => {
                 station.codec = format.codec;
                 station.bitrate_kbps = format.bitrate_kbps;
@@ -390,28 +389,36 @@ pub fn save_station(mut station: NewStation) -> Result<(i64, bool), String> {
             Err(e) => tracing::debug!("radio format probe skipped: {e}"),
         }
     }
-    OnlineStore::open_default().and_then(|store| store.add_radio_station(&station))
+    OnlineStore::run(move |store| store.add_radio_station(&station)).await
 }
 
 /// Learns the format of the saved station whose stream URL is `key` from a
 /// probe, when the store does not know it yet. Returns the reloaded list
 /// when the store changed, `None` when there was nothing to learn.
-pub fn learn_station_format(key: &str) -> Result<Option<Vec<RadioStation>>, String> {
-    let store = OnlineStore::open_default()?;
-    let known = store
-        .list_radio_stations()?
-        .into_iter()
-        .any(|s| s.stream_url == key && !(s.codec.is_empty() && s.bitrate_kbps == 0));
+pub async fn learn_station_format(key: &str) -> Result<Option<Vec<RadioStation>>, String> {
+    let owned = key.to_owned();
+    let known = OnlineStore::run(move |store| {
+        Ok(store
+            .list_radio_stations()?
+            .into_iter()
+            .any(|s| s.stream_url == owned && !(s.codec.is_empty() && s.bitrate_kbps == 0)))
+    })
+    .await?;
     if known {
         return Ok(None);
     }
-    let format = probe_stream_format(key)?;
-    if format.is_unknown()
-        || !store.set_radio_station_format(key, &format.codec, format.bitrate_kbps)?
-    {
+    let format = probe_stream_format(key).await?;
+    if format.is_unknown() {
         return Ok(None);
     }
-    store.list_radio_stations().map(Some)
+    let key = key.to_owned();
+    OnlineStore::run(move |store| {
+        if !store.set_radio_station_format(&key, &format.codec, format.bitrate_kbps)? {
+            return Ok(None);
+        }
+        store.list_radio_stations().map(Some)
+    })
+    .await
 }
 
 /// Removes a saved station and returns the remaining list.
@@ -442,19 +449,22 @@ fn top_vote_url(limit: u32) -> String {
     )
 }
 
-fn fetch_stations(
-    client: &crate::http::blocking::Client,
+async fn fetch_stations(
+    client: &reqwest::Client,
     url: &str,
 ) -> Result<Vec<StationSearchResult>, String> {
-    let response = client
-        .get(url)
-        .header("User-Agent", "aulos/0.1")
+    let request = client.get(url);
+    // A browser forbids setting `User-Agent` and would drop it anyway.
+    #[cfg(not(target_arch = "wasm32"))]
+    let request = request.header("User-Agent", "aulos/0.1");
+    let response = request
         .send()
-        .map_err(|e| format!("Radio search failed: {e}"))?;
+        .await
+        .map_err(|e| super::request_error("Radio search failed", url, &e))?;
     if !response.status().is_success() {
         return Err(format!("Radio search returned HTTP {}", response.status()));
     }
-    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
+    let body = super::read_capped_response(response, MAX_JSON_RESPONSE_BYTES).await?;
     let raw: Vec<StationRaw> =
         serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
     Ok(map_station_results(raw))
@@ -587,10 +597,7 @@ const MAX_PLAYLIST_HOPS: u32 = 3;
 /// stopping as soon as a hop's result no longer looks like a playlist. If
 /// the chain is still unresolved at the cap, that's a clear error rather
 /// than silently handing back a playlist URL as if it were a direct stream.
-pub fn resolve_stream_url(
-    client: &crate::http::blocking::Client,
-    url: &str,
-) -> Result<String, String> {
+pub async fn resolve_stream_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
     /// Playlist bodies (.pls/.m3u) are always small hand-written text
     /// files; a hostile or broken server returning an unbounded body must
     /// not be read into memory in full.
@@ -604,7 +611,8 @@ pub fn resolve_stream_url(
         let response = client
             .get(&current)
             .send()
-            .map_err(|e| format!("Failed to fetch playlist: {e}"))?;
+            .await
+            .map_err(|e| super::request_error("Failed to fetch playlist", &current, &e))?;
         if !response.status().is_success() {
             return Err(format!(
                 "Failed to fetch playlist: HTTP {}",
@@ -618,7 +626,7 @@ pub fn resolve_stream_url(
             .map(str::to_string);
         let format =
             sniff_playlist_format(&current, content_type.as_deref()).unwrap_or(extension_hint);
-        let bytes = super::read_capped_body(response, MAX_PLAYLIST_RESPONSE_BYTES)?;
+        let bytes = super::read_capped_response(response, MAX_PLAYLIST_RESPONSE_BYTES).await?;
         let body =
             String::from_utf8(bytes).map_err(|e| format!("Playlist was not valid UTF-8: {e}"))?;
         current = parse_playlist(&body, format)

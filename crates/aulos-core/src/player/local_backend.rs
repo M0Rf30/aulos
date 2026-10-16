@@ -62,7 +62,7 @@ impl LocalBackend {
             engine,
             state: PlaybackState::Stopped,
             volume,
-            http_client: crate::http::blocking::Client::new(),
+            http_client: crate::http::blocking_client(),
             eq_controller,
             replay_gain_db: None,
             icy_title: Arc::new(Mutex::new(None)),

@@ -572,13 +572,13 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                         state.selected == Some(track.id),
                         cols,
                     );
-                    if out.response.double_clicked() {
-                        intents.push(Intent::PlayTrack(real));
-                    } else if out.response.clicked()
+                    if out.response.clicked()
                         && !out.toggle_favorite
                         && out.set_rating.is_none()
+                        && !out.more.clicked()
                     {
                         intents.push(Intent::Select(track.id));
+                        intents.push(Intent::PlayTrack(real));
                     }
                     if out.toggle_favorite {
                         intents.push(Intent::Favorite(real));

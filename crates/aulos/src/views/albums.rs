@@ -1115,13 +1115,18 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                         selected == Some(track.id),
                         cols,
                     );
-                    if out.response.double_clicked() {
+                    // One click or tap plays; the heart, stars and "more" button
+                    // on the row are separate hit areas.
+                    if out.response.clicked()
+                        && !out.toggle_favorite
+                        && out.set_rating.is_none()
+                        && !out.more.clicked()
+                    {
+                        actions.push(Action::Select(track.id));
                         actions.push(Action::PlayAlbum {
                             album: idx,
                             start: i,
                         });
-                    } else if out.response.clicked() {
-                        actions.push(Action::Select(track.id));
                     }
                     if out.toggle_favorite {
                         actions.push(Action::Favorite(track.clone()));
