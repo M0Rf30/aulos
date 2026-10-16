@@ -186,6 +186,15 @@ impl PlaySource {
                 hint_extension,
                 icy_title,
             } => {
+                if url
+                    .split(['?', '#'])
+                    .next()
+                    .is_some_and(|p| p.to_ascii_lowercase().ends_with(".m3u8"))
+                {
+                    let (reader, hint) =
+                        crate::player::hls::HlsReader::open(client, &url).map_err(PlayerError)?;
+                    return SymphoniaDecoder::open_stream(reader, hint.as_deref());
+                }
                 let response = client
                     .get(&url)
                     .header("Icy-MetaData", "1")

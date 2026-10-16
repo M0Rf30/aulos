@@ -629,8 +629,15 @@ pub async fn resolve_stream_url(client: &reqwest::Client, url: &str) -> Result<S
         let bytes = super::read_capped_response(response, MAX_PLAYLIST_RESPONSE_BYTES).await?;
         let body =
             String::from_utf8(bytes).map_err(|e| format!("Playlist was not valid UTF-8: {e}"))?;
-        current = parse_playlist(&body, format)
+        // An HLS playlist is the stream itself: the player follows it.
+        if body.contains("#EXT-X-") {
+            return Ok(current);
+        }
+        let entry = parse_playlist(&body, format)
             .ok_or_else(|| "Playlist contained no stream URL".to_string())?;
+        current = url::Url::parse(&current)
+            .and_then(|base| base.join(&entry))
+            .map_or(entry, String::from);
     }
     if sniff_playlist_format(&current, None).is_some() {
         Err(format!(

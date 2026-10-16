@@ -9,6 +9,8 @@ pub mod eq_presets;
 pub mod eq_source;
 pub mod equalizer;
 pub mod extras;
+#[cfg(not(target_arch = "wasm32"))]
+mod hls;
 mod http_range_reader;
 #[cfg(not(target_arch = "wasm32"))]
 mod icy_reader;
