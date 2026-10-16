@@ -466,6 +466,33 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v12 commit error: {e}"))?;
         }
 
+        if version < 13 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v13 transaction error: {e}"))?;
+            // A remote provider's library is fetched over the network, so
+            // it is cached here (scoped by `provider_id`, unlike
+            // `cover_cache`, because its album keys are not: two providers
+            // can share an artist/album pair) to paint instantly on the
+            // next provider switch or app restart while a fresh sync runs.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS remote_cover_cache (
+                    provider_id TEXT NOT NULL,
+                    album_key   TEXT NOT NULL,
+                    image_data  BLOB NOT NULL,
+                    width       INTEGER NOT NULL,
+                    height      INTEGER NOT NULL,
+                    fingerprint INTEGER NOT NULL,
+                    PRIMARY KEY (provider_id, album_key)
+                );
+                PRAGMA user_version=13;",
+            )
+            .map_err(|e| format!("Migration v13 error: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v13 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -547,6 +574,121 @@ impl LibraryDb {
             )
             .map_err(|e| format!("Upsert error: {e}"))?;
         Ok(())
+    }
+
+    /// Bulk-upserts a remote provider's tracks in one transaction, used to
+    /// cache its library in the shared database so a provider switch or app
+    /// restart can show it immediately instead of starting from a blank
+    /// screen while the (possibly slow) network resync runs. Unlike
+    /// [`Self::upsert_track`] (kept for the local scanner, where favorites
+    /// and ratings are app-only state that must survive a retag) this also
+    /// syncs favorite, rating and ReplayGain from the provider, which is
+    /// their source of truth for a remote library.
+    pub fn upsert_remote_tracks(&self, tracks: &[Track]) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Upsert transaction error: {e}"))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO tracks (path, title, artist, album_artist, album, genre,
+                     track_number, disc_number, year, duration_ms, bitrate, sample_rate, mtime,
+                     provider, provider_track_id, bit_depth, release_type, added_at,
+                     is_favorite, rating, rg_track_gain, rg_album_gain, favorited_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                     ON CONFLICT(path) DO UPDATE SET
+                        title=excluded.title, artist=excluded.artist,
+                        album_artist=excluded.album_artist, album=excluded.album,
+                        genre=excluded.genre, track_number=excluded.track_number,
+                        disc_number=excluded.disc_number, year=excluded.year,
+                        duration_ms=excluded.duration_ms, bitrate=excluded.bitrate,
+                        sample_rate=excluded.sample_rate, mtime=excluded.mtime,
+                        provider=excluded.provider, provider_track_id=excluded.provider_track_id,
+                        bit_depth=excluded.bit_depth, release_type=excluded.release_type,
+                        added_at=excluded.added_at, is_favorite=excluded.is_favorite,
+                        rating=excluded.rating, rg_track_gain=excluded.rg_track_gain,
+                        rg_album_gain=excluded.rg_album_gain, favorited_at=excluded.favorited_at",
+                )
+                .map_err(|e| format!("Upsert error: {e}"))?;
+            for track in tracks {
+                stmt.execute(params![
+                    track.path.to_string_lossy().as_ref(),
+                    track.title,
+                    track.artist,
+                    track.album_artist,
+                    track.album,
+                    track.genre,
+                    track.track_number,
+                    track.disc_number,
+                    track.year,
+                    track.duration.as_millis() as i64,
+                    track.bitrate,
+                    track.sample_rate,
+                    0i64,
+                    &*track.provider_id,
+                    track.source_uri,
+                    track.bit_depth,
+                    track.release_type,
+                    if track.added_at > 0 {
+                        track.added_at
+                    } else {
+                        crate::unix_now()
+                    },
+                    track.is_favorite,
+                    track.rating,
+                    track.rg_track_gain,
+                    track.rg_album_gain,
+                    track.favorited_at,
+                ])
+                .map_err(|e| format!("Upsert error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Upsert commit error: {e}"))?;
+        Ok(())
+    }
+
+    /// Deletes `provider`'s tracks whose path is not in `keep` (removed
+    /// from the remote library since the last sync).
+    pub fn prune_provider_tracks(
+        &self,
+        provider: &str,
+        keep: &HashSet<String>,
+    ) -> Result<usize, String> {
+        let existing: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM tracks WHERE provider = ?1")
+                .map_err(|e| format!("Prune query error: {e}"))?;
+            stmt.query_map(params![provider], |row| row.get(0))
+                .map_err(|e| format!("Prune query error: {e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("Prune row error: {e}"))?
+        };
+        let stale: Vec<&String> = existing.iter().filter(|p| !keep.contains(*p)).collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Prune transaction error: {e}"))?;
+        let mut removed = 0;
+        {
+            let mut delete = tx
+                .prepare("DELETE FROM tracks WHERE path = ?1")
+                .map_err(|e| format!("Prune error: {e}"))?;
+            for path in &stale {
+                removed += delete
+                    .execute(params![path])
+                    .map_err(|e| format!("Prune error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Prune commit error: {e}"))?;
+        Ok(removed)
     }
 
     /// Remove missing local tracks beneath successfully scanned roots.
@@ -883,6 +1025,117 @@ impl LibraryDb {
             )
             .map_err(|e| format!("Cover cache error: {e}"))?;
         Ok(())
+    }
+
+    /// Every persisted cover thumbnail of a remote provider's library, by
+    /// album key. Unlike [`Self::cached_thumbs`] there is no file stamp to
+    /// validate: a remote cover is only ever replaced by a fresh network
+    /// fetch, never by comparing against a local file.
+    pub fn cached_remote_thumbs(
+        &self,
+        provider_id: &str,
+    ) -> Result<HashMap<String, CoverThumb>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT album_key, image_data, width, height, fingerprint
+                 FROM remote_cover_cache WHERE provider_id = ?1",
+            )
+            .map_err(|e| format!("Remote cover cache error: {e}"))?;
+        let rows = stmt
+            .query_map(params![provider_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    CoverThumb {
+                        encoded: row.get::<_, Vec<u8>>(1)?.into(),
+                        width: row.get(2)?,
+                        height: row.get(3)?,
+                        fingerprint: row.get::<_, i64>(4)? as u64,
+                    },
+                ))
+            })
+            .map_err(|e| format!("Remote cover cache error: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("Remote cover cache error: {e}"))
+    }
+
+    /// Upserts (never deletes) a remote provider's cover thumbnails, one
+    /// transaction per call; see [`Self::prune_remote_thumbs`] for dropping
+    /// the ones that left the library.
+    pub fn upsert_remote_thumbs(
+        &self,
+        provider_id: &str,
+        entries: &[(String, CoverThumb)],
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Remote cover cache transaction error: {e}"))?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO remote_cover_cache
+                        (provider_id, album_key, image_data, width, height, fingerprint)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(|e| format!("Remote cover cache error: {e}"))?;
+            for (key, thumb) in entries {
+                insert
+                    .execute(params![
+                        provider_id,
+                        key,
+                        thumb.encoded.as_ref(),
+                        thumb.width,
+                        thumb.height,
+                        thumb.fingerprint as i64,
+                    ])
+                    .map_err(|e| format!("Remote cover cache error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Remote cover cache commit error: {e}"))
+    }
+
+    /// Deletes a remote provider's cached thumbnails whose album key is not
+    /// in `keep` (left the library since the last sync, or the whole
+    /// provider was removed, with `keep` empty).
+    pub fn prune_remote_thumbs(
+        &self,
+        provider_id: &str,
+        keep: &HashSet<String>,
+    ) -> Result<usize, String> {
+        let existing: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT album_key FROM remote_cover_cache WHERE provider_id = ?1")
+                .map_err(|e| format!("Remote cover cache prune query error: {e}"))?;
+            stmt.query_map(params![provider_id], |row| row.get(0))
+                .map_err(|e| format!("Remote cover cache prune query error: {e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("Remote cover cache prune row error: {e}"))?
+        };
+        let stale: Vec<&String> = existing.iter().filter(|k| !keep.contains(*k)).collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Remote cover cache prune transaction error: {e}"))?;
+        let mut removed = 0;
+        {
+            let mut delete = tx
+                .prepare("DELETE FROM remote_cover_cache WHERE provider_id = ?1 AND album_key = ?2")
+                .map_err(|e| format!("Remote cover cache prune error: {e}"))?;
+            for key in &stale {
+                removed += delete
+                    .execute(params![provider_id, key])
+                    .map_err(|e| format!("Remote cover cache prune error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Remote cover cache prune commit error: {e}"))?;
+        Ok(removed)
     }
 
     /// Remove a single track by its file path.
@@ -1711,7 +1964,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         assert!(
             db.conn
@@ -1744,7 +1997,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
@@ -2020,6 +2273,113 @@ mod tests {
             .unwrap()
             .added_at;
         assert!(added >= before, "{added} < {before}");
+    }
+
+    fn remote_track(provider: &str, path: &str, is_favorite: bool, rating: Option<u8>) -> Track {
+        Track {
+            id: 0,
+            path: PathBuf::from(path),
+            title: path.to_string(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::ZERO,
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from(provider),
+            source_uri: path.to_string(),
+            is_favorite,
+            rating,
+            rg_track_gain: Some(-6.0),
+            rg_album_gain: Some(-5.5),
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 1,
+            favorited_at: 0,
+        }
+    }
+
+    #[test]
+    fn upsert_remote_tracks_syncs_favorite_rating_and_gain_from_the_provider() {
+        let db = LibraryDb::open_memory().unwrap();
+        db.upsert_remote_tracks(&[remote_track("nav", "song-1", false, None)])
+            .unwrap();
+        // The server toggled the favorite and rated the track since the
+        // last sync: unlike `upsert_track` (local scanner, which must
+        // preserve app-only annotations across a retag), a later sync
+        // overwrites them, because the provider is their source of truth.
+        db.upsert_remote_tracks(&[remote_track("nav", "song-1", true, Some(4))])
+            .unwrap();
+        let track = db.all_tracks(Some("nav")).unwrap().remove(0);
+        assert!(track.is_favorite);
+        assert_eq!(track.rating, Some(4));
+        assert_eq!(track.rg_track_gain, Some(-6.0));
+    }
+
+    #[test]
+    fn prune_provider_tracks_only_drops_that_providers_missing_rows() {
+        let db = LibraryDb::open_memory().unwrap();
+        insert_local(&db, Path::new("/music/local.flac"));
+        db.upsert_remote_tracks(&[
+            remote_track("nav", "song-1", false, None),
+            remote_track("nav", "song-2", false, None),
+        ])
+        .unwrap();
+
+        // "song-2" left the server; "song-1" is still there.
+        let keep = HashSet::from(["song-1".to_string()]);
+        let removed = db.prune_provider_tracks("nav", &keep).unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining: Vec<String> = db
+            .all_tracks(Some("nav"))
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(remaining, ["song-1"]);
+        // The local provider's own track is untouched.
+        assert_eq!(db.all_tracks(Some("local")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_cover_cache_is_scoped_per_provider_and_prunes_by_key() {
+        let db = LibraryDb::open_memory().unwrap();
+        let thumb = |fp: u64| CoverThumb {
+            width: 1,
+            height: 1,
+            encoded: vec![0, 0, 0, 255].into(),
+            fingerprint: fp,
+        };
+        db.upsert_remote_thumbs(
+            "nav",
+            &[("a".to_string(), thumb(1)), ("b".to_string(), thumb(2))],
+        )
+        .unwrap();
+        // A different provider can use the same album key without clashing.
+        db.upsert_remote_thumbs("other", &[("a".to_string(), thumb(9))])
+            .unwrap();
+
+        let nav = db.cached_remote_thumbs("nav").unwrap();
+        assert_eq!(nav.len(), 2);
+        assert_eq!(nav["a"].fingerprint, 1);
+        assert_eq!(
+            db.cached_remote_thumbs("other").unwrap()["a"].fingerprint,
+            9
+        );
+
+        // "b" left nav's library; "other"'s row is a different provider and
+        // must survive pruning nav with an empty keep set.
+        db.prune_remote_thumbs("nav", &HashSet::from(["a".to_string()]))
+            .unwrap();
+        let nav = db.cached_remote_thumbs("nav").unwrap();
+        assert_eq!(nav.len(), 1);
+        assert!(nav.contains_key("a"));
+        assert_eq!(db.cached_remote_thumbs("other").unwrap().len(), 1);
     }
 
     #[test]

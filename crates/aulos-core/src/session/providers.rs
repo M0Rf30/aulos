@@ -564,12 +564,36 @@ impl Session {
         }
         self.providers.subsonic_edit_states.remove(i);
         self.providers.subsonic_connection_status.remove(i);
+        let removed_id = self
+            .config
+            .config
+            .subsonic_servers
+            .get(i)
+            .map(|entry| entry.id.clone());
         if i < self.config.config.subsonic_servers.len() {
             self.config.config.subsonic_servers.remove(i);
         }
         tracing::info!("Subsonic server removed at index {i}");
         self.config.save();
+        if let Some(id) = removed_id {
+            Self::forget_provider_cache(&id);
+        }
         self.reinit_subsonic_providers()
+    }
+
+    /// Drops a removed provider's cached tracks and cover thumbnails from
+    /// the shared database, so they don't linger once it is no longer
+    /// configured.
+    fn forget_provider_cache(provider_id: &str) {
+        let Ok(db) = LibraryDb::open(&crate::paths::library_db_path()) else {
+            return;
+        };
+        if let Err(e) = db.remove_provider_tracks(provider_id) {
+            tracing::warn!("Failed to drop cached tracks for {provider_id}: {e}");
+        }
+        if let Err(e) = db.prune_remote_thumbs(provider_id, &std::collections::HashSet::new()) {
+            tracing::warn!("Failed to drop cached covers for {provider_id}: {e}");
+        }
     }
 
     /// Re-register all MPD providers from the config. The library is only

@@ -25,6 +25,7 @@ use crate::task::Effect;
 use crate::task::channel_stream;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +55,20 @@ pub enum LibraryEvent {
     },
     /// The whole library of a database-backed provider, in one piece.
     Loaded {
+        generation: u64,
+        provider_id: String,
+        tracks: Vec<Track>,
+        albums: Vec<Album>,
+        covers: CoverSet,
+    },
+    /// A cached snapshot of a remote provider's library, read from the
+    /// local database before its fresh (and possibly slow, hundreds of
+    /// albums) network reload completes, so a provider switch or app
+    /// restart has something to show immediately. Handled like `Loaded`
+    /// and then immediately begins staging, so the following `Batch`/
+    /// `LoadComplete` events of the same reload accumulate off to the side
+    /// instead of duplicating these rows.
+    CacheSeeded {
         generation: u64,
         provider_id: String,
         tracks: Vec<Track>,
@@ -496,6 +511,30 @@ impl Session {
                 // Full-size bytes are loaded lazily; drop any stale ones.
                 self.cover_bytes.clear();
                 self.refresh_search();
+                LibraryApplied::Loaded { covers }
+            }
+            LibraryEvent::CacheSeeded {
+                generation,
+                provider_id,
+                tracks,
+                albums,
+                covers,
+            } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return LibraryApplied::Stale;
+                }
+                self.library
+                    .replace_loaded(tracks, albums, &self.config.config);
+                let covers = self.library.covers.replace(covers);
+                self.cover_bytes.clear();
+                self.refresh_search();
+                // The fresh network reload (started just before this cached
+                // snapshot landed) is still running: make it stage over
+                // these cached rows instead of duplicating them, and swap
+                // in atomically at `LoadComplete` like any other refresh of
+                // an already-visible library.
+                self.library.begin_incremental_reload(generation);
+                self.library.covers.begin_staging();
                 LibraryApplied::Loaded { covers }
             }
             LibraryEvent::Batch {
@@ -984,6 +1023,92 @@ async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> Co
         .await
 }
 
+/// The Subsonic provider's own cached library, if one was persisted by an
+/// earlier sync: `None` on the first ever sync, or if the cache is empty.
+async fn cached_provider_snapshot(provider_id: &str) -> Option<(Vec<Track>, Vec<Album>)> {
+    let provider_id = provider_id.to_string();
+    crate::task::spawn_blocking(move || {
+        let db = LibraryDb::open(&crate::paths::library_db_path()).ok()?;
+        let albums = db.all_albums(Some(&provider_id)).ok()?;
+        if albums.is_empty() {
+            return None;
+        }
+        let tracks = db.all_tracks(Some(&provider_id)).ok()?;
+        Some((tracks, albums))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The Subsonic provider's own cached cover thumbnails, if any were
+/// persisted by an earlier sync.
+async fn cached_provider_covers(provider_id: &str) -> CoverSet {
+    let provider_id = provider_id.to_string();
+    crate::task::spawn_blocking(move || {
+        LibraryDb::open(&crate::paths::library_db_path())
+            .and_then(|db| db.cached_remote_thumbs(&provider_id))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Persists one batch's tracks and cover thumbnails to the shared library
+/// database, so the next provider switch or app restart can paint this
+/// library from the cache instead of starting from a blank screen while the
+/// network resync runs.
+async fn persist_provider_batch(provider_id: &str, albums: &[Album], covers: &CoverSet) {
+    let provider_id = provider_id.to_string();
+    let tracks: Vec<Track> = albums
+        .iter()
+        .flat_map(|a| a.tracks.iter().cloned())
+        .collect();
+    let covers: Vec<(String, CoverThumb)> =
+        covers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    crate::task::spawn_blocking(move || {
+        let Ok(db) = LibraryDb::open(&crate::paths::library_db_path()) else {
+            return;
+        };
+        if let Err(e) = db.upsert_remote_tracks(&tracks) {
+            tracing::warn!("Failed to cache {provider_id} tracks: {e}");
+        }
+        if !covers.is_empty()
+            && let Err(e) = db.upsert_remote_thumbs(&provider_id, &covers)
+        {
+            tracing::warn!("Failed to cache {provider_id} covers: {e}");
+        }
+    })
+    .await
+    .ok();
+}
+
+/// Drops cached tracks and cover thumbnails of `provider_id` that were not
+/// seen in the sync that just completed (removed from the server since the
+/// last one).
+async fn prune_provider_cache(
+    provider_id: &str,
+    keep_paths: &HashSet<String>,
+    keep_keys: &HashSet<String>,
+) {
+    let provider_id = provider_id.to_string();
+    let keep_paths = keep_paths.clone();
+    let keep_keys = keep_keys.clone();
+    crate::task::spawn_blocking(move || {
+        let Ok(db) = LibraryDb::open(&crate::paths::library_db_path()) else {
+            return;
+        };
+        if let Err(e) = db.prune_provider_tracks(&provider_id, &keep_paths) {
+            tracing::warn!("Failed to prune {provider_id} cache: {e}");
+        }
+        if let Err(e) = db.prune_remote_thumbs(&provider_id, &keep_keys) {
+            tracing::warn!("Failed to prune {provider_id} cover cache: {e}");
+        }
+    })
+    .await
+    .ok();
+}
+
 /// Incremental reload of a remote provider: albums in batches of
 /// [`BATCH_SIZE`], each sent as a [`LibraryEvent::Batch`] with its covers,
 /// then [`LibraryEvent::LoadComplete`]. `mpd`/`subsonic` are the concrete
@@ -1061,14 +1186,35 @@ async fn load_incremental(
             let Some(subsonic) = subsonic else { return };
             tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
 
+            // Paint a cached snapshot from the database immediately, so a
+            // provider switch or app restart doesn't sit on a blank screen
+            // for as long as the full network resync (hundreds of albums)
+            // takes; the batches below replace it once ready.
+            if let Some((tracks, albums)) = cached_provider_snapshot(&provider_id).await {
+                let covers = cached_provider_covers(&provider_id).await;
+                _ = tx
+                    .send(LibraryEvent::CacheSeeded {
+                        generation,
+                        provider_id: provider_id.clone(),
+                        tracks,
+                        albums,
+                        covers,
+                    })
+                    .await;
+            }
+
             let mut offset: i32 = 0;
             let page_size = BATCH_SIZE as i32;
+            let mut keep_paths: HashSet<String> = HashSet::new();
+            let mut keep_keys: HashSet<String> = HashSet::new();
+            let mut synced_fully = true;
             loop {
                 let (albums, has_more) = match subsonic.browse_albums_page(offset, page_size).await
                 {
                     Ok(result) => result,
                     Err(e) => {
                         tracing::error!("Subsonic browse_albums_page failed: {e}");
+                        synced_fully = false;
                         break;
                     }
                 };
@@ -1078,6 +1224,16 @@ async fn load_incremental(
                 let batch_count = albums.len();
                 let covers = batch_covers(&provider, &albums).await;
                 tracing::debug!("Subsonic batch: offset={offset}, albums={batch_count}");
+                for album in &albums {
+                    keep_keys.insert(CoverArt::album_key(&album.artist, &album.name));
+                    keep_paths.extend(
+                        album
+                            .tracks
+                            .iter()
+                            .map(|t| t.path.to_string_lossy().into_owned()),
+                    );
+                }
+                persist_provider_batch(&provider_id, &albums, &covers).await;
                 _ = tx
                     .send(LibraryEvent::Batch {
                         generation,
@@ -1090,6 +1246,12 @@ async fn load_incremental(
                     break;
                 }
                 offset += page_size;
+            }
+            // A failed page leaves the sync incomplete: pruning now would
+            // delete tracks that are still on the server but simply were
+            // not reached yet, so only clean up after a full pass.
+            if synced_fully {
+                prune_provider_cache(&provider_id, &keep_paths, &keep_keys).await;
             }
         }
         // Database-backed providers load in one piece (`load_local`); the
@@ -1609,6 +1771,46 @@ mod tests {
         assert!(!delta.cleared);
         assert!(session.library.covers.contains("c") && !session.library.covers.contains("b"));
         assert_eq!(visible_names(&session), ["A", "C"]);
+    }
+
+    #[test]
+    fn cache_seeded_stages_the_following_batches_instead_of_duplicating_them() {
+        let mut session = test_session();
+        let generation = session.library.begin_reload_generation();
+        let provider_id = session.providers.registry.active_id().to_string();
+
+        // A snapshot cached by an earlier sync paints the view right away.
+        let cached = album("Abbey Road", "Beatles", 1);
+        let applied = session.apply_library_event(LibraryEvent::CacheSeeded {
+            generation,
+            provider_id: provider_id.clone(),
+            tracks: cached.tracks.clone(),
+            albums: vec![cached],
+            covers: covers(&[("abbey-road", 1)]),
+        });
+        assert!(matches!(applied, LibraryApplied::Loaded { .. }));
+        assert_eq!(visible_names(&session), ["Abbey Road"]);
+
+        // The fresh network reload's first batch stages instead of
+        // appending straight to the visible lists, so the cached row is
+        // not duplicated alongside it.
+        let LibraryApplied::Batch { staged, .. } = batch(
+            &mut session,
+            generation,
+            vec![album("Thriller", "Jackson", 2)],
+            covers(&[("thriller", 2)]),
+        ) else {
+            panic!("expected Batch");
+        };
+        assert!(staged);
+        assert_eq!(visible_names(&session), ["Abbey Road"]);
+
+        // `LoadComplete` swaps the staged batch in atomically, replacing
+        // the cached snapshot instead of piling onto it.
+        let LibraryApplied::Completed { .. } = complete(&mut session, generation) else {
+            panic!("expected Completed");
+        };
+        assert_eq!(visible_names(&session), ["Thriller"]);
     }
 
     #[test]
