@@ -80,7 +80,7 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
     let context_label = player.and_then(|p| p.queue_context_label());
     let total: u64 = queue.iter().map(|t| t.duration.as_secs()).sum();
     let meta = if queue.is_empty() {
-        "Empty".to_owned()
+        aulos_core::fl!("queue-empty-meta")
     } else {
         format!("{} · {}", queue.len(), format_duration_coarse(total))
     };
@@ -145,7 +145,7 @@ fn header(ui: &mut Ui, pal: Palette, meta: &str, can_clear: bool, out: &mut Vec<
         ui.set_height(HEADER_H);
         ui.add_space(16.0);
         ui.label(
-            RichText::new("Queue")
+            RichText::new(aulos_core::fl!("queue-title"))
                 .font(theme::semibold(15.0))
                 .color(pal.text),
         );
@@ -161,8 +161,16 @@ fn header(ui: &mut Ui, pal: Palette, meta: &str, can_clear: bool, out: &mut Vec<
                 out.push(Intent::Close);
             }
             ui.add_space(4.0);
-            if pill_button_enabled(ui, "Clear", None, PillKind::Ghost, 28.0, 0.0, can_clear)
-                .clicked()
+            if pill_button_enabled(
+                ui,
+                &aulos_core::fl!("queue-clear"),
+                None,
+                PillKind::Ghost,
+                28.0,
+                0.0,
+                can_clear,
+            )
+            .clicked()
             {
                 out.push(Intent::Clear);
             }
@@ -182,7 +190,7 @@ fn footer(ui: &mut Ui, pal: Palette, out: &mut Vec<Intent>) {
         ui.add_space(16.0);
         pill_button(
             ui,
-            "Save as playlist",
+            &aulos_core::fl!("queue-save-as-playlist"),
             Some(regular::PLAYLIST),
             PillKind::Secondary,
             30.0,
@@ -216,14 +224,14 @@ fn body(
         empty_state(
             ui,
             regular::LIST_PLUS,
-            "Queue is empty",
-            "Play an album or add tracks to see them here.",
+            &aulos_core::fl!("queue-empty-title"),
+            &aulos_core::fl!("queue-empty-hint"),
             None,
         );
         return;
     }
     if let Some(track) = now {
-        group_label(ui, "NOW PLAYING");
+        group_label(ui, &aulos_core::fl!("queue-group-now-playing"));
         now_row(ui, app, track);
         ui.add_space(8.0);
     }
@@ -231,8 +239,8 @@ fn body(
         empty_state(
             ui,
             regular::ARROW_BEND_DOWN_RIGHT,
-            "Nothing up next",
-            "Add tracks with Play next or Add to queue.",
+            &aulos_core::fl!("queue-nothing-next-title"),
+            &aulos_core::fl!("queue-nothing-next-hint"),
             None,
         );
         return;
@@ -282,12 +290,16 @@ fn body(
 /// `ADDED TO QUEUE`.
 fn group_title(group: &QueueGroup, context_label: Option<&str>) -> String {
     match (group.origin, context_label) {
-        (QueueOrigin::PlayNext, _) => "PLAYING NEXT".to_owned(),
-        (QueueOrigin::Added, _) => "ADDED TO QUEUE".to_owned(),
+        (QueueOrigin::PlayNext, _) => aulos_core::fl!("queue-group-playing-next"),
+        (QueueOrigin::Added, _) => aulos_core::fl!("queue-group-added"),
         (QueueOrigin::Context, Some(album)) => {
-            format!("FROM {} \u{b7} {} LEFT", album.to_uppercase(), group.len)
+            aulos_core::fl!(
+                "queue-group-from-album",
+                album = album.to_uppercase(),
+                count = group.len
+            )
         }
-        (QueueOrigin::Context, None) => "UP NEXT".to_owned(),
+        (QueueOrigin::Context, None) => aulos_core::fl!("queue-group-up-next"),
     }
 }
 
@@ -473,10 +485,10 @@ fn apply(app: &mut App, intent: Intent) {
                 .unwrap_or_default();
             overlays::prompt(
                 app,
-                "Save queue as playlist",
-                "Name",
-                "Playlist name",
-                "Save",
+                &aulos_core::fl!("queue-save-title"),
+                &aulos_core::fl!("queue-save-name"),
+                &aulos_core::fl!("queue-save-hint"),
+                &aulos_core::fl!("queue-save-submit"),
                 move |app, name| {
                     menus::save_as_playlist(app, name, uris);
                 },

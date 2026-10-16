@@ -36,11 +36,11 @@ const ROW_H: f32 = 40.0;
 fn duration_long(total_secs: u64) -> String {
     let (h, m) = (total_secs / 3600, (total_secs % 3600) / 60);
     if h > 0 {
-        format!("{h} h {m} m")
+        aulos_core::fl!("playlists-duration-hm", hours = h, minutes = m)
     } else if m > 0 {
-        format!("{m} m")
+        aulos_core::fl!("playlists-duration-m", minutes = m)
     } else {
-        format!("{total_secs} s")
+        aulos_core::fl!("playlists-duration-s", seconds = total_secs)
     }
 }
 const ITEM_H: f32 = 48.0;
@@ -290,11 +290,10 @@ fn tracks_of<'a>(app: &'a App, cur: &Cur<'a>) -> &'a [Track] {
 }
 
 fn songs(n: usize) -> String {
-    if n == 1 {
-        "1 song".to_owned()
-    } else {
-        format!("{n} songs")
-    }
+    aulos_core::fl!(
+        "playlists-song-count",
+        count = i64::try_from(n).unwrap_or(i64::MAX)
+    )
 }
 
 fn plain_secs(p: &Playlist) -> u64 {
@@ -465,16 +464,23 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
     let pal = app.pal;
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new("Playlists")
+            RichText::new(aulos_core::fl!("playlists"))
                 .font(theme::semibold(26.0))
                 .color(pal.text),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if square_button(ui, &pal, regular::PLUS, "New playlist").clicked() {
+            if square_button(ui, &pal, regular::PLUS, &aulos_core::fl!("playlists-new")).clicked() {
                 out.acts.push(Act::BeginCreate);
             }
-            if square_button(ui, &pal, regular::DOWNLOAD_SIMPLE, "Import playlist file").clicked() {
+            if square_button(
+                ui,
+                &pal,
+                regular::DOWNLOAD_SIMPLE,
+                &aulos_core::fl!("playlists-import-tooltip"),
+            )
+            .clicked()
+            {
                 out.acts.push(Act::Import);
             }
         });
@@ -489,13 +495,17 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
             ui.spacing_mut().item_spacing.y = 4.0;
             let selected = if new_editor { None } else { st.sel.as_ref() };
             if !playlists.playlists.is_empty() {
-                section_label(ui, "PLAYLISTS");
+                section_label(ui, &aulos_core::fl!("playlists").to_uppercase());
                 for p in &playlists.playlists {
                     let sel = Sel::Plain(p.id.clone());
                     let n = p.tracks.len().max(p.track_count as usize);
                     let secs = plain_secs(p);
                     let meta = if secs > 0 {
-                        format!("{} · {}", songs(n), duration_long(secs))
+                        aulos_core::fl!(
+                            "playlists-meta-duration",
+                            songs = songs(n),
+                            duration = duration_long(secs)
+                        )
                     } else {
                         songs(n)
                     };
@@ -514,14 +524,21 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
                 }
             }
             if !playlists.smart_playlists.is_empty() {
-                section_label(ui, "SMART");
+                section_label(
+                    ui,
+                    &aulos_core::fl!("playlists-section-smart").to_uppercase(),
+                );
                 for (i, p) in playlists.smart_playlists.iter().enumerate() {
                     let sel = Sel::Smart(p.id);
                     let rules = st.smart_meta.get(i).map(|s| s.trim()).unwrap_or("");
                     let meta = if rules.is_empty() {
                         songs(p.track_count)
                     } else {
-                        format!("{rules} · {}", songs(p.track_count))
+                        aulos_core::fl!(
+                            "playlists-meta-rules",
+                            rules = rules,
+                            songs = songs(p.track_count)
+                        )
                     };
                     let resp = list_item(
                         ui,
@@ -604,7 +621,7 @@ fn list_item(
 /// The right-click menu of a list row.
 fn item_menu(resp: &Response, sel: &Sel, renamable: bool, out: &mut Out) {
     resp.context_menu(|ui| {
-        if ui.button("Play").clicked() {
+        if ui.button(aulos_core::fl!("play")).clicked() {
             out.acts.push(Act::Play {
                 sel: sel.clone(),
                 shuffle: false,
@@ -612,7 +629,7 @@ fn item_menu(resp: &Response, sel: &Sel, renamable: bool, out: &mut Out) {
             });
             ui.close();
         }
-        if ui.button("Shuffle").clicked() {
+        if ui.button(aulos_core::fl!("shuffle")).clicked() {
             out.acts.push(Act::Play {
                 sel: sel.clone(),
                 shuffle: true,
@@ -620,15 +637,25 @@ fn item_menu(resp: &Response, sel: &Sel, renamable: bool, out: &mut Out) {
             });
             ui.close();
         }
-        if renamable && ui.button("Rename…").clicked() {
+        if renamable
+            && ui
+                .button(aulos_core::fl!("playlists-menu-rename"))
+                .clicked()
+        {
             out.acts.push(Act::OpenRename(sel.clone()));
             ui.close();
         }
-        if ui.button("Export…").clicked() {
+        if ui
+            .button(aulos_core::fl!("playlists-menu-export"))
+            .clicked()
+        {
             out.acts.push(Act::Export(sel.clone()));
             ui.close();
         }
-        if ui.button("Delete…").clicked() {
+        if ui
+            .button(aulos_core::fl!("playlists-menu-delete"))
+            .clicked()
+        {
             out.acts.push(Act::OpenDelete(sel.clone()));
             ui.close();
         }
@@ -657,23 +684,24 @@ fn right_column(
     if cur.is_none() && !new_editor {
         let none = app.session.playlists.playlists.is_empty()
             && app.session.playlists.smart_playlists.is_empty();
+        let new_label = aulos_core::fl!("playlists-new");
         let (title, body) = if none {
             (
-                "No playlists yet",
-                "Create a playlist, build a smart playlist from rules, or import an M3U / PLS file.",
+                aulos_core::fl!("playlists-empty-title"),
+                aulos_core::fl!("playlists-empty-body"),
             )
         } else {
             (
-                "Pick a playlist",
-                "Select a playlist on the left to see its songs.",
+                aulos_core::fl!("playlists-pick-title"),
+                aulos_core::fl!("playlists-pick-body"),
             )
         };
         if empty_state(
             ui,
             regular::PLAYLIST,
-            title,
-            body,
-            none.then_some("New playlist"),
+            &title,
+            &body,
+            none.then_some(new_label.as_str()),
         ) {
             out.acts.push(Act::BeginCreate);
         }
@@ -704,9 +732,11 @@ fn right_column(
                                         .color(pal.text_3),
                                 );
                                 ui.label(
-                                    RichText::new("NEW SMART PLAYLIST")
-                                        .font(theme::semibold(11.0))
-                                        .color(pal.text_3),
+                                    RichText::new(
+                                        aulos_core::fl!("new-smart-playlist").to_uppercase(),
+                                    )
+                                    .font(theme::semibold(11.0))
+                                    .color(pal.text_3),
                                 );
                             });
                             ui.add_space(10.0);
@@ -750,11 +780,19 @@ fn detail_header(
             let secs = plain_secs(p);
             let n = p.tracks.len().max(p.track_count as usize);
             let meta = if secs > 0 {
-                format!("{} · {}", songs(n), duration_long(secs))
+                aulos_core::fl!(
+                    "playlists-meta-duration",
+                    songs = songs(n),
+                    duration = duration_long(secs)
+                )
             } else {
                 songs(n)
             };
-            ("PLAYLIST", regular::PLAYLIST, meta)
+            (
+                aulos_core::fl!("playlists-kind-playlist").to_uppercase(),
+                regular::PLAYLIST,
+                meta,
+            )
         }
         Cur::Smart(p) => {
             let secs: u64 = tracks.iter().map(|t| t.duration.as_secs()).sum();
@@ -766,16 +804,24 @@ fn detail_header(
             // A limit that cuts the matches reads "50 of 118 matching songs".
             let total = app.session.playlists.smart_playlist_total;
             let count = if total > n && !tracks.is_empty() {
-                format!("{n} of {total} matching songs")
+                aulos_core::fl!("playlists-matching-songs", count = n, total = total)
             } else {
                 songs(n)
             };
             let meta = if secs > 0 {
-                format!("{count} · {} · updates live", duration_long(secs))
+                aulos_core::fl!(
+                    "playlists-smart-meta-duration",
+                    count = count,
+                    duration = duration_long(secs)
+                )
             } else {
-                format!("{count} · updates live")
+                aulos_core::fl!("playlists-smart-meta", count = count)
             };
-            ("SMART PLAYLIST", fill::SPARKLE, meta)
+            (
+                aulos_core::fl!("playlists-kind-smart").to_uppercase(),
+                fill::SPARKLE,
+                meta,
+            )
         }
     };
     let width = ui.available_width();
@@ -810,7 +856,7 @@ fn detail_header(
                         !tracks.is_empty() || matches!(cur, Cur::Smart(p) if p.track_count > 0);
                     if pill_button_enabled(
                         ui,
-                        "Play",
+                        &aulos_core::fl!("play"),
                         Some(regular::PLAY),
                         PillKind::Primary,
                         32.0,
@@ -827,7 +873,7 @@ fn detail_header(
                     }
                     if pill_button_enabled(
                         ui,
-                        "Shuffle",
+                        &aulos_core::fl!("shuffle"),
                         Some(regular::SHUFFLE),
                         PillKind::Secondary,
                         32.0,
@@ -846,7 +892,7 @@ fn detail_header(
                         Cur::Smart(p) => {
                             if pill_button(
                                 ui,
-                                "Edit rules",
+                                &aulos_core::fl!("playlists-edit-rules"),
                                 Some(regular::SLIDERS_HORIZONTAL),
                                 if editing {
                                     PillKind::Active
@@ -864,7 +910,7 @@ fn detail_header(
                         Cur::Plain(_) => {
                             if pill_button(
                                 ui,
-                                "Rename",
+                                &aulos_core::fl!("rename-playlist"),
                                 Some(regular::PENCIL_SIMPLE),
                                 PillKind::Secondary,
                                 32.0,
@@ -878,7 +924,7 @@ fn detail_header(
                     }
                     if pill_button(
                         ui,
-                        "Export",
+                        &aulos_core::fl!("playlists-export"),
                         Some(regular::UPLOAD_SIMPLE),
                         PillKind::Secondary,
                         32.0,
@@ -890,7 +936,7 @@ fn detail_header(
                     }
                     if pill_button(
                         ui,
-                        "Delete",
+                        &aulos_core::fl!("delete-playlist"),
                         Some(regular::TRASH),
                         PillKind::Danger,
                         32.0,
@@ -1026,8 +1072,8 @@ fn track_rows(
     }
     if tracks.is_empty() {
         let text = match cur {
-            Cur::Plain(_) => "No songs yet. Add songs from the menu of any track.",
-            Cur::Smart(_) => "No songs match these rules.",
+            Cur::Plain(_) => aulos_core::fl!("playlists-no-songs"),
+            Cur::Smart(_) => aulos_core::fl!("playlists-no-songs-smart"),
         };
         ui.label(
             RichText::new(text)
@@ -1304,10 +1350,14 @@ fn order_choices() -> Vec<(OrderField, bool)> {
 /// "by title, ascending".
 fn order_label((field, desc): (OrderField, bool)) -> String {
     if field == OrderField::Random {
-        return "at random".to_owned();
+        return aulos_core::fl!("playlists-order-random");
     }
-    let dir = if desc { "descending" } else { "ascending" };
-    format!("by {}, {dir}", field.label().to_lowercase())
+    let field = field.label().to_lowercase();
+    if desc {
+        aulos_core::fl!("playlists-order-desc", field = field)
+    } else {
+        aulos_core::fl!("playlists-order-asc", field = field)
+    }
 }
 
 fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) {
@@ -1322,30 +1372,41 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
 
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Name")
+                    RichText::new(aulos_core::fl!("playlists-editor-name"))
                         .font(theme::regular(13.0))
                         .color(pal.text_2),
                 );
                 let mut name = ed.playlist.name.clone();
-                if text_field(ui, &mut name, "Playlist name", 280.0).changed() {
+                if text_field(
+                    ui,
+                    &mut name,
+                    &aulos_core::fl!("playlists-name-placeholder"),
+                    280.0,
+                )
+                .changed()
+                {
                     ed.set_name(name);
                 }
             });
 
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Match")
+                    RichText::new(aulos_core::fl!("playlists-editor-match"))
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
                 let current = usize::from(ed.playlist.match_mode == MatchMode::Any);
                 if let Some(i) = pick(ui, "match-mode", 64.0, current, 2, |i| {
-                    if i == 0 { "all".into() } else { "any".into() }
+                    if i == 0 {
+                        aulos_core::fl!("playlists-editor-match-all")
+                    } else {
+                        aulos_core::fl!("playlists-editor-match-any")
+                    }
                 }) {
                     ed.set_match_mode(i);
                 }
                 ui.label(
-                    RichText::new("of these rules")
+                    RichText::new(aulos_core::fl!("playlists-editor-of-rules"))
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
@@ -1409,25 +1470,46 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                         ui.add_space((ui.available_width() - 28.0 - 8.0).max(0.0));
                     } else if op == RuleOp::Between {
                         let half = ((avail - 40.0) / 2.0).max(40.0);
-                        if text_field(ui, &mut value, "from", half).changed() {
+                        if text_field(
+                            ui,
+                            &mut value,
+                            &aulos_core::fl!("playlists-editor-from"),
+                            half,
+                        )
+                        .changed()
+                        {
                             ed.set_rule_value(i, value);
                         }
                         ui.label(
-                            RichText::new("and")
+                            RichText::new(aulos_core::fl!("playlists-editor-and"))
                                 .font(theme::regular(13.0))
                                 .color(pal.text_2),
                         );
-                        if text_field(ui, &mut value2, "to", half).changed() {
+                        if text_field(
+                            ui,
+                            &mut value2,
+                            &aulos_core::fl!("playlists-editor-to"),
+                            half,
+                        )
+                        .changed()
+                        {
                             ed.set_rule_value2(i, value2);
                         }
-                    } else if text_field(ui, &mut value, "value", avail).changed() {
+                    } else if text_field(
+                        ui,
+                        &mut value,
+                        &aulos_core::fl!("smart-playlist-value-placeholder"),
+                        avail,
+                    )
+                    .changed()
+                    {
                         ed.set_rule_value(i, value);
                     }
                     if IconBtn::new(regular::MINUS_CIRCLE)
                         .size(28.0)
                         .icon_size(16.0)
                         .color(pal.text_3)
-                        .tip("Remove rule")
+                        .tip(aulos_core::fl!("remove-rule-tooltip"))
                         .show(ui)
                         .clicked()
                     {
@@ -1440,7 +1522,7 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
             }
             if pill_button(
                 ui,
-                "Add rule",
+                &aulos_core::fl!("add-rule"),
                 Some(regular::PLUS),
                 PillKind::Ghost,
                 30.0,
@@ -1460,7 +1542,7 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     ed.set_limit_enabled(on);
                 }
                 ui.label(
-                    RichText::new("Limit to")
+                    RichText::new(aulos_core::fl!("smart-playlist-limit"))
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
@@ -1471,12 +1553,12 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     }
                 });
                 ui.label(
-                    RichText::new("songs")
+                    RichText::new(aulos_core::fl!("playlists-editor-songs"))
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
                 ui.label(
-                    RichText::new("picked")
+                    RichText::new(aulos_core::fl!("playlists-editor-picked"))
                         .font(theme::regular(13.0))
                         .color(pal.text),
                 );
@@ -1516,13 +1598,12 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                                 .font(theme::semibold(13.0))
                                 .color(pal.text),
                         );
-                        let tail = if n == 1 {
-                            "song matches"
-                        } else {
-                            "songs match"
-                        };
+                        let tail = aulos_core::fl!(
+                            "playlists-editor-matches-tail",
+                            count = i64::try_from(n).unwrap_or(i64::MAX)
+                        );
                         ui.label(
-                            RichText::new(tail)
+                            RichText::new(&tail)
                                 .font(theme::regular(13.0))
                                 .color(pal.text_2),
                         );
@@ -1537,8 +1618,8 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     }
                     (None, err) => {
                         let (text, color) = match err {
-                            Some(err) => (err.as_str(), pal.danger),
-                            None => ("Counting matches…", pal.text_3),
+                            Some(err) => (err.clone(), pal.danger),
+                            None => (aulos_core::fl!("playlists-editor-counting"), pal.text_3),
                         };
                         ui.label(RichText::new(text).font(theme::regular(12.5)).color(color));
                     }
@@ -1547,7 +1628,7 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     let valid = ed.errors.is_empty();
                     if pill_button_enabled(
                         ui,
-                        "Save rules",
+                        &aulos_core::fl!("playlists-editor-save"),
                         None,
                         PillKind::Primary,
                         30.0,
@@ -1558,7 +1639,16 @@ fn editor_card(ui: &mut Ui, pal: &Palette, ed: &mut EditorState, out: &mut Out) 
                     {
                         out.acts.push(Act::SaveRules);
                     }
-                    if pill_button(ui, "Cancel", None, PillKind::Ghost, 30.0, 0.0).clicked() {
+                    if pill_button(
+                        ui,
+                        &aulos_core::fl!("playlists-cancel"),
+                        None,
+                        PillKind::Ghost,
+                        30.0,
+                        0.0,
+                    )
+                    .clicked()
+                    {
                         out.acts.push(Act::CancelRules);
                     }
                 });
@@ -1600,25 +1690,38 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
             match dialog {
                 Dialog::Create { name, smart } => {
                     ui.label(
-                        RichText::new("New playlist")
+                        RichText::new(aulos_core::fl!("playlists-new"))
                             .font(theme::semibold(17.0))
                             .color(pal.text),
                     );
                     let mut kind = usize::from(*smart);
-                    if segmented(ui, &mut kind, &["Playlist", "Smart playlist"], 28.0) {
+                    if segmented(
+                        ui,
+                        &mut kind,
+                        &[
+                            &aulos_core::fl!("playlists-kind-playlist"),
+                            &aulos_core::fl!("playlists-kind-smart-label"),
+                        ],
+                        28.0,
+                    ) {
                         *smart = kind == 1;
                     }
                     let hint = if *smart {
-                        "A smart playlist fills itself from rules you set next."
+                        aulos_core::fl!("playlists-create-hint-smart")
                     } else {
-                        "An empty playlist; add songs from any track's menu."
+                        aulos_core::fl!("playlists-create-hint-plain")
                     };
                     ui.label(
                         RichText::new(hint)
                             .font(theme::regular(12.5))
                             .color(pal.text_2),
                     );
-                    let field = text_field(ui, name, "Playlist name", 340.0);
+                    let field = text_field(
+                        ui,
+                        name,
+                        &aulos_core::fl!("playlists-name-placeholder"),
+                        340.0,
+                    );
                     if fresh {
                         field.request_focus();
                     }
@@ -1628,7 +1731,7 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if pill_button_enabled(
                             ui,
-                            "Create",
+                            &aulos_core::fl!("playlists-create"),
                             None,
                             PillKind::Primary,
                             32.0,
@@ -1645,7 +1748,16 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                                 Act::CreatePlain(name)
                             });
                         }
-                        if pill_button(ui, "Cancel", None, PillKind::Ghost, 32.0, 0.0).clicked() {
+                        if pill_button(
+                            ui,
+                            &aulos_core::fl!("playlists-cancel"),
+                            None,
+                            PillKind::Ghost,
+                            32.0,
+                            0.0,
+                        )
+                        .clicked()
+                        {
                             end = DialogEnd::Close;
                         }
                     });
@@ -1653,11 +1765,16 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                 }
                 Dialog::Rename { id, name } => {
                     ui.label(
-                        RichText::new("Rename playlist")
+                        RichText::new(aulos_core::fl!("playlists-rename-title"))
                             .font(theme::semibold(17.0))
                             .color(pal.text),
                     );
-                    let field = text_field(ui, name, "Playlist name", 340.0);
+                    let field = text_field(
+                        ui,
+                        name,
+                        &aulos_core::fl!("playlists-name-placeholder"),
+                        340.0,
+                    );
                     if fresh {
                         field.request_focus();
                     }
@@ -1667,7 +1784,7 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if pill_button_enabled(
                             ui,
-                            "Rename",
+                            &aulos_core::fl!("rename-playlist"),
                             None,
                             PillKind::Primary,
                             32.0,
@@ -1680,7 +1797,16 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                             end =
                                 DialogEnd::Confirm(Act::Rename(id.clone(), name.trim().to_owned()));
                         }
-                        if pill_button(ui, "Cancel", None, PillKind::Ghost, 32.0, 0.0).clicked() {
+                        if pill_button(
+                            ui,
+                            &aulos_core::fl!("playlists-cancel"),
+                            None,
+                            PillKind::Ghost,
+                            32.0,
+                            0.0,
+                        )
+                        .clicked()
+                        {
                             end = DialogEnd::Close;
                         }
                     });
@@ -1688,22 +1814,23 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                 }
                 Dialog::Delete { sel, name } => {
                     ui.label(
-                        RichText::new(format!("Delete “{name}”?"))
-                            .font(theme::semibold(17.0))
-                            .color(pal.text),
+                        RichText::new(aulos_core::fl!(
+                            "playlists-delete-title",
+                            name = name.as_str()
+                        ))
+                        .font(theme::semibold(17.0))
+                        .color(pal.text),
                     );
                     ui.label(
-                        RichText::new(
-                            "This can't be undone. The songs themselves stay in your library.",
-                        )
-                        .font(theme::regular(13.0))
-                        .color(pal.text_2),
+                        RichText::new(aulos_core::fl!("playlists-delete-body"))
+                            .font(theme::regular(13.0))
+                            .color(pal.text_2),
                     );
                     let mut end = DialogEnd::Open;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if pill_button(
                             ui,
-                            "Delete",
+                            &aulos_core::fl!("delete-playlist"),
                             Some(regular::TRASH),
                             PillKind::Danger,
                             32.0,
@@ -1713,7 +1840,16 @@ fn dialogs(ctx: &egui::Context, pal: Palette, st: &mut State, out: &mut Out) {
                         {
                             end = DialogEnd::Confirm(Act::Delete(sel.clone()));
                         }
-                        if pill_button(ui, "Cancel", None, PillKind::Ghost, 32.0, 0.0).clicked() {
+                        if pill_button(
+                            ui,
+                            &aulos_core::fl!("playlists-cancel"),
+                            None,
+                            PillKind::Ghost,
+                            32.0,
+                            0.0,
+                        )
+                        .clicked()
+                        {
                             end = DialogEnd::Close;
                         }
                     });
@@ -1983,7 +2119,7 @@ fn export(app: &mut App, sel: &Sel) {
     };
     let Some(found) = found else { return };
     let Some((name, source)) = found else {
-        app.toast("This playlist is empty, nothing to export");
+        app.toast(aulos_core::fl!("playlists-export-empty"));
         return;
     };
     let relative = app.session.config.config.m3u_relative_paths;
@@ -2014,19 +2150,26 @@ fn poll_io(app: &mut App, st: &mut State) {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let text = if outcome.skipped > 0 {
-                    format!(
-                        "Exported {} songs to {file} ({} not local files were skipped)",
-                        outcome.written, outcome.skipped
+                    aulos_core::fl!(
+                        "playlists-export-done-skipped",
+                        count = outcome.written,
+                        file = file.as_str(),
+                        skipped = outcome.skipped
                     )
                 } else {
-                    format!("Exported {} songs to {file}", outcome.written)
+                    aulos_core::fl!(
+                        "playlists-export-done",
+                        count = outcome.written,
+                        file = file.as_str()
+                    )
                 };
                 app.toast(text);
             }
             IoMsg::Exported(Ok(None)) => {}
-            IoMsg::Exported(Err(reason)) => {
-                app.toast_error(format!("Playlist export failed: {reason}"))
-            }
+            IoMsg::Exported(Err(reason)) => app.toast_error(aulos_core::fl!(
+                "playlists-export-failed",
+                reason = reason.as_str()
+            )),
         }
     }
 }
@@ -2040,8 +2183,14 @@ async fn export_flow(
         "{}.m3u8",
         aulos_core::library::playlist_io::sanitize_file_name(name)
     );
-    let filter = Filter::new("M3U playlist", ["m3u8", "m3u"]);
-    let Some(mut path) = dialogs::save_file("Export playlist", &default_name, Some(&filter)).await
+    let filter_name = aulos_core::fl!("playlists-filter-m3u");
+    let filter = Filter::new(&filter_name, ["m3u8", "m3u"]);
+    let Some(mut path) = dialogs::save_file(
+        &aulos_core::fl!("playlists-export-dialog-title"),
+        &default_name,
+        Some(&filter),
+    )
+    .await
     else {
         return Ok(None);
     };
@@ -2055,11 +2204,16 @@ async fn export_flow(
 
 /// The playlist files the user picked; empty when the dialog was cancelled.
 async fn pick_playlist_files() -> Vec<PathBuf> {
+    let filter_name = aulos_core::fl!("playlists-filter-import");
     let filter = Filter::new(
-        "Playlists (M3U, M3U8, PLS)",
+        &filter_name,
         aulos_core::library::m3u::PLAYLIST_EXTENSIONS
             .iter()
             .copied(),
     );
-    dialogs::pick_files("Import playlists", Some(&filter)).await
+    dialogs::pick_files(
+        &aulos_core::fl!("playlists-import-dialog-title"),
+        Some(&filter),
+    )
+    .await
 }

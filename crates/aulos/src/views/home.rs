@@ -227,7 +227,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         &mut cx,
                         offsets,
                         "recent",
-                        "Recently played",
+                        &aulos_core::fl!("queue-history-label"),
                         None,
                         Some(Act::SeeAllAlbums {
                             recently_added: false,
@@ -243,7 +243,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         &mut cx,
                         offsets,
                         "most",
-                        "Most played this month",
+                        &aulos_core::fl!("home-most-played-month"),
                         None,
                         Some(Act::SeeAllAlbums {
                             recently_added: false,
@@ -253,8 +253,9 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                     ui.add_space(SECTION_GAP);
                 }
                 if !data.top_artists_month.is_empty() {
+                    let title = aulos_core::fl!("home-top-artists-month");
                     let head = Head {
-                        title: "Top artists this month",
+                        title: &title,
                         hint: None,
                         action: None,
                         see_all: true,
@@ -266,11 +267,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         head,
                         |ui| {
                             for a in &data.top_artists_month {
-                                let sub = if a.plays == 1 {
-                                    "1 play".to_owned()
-                                } else {
-                                    format!("{} plays", a.plays)
-                                };
+                                let sub = aulos_core::fl!("home-plays", count = i64::from(a.plays));
                                 artist_card(ui, &mut cx, &a.name, &sub, ArtistKind::Library);
                             }
                         },
@@ -284,10 +281,14 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                     if s.is_empty() {
                         continue;
                     }
-                    let title = format!("Because you listened to {}", s.seed);
+                    let title =
+                        aulos_core::fl!("home-because-you-listened", artist = s.seed.as_str());
+                    let similar_hint = aulos_core::fl!("home-similar-hint");
+                    let in_library = aulos_core::fl!("home-in-library");
+                    let not_in_library = aulos_core::fl!("home-not-in-library");
                     let head = Head {
                         title: &title,
-                        hint: Some("Artists you may like"),
+                        hint: Some(&similar_hint),
                         action: None,
                         see_all: true,
                     };
@@ -298,20 +299,14 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         head,
                         |ui| {
                             for name in &s.in_library {
-                                artist_card(
-                                    ui,
-                                    &mut cx,
-                                    name,
-                                    "In your library",
-                                    ArtistKind::Library,
-                                );
+                                artist_card(ui, &mut cx, name, &in_library, ArtistKind::Library);
                             }
                             for d in &s.discover {
                                 let kind = ArtistKind::Discover {
                                     url: &d.url,
                                     site: d.site,
                                 };
-                                artist_card(ui, &mut cx, &d.name, "Not in your library", kind);
+                                artist_card(ui, &mut cx, &d.name, &not_in_library, kind);
                             }
                         },
                     );
@@ -326,7 +321,7 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                         &mut cx,
                         offsets,
                         "added",
-                        "Recently added",
+                        &aulos_core::fl!("home-recently-added"),
                         None,
                         Some(Act::SeeAllAlbums {
                             recently_added: true,
@@ -336,14 +331,14 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                     ui.add_space(SECTION_GAP);
                 }
                 if !data.rediscover.is_empty() {
-                    let hint = Some("Albums you haven't played in a while");
+                    let hint = aulos_core::fl!("home-rediscover-hint");
                     album_shelf(
                         ui,
                         &mut cx,
                         offsets,
                         "rediscover",
-                        "Rediscover",
-                        hint,
+                        &aulos_core::fl!("home-rediscover"),
+                        Some(&hint),
                         Some(Act::SeeAllAlbums {
                             recently_added: false,
                         }),
@@ -352,10 +347,12 @@ fn home_page(app: &App, ui: &mut Ui, st: &mut State, out: &mut Out) {
                     ui.add_space(SECTION_GAP);
                 }
                 if !data.random.is_empty() {
+                    let title = aulos_core::fl!("home-random-picks");
+                    let shuffle_tip = aulos_core::fl!("home-shuffle-picks");
                     let head = Head {
-                        title: "Random picks",
+                        title: &title,
                         hint: None,
-                        action: Some((regular::SHUFFLE, "Shuffle picks")),
+                        action: Some((regular::SHUFFLE, &shuffle_tip)),
                         see_all: true,
                     };
                     let clicked =
@@ -400,10 +397,11 @@ fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
             } else {
                 format!(" · {}", track.artist)
             };
+            let now_playing = format!("{} ", aulos_core::fl!("queue-now-playing-label"));
             crate::widgets::truncated_runs(
                 ui,
                 &[
-                    ("Now playing ", theme::regular(14.0), pal.text_2),
+                    (&now_playing, theme::regular(14.0), pal.text_2),
                     (&track.title, theme::medium(14.0), pal.text),
                     (&artist, theme::regular(14.0), pal.text_2),
                 ],
@@ -434,11 +432,10 @@ fn greeting(app: &App, ui: &mut Ui, library_albums: usize) {
                 });
             }
             None => {
-                let text = if library_albums == 1 {
-                    "1 album in your library".to_owned()
-                } else {
-                    format!("{library_albums} albums in your library")
-                };
+                let text = aulos_core::fl!(
+                    "home-subtitle",
+                    count = i64::try_from(library_albums).unwrap_or(i64::MAX)
+                );
                 ui.label(
                     RichText::new(text)
                         .font(theme::regular(14.0))
@@ -482,29 +479,59 @@ fn welcome(app: &App, ui: &mut Ui, out: &mut Out) {
         let (mark, _) = ui.allocate_exact_size(vec2(60.0, 56.0), Sense::hover());
         brand_mark(ui, mark.center(), &pal);
         ui.add_space(14.0);
-        ui.label(RichText::new("Welcome to Aulos").font(theme::semibold(22.0)).color(pal.text));
+        ui.label(
+            RichText::new(aulos_core::fl!("home-welcome-title"))
+                .font(theme::semibold(22.0))
+                .color(pal.text),
+        );
         ui.add_space(8.0);
         let body = if scanning {
-            "Scanning your library… Suggestions will appear as soon as your music is indexed."
+            aulos_core::fl!("home-empty-scanning-body")
         } else {
-            "Add a music folder or connect a server in Settings. Internet radio and podcasts work without any library."
+            aulos_core::fl!("home-empty-body")
         };
         ui.allocate_ui(vec2(avail.width().min(420.0), 60.0), |ui| {
             ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                ui.label(RichText::new(body).font(theme::regular(14.0)).color(pal.text_2));
+                ui.label(
+                    RichText::new(body)
+                        .font(theme::regular(14.0))
+                        .color(pal.text_2),
+                );
             });
         });
         ui.add_space(8.0);
         let width = 160.0 + 120.0 + 8.0;
-        ui.allocate_ui_with_layout(vec2(width, 34.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if pill_button(ui, "Open settings", Some(regular::GEAR), PillKind::Accent, 34.0, 0.0).clicked() {
-                out.act = Some(Act::Goto(Route::Settings));
-            }
-            if pill_button(ui, "Browse radio", Some(regular::BROADCAST), PillKind::Secondary, 34.0, 0.0).clicked() {
-                out.act = Some(Act::Goto(Route::Radio));
-            }
-        });
+        ui.allocate_ui_with_layout(
+            vec2(width, 34.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if pill_button(
+                    ui,
+                    &aulos_core::fl!("home-open-settings"),
+                    Some(regular::GEAR),
+                    PillKind::Accent,
+                    34.0,
+                    0.0,
+                )
+                .clicked()
+                {
+                    out.act = Some(Act::Goto(Route::Settings));
+                }
+                if pill_button(
+                    ui,
+                    &aulos_core::fl!("home-browse-radio"),
+                    Some(regular::BROADCAST),
+                    PillKind::Secondary,
+                    34.0,
+                    0.0,
+                )
+                .clicked()
+                {
+                    out.act = Some(Act::Goto(Route::Radio));
+                }
+            },
+        );
     });
 }
 
@@ -518,7 +545,7 @@ fn no_history(ui: &mut Ui, cx: &mut Cx) {
         brand_mark(ui, mark.center(), &pal);
         ui.add_space(14.0);
         ui.label(
-            RichText::new("Welcome to Aulos")
+            RichText::new(aulos_core::fl!("home-welcome-title"))
                 .font(theme::semibold(22.0))
                 .color(pal.text),
         );
@@ -526,11 +553,9 @@ fn no_history(ui: &mut Ui, cx: &mut Cx) {
         ui.allocate_ui(vec2(ui.available_width().min(420.0), 44.0), |ui| {
             ui.with_layout(Layout::top_down(Align::Center), |ui| {
                 ui.label(
-                    RichText::new(
-                        "Start listening and this page fills up — recent plays, this month’s favourites, albums worth another spin.",
-                    )
-                    .font(theme::regular(14.0))
-                    .color(pal.text_2),
+                    RichText::new(aulos_core::fl!("home-no-history-hint"))
+                        .font(theme::regular(14.0))
+                        .color(pal.text_2),
                 );
             });
         });
@@ -543,7 +568,7 @@ fn no_history(ui: &mut Ui, cx: &mut Cx) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if pill_button(
                     ui,
-                    "Shuffle everything",
+                    &aulos_core::fl!("home-shuffle-everything"),
                     Some(regular::SHUFFLE),
                     PillKind::Accent,
                     34.0,
@@ -553,7 +578,15 @@ fn no_history(ui: &mut Ui, cx: &mut Cx) {
                 {
                     cx.out.act = Some(Act::ShuffleAll);
                 }
-                if pill_button(ui, "Browse albums", None, PillKind::Secondary, 34.0, 0.0).clicked()
+                if pill_button(
+                    ui,
+                    &aulos_core::fl!("home-browse-albums"),
+                    None,
+                    PillKind::Secondary,
+                    34.0,
+                    0.0,
+                )
+                .clicked()
                 {
                     cx.out.act = Some(Act::Goto(Route::Albums));
                 }
@@ -702,7 +735,7 @@ fn link(ui: &mut Ui, text: &str, color: Color32) -> bool {
 }
 
 fn see_all_link(ui: &mut Ui, color: Color32) -> bool {
-    link(ui, "See all", color)
+    link(ui, &aulos_core::fl!("home-see-all"), color)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -787,7 +820,7 @@ fn album_card_at(ui: &mut Ui, cx: &mut Cx, rect: Rect, a: &AlbumRef) {
             ui.painter(),
             title_rect,
             Align::Min,
-            "Unknown album",
+            &aulos_core::fl!("unknown-album"),
             theme::semibold(13.5),
             pal.text_2,
         );
@@ -922,7 +955,11 @@ fn artist_card(ui: &mut Ui, cx: &mut Cx, name: &str, sub: &str, kind: ArtistKind
             }
         }
         ArtistKind::Discover { url, site } => {
-            let resp = resp.on_hover_text(format!("Open {name} on {site}"));
+            let resp = resp.on_hover_text(aulos_core::fl!(
+                "home-open-on-site",
+                name = name,
+                site = site
+            ));
             if resp.clicked() {
                 cx.out.act = Some(Act::OpenUrl(url.to_owned()));
             }
@@ -970,9 +1007,12 @@ fn favourites_list(ui: &mut Ui, cx: &mut Cx, data: &HomeData) {
     const COL_GAP: f32 = 16.0;
     let pal = cx.app.pal;
     let title = if data.favourites_this_month {
-        format!("Favourites of {}", chrono::Local::now().format("%B"))
+        aulos_core::fl!(
+            "home-favourites-of-month",
+            month = month_name(chrono::Datelike::month(&chrono::Local::now()))
+        )
     } else {
-        "Favourites".to_owned()
+        aulos_core::fl!("home-favourites")
     };
     ui.horizontal(|ui| {
         ui.label(
@@ -983,16 +1023,12 @@ fn favourites_list(ui: &mut Ui, cx: &mut Cx, data: &HomeData) {
         ui.add_space(2.0);
         let songs = data.favourites_total;
         ui.label(
-            RichText::new(if songs == 1 {
-                "1 song".to_owned()
-            } else {
-                format!("{songs} songs")
-            })
-            .font(theme::regular(13.0))
-            .color(pal.text_3),
+            RichText::new(aulos_core::fl!("home-song-count", count = i64::from(songs)))
+                .font(theme::regular(13.0))
+                .color(pal.text_3),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if link(ui, "Play all", pal.text_2) {
+            if link(ui, &aulos_core::fl!("play-all"), pal.text_2) {
                 cx.out.act = Some(Act::PlayFavourites(0));
             }
         });
@@ -1067,7 +1103,7 @@ fn favourites_list(ui: &mut Ui, cx: &mut Cx, data: &HomeData) {
 fn decade_tiles(ui: &mut Ui, cx: &mut Cx, decades: &[DecadeCount]) {
     let pal = cx.app.pal;
     ui.label(
-        RichText::new("Decades")
+        RichText::new(aulos_core::fl!("home-decades"))
             .font(theme::semibold(17.0))
             .color(pal.text),
     );
@@ -1091,11 +1127,7 @@ fn decade_tiles(ui: &mut Ui, cx: &mut Cx, decades: &[DecadeCount]) {
                     );
                 }
                 let inner = rect.shrink2(vec2(12.0, 9.0));
-                let count = if d.albums == 1 {
-                    "1 album".to_owned()
-                } else {
-                    format!("{} albums", d.albums)
-                };
+                let count = aulos_core::fl!("home-decade-albums", count = i64::from(d.albums));
                 let top = Rect::from_min_size(
                     pos2(inner.left(), inner.bottom() - 34.0),
                     vec2(inner.width(), 19.0),
@@ -1149,14 +1181,14 @@ fn decade_page(app: &App, ui: &mut Ui, out: &mut Out) {
                 if IconBtn::new(regular::ARROW_LEFT)
                     .size(30.0)
                     .icon_size(16.0)
-                    .tip("Back")
+                    .tip(aulos_core::fl!("home-back"))
                     .show(ui)
                     .clicked()
                 {
                     out.act = Some(Act::CloseDecade);
                 }
                 ui.label(
-                    RichText::new(format!("The {}s", view.decade))
+                    RichText::new(aulos_core::fl!("home-decade-title", decade = view.decade))
                         .font(theme::semibold(26.0))
                         .color(pal.text),
                 );
@@ -1171,7 +1203,7 @@ fn decade_page(app: &App, ui: &mut Ui, out: &mut Out) {
                     let enabled = view.albums.as_ref().is_some_and(|a| !a.is_empty());
                     let r = crate::widgets::pill_button_enabled(
                         ui,
-                        "Shuffle play",
+                        &aulos_core::fl!("home-decade-play"),
                         Some(regular::SHUFFLE),
                         PillKind::Accent,
                         32.0,
@@ -1219,8 +1251,8 @@ fn decade_page(app: &App, ui: &mut Ui, out: &mut Out) {
             empty_state(
                 ui,
                 regular::VINYL_RECORD,
-                "No albums",
-                "No albums from this decade in your library.",
+                &aulos_core::fl!("home-decade-empty-title"),
+                &aulos_core::fl!("home-decade-empty-hint"),
                 None,
             );
         }
@@ -1251,5 +1283,23 @@ fn decade_page(app: &App, ui: &mut Ui, out: &mut Out) {
                     }
                 });
         }
+    }
+}
+
+/// The localized name of calendar month `month` (1–12).
+fn month_name(month: u32) -> String {
+    match month {
+        1 => aulos_core::fl!("home-month-1"),
+        2 => aulos_core::fl!("home-month-2"),
+        3 => aulos_core::fl!("home-month-3"),
+        4 => aulos_core::fl!("home-month-4"),
+        5 => aulos_core::fl!("home-month-5"),
+        6 => aulos_core::fl!("home-month-6"),
+        7 => aulos_core::fl!("home-month-7"),
+        8 => aulos_core::fl!("home-month-8"),
+        9 => aulos_core::fl!("home-month-9"),
+        10 => aulos_core::fl!("home-month-10"),
+        11 => aulos_core::fl!("home-month-11"),
+        _ => aulos_core::fl!("home-month-12"),
     }
 }

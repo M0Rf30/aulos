@@ -179,9 +179,7 @@ fn main() {
             Err(error) => {
                 tracing::error!("Aulos failed to start: {error:?}");
                 if let Some(loading) = loading {
-                    loading.set_inner_html(
-                        "Aulos could not start: this browser needs WebGL2 or WebGPU.",
-                    );
+                    loading.set_inner_html(&aulos_core::fl!("app-web-start-failed"));
                 }
             }
         }

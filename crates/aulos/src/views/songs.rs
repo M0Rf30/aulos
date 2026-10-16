@@ -57,11 +57,11 @@ fn thousands(n: usize) -> String {
 fn total_label(secs: u64) -> String {
     let (d, h, m) = (secs / 86_400, (secs % 86_400) / 3600, (secs % 3600) / 60);
     if d > 0 {
-        format!("{d} d {h} h")
+        aulos_core::fl!("songs-total-days-hours", days = d, hours = h)
     } else if h > 0 {
-        format!("{h} h {m} m")
+        aulos_core::fl!("songs-total-hours-minutes", hours = h, minutes = m)
     } else {
-        format!("{m} m")
+        aulos_core::fl!("songs-total-minutes", minutes = m)
     }
 }
 
@@ -89,7 +89,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
     Frame::NONE.inner_margin(margin).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Songs")
+                egui::RichText::new(aulos_core::fl!("songs"))
                     .font(theme::semibold(26.0))
                     .color(pal.text),
             );
@@ -108,7 +108,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 let enabled = !library.tracks.is_empty();
                 if widgets::pill_button_enabled(
                     ui,
-                    "Shuffle all",
+                    &aulos_core::fl!("songs-shuffle-all"),
                     Some(regular::SHUFFLE),
                     PillKind::Primary,
                     30.0,
@@ -131,19 +131,19 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
             widgets::empty_state(
                 ui,
                 regular::MUSIC_NOTES,
-                "No songs yet",
-                "Add a music folder in Settings and Aulos will fill this list.",
+                &aulos_core::fl!("songs-empty-title"),
+                &aulos_core::fl!("songs-empty-body"),
                 None,
             );
         } else {
-            let body = format!(
-                "Nothing in your library matches “{}”.",
-                library.search_query().trim()
+            let body = aulos_core::fl!(
+                "songs-no-search-matches-body",
+                query = library.search_query().trim()
             );
             widgets::empty_state(
                 ui,
                 regular::MAGNIFYING_GLASS,
-                "No matching songs",
+                &aulos_core::fl!("songs-no-search-matches-title"),
                 &body,
                 None,
             );
@@ -152,7 +152,12 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
         let cols = Columns::songs(app.narrow);
         let sorted = state.sort.unwrap_or(SortField::Title);
         Frame::NONE.inner_margin(margin).show(ui, |ui| {
-            if let Some(field) = widgets::track_header_sortable(ui, cols, "#", sorted) {
+            if let Some(field) = widgets::track_header_sortable(
+                ui,
+                cols,
+                &aulos_core::fl!("songs-column-number"),
+                sorted,
+            ) {
                 intents.push(Intent::Sort(field));
             }
         });

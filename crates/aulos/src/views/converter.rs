@@ -150,20 +150,23 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
     // Header.
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new("Converter")
+            RichText::new(aulos_core::fl!("converter-title"))
                 .font(theme::semibold(26.0))
                 .color(pal.text),
         );
-        tag_badge(ui, "LAB", pal.text_1, Color32::TRANSPARENT, pal.text_5);
+        tag_badge(
+            ui,
+            &aulos_core::fl!("converter-lab-badge"),
+            pal.text_1,
+            Color32::TRANSPARENT,
+            pal.text_5,
+        );
         let dir = convert::out_dir(config).display().to_string();
+        let experimental = format!("{} ", aulos_core::fl!("converter-experimental-note"));
         crate::widgets::truncated_runs(
             ui,
             &[
-                (
-                    "Experimental. Originals are never modified; output goes to ",
-                    theme::regular(14.0),
-                    pal.text_2,
-                ),
+                (experimental.as_str(), theme::regular(14.0), pal.text_2),
                 (&dir, theme::mono(12.0), pal.text_1),
             ],
         );
@@ -171,14 +174,14 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
 
     // Banners.
     if let Some(error) = &app.session.convert.dir_error {
-        let text = format!("Could not use the output folder: {error}");
+        let text = aulos_core::fl!("converter-dir-error", error = error.to_string());
         if banner(
             ui,
             &pal,
             pal.danger,
             regular::WARNING_CIRCLE,
             &text,
-            Some("Change folder"),
+            Some(aulos_core::fl!("converter-change-folder").as_str()),
         ) {
             out.push(Intent::ChangeDir);
         }
@@ -187,9 +190,9 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
         match convert::ffmpeg::cached() {
             Some(true) => {}
             Some(false) => {
-                let text = format!(
-                    "{} needs ffmpeg, which was not found on this system. Install it to convert to this format.",
-                    format_short_label(config.convert_format)
+                let text = aulos_core::fl!(
+                    "converter-ffmpeg-missing",
+                    format = format_short_label(config.convert_format)
                 );
                 banner(ui, &pal, pal.warn, regular::WARNING, &text, None);
             }
@@ -199,7 +202,7 @@ fn page(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
                     &pal,
                     pal.text_2,
                     regular::INFO,
-                    "Checking for ffmpeg…",
+                    &aulos_core::fl!("converter-checking-ffmpeg"),
                     None,
                 );
             }
@@ -294,7 +297,7 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
 
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new("Queue")
+            RichText::new(aulos_core::fl!("converter-queue-title"))
                 .font(theme::semibold(15.0))
                 .color(pal.text),
         );
@@ -311,12 +314,19 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
                         Intent::Pause
                     });
                 }
-                if icon_button(ui, &pal, regular::PLUS, "Add files").clicked() {
+                if icon_button(
+                    ui,
+                    &pal,
+                    regular::PLUS,
+                    &aulos_core::fl!("convert-add-files"),
+                )
+                .clicked()
+                {
                     out.push(Intent::AddFiles);
                 }
             } else if pill_button_enabled(
                 ui,
-                "Add files",
+                &aulos_core::fl!("convert-add-files"),
                 Some(regular::PLUS),
                 PillKind::Secondary,
                 28.0,
@@ -328,18 +338,32 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
                 out.push(Intent::AddFiles);
             }
             if active
-                && pill_button_enabled(ui, "Cancel all", None, PillKind::Danger, 28.0, 0.0, true)
-                    .clicked()
+                && pill_button_enabled(
+                    ui,
+                    &aulos_core::fl!("convert-cancel-all"),
+                    None,
+                    PillKind::Danger,
+                    28.0,
+                    0.0,
+                    true,
+                )
+                .clicked()
             {
                 out.push(Intent::CancelAll);
             }
-            if counts.done + counts.failed > 0 && ghost_button(ui, &pal, "Clear finished").clicked()
+            if counts.done + counts.failed > 0
+                && ghost_button(ui, &pal, &aulos_core::fl!("convert-clear-finished")).clicked()
             {
                 out.push(Intent::ClearFinished);
             }
-            let mut summary = format!("{} jobs · {} done", jobs.len(), counts.done);
+            let mut summary =
+                aulos_core::fl!("converter-summary", jobs = jobs.len(), done = counts.done);
             if counts.failed > 0 {
-                summary.push_str(&format!(" · {} failed", counts.failed));
+                summary.push_str(" · ");
+                summary.push_str(&aulos_core::fl!(
+                    "converter-summary-failed",
+                    failed = counts.failed
+                ));
             }
             ui.add(Label::new(RichText::new(summary).color(pal.text_2)).truncate());
         });
@@ -349,9 +373,9 @@ fn queue(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
         if empty_state(
             ui,
             regular::ARROWS_LEFT_RIGHT,
-            "Nothing to convert",
-            "Add audio files, video files or a CUE sheet — or drop them here. Originals are never modified.",
-            Some("Add files"),
+            &aulos_core::fl!("converter-empty-title"),
+            &aulos_core::fl!("converter-empty-body"),
+            Some(aulos_core::fl!("convert-add-files").as_str()),
         ) {
             out.push(Intent::AddFiles);
         }
@@ -405,13 +429,13 @@ fn ghost_button(ui: &mut Ui, pal: &Palette, label: &str) -> egui::Response {
 /// play glyph while the queue is paused.
 fn pause_pill(ui: &mut Ui, pal: &Palette, paused: bool) -> egui::Response {
     let (label, glyph) = if paused {
-        ("Resume", fill::PLAY)
+        (aulos_core::fl!("converter-resume"), fill::PLAY)
     } else {
-        ("Pause", fill::PAUSE)
+        (aulos_core::fl!("pause"), fill::PAUSE)
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), theme::semibold(13.0), pal.text);
+        .layout_no_wrap(label, theme::semibold(13.0), pal.text);
     let (rect, resp) = ui.allocate_exact_size(
         vec2(galley.size().x + 12.0 + 6.0 + 20.0, 28.0),
         Sense::click(),
@@ -439,9 +463,9 @@ fn pause_pill(ui: &mut Ui, pal: &Palette, paused: bool) -> egui::Response {
         pal.text,
     );
     resp.on_hover_text(if paused {
-        "Resume the queue"
+        aulos_core::fl!("converter-resume-tooltip")
     } else {
-        "Pause the queue"
+        aulos_core::fl!("converter-pause-tooltip")
     })
 }
 
@@ -496,9 +520,10 @@ fn quality_text(q: f32) -> String {
 }
 
 fn extension_upper(path: &Path) -> String {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .map_or_else(|| "FILE".to_owned(), str::to_uppercase)
+    path.extension().and_then(OsStr::to_str).map_or_else(
+        || aulos_core::fl!("converter-file-fallback"),
+        str::to_uppercase,
+    )
 }
 
 fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &mut Vec<Intent>) {
@@ -570,12 +595,12 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
     let status = match &job.state {
         JobState::Running => running_status(job),
         JobState::Done => job.output_bytes.map_or_else(
-            || "Done".to_owned(),
-            |bytes| format!("Done · {}", estimate::format_bytes(bytes)),
+            || aulos_core::fl!("convert-state-done"),
+            |bytes| aulos_core::fl!("converter-done-size", size = estimate::format_bytes(bytes)),
         ),
-        JobState::Queued => "Queued".to_owned(),
+        JobState::Queued => aulos_core::fl!("convert-state-queued"),
         JobState::Failed(reason) => reason.clone(),
-        JobState::Cancelled => "Cancelled".to_owned(),
+        JobState::Cancelled => aulos_core::fl!("convert-state-cancelled"),
     };
 
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
@@ -623,8 +648,14 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
     let split_cue = settings.map_or(config.convert_split_cue, |s| s.split_cue);
     let target = format_tag(format, flac, lossy);
     let mut meta = match job.kind {
-        JobKind::Convert => format!("{} → {target}", source_label(job)),
-        JobKind::CueSplit if !split_cue => format!("CUE, one file → {target}"),
+        JobKind::Convert => aulos_core::fl!(
+            "converter-meta-convert",
+            source = source_label(job),
+            target = target.as_str()
+        ),
+        JobKind::CueSplit if !split_cue => {
+            aulos_core::fl!("converter-meta-cue-one-file", target = target.as_str())
+        }
         JobKind::CueSplit => {
             let total = job.cue_total.load(Ordering::Relaxed);
             let current = job.cue_track.load(Ordering::Relaxed);
@@ -634,20 +665,36 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
                 total.max(known.unwrap_or(0)),
             ) {
                 (true, total) if total > 0 && current > 0 => {
-                    format!("CUE split · track {current} of {total} → {target}")
+                    aulos_core::fl!(
+                        "converter-meta-cue-track",
+                        current = current,
+                        total = total,
+                        target = target.as_str()
+                    )
                 }
-                (_, total) if total > 0 => format!("CUE split · {total} tracks → {target}"),
-                _ => format!("CUE split → {target}"),
+                (_, total) if total > 0 => aulos_core::fl!(
+                    "converter-meta-cue-tracks",
+                    total = total,
+                    target = target.as_str()
+                ),
+                _ => aulos_core::fl!("converter-meta-cue-split", target = target.as_str()),
             }
         }
     };
     if let Some(hz) = rate {
-        meta.push_str(&format!(" · {} kHz", khz(hz)));
+        meta.push_str(" · ");
+        meta.push_str(&aulos_core::fl!("converter-meta-khz", khz = khz(hz)));
     }
     match channels {
         ChannelMode::Source => {}
-        ChannelMode::Mono => meta.push_str(" · mono"),
-        ChannelMode::Stereo => meta.push_str(" · stereo"),
+        ChannelMode::Mono => {
+            meta.push_str(" · ");
+            meta.push_str(&aulos_core::fl!("converter-meta-mono"));
+        }
+        ChannelMode::Stereo => {
+            meta.push_str(" · ");
+            meta.push_str(&aulos_core::fl!("converter-meta-stereo"));
+        }
     }
     let cy = rect.center().y;
     paint_text(
@@ -704,28 +751,54 @@ fn job_row(ui: &mut Ui, pal: &Palette, config: &Config, job: &ConvertJob, out: &
     );
     let job_dir = || settings.map_or_else(|| convert::out_dir(config), |s| s.out_dir.clone());
     let (tip, intent) = match &job.state {
-        JobState::Done => ("Show in folder", Intent::OpenDir(job_dir())),
-        JobState::Running => ("Cancel", Intent::Cancel(job.id)),
-        JobState::Queued => ("Remove from queue", Intent::Remove(job.id)),
-        JobState::Failed(_) | JobState::Cancelled => ("Retry", Intent::Retry(job.id)),
+        JobState::Done => (
+            aulos_core::fl!("converter-show-in-folder"),
+            Intent::OpenDir(job_dir()),
+        ),
+        JobState::Running => (
+            aulos_core::fl!("convert-cancel-tooltip"),
+            Intent::Cancel(job.id),
+        ),
+        JobState::Queued => (
+            aulos_core::fl!("converter-remove-from-queue"),
+            Intent::Remove(job.id),
+        ),
+        JobState::Failed(_) | JobState::Cancelled => (
+            aulos_core::fl!("convert-retry-tooltip"),
+            Intent::Retry(job.id),
+        ),
     };
     if action_resp.on_hover_text(tip).clicked() {
         out.push(intent);
     }
 
     resp.context_menu(|ui| {
-        if matches!(job.state, JobState::Done) && ui.button("Show in folder").clicked() {
+        if matches!(job.state, JobState::Done)
+            && ui
+                .button(aulos_core::fl!("converter-show-in-folder"))
+                .clicked()
+        {
             out.push(Intent::OpenDir(job_dir()));
         }
-        if matches!(job.state, JobState::Running) && ui.button("Cancel").clicked() {
+        if matches!(job.state, JobState::Running)
+            && ui
+                .button(aulos_core::fl!("convert-cancel-tooltip"))
+                .clicked()
+        {
             out.push(Intent::Cancel(job.id));
         }
         if matches!(job.state, JobState::Failed(_) | JobState::Cancelled)
-            && ui.button("Retry").clicked()
+            && ui
+                .button(aulos_core::fl!("convert-retry-tooltip"))
+                .clicked()
         {
             out.push(Intent::Retry(job.id));
         }
-        if !matches!(job.state, JobState::Running) && ui.button("Remove from list").clicked() {
+        if !matches!(job.state, JobState::Running)
+            && ui
+                .button(aulos_core::fl!("converter-remove-from-list"))
+                .clicked()
+        {
             out.push(Intent::Remove(job.id));
         }
     });
@@ -743,15 +816,24 @@ fn source_label(job: &ConvertJob) -> String {
 fn running_status(job: &ConvertJob) -> String {
     let percent = job.progress_permille() / 10;
     if job.is_paused() {
-        return format!("Paused · {percent}%");
+        return aulos_core::fl!("converter-paused-percent", percent = percent);
     }
     let total = job.cue_total.load(Ordering::Relaxed);
     if job.kind == JobKind::CueSplit && total > 0 {
         let current = job.cue_track.load(Ordering::Relaxed).max(1);
-        return format!("{percent}% · {current}/{total}");
+        return aulos_core::fl!(
+            "converter-progress-cue",
+            percent = percent,
+            current = current,
+            total = total
+        );
     }
     match job.eta() {
-        Some(eta) => format!("{percent}% · {} left", estimate::format_clock(eta)),
+        Some(eta) => aulos_core::fl!(
+            "converter-progress-eta",
+            percent = percent,
+            time = estimate::format_clock(eta)
+        ),
         None => format!("{percent}%"),
     }
 }
@@ -785,7 +867,7 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
         .show(&mut content_ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 14.0);
             ui.label(
-                RichText::new("Output")
+                RichText::new(aulos_core::fl!("convert-output-section"))
                     .font(theme::semibold(15.0))
                     .color(pal.text),
             );
@@ -796,7 +878,7 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             switch_row(
                 ui,
                 &pal,
-                "Split by CUE sheet",
+                &aulos_core::fl!("converter-split-cue"),
                 &cue,
                 config.convert_split_cue,
                 Intent::SplitCue,
@@ -805,8 +887,8 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             switch_row(
                 ui,
                 &pal,
-                "Copy tags & cover",
-                "Tags, ReplayGain and the front cover are carried over",
+                &aulos_core::fl!("converter-copy-tags"),
+                &aulos_core::fl!("converter-copy-tags-hint"),
                 config.convert_copy_tags,
                 Intent::CopyTags,
                 out,
@@ -819,13 +901,9 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
         config.convert_format.requires_ffmpeg() && convert::ffmpeg::cached() != Some(true);
     let ready = counts.queued > 0 && !ffmpeg_blocked;
     let summary = if counts.queued == 0 {
-        "Nothing queued".to_owned()
+        aulos_core::fl!("converter-nothing-queued")
     } else {
-        let files = format!(
-            "{} {}",
-            counts.queued,
-            if counts.queued == 1 { "file" } else { "files" }
-        );
+        let files = aulos_core::fl!("converter-queued-files", count = counts.queued);
         let target = Target {
             format: config.convert_format,
             target_rate: config.convert_sample_rate,
@@ -841,14 +919,16 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
             .filter(|j| j.state == JobState::Queued)
             .filter_map(|j| j.source_info.as_ref());
         match estimate::queue_estimate(queued, target) {
-            Some(est) => format!(
-                "{files} · ~{} → ~{}",
-                estimate::format_bytes(est.source_bytes),
-                estimate::format_bytes(est.output_bytes)
+            Some(est) => aulos_core::fl!(
+                "converter-queue-estimate",
+                files = files.as_str(),
+                from = estimate::format_bytes(est.source_bytes),
+                to = estimate::format_bytes(est.output_bytes)
             ),
-            None => format!(
-                "{files} → {}",
-                format_tag(
+            None => aulos_core::fl!(
+                "converter-queue-target",
+                files = files.as_str(),
+                target = format_tag(
                     config.convert_format,
                     config.flac_options,
                     config.lossy_options
@@ -863,7 +943,7 @@ fn output_card(app: &App, ui: &mut Ui, out: &mut Vec<Intent>) {
     );
     if pill_button_enabled(
         &mut footer_ui,
-        "Convert",
+        &aulos_core::fl!("convert"),
         Some(regular::ARROWS_LEFT_RIGHT),
         PillKind::Primary,
         34.0,
@@ -896,7 +976,7 @@ fn field_label(ui: &mut Ui, pal: &Palette, text: &str, opacity: f32) {
 
 fn format_section(ui: &mut Ui, pal: &Palette, current: OutputFormat, out: &mut Vec<Intent>) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    field_label(ui, pal, "Format", 1.0);
+    field_label(ui, pal, &aulos_core::fl!("convert-format"), 1.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(theme::radius::MD), pal.bg);
@@ -935,7 +1015,7 @@ fn format_section(ui: &mut Ui, pal: &Palette, current: OutputFormat, out: &mut V
 
     let other = OTHER_FORMATS.iter().position(|f| *f == current);
     let value = other.map_or_else(
-        || "More formats…".to_owned(),
+        || aulos_core::fl!("converter-more-formats"),
         |i| format_short_label(OTHER_FORMATS[i]),
     );
     let dd = Dropdown {
@@ -960,7 +1040,7 @@ fn settings_grid(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Inte
             quality_cell(&mut cols[0], pal, format, flac, lossy, out);
             let ui = &mut cols[1];
             ui.spacing_mut().item_spacing.y = 6.0;
-            field_label(ui, pal, "Sample rate", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("convert-sample-rate"), 1.0);
             let selected = SAMPLE_RATE_OPTIONS
                 .iter()
                 .position(|r| *r == config.convert_sample_rate);
@@ -981,11 +1061,11 @@ fn settings_grid(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Inte
             ui.spacing_mut().item_spacing.y = 6.0;
             let enabled = format == OutputFormat::Flac;
             let opacity = if enabled { 1.0 } else { 0.38 };
-            field_label(ui, pal, "Bit depth", opacity);
+            field_label(ui, pal, &aulos_core::fl!("convert-flac-bitdepth"), opacity);
             let value = if enabled {
                 flac_bit_depth_label(flac.bit_depth)
             } else {
-                format!("n/a for {}", format_short_label(format))
+                aulos_core::fl!("converter-depth-na", format = format_short_label(format))
             };
             let selected = FLAC_BIT_DEPTH_OPTIONS
                 .iter()
@@ -1005,20 +1085,19 @@ fn settings_grid(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Inte
 
             let ui = &mut cols[1];
             ui.spacing_mut().item_spacing.y = 6.0;
-            field_label(ui, pal, "Channels", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("converter-channels"), 1.0);
             let selected = ChannelMode::ALL
                 .iter()
                 .position(|c| *c == config.convert_channels);
+            let channels_value = channels_label(config.convert_channels);
             let dd = Dropdown {
                 salt: "convert-channels",
-                value: channels_label(config.convert_channels),
+                value: &channels_value,
                 count: ChannelMode::ALL.len(),
                 selected,
                 enabled: true,
             };
-            if let Some(i) = dropdown(ui, pal, &dd, |i| {
-                channels_label(ChannelMode::ALL[i]).to_owned()
-            }) {
+            if let Some(i) = dropdown(ui, pal, &dd, |i| channels_label(ChannelMode::ALL[i])) {
                 out.push(Intent::Channels(ChannelMode::ALL[i]));
             }
         });
@@ -1038,11 +1117,14 @@ fn quality_cell(
     ui.spacing_mut().item_spacing.y = 6.0;
     match format {
         OutputFormat::Flac => {
-            field_label(ui, pal, "Compression", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("converter-compression"), 1.0);
             let selected = FLAC_COMPRESSION_OPTIONS
                 .iter()
                 .position(|l| *l == flac.compression_level);
-            let value = format!("Level {}", flac.compression_level);
+            let value = aulos_core::fl!(
+                "converter-compression-level",
+                level = flac.compression_level
+            );
             let dd = Dropdown {
                 salt: "convert-quality",
                 value: &value,
@@ -1051,13 +1133,16 @@ fn quality_cell(
                 enabled: true,
             };
             if let Some(i) = dropdown(ui, pal, &dd, |i| {
-                format!("Level {}", FLAC_COMPRESSION_OPTIONS[i])
+                aulos_core::fl!(
+                    "converter-compression-level",
+                    level = FLAC_COMPRESSION_OPTIONS[i]
+                )
             }) {
                 out.push(Intent::FlacCompression(FLAC_COMPRESSION_OPTIONS[i]));
             }
         }
         OutputFormat::Mp3 => {
-            field_label(ui, pal, "Quality", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("convert-mp3-mode"), 1.0);
             let selected = MP3_MODE_OPTIONS.iter().position(|m| *m == lossy.mp3_mode);
             let value = mp3_mode_label(lossy.mp3_mode);
             let dd = Dropdown {
@@ -1072,7 +1157,7 @@ fn quality_cell(
             }
         }
         OutputFormat::Aac | OutputFormat::Opus => {
-            field_label(ui, pal, "Bitrate", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("convert-bitrate"), 1.0);
             let current = if format == OutputFormat::Aac {
                 lossy.aac_bitrate_kbps
             } else {
@@ -1094,11 +1179,14 @@ fn quality_cell(
             }
         }
         OutputFormat::OggVorbis => {
-            field_label(ui, pal, "Quality", 1.0);
+            field_label(ui, pal, &aulos_core::fl!("convert-vorbis-quality"), 1.0);
             let selected = VORBIS_QUALITY_OPTIONS
                 .iter()
                 .position(|q| (*q - lossy.vorbis_quality).abs() < 0.01);
-            let value = format!("Quality {}", quality_text(lossy.vorbis_quality));
+            let value = aulos_core::fl!(
+                "converter-quality-value",
+                q = quality_text(lossy.vorbis_quality)
+            );
             let dd = Dropdown {
                 salt: "convert-quality",
                 value: &value,
@@ -1107,7 +1195,10 @@ fn quality_cell(
                 enabled: true,
             };
             if let Some(i) = dropdown(ui, pal, &dd, |i| {
-                format!("Quality {}", quality_text(VORBIS_QUALITY_OPTIONS[i]))
+                aulos_core::fl!(
+                    "converter-quality-value",
+                    q = quality_text(VORBIS_QUALITY_OPTIONS[i])
+                )
             }) {
                 out.push(Intent::VorbisQuality(VORBIS_QUALITY_OPTIONS[i]));
             }
@@ -1118,10 +1209,11 @@ fn quality_cell(
         | OutputFormat::Aiff16
         | OutputFormat::Aiff24
         | OutputFormat::Alac => {
-            field_label(ui, pal, "Quality", 0.38);
+            field_label(ui, pal, &aulos_core::fl!("convert-mp3-mode"), 0.38);
+            let lossless = aulos_core::fl!("converter-lossless");
             let dd = Dropdown {
                 salt: "convert-quality",
-                value: "Lossless",
+                value: &lossless,
                 count: 0,
                 selected: None,
                 enabled: false,
@@ -1131,11 +1223,11 @@ fn quality_cell(
     }
 }
 
-fn channels_label(mode: ChannelMode) -> &'static str {
+fn channels_label(mode: ChannelMode) -> String {
     match mode {
-        ChannelMode::Source => "Keep",
-        ChannelMode::Mono => "Mono",
-        ChannelMode::Stereo => "Stereo",
+        ChannelMode::Source => aulos_core::fl!("converter-channels-keep"),
+        ChannelMode::Mono => aulos_core::fl!("converter-channels-mono"),
+        ChannelMode::Stereo => aulos_core::fl!("converter-channels-stereo"),
     }
 }
 
@@ -1143,7 +1235,7 @@ fn channels_label(mode: ChannelMode) -> &'static str {
 /// token reminder.
 fn pattern_section(ui: &mut Ui, pal: &Palette, pattern: &str, out: &mut Vec<Intent>) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    field_label(ui, pal, "File name pattern", 1.0);
+    field_label(ui, pal, &aulos_core::fl!("converter-pattern-label"), 1.0);
     let id = Id::new("convert-pattern");
     let focused = ui.memory(|m| m.has_focus(id));
     // While editing, the draft lives in egui's temp storage; otherwise the
@@ -1183,7 +1275,10 @@ fn pattern_section(ui: &mut Ui, pal: &Palette, pattern: &str, out: &mut Vec<Inte
         out.push(Intent::Pattern(draft));
     }
     ui.label(
-        RichText::new("{artist} {album_artist} {album} {title} {track:02} {disc} {year} {genre} {filename} — / makes folders")
+        RichText::new(aulos_core::fl!(
+            "converter-pattern-hint",
+            tokens = "{artist} {album_artist} {album} {title} {track:02} {disc} {year} {genre} {filename}"
+        ))
             .font(theme::regular(11.0))
             .color(pal.text_3),
     );
@@ -1196,15 +1291,14 @@ fn cue_summary(jobs: &[ConvertJob]) -> String {
         .iter()
         .find(|j| j.kind == JobKind::CueSplit && j.state.is_active())
     else {
-        return "Applies to .cue sheets added to the queue".to_owned();
+        return aulos_core::fl!("converter-cue-hint");
     };
     let name = job
         .source
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     match job.source_info.as_ref().and_then(|i| i.cue_tracks) {
-        Some(1) => format!("{name} · 1 track found"),
-        Some(n) => format!("{name} · {n} tracks found"),
+        Some(n) => aulos_core::fl!("converter-cue-found", name = name.as_str(), count = n),
         None => name,
     }
 }
@@ -1254,7 +1348,7 @@ fn switch_row(
 
 fn folder_section(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Intent>) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    field_label(ui, pal, "Output folder", 1.0);
+    field_label(ui, pal, &aulos_core::fl!("converter-output-folder"), 1.0);
     let dir = convert::out_dir(config);
     let width = ui.available_width();
     let mut job = LayoutJob::single_section(
@@ -1291,7 +1385,7 @@ fn folder_section(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Int
     ui.horizontal(|ui| {
         if pill_button_enabled(
             ui,
-            "Change…",
+            &aulos_core::fl!("convert-dir-change"),
             Some(regular::PENCIL_SIMPLE),
             PillKind::Secondary,
             28.0,
@@ -1304,7 +1398,7 @@ fn folder_section(ui: &mut Ui, pal: &Palette, config: &Config, out: &mut Vec<Int
         }
         if pill_button_enabled(
             ui,
-            "Open",
+            &aulos_core::fl!("converter-open"),
             Some(regular::FOLDER_OPEN),
             PillKind::Ghost,
             28.0,
@@ -1497,17 +1591,22 @@ fn drain_picks(app: &mut App) {
 
 /// The files the user picked; empty when the dialog was cancelled.
 async fn pick_files() -> Vec<PathBuf> {
+    let filter_name = aulos_core::fl!("converter-filter-name");
     let filter = Filter::new(
-        "Audio, video and CUE files",
+        &filter_name,
         aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
             .iter()
             .chain(["cue", "mkv", "mov", "avi"].iter())
             .copied(),
     );
-    dialogs::pick_files("Select audio or video files, or a CUE sheet", Some(&filter)).await
+    dialogs::pick_files(
+        &aulos_core::fl!("converter-pick-files-title"),
+        Some(&filter),
+    )
+    .await
 }
 
 /// The folder the user picked; `None` when the dialog was cancelled.
 async fn pick_folder() -> Option<PathBuf> {
-    dialogs::pick_folder("Select the output folder").await
+    dialogs::pick_folder(&aulos_core::fl!("converter-pick-folder-title")).await
 }

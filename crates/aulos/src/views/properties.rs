@@ -82,8 +82,8 @@ fn draw(app: &App, ctx: &Context) -> Vec<Intent> {
                                 empty_state(
                                     ui,
                                     regular::INFO,
-                                    "Nothing selected",
-                                    "Open Properties from a track or album menu.",
+                                    &aulos_core::fl!("props-empty-title"),
+                                    &aulos_core::fl!("props-empty-hint"),
                                     None,
                                 );
                             }
@@ -99,7 +99,7 @@ fn header(ui: &mut Ui, pal: Palette, subject: Option<&Subject>, out: &mut Vec<In
         ui.set_height(HEADER_H);
         ui.add_space(16.0);
         ui.label(
-            RichText::new("Properties")
+            RichText::new(aulos_core::fl!("properties"))
                 .font(theme::semibold(15.0))
                 .color(pal.text),
         );
@@ -107,8 +107,15 @@ fn header(ui: &mut Ui, pal: Palette, subject: Option<&Subject>, out: &mut Vec<In
         if let Some(subject) = subject {
             ui.add_space(10.0);
             let mut chosen = usize::from(matches!(subject, Subject::Album(_)));
-            if segmented(ui, &mut chosen, &["Track", "Album"], 28.0)
-                && chosen == 1
+            if segmented(
+                ui,
+                &mut chosen,
+                &[
+                    &aulos_core::fl!("props-tab-track"),
+                    &aulos_core::fl!("props-tab-album"),
+                ],
+                28.0,
+            ) && chosen == 1
                 && let Subject::Track(track) = subject
             {
                 out.push(Intent::AlbumOf(Box::new(track.clone())));
@@ -187,54 +194,74 @@ fn track_rows(ui: &mut Ui, app: &App, track: &Track) {
     };
     let info = merge(loaded, known_from_track(track));
     match state {
-        Loadable::Loading => status(ui, app, "Reading file…"),
-        Loadable::Failed(message) => {
-            status(ui, app, &format!("Could not read the file: {message}"))
-        }
+        Loadable::Loading => status(ui, app, &aulos_core::fl!("props-reading-file")),
+        Loadable::Failed(message) => status(
+            ui,
+            app,
+            &aulos_core::fl!("props-read-file-failed", error = message.as_str()),
+        ),
         Loadable::Idle | Loadable::Loaded(_) => {}
     }
 
-    let rows: Vec<(&str, String)> = vec![
-        ("Artist", track.artist.clone()),
-        ("Album", text_or_dash(Some(&track.album))),
+    let rows: Vec<(String, String)> = vec![
+        (aulos_core::fl!("props-artist"), track.artist.clone()),
         (
-            "Duration",
+            aulos_core::fl!("props-album"),
+            text_or_dash(Some(&track.album)),
+        ),
+        (
+            aulos_core::fl!("props-duration"),
             info.duration
                 .map_or(MISSING.to_string(), format_duration_exact),
         ),
-        ("Source", source_label(track)),
-        ("Container", text_or_dash(info.container.as_ref())),
-        ("Codec", format_codec(&info)),
-        ("Bitrate", format_bitrate_line(&info)),
+        (aulos_core::fl!("props-source"), source_label(track)),
         (
-            "Sample rate",
+            aulos_core::fl!("props-container"),
+            text_or_dash(info.container.as_ref()),
+        ),
+        (aulos_core::fl!("props-codec"), format_codec(&info)),
+        (aulos_core::fl!("props-bitrate"), format_bitrate_line(&info)),
+        (
+            aulos_core::fl!("props-sample-rate"),
             info.sample_rate
                 .map_or(MISSING.to_string(), format_sample_rate),
         ),
         (
-            "Bit depth",
+            aulos_core::fl!("props-bit-depth"),
             format_bit_depth(info.bits_per_sample, info.lossless),
         ),
         (
-            "Channels",
+            aulos_core::fl!("props-channels"),
             format_channels(info.channels, info.channel_layout.as_deref()),
         ),
-        ("Size", format_file_size(&info)),
-        ("Encoder", text_or_dash(info.encoder.as_ref())),
-        ("Tags", list_or_dash(&info.tag_formats)),
-        ("Date", text_or_dash(info.date.as_ref())),
+        (aulos_core::fl!("props-size"), format_file_size(&info)),
         (
-            "ReplayGain track",
+            aulos_core::fl!("props-encoder"),
+            text_or_dash(info.encoder.as_ref()),
+        ),
+        (
+            aulos_core::fl!("props-tag-formats"),
+            list_or_dash(&info.tag_formats),
+        ),
+        (
+            aulos_core::fl!("props-date"),
+            text_or_dash(info.date.as_ref()),
+        ),
+        (
+            aulos_core::fl!("props-replaygain-track"),
             text_or_dash(info.replay_gain.track_gain.as_ref()),
         ),
         (
-            "ReplayGain album",
+            aulos_core::fl!("props-replaygain-album"),
             text_or_dash(info.replay_gain.album_gain.as_ref()),
         ),
-        ("Location", text_or_dash(info.remote_path.as_ref())),
+        (
+            aulos_core::fl!("props-location"),
+            text_or_dash(info.remote_path.as_ref()),
+        ),
     ];
     for (key, value) in rows {
-        row(ui, app, key, &value);
+        row(ui, app, &key, &value);
     }
 }
 
@@ -245,10 +272,12 @@ fn album_rows(ui: &mut Ui, app: &App, album: &Album) {
         _ => None,
     };
     match state {
-        Loadable::Loading => status(ui, app, "Reading files…"),
-        Loadable::Failed(message) => {
-            status(ui, app, &format!("Could not read the files: {message}"))
-        }
+        Loadable::Loading => status(ui, app, &aulos_core::fl!("props-reading-files")),
+        Loadable::Failed(message) => status(
+            ui,
+            app,
+            &aulos_core::fl!("props-read-files-failed", error = message.as_str()),
+        ),
         Loadable::Idle | Loadable::Loaded(_) => {}
     }
 
@@ -257,12 +286,15 @@ fn album_rows(ui: &mut Ui, app: &App, album: &Album) {
         Some(s) => format_year_range(s.year_min, s.year_max),
         None => text_or_dash((album.year > 0).then(|| album.year.to_string())),
     };
-    let mut rows: Vec<(&str, String)> = vec![
-        ("Artist", album.artist.clone()),
-        ("Year", year),
-        ("Tracks", album.tracks.len().to_string()),
+    let mut rows: Vec<(String, String)> = vec![
+        (aulos_core::fl!("props-artist"), album.artist.clone()),
+        (aulos_core::fl!("props-year"), year),
         (
-            "Duration",
+            aulos_core::fl!("props-tracks"),
+            album.tracks.len().to_string(),
+        ),
+        (
+            aulos_core::fl!("props-duration"),
             format_duration_exact(summary.map_or(total, |s| s.total_duration)),
         ),
     ];
@@ -273,22 +305,28 @@ fn album_rows(ui: &mut Ui, app: &App, album: &Album) {
             .map(|r| format_sample_rate(*r))
             .collect();
         rows.push((
-            "Size",
+            aulos_core::fl!("props-size"),
             s.total_size.map_or(MISSING.to_string(), format_size),
         ));
-        rows.push(("Formats", list_or_dash(&s.formats)));
-        rows.push(("Sample rates", list_or_dash(&rates)));
-        rows.push(("Bit depths", list_or_dash(&s.bit_depths)));
+        rows.push((aulos_core::fl!("props-formats"), list_or_dash(&s.formats)));
+        rows.push((aulos_core::fl!("props-sample-rates"), list_or_dash(&rates)));
         rows.push((
-            "Bitrate",
+            aulos_core::fl!("props-bit-depths"),
+            list_or_dash(&s.bit_depths),
+        ));
+        rows.push((
+            aulos_core::fl!("props-bitrate"),
             format_bitrate_range(s.bitrate_min_kbps, s.bitrate_max_kbps),
         ));
         if s.unprobed > 0 {
-            rows.push(("Not read", format!("{} tracks", s.unprobed)));
+            rows.push((
+                aulos_core::fl!("props-not-read"),
+                aulos_core::fl!("props-not-read-count", count = s.unprobed),
+            ));
         }
     }
     for (key, value) in rows {
-        row(ui, app, key, &value);
+        row(ui, app, &key, &value);
     }
 }
 
@@ -349,7 +387,10 @@ fn apply(app: &mut App, intent: Intent) {
                     let effect = app.session.open_album_properties(album);
                     app.run(effect);
                 }
-                None => app.toast_error(format!("{} is not in the library", track.album)),
+                None => app.toast_error(aulos_core::fl!(
+                    "props-album-not-in-library",
+                    album = track.album.as_str()
+                )),
             }
         }
     }

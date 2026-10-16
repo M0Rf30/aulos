@@ -31,6 +31,44 @@ pub fn init_from_system() {
     init(&requested);
 }
 
+/// [`init`] with `language` (a BCP 47 tag), or the system languages when it
+/// is empty or unparsable. Also the way to switch language at runtime.
+pub fn init_for(language: &str) {
+    match language.parse::<LanguageIdentifier>() {
+        Ok(id) if !language.is_empty() => init(&[id]),
+        _ => init_from_system(),
+    }
+}
+
+/// Languages that ship translations, as BCP 47 tags, fallback first.
+#[must_use]
+pub fn available_languages() -> Vec<String> {
+    let mut tags: Vec<String> = LANGUAGE_LOADER
+        .available_languages(&Localizations)
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    tags.sort();
+    tags
+}
+
+/// A language's name in that language, for a language picker; the tag itself
+/// when unknown.
+#[must_use]
+pub fn native_name(tag: &str) -> String {
+    match tag {
+        "en" => "English",
+        "it" => "Italiano",
+        "de" => "Deutsch",
+        "fr" => "Français",
+        "es" => "Español",
+        "pt-BR" => "Português (Brasil)",
+        other => other,
+    }
+    .to_owned()
+}
+
 // Get the `Localizer` to be used for localizing this library.
 #[must_use]
 pub fn localizer() -> Box<dyn Localizer> {
@@ -65,4 +103,75 @@ macro_rules! fl {
     ($message_id:literal, $($args:expr),*) => {{
         i18n_embed_fl::fl!($crate::i18n::LANGUAGE_LOADER, $message_id, $($args), *)
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluent_syntax::{ast, parser};
+    use std::collections::BTreeMap;
+
+    /// Message id -> its `$variables`, panicking on any syntax error (the
+    /// loader would skip a bad entry silently and show English instead).
+    fn messages(tag: &str) -> BTreeMap<String, Vec<String>> {
+        fn vars(pattern: &ast::Pattern<&str>, out: &mut Vec<String>) {
+            for el in &pattern.elements {
+                if let ast::PatternElement::Placeable { expression } = el {
+                    expr(expression, out);
+                }
+            }
+        }
+        fn expr(e: &ast::Expression<&str>, out: &mut Vec<String>) {
+            match e {
+                ast::Expression::Inline(ast::InlineExpression::VariableReference { id }) => {
+                    out.push(id.name.to_owned());
+                }
+                ast::Expression::Inline(ast::InlineExpression::Placeable { expression }) => {
+                    expr(expression, out);
+                }
+                ast::Expression::Select { selector, variants } => {
+                    expr(&ast::Expression::Inline(selector.clone()), out);
+                    for v in variants {
+                        vars(&v.value, out);
+                    }
+                }
+                ast::Expression::Inline(_) => {}
+            }
+        }
+        let file = Localizations::get(&format!("{tag}/aulos.ftl")).unwrap();
+        let text = std::str::from_utf8(&file.data).unwrap();
+        let resource = parser::parse(text).unwrap_or_else(|(_, e)| panic!("{tag}: {e:?}"));
+        resource
+            .body
+            .iter()
+            .filter_map(|entry| match entry {
+                ast::Entry::Message(m) => {
+                    let mut v = Vec::new();
+                    if let Some(p) = &m.value {
+                        vars(p, &mut v);
+                    }
+                    v.sort();
+                    v.dedup();
+                    Some((m.id.name.to_owned(), v))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A translation that drops a message or a placeholder shows English (or
+    /// a missing value) to the user; a malformed one fails to parse.
+    #[test]
+    fn every_translation_has_the_english_messages_and_placeholders() {
+        let en = messages("en");
+        let langs = available_languages();
+        assert!(langs.len() > 1, "only {langs:?}");
+        for tag in langs.iter().filter(|t| *t != "en") {
+            let tr = messages(tag);
+            for (id, vars) in &en {
+                assert_eq!(tr.get(id), Some(vars), "{tag}: `{id}`");
+            }
+            assert_eq!(tr.len(), en.len(), "{tag} has extra messages");
+        }
+    }
 }

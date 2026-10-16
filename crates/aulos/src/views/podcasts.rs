@@ -182,19 +182,28 @@ fn header(
                 && IconBtn::new(regular::CARET_LEFT)
                     .size(30.0)
                     .icon_size(17.0)
-                    .tip("All shows")
+                    .tip(&aulos_core::fl!("podcasts-all-shows"))
                     .show(ui)
                     .clicked()
             {
                 intents.push(Intent::Back);
             }
             ui.label(
-                RichText::new("Podcasts")
+                RichText::new(aulos_core::fl!("podcasts"))
                     .font(theme::semibold(26.0))
                     .color(cx.pal.text),
             );
             let mut tab = st.tab;
-            if segmented(ui, &mut tab, &["Subscriptions", "Discover"], 28.0) {
+            let tab_labels = [
+                aulos_core::fl!("subscriptions"),
+                aulos_core::fl!("podcast-tab-discover"),
+            ];
+            if segmented(
+                ui,
+                &mut tab,
+                &[tab_labels[0].as_str(), tab_labels[1].as_str()],
+                28.0,
+            ) {
                 st.tab = tab;
                 if detail && tab == TAB_DISCOVER {
                     intents.push(Intent::Back);
@@ -203,7 +212,7 @@ fn header(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if pill_button(
                     ui,
-                    "Add feed URL",
+                    &aulos_core::fl!("podcast-add-by-url"),
                     Some(regular::RSS),
                     PillKind::Secondary,
                     30.0,
@@ -218,7 +227,7 @@ fn header(
                     && IconBtn::new(regular::ARROW_CLOCKWISE)
                         .size(30.0)
                         .icon_size(16.0)
-                        .tip("Refresh all feeds")
+                        .tip(&aulos_core::fl!("podcasts-refresh-all-feeds"))
                         .show(ui)
                         .clicked()
                 {
@@ -238,7 +247,17 @@ fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
                 st.add_error = None;
             }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if pill_button(ui, "Subscribe", None, PillKind::Primary, 32.0, 0.0).clicked() || enter {
+            if pill_button(
+                ui,
+                &aulos_core::fl!("subscribe"),
+                None,
+                PillKind::Primary,
+                32.0,
+                0.0,
+            )
+            .clicked()
+                || enter
+            {
                 intents.push(Intent::Subscribe(st.add_url.trim().to_owned()));
             }
             if let Some(err) = &st.add_error {
@@ -261,19 +280,37 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
     }
     let pal = &cx.pal;
     let n = failures.len();
-    let title = format!("Couldn’t refresh {n} feed{}", if n == 1 { "" } else { "s" });
+    let title = aulos_core::fl!("podcasts-refresh-failed-title", count = n);
     let names: Vec<&str> = failures.iter().map(|f| f.podcast.title.as_str()).collect();
     let names = match names.as_slice() {
         [one] => (*one).to_owned(),
-        [a, b] => format!("{a} and {b}"),
-        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+        [a, b] => aulos_core::fl!(
+            "podcasts-names-two",
+            a = (*a).to_owned(),
+            b = (*b).to_owned()
+        ),
+        [a, b, rest @ ..] => {
+            aulos_core::fl!(
+                "podcasts-names-many",
+                a = (*a).to_owned(),
+                b = (*b).to_owned(),
+                more = (rest.len())
+            )
+        }
         [] => String::new(),
     };
     let first = failures[0].reason;
     let mut detail = if failures.iter().all(|f| f.reason == first) {
-        format!("{names}: {first}.")
+        aulos_core::fl!(
+            "podcasts-refresh-failed-detail",
+            names = names.as_str(),
+            reason = first
+        )
     } else {
-        format!("{names} could not be reached.")
+        aulos_core::fl!(
+            "podcasts-refresh-failed-unreachable",
+            names = names.as_str()
+        )
     };
     let oldest = failures
         .iter()
@@ -284,9 +321,10 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        detail.push_str(&format!(
-            " Showing episodes cached {} ago.",
-            age_label((now - oldest).max(0))
+        detail.push(' ');
+        detail.push_str(&aulos_core::fl!(
+            "podcasts-cached-ago",
+            age = age_label((now - oldest).max(0))
         ));
     }
     let retrying = failures
@@ -326,16 +364,20 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
                         if IconBtn::new(regular::X)
                             .size(30.0)
                             .icon_size(14.0)
-                            .tip("Dismiss")
+                            .tip(&aulos_core::fl!("podcasts-dismiss"))
                             .show(ui)
                             .clicked()
                         {
                             intents.push(Intent::DismissRefreshErrors);
                         }
-                        let label = if retrying { "Retrying…" } else { "Retry" };
+                        let label = if retrying {
+                            aulos_core::fl!("podcasts-retrying")
+                        } else {
+                            aulos_core::fl!("podcast-retry")
+                        };
                         if pill_button(
                             ui,
-                            label,
+                            &label,
                             Some(regular::ARROW_CLOCKWISE),
                             PillKind::Secondary,
                             30.0,
@@ -354,12 +396,11 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
 
 /// "45 minutes", "3 hours", "2 days": how long ago something was.
 fn age_label(secs: i64) -> String {
-    let (n, unit) = match secs {
-        s if s < 3_600 => ((s / 60).max(1), "minute"),
-        s if s < 86_400 => (s / 3_600, "hour"),
-        s => (s / 86_400, "day"),
-    };
-    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+    match secs {
+        s if s < 3_600 => aulos_core::fl!("podcasts-age-minutes", count = (s / 60).max(1)),
+        s if s < 86_400 => aulos_core::fl!("podcasts-age-hours", count = (s / 3_600)),
+        s => aulos_core::fl!("podcasts-age-days", count = (s / 86_400)),
+    }
 }
 
 // -- subscriptions -------------------------------------------------------------
@@ -380,10 +421,10 @@ fn subscriptions(
             let (discover, add) = empty_state_actions(
                 ui,
                 regular::MICROPHONE_STAGE,
-                "No subscriptions yet",
-                "Find shows in Discover, or paste an RSS feed URL. New episodes show up here and in Home.",
-                "Open Discover",
-                Some("Add feed URL"),
+                &aulos_core::fl!("podcasts-none-title"),
+                &aulos_core::fl!("podcasts-none-body"),
+                &aulos_core::fl!("podcasts-open-discover"),
+                Some(aulos_core::fl!("podcast-add-by-url").as_str()),
                 false,
             );
             if discover {
@@ -455,13 +496,16 @@ fn show_row(
         if !meta.is_empty() {
             meta.push_str(" · ");
         }
-        meta.push_str(cadence_label(cadence));
+        meta.push_str(&cadence_label(cadence));
     }
     if show.unplayed_count > 0 {
         if !meta.is_empty() {
             meta.push_str(" · ");
         }
-        meta.push_str(&format!("{} unplayed", show.unplayed_count));
+        meta.push_str(&aulos_core::fl!(
+            "podcast-unplayed-badge",
+            count = show.unplayed_count
+        ));
     }
     let meta_r = Rect::from_min_max(
         pos2(text_l, rect.center().y + 2.0),
@@ -499,15 +543,18 @@ fn show_row(
         intents.push(Intent::Select(show.id));
     }
     resp.context_menu(|ui| {
-        if ui.button("Open").clicked() {
+        if ui.button(aulos_core::fl!("podcasts-menu-open")).clicked() {
             intents.push(Intent::Select(show.id));
             ui.close();
         }
-        if ui.button("Refresh").clicked() {
+        if ui.button(aulos_core::fl!("podcast-refresh")).clicked() {
             intents.push(Intent::Refresh(show.id));
             ui.close();
         }
-        if ui.button("Unsubscribe…").clicked() {
+        if ui
+            .button(aulos_core::fl!("podcasts-menu-unsubscribe"))
+            .clicked()
+        {
             intents.push(Intent::AskUnsubscribe(show.id));
             ui.close();
         }
@@ -541,9 +588,12 @@ fn show_detail(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let labels = [
-                "All".to_owned(),
-                format!("Unplayed · {}", st.cache_unplayed),
-                format!("Downloaded · {}", st.cache_downloaded),
+                aulos_core::fl!("podcast-filter-all"),
+                aulos_core::fl!("podcasts-filter-unplayed-count", count = st.cache_unplayed),
+                aulos_core::fl!(
+                    "podcasts-filter-downloaded-count",
+                    count = st.cache_downloaded
+                ),
             ];
             for (i, label) in labels.iter().enumerate() {
                 if chip(ui, label, st.filter == i, None).clicked() {
@@ -551,7 +601,12 @@ fn show_detail(
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                text_field(ui, &mut st.text, "Filter episodes", 220.0);
+                text_field(
+                    ui,
+                    &mut st.text,
+                    &aulos_core::fl!("podcasts-filter-episodes"),
+                    220.0,
+                );
             });
         });
     });
@@ -564,9 +619,9 @@ fn show_detail(
         } else if empty_state(
             ui,
             regular::MICROPHONE_STAGE,
-            "No episodes",
-            "This feed has no episodes yet.",
-            Some("Refresh"),
+            &aulos_core::fl!("podcasts-no-episodes-title"),
+            &aulos_core::fl!("podcasts-no-episodes-body"),
+            Some(aulos_core::fl!("podcast-refresh").as_str()),
         ) {
             intents.push(Intent::Refresh(show.id));
         }
@@ -577,7 +632,7 @@ fn show_detail(
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new("No episodes match the filter")
+                    RichText::new(aulos_core::fl!("podcasts-no-episodes-match"))
                         .font(theme::regular(13.5))
                         .color(cx.pal.text_2),
                 );
@@ -663,21 +718,25 @@ fn hero(
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let w = ui.available_width().min(620.0);
                 ui.set_max_width(w);
-                crate::widgets::caps_label(ui, "SHOW");
+                crate::widgets::caps_label(ui, &aulos_core::fl!("podcasts-show-caps"));
                 crate::widgets::label_text(ui, &show.title, theme::semibold(24.0), cx.pal.text);
                 let mut meta = show.author.clone();
                 if let Some(cadence) = show.cadence {
                     if !meta.is_empty() {
                         meta.push_str(" · ");
                     }
-                    meta.push_str(cadence_label(cadence));
+                    meta.push_str(&cadence_label(cadence));
                 }
                 if !meta.is_empty() {
                     meta.push_str(" · ");
                 }
-                meta.push_str(&format!("{} episodes", pod.episodes.len()));
+                meta.push_str(&aulos_core::fl!(
+                    "podcast-episode-count",
+                    count = pod.episodes.len()
+                ));
                 if pod.refreshing.contains(&show.id) {
-                    meta.push_str(" · Refreshing…");
+                    meta.push_str(" · ");
+                    meta.push_str(&aulos_core::fl!("podcast-refreshing"));
                 }
                 crate::widgets::label_text(ui, &meta, theme::regular(13.0), cx.pal.text_2);
                 if !st.desc.1.is_empty() {
@@ -687,9 +746,20 @@ fn hero(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if let Some((ep, resume)) = primary_episode(&pod.episodes) {
-                        let label = if resume { "Continue" } else { "Latest" };
-                        if pill_button(ui, label, Some(regular::PLAY), PillKind::Primary, 30.0, 0.0)
-                            .clicked()
+                        let label = if resume {
+                            aulos_core::fl!("podcasts-continue")
+                        } else {
+                            aulos_core::fl!("podcasts-latest")
+                        };
+                        if pill_button(
+                            ui,
+                            &label,
+                            Some(regular::PLAY),
+                            PillKind::Primary,
+                            30.0,
+                            0.0,
+                        )
+                        .clicked()
                         {
                             intents.push(Intent::Play(ep.id));
                         }
@@ -697,23 +767,32 @@ fn hero(
                     if st.pending_unsub == Some(show.id) {
                         if pill_button(
                             ui,
-                            "Unsubscribe",
+                            &aulos_core::fl!("podcast-unsubscribe"),
                             Some(regular::TRASH),
                             PillKind::Danger,
                             30.0,
                             0.0,
                         )
-                        .on_hover_text("Also deletes downloaded episodes and playback positions")
+                        .on_hover_text(aulos_core::fl!("podcasts-unsubscribe-hover"))
                         .clicked()
                         {
                             intents.push(Intent::Unsubscribe(show.id));
                         }
-                        if pill_button(ui, "Cancel", None, PillKind::Ghost, 30.0, 0.0).clicked() {
+                        if pill_button(
+                            ui,
+                            &aulos_core::fl!("podcast-cancel"),
+                            None,
+                            PillKind::Ghost,
+                            30.0,
+                            0.0,
+                        )
+                        .clicked()
+                        {
                             st.pending_unsub = None;
                         }
                     } else if pill_button(
                         ui,
-                        "Subscribed",
+                        &aulos_core::fl!("podcast-subscribed-badge"),
                         Some(regular::CHECK),
                         PillKind::Secondary,
                         30.0,
@@ -726,7 +805,7 @@ fn hero(
                     if IconBtn::new(regular::ARROW_CLOCKWISE)
                         .size(30.0)
                         .icon_size(16.0)
-                        .tip("Refresh this feed")
+                        .tip(&aulos_core::fl!("podcasts-refresh-this-feed"))
                         .show(ui)
                         .clicked()
                     {
@@ -843,7 +922,7 @@ fn episode_row(
         let w = paint_badge(
             p,
             pos2(title_x, title_y),
-            "NEW",
+            &aulos_core::fl!("podcasts-new-badge"),
             cx.accent.on_fill,
             pal.reed,
         );
@@ -891,30 +970,33 @@ fn episode_row(
     if wide {
         let (status, color) = if let Some(dl) = download {
             let text = match dl.fraction() {
-                _ if dl.is_cancelling() => "Cancelling…".to_owned(),
-                Some(f) => format!("Downloading · {}%", (f * 100.0).floor() as u32),
-                None => "Downloading…".to_owned(),
+                _ if dl.is_cancelling() => aulos_core::fl!("podcasts-ep-cancelling"),
+                Some(f) => aulos_core::fl!(
+                    "podcasts-ep-downloading-pct",
+                    pct = ((f * 100.0).floor() as u32)
+                ),
+                None => aulos_core::fl!("podcasts-ep-downloading"),
             };
             (text, pal.reed)
         } else if e.played {
-            ("Played".to_owned(), pal.text_3)
+            (aulos_core::fl!("podcasts-ep-played"), pal.text_3)
         } else if started {
             let left = (e.duration_secs - e.position_ms / 1000).max(0);
             (
                 if e.duration_secs > 0 {
-                    format!("{} left", fmt_dur(left))
+                    aulos_core::fl!("podcast-time-left", time = fmt_dur(left))
                 } else {
-                    "In progress".to_owned()
+                    aulos_core::fl!("podcasts-ep-in-progress")
                 },
                 cx.accent.text,
             )
         } else if e.duration_secs > 0 {
             (
-                format!("Unplayed · {}", fmt_dur(e.duration_secs)),
+                aulos_core::fl!("podcasts-ep-unplayed-dur", time = fmt_dur(e.duration_secs)),
                 pal.text_2,
             )
         } else {
-            ("Unplayed".to_owned(), pal.text_2)
+            (aulos_core::fl!("podcasts-ep-unplayed"), pal.text_2)
         };
         let status_rect = Rect::from_min_max(
             pos2(status_l, rect.center().y - 15.0),
@@ -955,14 +1037,14 @@ fn episode_row(
                 pal.reed
             },
             false,
-            "Cancel download",
+            aulos_core::fl!("podcasts-cancel-download"),
         )
     } else if downloaded {
         (
             fill::CHECK_CIRCLE,
             pal.text_2,
             true,
-            "Downloaded — click to remove",
+            aulos_core::fl!("podcasts-downloaded-remove"),
         )
     } else {
         (
@@ -973,7 +1055,7 @@ fn episode_row(
                 pal.text_3
             },
             false,
-            "Download for offline",
+            aulos_core::fl!("podcasts-download-offline"),
         )
     };
     ui.painter().circle_filled(
@@ -1006,9 +1088,9 @@ fn episode_row(
     resp.context_menu(|ui| {
         if ui
             .button(if current.is_some() {
-                "Play / pause"
+                aulos_core::fl!("podcasts-play-pause")
             } else {
-                "Play"
+                aulos_core::fl!("play")
             })
             .clicked()
         {
@@ -1017,9 +1099,9 @@ fn episode_row(
         }
         if ui
             .button(if e.played {
-                "Mark as unplayed"
+                aulos_core::fl!("podcasts-mark-unplayed")
             } else {
-                "Mark as played"
+                aulos_core::fl!("podcasts-mark-played")
             })
             .clicked()
         {
@@ -1027,16 +1109,22 @@ fn episode_row(
             ui.close();
         }
         if downloading {
-            if ui.button("Cancel download").clicked() {
+            if ui
+                .button(aulos_core::fl!("podcasts-cancel-download"))
+                .clicked()
+            {
                 intents.push(Intent::CancelDownload(e.id));
                 ui.close();
             }
         } else if downloaded {
-            if ui.button("Remove download").clicked() {
+            if ui
+                .button(aulos_core::fl!("podcasts-remove-download"))
+                .clicked()
+            {
                 intents.push(Intent::DeleteDownload(e.id));
                 ui.close();
             }
-        } else if ui.button("Download").clicked() {
+        } else if ui.button(aulos_core::fl!("podcasts-download")).clicked() {
             intents.push(Intent::Download(e.id));
             ui.close();
         }
@@ -1075,7 +1163,7 @@ fn discover(
         let resp = search_field(
             ui,
             &mut st.search,
-            "Search podcasts or paste a feed URL",
+            &aulos_core::fl!("podcasts-search-hint"),
             width,
             id,
         );
@@ -1093,9 +1181,9 @@ fn discover(
         if empty_state_tinted(
             ui,
             regular::WARNING_CIRCLE,
-            "Couldn’t search podcasts",
+            &aulos_core::fl!("podcasts-search-failed"),
             err,
-            Some("Retry"),
+            Some(aulos_core::fl!("podcast-retry").as_str()),
             Some(cx.pal.danger),
         ) {
             intents.push(Intent::SubmitSearch);
@@ -1107,16 +1195,16 @@ fn discover(
             empty_state(
                 ui,
                 regular::MAGNIFYING_GLASS,
-                "No shows found",
-                "Try a different name, or paste the feed URL directly.",
+                &aulos_core::fl!("podcast-no-results"),
+                &aulos_core::fl!("podcasts-no-shows-body"),
                 None,
             );
         } else {
             empty_state(
                 ui,
                 regular::MICROPHONE_STAGE,
-                "Discover podcasts",
-                "Search the directory by show name, or paste an RSS feed URL and press Enter.",
+                &aulos_core::fl!("podcasts-discover-title"),
+                &aulos_core::fl!("podcasts-discover-body"),
                 None,
             );
         }
@@ -1183,7 +1271,7 @@ fn discover(
                 if pod.podcasts.iter().any(|s| s.feed_url == r.feed_url) {
                     pill_button(
                         &mut c,
-                        "Subscribed",
+                        &aulos_core::fl!("podcast-subscribed-badge"),
                         Some(regular::CHECK),
                         PillKind::Secondary,
                         30.0,
@@ -1191,7 +1279,7 @@ fn discover(
                     );
                 } else if pill_button(
                     &mut c,
-                    "Subscribe",
+                    &aulos_core::fl!("subscribe"),
                     Some(regular::PLUS),
                     PillKind::Primary,
                     30.0,
@@ -1233,24 +1321,28 @@ fn skeleton_rows(ui: &mut Ui, cx: &Ctx, n: usize, art: f32, row_h: f32) {
     });
 }
 
-fn cadence_label(cadence: Cadence) -> &'static str {
+fn cadence_label(cadence: Cadence) -> String {
     match cadence {
-        Cadence::Daily => "Daily",
-        Cadence::TwiceWeekly => "Twice weekly",
-        Cadence::Weekly => "Weekly",
-        Cadence::Biweekly => "Biweekly",
-        Cadence::Monthly => "Monthly",
+        Cadence::Daily => aulos_core::fl!("podcasts-cadence-daily"),
+        Cadence::TwiceWeekly => aulos_core::fl!("podcasts-cadence-twice-weekly"),
+        Cadence::Weekly => aulos_core::fl!("podcasts-cadence-weekly"),
+        Cadence::Biweekly => aulos_core::fl!("podcasts-cadence-biweekly"),
+        Cadence::Monthly => aulos_core::fl!("podcasts-cadence-monthly"),
     }
 }
 
 fn fmt_dur(secs: i64) -> String {
     let mins = secs / 60;
     if mins >= 60 {
-        format!("{} h {:02} min", mins / 60, mins % 60)
+        aulos_core::fl!(
+            "podcasts-dur-hm",
+            h = (mins / 60),
+            m = format!("{:02}", mins % 60)
+        )
     } else if mins > 0 {
-        format!("{mins} min")
+        aulos_core::fl!("podcasts-dur-m", m = mins)
     } else {
-        format!("{secs} s")
+        aulos_core::fl!("podcasts-dur-s", s = secs)
     }
 }
 
@@ -1358,18 +1450,17 @@ fn apply(app: &mut App, intent: Intent) {
         Intent::Subscribe(url) => match app.session.podcasts.subscribe(url) {
             Ok(effect) => {
                 app.run(effect);
-                app.toast("Subscribing…");
+                app.toast(aulos_core::fl!("podcasts-subscribing-toast"));
                 let st = &mut app.views.podcasts;
                 st.add_open = false;
                 st.add_url.clear();
                 st.add_error = None;
             }
             Err(UrlError::Empty) => {
-                app.views.podcasts.add_error = Some("Enter a feed URL".to_owned())
+                app.views.podcasts.add_error = Some(aulos_core::fl!("podcast-add-url-required"))
             }
             Err(UrlError::NotHttp) => {
-                app.views.podcasts.add_error =
-                    Some("The URL must start with http:// or https://".to_owned())
+                app.views.podcasts.add_error = Some(aulos_core::fl!("podcast-add-url-invalid"))
             }
         },
     }

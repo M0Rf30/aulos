@@ -93,7 +93,7 @@ fn colors(genre: &str) -> (Color32, Color32) {
 }
 
 fn songs_label(count: u32) -> String {
-    format!("{count} song{}", if count == 1 { "" } else { "s" })
+    aulos_core::fl!("genres-song-count", count = count)
 }
 
 // -- browse -----------------------------------------------------------------------
@@ -165,7 +165,12 @@ fn browse(app: &mut App, ui: &mut Ui) {
                     .inner_margin(Margin::symmetric(pad as i8, 0))
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
-                        page_title(ui, &pal, "Genres", &genres.len().to_string());
+                        page_title(
+                            ui,
+                            &pal,
+                            &aulos_core::fl!("genres"),
+                            &genres.len().to_string(),
+                        );
                         ui.add_space(18.0);
                         if loading {
                             ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -174,7 +179,7 @@ fn browse(app: &mut App, ui: &mut Ui) {
                                     ui,
                                     &pal,
                                     &lib.scan_progress.snapshot(),
-                                    "Scanning your library…",
+                                    &aulos_core::fl!("genres-scanning"),
                                 );
                                 ui.add_space(14.0);
                             }
@@ -204,16 +209,16 @@ fn empty(ui: &mut Ui, a: &App) {
         empty_state(
             ui,
             regular::SHAPES,
-            "No genres yet",
-            "Genres come from the tags of your music. Songs without a genre tag are not listed here.",
+            &aulos_core::fl!("genres-empty-title"),
+            &aulos_core::fl!("genres-empty-body"),
             None,
         );
     } else {
         empty_state(
             ui,
             regular::SHAPES,
-            "No matching genres",
-            &format!("No genre matches “{query}”."),
+            &aulos_core::fl!("genres-no-matches-title"),
+            &aulos_core::fl!("genres-no-matches-body", query = query.as_str()),
             None,
         );
     }
@@ -491,9 +496,9 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
         } else if empty_state(
             ui,
             regular::SHAPES,
-            "Genre not found",
-            &format!("There are no songs tagged “{name}” in this library."),
-            Some("All genres"),
+            &aulos_core::fl!("genres-not-found-title"),
+            &aulos_core::fl!("genres-not-found-body", name = name),
+            Some(&aulos_core::fl!("genres-all")),
         ) {
             app.navigate(Route::Genres);
         }
@@ -525,28 +530,30 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
                 vertical_gradient(ui.painter(), hero_rect, tint, pal.bg);
                 super::artists::announce_hero_tint(ui, origin, tint);
                 ui.add_space(8.0);
-                Frame::NONE.inner_margin(Margin::symmetric(pad as i8, 0)).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    hero(ui, a, genre_name, tracks.len(), &mut out);
-                    ui.add_space(22.0);
-                    top_artists(ui, a, &mut out);
-                    ui.add_space(22.0);
-                    if loading {
-                        ui.ctx().request_repaint_after(Duration::from_millis(100));
-                        skeleton_rows(ui);
-                    } else if tracks.is_empty() {
-                        empty_state(
-                            ui,
-                            regular::MUSIC_NOTES,
-                            "No songs in this genre",
-                            "Nothing tagged with this genre could be loaded from the active source.",
-                            None,
-                        );
-                    } else {
-                        track_list(ui, a, tracks, &mut out);
-                    }
-                    ui.add_space(24.0);
-                });
+                Frame::NONE
+                    .inner_margin(Margin::symmetric(pad as i8, 0))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        hero(ui, a, genre_name, tracks.len(), &mut out);
+                        ui.add_space(22.0);
+                        top_artists(ui, a, &mut out);
+                        ui.add_space(22.0);
+                        if loading {
+                            ui.ctx().request_repaint_after(Duration::from_millis(100));
+                            skeleton_rows(ui);
+                        } else if tracks.is_empty() {
+                            empty_state(
+                                ui,
+                                regular::MUSIC_NOTES,
+                                &aulos_core::fl!("genres-detail-empty-title"),
+                                &aulos_core::fl!("genres-detail-empty-body"),
+                                None,
+                            );
+                        } else {
+                            track_list(ui, a, tracks, &mut out);
+                        }
+                        ui.add_space(24.0);
+                    });
             });
     }
     if out.select.is_some() {
@@ -572,7 +579,7 @@ fn hero(ui: &mut Ui, a: &App, genre_name: &str, track_count: usize, out: &mut De
     let white = Color32::WHITE;
     ui.add_space(20.0);
     ui.label(
-        egui::RichText::new("GENRE")
+        egui::RichText::new(aulos_core::fl!("genre-label").to_uppercase())
             .font(theme::semibold(11.0))
             .color(white.alpha(0.82))
             .extra_letter_spacing(1.1),
@@ -581,15 +588,11 @@ fn hero(ui: &mut Ui, a: &App, genre_name: &str, track_count: usize, out: &mut De
     label_text(ui, genre_name, theme::bold(48.0), white);
     ui.add_space(8.0);
     if let Some(stats) = a.views.genres.stats.as_ref().filter(|_| track_count > 0) {
-        let albums = format!(
-            "{} album{}",
-            stats.albums,
-            if stats.albums == 1 { "" } else { "s" }
-        );
-        let summary = format!(
-            "{} · {albums} · {}",
-            songs_label(track_count as u32),
-            format_duration_coarse(stats.secs)
+        let summary = aulos_core::fl!(
+            "genres-summary",
+            songs = songs_label(track_count as u32),
+            albums = aulos_core::fl!("genres-album-count", count = stats.albums),
+            duration = format_duration_coarse(stats.secs)
         );
         label_text(ui, &summary, theme::regular(13.0), white.alpha(0.86));
     } else {
@@ -606,7 +609,7 @@ fn hero(ui: &mut Ui, a: &App, genre_name: &str, track_count: usize, out: &mut De
         let has = track_count > 0;
         if pill_button_enabled(
             ui,
-            "Shuffle",
+            &aulos_core::fl!("shuffle"),
             Some(regular::SHUFFLE),
             PillKind::Primary,
             34.0,
@@ -619,7 +622,7 @@ fn hero(ui: &mut Ui, a: &App, genre_name: &str, track_count: usize, out: &mut De
         }
         if pill_button_enabled(
             ui,
-            "Play in order",
+            &aulos_core::fl!("genres-play-in-order"),
             Some(regular::PLAY),
             PillKind::Secondary,
             34.0,
@@ -646,13 +649,14 @@ fn top_artists(ui: &mut Ui, a: &App, out: &mut DetailOut) {
     };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        let label_w = text_width(ui, "Top artists", theme::regular(13.0)) + 4.0;
+        let top_label = aulos_core::fl!("genres-top-artists");
+        let label_w = text_width(ui, &top_label, theme::regular(13.0)) + 4.0;
         let (rect, _) = ui.allocate_exact_size(vec2(label_w, 30.0), Sense::hover());
         paint_text(
             ui.painter(),
             rect,
             Align::Min,
-            "Top artists",
+            &top_label,
             theme::regular(13.0),
             pal.text_2,
         );

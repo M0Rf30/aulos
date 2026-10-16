@@ -70,6 +70,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             ui.spacing_mut().item_spacing.x = 12.0;
                             if let Some(action) = &toast.action {
                                 let label = action.label();
+                                let label = label.as_str();
                                 let w = text_width(ui, label, theme::semibold(13.0)) + 24.0;
                                 let (rect, r) =
                                     ui.allocate_exact_size(vec2(w, 30.0), Sense::click());

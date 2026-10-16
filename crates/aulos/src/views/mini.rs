@@ -40,7 +40,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.painter(),
             mid,
             Align::Center,
-            "Nothing playing",
+            &aulos_core::fl!("mini-nothing-playing"),
             theme::semibold(14.0),
             SUB,
         );
@@ -92,7 +92,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .size(28.0)
         .icon_size(14.0)
         .color(if pinned { t.accent.fill } else { SUB })
-        .tip(if pinned { "Unpin" } else { "Keep on top" })
+        .tip(if pinned {
+            aulos_core::fl!("mini-unpin")
+        } else {
+            aulos_core::fl!("mini-keep-on-top")
+        })
         .show(ui)
     });
     if pin_resp.inner.clicked() {
@@ -204,7 +208,7 @@ fn expand_button(app: &mut App, ui: &mut Ui, rect: Rect) {
             .size(28.0)
             .icon_size(15.0)
             .color(SUB)
-            .tip("Expand")
+            .tip(aulos_core::fl!("mini-expand"))
             .show(ui)
     });
     if resp.inner.clicked() {

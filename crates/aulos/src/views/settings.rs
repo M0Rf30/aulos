@@ -69,21 +69,30 @@ const SECTIONS: [Sec; 12] = [
     Sec::About,
 ];
 
+/// Splits a localized `a | b | c` list of search terms.
+fn terms(list: &str) -> Vec<String> {
+    list.split('|')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 impl Sec {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Sec::Library => "Library",
-            Sec::Sources => "Sources",
-            Sec::Playback => "Playback",
-            Sec::Equalizer => "Equalizer",
-            Sec::Scrobbling => "Scrobbling",
-            Sec::Online => "Online data",
-            Sec::Tagger => "Tag editor keys",
-            Sec::Appearance => "Appearance",
-            Sec::Startup => "Startup page",
-            Sec::Desktop => "Background playback",
-            Sec::Experimental => "Experimental",
-            Sec::About => "About",
+            Sec::Library => aulos_core::fl!("settings-library"),
+            Sec::Sources => aulos_core::fl!("settings-sec-sources"),
+            Sec::Playback => aulos_core::fl!("settings-playback"),
+            Sec::Equalizer => aulos_core::fl!("equalizer"),
+            Sec::Scrobbling => aulos_core::fl!("scrobbling"),
+            Sec::Online => aulos_core::fl!("settings-sec-online"),
+            Sec::Tagger => aulos_core::fl!("settings-sec-tagger"),
+            Sec::Appearance => aulos_core::fl!("settings-appearance"),
+            Sec::Startup => aulos_core::fl!("settings-sec-startup"),
+            Sec::Desktop => aulos_core::fl!("settings-sec-desktop"),
+            Sec::Experimental => aulos_core::fl!("settings-experimental"),
+            Sec::About => aulos_core::fl!("settings-about"),
         }
     }
 
@@ -106,103 +115,57 @@ impl Sec {
 
     /// Everything the search box matches this section against.
     fn keywords(self) -> Vec<String> {
-        let lit = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
         match self {
             Sec::Library => [
                 keywords::library(),
                 keywords::artist_tags(),
                 keywords::compilations(),
                 keywords::playlists(),
-                lit(&["Watch for changes", "auto rescan", "file watcher"]),
+                terms(&aulos_core::fl!("settings-kw-library")),
             ]
             .concat(),
-            Sec::Sources => lit(&[
-                "Sources",
-                "MPD",
-                "Subsonic",
-                "OpenSubsonic",
-                "Navidrome",
-                "server",
-                "provider",
-                "connection",
-            ]),
+            Sec::Sources => terms(&aulos_core::fl!("settings-kw-sources")),
             // `playback_extras()` lists the fade/auto-play/party strings first and the
             // desktop strings (notifications, suspend, background) from index 9 on.
             Sec::Playback => [
                 keywords::playback(),
                 keywords::playback_extras().into_iter().take(9).collect(),
-                lit(&[
-                    "Gapless",
-                    "Stop after current track",
-                    "stop after every track",
-                ]),
+                terms(&aulos_core::fl!("settings-kw-playback")),
             ]
             .concat(),
-            Sec::Equalizer => lit(&[
-                "Equalizer",
-                "preamp",
-                "preset",
-                "AutoEQ",
-                "bands",
-                "headphone",
-            ]),
-            Sec::Scrobbling => lit(&[
-                "Scrobbling",
-                "Last.fm",
-                "ListenBrainz",
-                "Libre.fm",
-                "scrobble",
-                "listening history",
-                "import",
-                "love",
-            ]),
+            Sec::Equalizer => terms(&aulos_core::fl!("settings-kw-equalizer")),
+            Sec::Scrobbling => terms(&aulos_core::fl!("settings-kw-scrobbling")),
             Sec::Online => [
                 keywords::artist_info(),
-                lit(&[
-                    "Artist biographies",
-                    "Artist photos",
-                    "Radio station icons",
-                    "Online data",
-                    "network",
-                    "suggestions",
-                    "Because you listened to",
-                ]),
+                terms(&aulos_core::fl!("settings-kw-online")),
             ]
             .concat(),
-            Sec::Tagger => [keywords::tagger(), lit(&["AcoustID", "Cover Art Archive"])].concat(),
+            Sec::Tagger => [
+                keywords::tagger(),
+                terms(&aulos_core::fl!("settings-kw-tagger")),
+            ]
+            .concat(),
             Sec::Appearance => [
                 keywords::appearance(),
-                lit(&[
-                    "Theme",
-                    "Dark",
-                    "Light",
-                    "System",
-                    "Tint",
-                    "cover colour",
-                    "Reduce motion",
-                    "animations",
-                ]),
+                terms(&aulos_core::fl!("settings-kw-appearance")),
             ]
             .concat(),
             Sec::Startup => [
                 keywords::startup(),
-                lit(&[
-                    "Start playing on launch",
-                    "auto-play",
-                    "autoplay",
-                    "Display name",
-                    "greeting",
-                    "username",
-                ]),
+                terms(&aulos_core::fl!("settings-kw-startup")),
             ]
             .concat(),
             Sec::Desktop => [
                 keywords::playback_extras().into_iter().skip(9).collect(),
-                lit(&["Desktop", "tray", "window close"]),
+                terms(&aulos_core::fl!("settings-kw-desktop")),
             ]
             .concat(),
             Sec::Experimental => keywords::experimental(),
-            Sec::About => [keywords::about(), lit(&["version", "license", "GPL"])].concat(),
+            Sec::About => [
+                keywords::about(),
+                terms(&aulos_core::fl!("settings-kw-about")),
+            ]
+            .concat(),
         }
     }
 }
@@ -374,7 +337,7 @@ fn nav(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
     ui.label(
-        egui::RichText::new("Settings")
+        egui::RichText::new(aulos_core::fl!("settings"))
             .font(theme::semibold(26.0))
             .color(pal.text),
     );
@@ -423,7 +386,7 @@ fn nav(app: &mut App, ui: &mut Ui) {
                     ui.painter(),
                     label_rect,
                     Align::Min,
-                    sec.label(),
+                    &sec.label(),
                     theme::regular(13.0),
                     fg,
                 );
@@ -479,7 +442,10 @@ fn search_box(ui: &mut Ui, pal: &Palette, text: &mut String) {
     child.add(
         egui::TextEdit::singleline(text)
             .id(id)
-            .hint_text(egui::RichText::new("Search settings").color(pal.text_3))
+            .hint_text(
+                egui::RichText::new(aulos_core::fl!("settings-search-placeholder"))
+                    .color(pal.text_3),
+            )
             .frame(egui::Frame::NONE)
             .desired_width(w)
             .font(theme::regular(13.0))
@@ -542,8 +508,8 @@ fn content(app: &mut App, ui: &mut Ui, _pal: Palette, pad: f32) {
                 empty_state(
                     ui,
                     ph::MAGNIFYING_GLASS,
-                    "No settings match",
-                    "Try another word, like playback or scrobble.",
+                    &aulos_core::fl!("settings-no-match-title"),
+                    &aulos_core::fl!("settings-no-match-hint"),
                     None,
                 );
             }
@@ -605,7 +571,8 @@ fn row(
     ui.painter()
         .galley(pos2(rect.left(), top), title_g.clone(), pal.text);
     if net {
-        let bw = text_width(ui, "NETWORK", theme::mono_semibold(9.5)) + 2.8 + 8.0;
+        let badge = aulos_core::fl!("settings-badge-network");
+        let bw = text_width(ui, &badge, theme::mono_semibold(9.5)) + 2.8 + 8.0;
         let b = Rect::from_min_size(
             pos2(
                 rect.left() + title_w + 8.0,
@@ -623,7 +590,7 @@ fn row(
             ui.painter(),
             b,
             Align::Center,
-            "NETWORK",
+            &badge,
             theme::mono_semibold(9.5),
             pal.text_2,
             0.4,
@@ -985,16 +952,25 @@ fn scrobble_update(app: &mut App, msg: ScrobbleMessage) {
 fn finish_import(app: &mut App, service: Service, res: Result<ImportOutcome, String>) {
     let name = service.display_name();
     match res {
-        Err(message) => app.toast_error(format!("Import from {name} failed: {message}")),
+        Err(message) => app.toast_error(aulos_core::fl!(
+            "settings-import-failed",
+            service = name,
+            reason = message
+        )),
         Ok(out) => {
             if let Some(message) = &out.error {
-                app.toast_error(format!("Import from {name} failed: {message}"));
+                app.toast_error(aulos_core::fl!(
+                    "settings-import-failed",
+                    service = name,
+                    reason = message.as_str()
+                ));
             } else if out.cancelled {
-                app.toast(format!("Import from {name} cancelled"));
+                app.toast(aulos_core::fl!("settings-import-cancelled", service = name));
             } else {
-                app.toast(format!(
-                    "Imported {} plays from {name}",
-                    out.progress.imported
+                app.toast(aulos_core::fl!(
+                    "settings-import-done",
+                    count = out.progress.imported,
+                    service = name
                 ));
             }
             if out.progress.imported > 0 {
@@ -1021,8 +997,10 @@ fn apply_loved(app: &mut App, loved: &[(String, String)]) {
         let effect = app.session.toggle_favorite(id);
         app.run(effect);
     }
-    app.session.playback.scrobble.finish_sync(format!(
-        "Synced loved tracks: {added} added here, {pushed} sent to Last.fm"
+    app.session.playback.scrobble.finish_sync(aulos_core::fl!(
+        "settings-loved-synced",
+        added = added,
+        pushed = pushed
     ));
 }
 
@@ -1035,7 +1013,8 @@ fn pick_folder(app: &mut App) {
     let tx = app.views.settings.sender();
     let ctx = app.ctx.clone();
     app.handle.spawn(async move {
-        let result = dialogs::pick_music_folder("Select Music Directory").await;
+        let result =
+            dialogs::pick_music_folder(&aulos_core::fl!("settings-pick-folder-title")).await;
         if tx.send(Msg::Folder(result)).is_ok() {
             ctx.request_repaint();
         }
@@ -1048,7 +1027,10 @@ fn folder_picked(app: &mut App, result: Result<Option<PathBuf>, String>) {
         Ok(Some(path)) => add_folder(app, path),
         // Dismissing the dialog is not worth a toast.
         Ok(None) => {}
-        Err(reason) => app.toast_error(format!("Could not add the folder: {reason}")),
+        Err(reason) => app.toast_error(aulos_core::fl!(
+            "settings-add-folder-failed",
+            reason = reason
+        )),
     }
 }
 
@@ -1116,12 +1098,15 @@ pub fn notify_folders_needing_access(app: &mut App) {
         app.toast_rich(
             ph::FOLDER_SIMPLE,
             "",
-            "Music folders",
-            " need your permission to be read again",
+            aulos_core::fl!("settings-folders-need-access-subject"),
+            format!(
+                " {}",
+                aulos_core::fl!("settings-folders-need-access-suffix")
+            ),
             Some(crate::app::ToastAction::AllowMusicFolders),
         );
     } else if dirs.iter().any(|d| access_of(d) == Access::NeedsRepick) {
-        app.toast("Pick your music folder again in Settings › Library to play your files");
+        app.toast(aulos_core::fl!("settings-folders-repick-notice"));
     }
 }
 
@@ -1176,11 +1161,11 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Library",
-        if scanning {
-            "Scanning…"
+        &aulos_core::fl!("settings-library"),
+        &if scanning {
+            aulos_core::fl!("settings-library-scanning")
         } else {
-            "Music folders are scanned into the local database"
+            aulos_core::fl!("settings-library-note")
         },
     );
     ui.add_space(10.0);
@@ -1196,11 +1181,7 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         .map(|(d, (n, ok))| (d.display().to_string(), *n, *ok, access_of(d)))
         .collect();
     if rows.is_empty() {
-        small_text(
-            ui,
-            "No music folders yet. Add one to build your library.",
-            pal.text_2,
-        );
+        small_text(ui, &aulos_core::fl!("settings-folders-empty"), pal.text_2);
         ui.add_space(8.0);
     }
     for (i, (path, tracks, exists, access)) in rows.iter().enumerate() {
@@ -1224,16 +1205,28 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
             .size(28.0)
             .icon_size(15.0)
             .color(pal.text_3)
-            .tip("Remove folder")
+            .tip(aulos_core::fl!("settings-folder-remove-tip"))
             .show(&mut child)
             .clicked()
         {
             act = Some(FolderAct::Remove(i));
         }
         let (label, icon, next) = match access {
-            Access::Granted => ("Rescan", ph::ARROWS_CLOCKWISE, FolderAct::Rescan),
-            Access::NeedsPermission => ("Allow access", ph::LOCK_KEY_OPEN, FolderAct::Allow(i)),
-            Access::NeedsRepick => ("Pick again", ph::FOLDER_OPEN, FolderAct::PickAgain),
+            Access::Granted => (
+                aulos_core::fl!("settings-folder-rescan"),
+                ph::ARROWS_CLOCKWISE,
+                FolderAct::Rescan,
+            ),
+            Access::NeedsPermission => (
+                aulos_core::fl!("settings-folder-allow"),
+                ph::LOCK_KEY_OPEN,
+                FolderAct::Allow(i),
+            ),
+            Access::NeedsRepick => (
+                aulos_core::fl!("settings-folder-pick-again"),
+                ph::FOLDER_OPEN,
+                FolderAct::PickAgain,
+            ),
         };
         let enabled = match access {
             Access::Granted => !scanning,
@@ -1242,7 +1235,7 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         };
         if pill_button_enabled(
             &mut child,
-            label,
+            &label,
             Some(icon),
             PillKind::Secondary,
             28.0,
@@ -1273,21 +1266,21 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         );
         let (meta, color) = if *access == Access::NeedsPermission {
             (
-                format!("{tracks} tracks · allow access to play them"),
+                aulos_core::fl!("settings-folder-tracks-allow", count = (*tracks)),
                 pal.warn,
             )
         } else if *access == Access::NeedsRepick {
             (
-                format!("{tracks} tracks · pick the folder again to play them"),
+                aulos_core::fl!("settings-folder-tracks-repick", count = (*tracks)),
                 pal.warn,
             )
         } else if *exists {
-            (format!("{tracks} tracks"), pal.text_2)
-        } else {
             (
-                "Not available · skipped while offline, not removed".to_owned(),
-                pal.warn,
+                aulos_core::fl!("settings-folder-tracks", count = (*tracks)),
+                pal.text_2,
             )
+        } else {
+            (aulos_core::fl!("settings-folder-unavailable"), pal.warn)
         };
         paint_text(
             ui.painter(),
@@ -1304,7 +1297,7 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = 10.0;
         if pill_button_enabled(
             ui,
-            "Add folder",
+            &aulos_core::fl!("settings-folder-add"),
             Some(ph::PLUS),
             PillKind::Outline,
             28.0,
@@ -1325,13 +1318,23 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
                 ui,
                 &pal,
                 &mut st.path_input,
-                "…or type a path",
+                &aulos_core::fl!("settings-folder-path-hint"),
                 field_w,
                 false,
             );
             let path = PathBuf::from(st.path_input.trim());
             let ok = !st.path_input.trim().is_empty() && path.is_dir();
-            if pill_button_enabled(ui, "Add", None, PillKind::Secondary, 28.0, 0.0, ok).clicked() {
+            if pill_button_enabled(
+                ui,
+                &aulos_core::fl!("settings-folder-add-path"),
+                None,
+                PillKind::Secondary,
+                28.0,
+                0.0,
+                ok,
+            )
+            .clicked()
+            {
                 st.path_input.clear();
                 add_folder(app, path);
             }
@@ -1357,8 +1360,8 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
         if let Some(on) = toggle_row(
             ui,
             &pal,
-            "Watch for changes",
-            "Rescan automatically when files in your music folders change.",
+            &aulos_core::fl!("settings-watch-title"),
+            &aulos_core::fl!("settings-watch-desc"),
             false,
             watch,
         ) {
@@ -1370,8 +1373,8 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Artist tags",
-        "How collaboration credits are grouped",
+        &aulos_core::fl!("settings-artist-tags-heading"),
+        &aulos_core::fl!("settings-artist-tags-note"),
     );
     ui.add_space(4.0);
     let cfg = &app.session.config.config;
@@ -1379,8 +1382,8 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "Split collaboration credits",
-        "“A feat. B” and “A; B” appear as separate artists. Your tags are never changed.",
+        &aulos_core::fl!("settings-split-title"),
+        &aulos_core::fl!("settings-split-desc"),
         false,
         split,
     ) {
@@ -1391,12 +1394,21 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     row(
         ui,
         &pal,
-        "Credit delimiters",
-        "Separators credits are split on (when splitting is on), divided by |.",
+        &aulos_core::fl!("settings-delimiters-title"),
+        &aulos_core::fl!("settings-delimiters-desc"),
         false,
         330.0,
         |ui| {
-            if pill_button(ui, "Reset", None, PillKind::Ghost, 28.0, 0.0).clicked() {
+            if pill_button(
+                ui,
+                &aulos_core::fl!("settings-reset"),
+                None,
+                PillKind::Ghost,
+                28.0,
+                0.0,
+            )
+            .clicked()
+            {
                 reset = true;
             }
             let resp = input(
@@ -1420,15 +1432,20 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     }
 
     ui.add_space(SECTION_GAP);
-    heading(ui, &pal, "Compilations and playlists", "");
+    heading(
+        ui,
+        &pal,
+        &aulos_core::fl!("settings-compilations-heading"),
+        "",
+    );
     ui.add_space(4.0);
     let cfg = &app.session.config.config;
     let (show_comp, relative) = (cfg.show_compilations_in_artists, cfg.m3u_relative_paths);
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "Show “Various Artists” in Artists",
-        "Compilations stay reachable from Albums either way.",
+        &aulos_core::fl!("settings-show-va-title"),
+        &aulos_core::fl!("settings-show-va-desc"),
         false,
         show_comp,
     ) {
@@ -1437,8 +1454,8 @@ fn sec_library(app: &mut App, ui: &mut Ui) {
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "Relative paths in exported M3U playlists",
-        "Write track paths relative to the playlist file instead of absolute.",
+        &aulos_core::fl!("settings-m3u-relative-title"),
+        &aulos_core::fl!("settings-m3u-relative-desc"),
         false,
         relative,
     ) {
@@ -1519,8 +1536,8 @@ fn sec_sources(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Sources",
-        "MPD and Subsonic / OpenSubsonic servers",
+        &aulos_core::fl!("settings-sec-sources"),
+        &aulos_core::fl!("settings-sources-note"),
     );
     ui.add_space(12.0);
 
@@ -1534,11 +1551,7 @@ fn sec_sources(app: &mut App, ui: &mut Ui) {
 
     let mut act = None;
     if cards.is_empty() {
-        small_text(
-            ui,
-            "No servers yet. Your local library is always available.",
-            pal.text_2,
-        );
+        small_text(ui, &aulos_core::fl!("settings-sources-empty"), pal.text_2);
         ui.add_space(8.0);
     } else {
         const CARD_H: f32 = 114.0;
@@ -1584,7 +1597,7 @@ fn sec_sources(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = 8.0;
         if pill_button(
             ui,
-            "Add MPD server",
+            &aulos_core::fl!("settings-add-mpd"),
             Some(ph::PLUS),
             PillKind::Ghost,
             28.0,
@@ -1601,7 +1614,7 @@ fn sec_sources(app: &mut App, ui: &mut Ui) {
         }
         if pill_button(
             ui,
-            "Add Subsonic server",
+            &aulos_core::fl!("settings-add-subsonic"),
             Some(ph::PLUS),
             PillKind::Ghost,
             28.0,
@@ -1645,7 +1658,11 @@ fn server_card(
         active,
     } = view;
     let (dot, text, text_color) = if testing {
-        (pal.warn, "Testing…".to_owned(), pal.text_1)
+        (
+            pal.warn,
+            aulos_core::fl!("settings-card-testing"),
+            pal.text_1,
+        )
     } else if let Some(s) = &card.status {
         // A failed test reads `<failure>: <reason>`; a success is the bare word.
         if s.contains(':') {
@@ -1654,9 +1671,13 @@ fn server_card(
             (pal.ok, s.clone(), pal.text_1)
         }
     } else if active {
-        (pal.ok, "Active source".to_owned(), pal.text_1)
+        (pal.ok, aulos_core::fl!("settings-card-active"), pal.text_1)
     } else {
-        (pal.text_4, "Not tested".to_owned(), pal.text_3)
+        (
+            pal.text_4,
+            aulos_core::fl!("settings-card-untested"),
+            pal.text_3,
+        )
     };
     let failed = !testing && card.status.as_deref().is_some_and(|s| s.contains(':'));
     let border = if editing {
@@ -1737,18 +1758,18 @@ fn server_card(
     );
     buttons.spacing_mut().item_spacing.x = 6.0;
     let (label, icon) = if testing {
-        ("Testing", None)
+        (aulos_core::fl!("settings-card-testing-btn"), None)
     } else if failed {
-        ("Retry", Some(ph::ARROW_CLOCKWISE))
+        (aulos_core::fl!("settings-retry"), Some(ph::ARROW_CLOCKWISE))
     } else {
-        ("Test", Some(ph::PLUGS_CONNECTED))
+        (aulos_core::fl!("settings-test"), Some(ph::PLUGS_CONNECTED))
     };
     if testing {
         buttons.add(egui::Spinner::new().size(14.0).color(pal.text_2));
     }
     if pill_button_enabled(
         &mut buttons,
-        label,
+        &label,
         icon,
         PillKind::Secondary,
         26.0,
@@ -1759,7 +1780,16 @@ fn server_card(
     {
         act = Some(ServerAct::Test(card.at));
     }
-    if pill_button(&mut buttons, "Edit", None, PillKind::Ghost, 26.0, 0.0).clicked() {
+    if pill_button(
+        &mut buttons,
+        &aulos_core::fl!("settings-edit"),
+        None,
+        PillKind::Ghost,
+        26.0,
+        0.0,
+    )
+    .clicked()
+    {
         act = Some(ServerAct::Edit(card.at));
     }
     act
@@ -1809,61 +1839,98 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
             Kind::Mpd => {
                 let s = &mut app.session.providers.mpd_edit_states[at.index];
                 ui.label(
-                    egui::RichText::new("MPD server")
+                    egui::RichText::new(aulos_core::fl!("settings-editor-mpd-title"))
                         .font(theme::semibold(14.0))
                         .color(pal.text),
                 );
                 ui.add_space(10.0);
-                labelled_input(ui, &pal, "Name", &mut s.name, "Living room MPD", false);
-                labelled_input(ui, &pal, "Host", &mut s.host, "localhost", false);
-                labelled_input(ui, &pal, "Port", &mut s.port, "6600", false);
-                labelled_input(ui, &pal, "Password (optional)", &mut s.password, "", true);
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-name"),
+                    &mut s.name,
+                    &aulos_core::fl!("settings-field-mpd-name-hint"),
+                    false,
+                );
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-host"),
+                    &mut s.host,
+                    "localhost",
+                    false,
+                );
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-port"),
+                    &mut s.port,
+                    "6600",
+                    false,
+                );
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-password-optional"),
+                    &mut s.password,
+                    "",
+                    true,
+                );
             }
             Kind::Subsonic => {
                 let s = &mut app.session.providers.subsonic_edit_states[at.index];
                 ui.label(
-                    egui::RichText::new("Subsonic / OpenSubsonic server")
+                    egui::RichText::new(aulos_core::fl!("settings-editor-subsonic-title"))
                         .font(theme::semibold(14.0))
                         .color(pal.text),
                 );
                 ui.add_space(10.0);
-                labelled_input(ui, &pal, "Name", &mut s.name, "Navidrome", false);
                 labelled_input(
                     ui,
                     &pal,
-                    "Server URL",
+                    &aulos_core::fl!("settings-field-name"),
+                    &mut s.name,
+                    "Navidrome",
+                    false,
+                );
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-server-url"),
                     &mut s.url,
                     "https://music.example.com",
                     false,
                 );
-                labelled_input(ui, &pal, "Username", &mut s.username, "", false);
-                labelled_input(ui, &pal, "Password or API key", &mut s.password, "", true);
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-username"),
+                    &mut s.username,
+                    "",
+                    false,
+                );
+                labelled_input(
+                    ui,
+                    &pal,
+                    &aulos_core::fl!("settings-field-password-or-key"),
+                    &mut s.password,
+                    "",
+                    true,
+                );
                 if cfg!(target_arch = "wasm32") {
                     // `fetch` cannot skip certificate checks: the browser
                     // alone decides which certificates it trusts.
                     s.accept_invalid_certs = false;
-                    small_text(
-                        ui,
-                        "The browser validates TLS certificates itself, so self-signed servers \
-                         only work once your browser trusts their certificate. The server must \
-                         also allow requests from this site (CORS) and use https when this page \
-                         is served over https.",
-                        pal.text_2,
-                    );
+                    small_text(ui, &aulos_core::fl!("settings-web-tls-note"), pal.text_2);
                     ui.add_space(6.0);
-                    small_text(
-                        ui,
-                        "The password is stored unencrypted in this browser's localStorage for \
-                         this site; the web has no system keyring.",
-                        pal.warn,
-                    );
+                    small_text(ui, &aulos_core::fl!("settings-web-password-note"), pal.warn);
                 } else {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         toggle(ui, &mut s.accept_invalid_certs);
                         small_text(
                             ui,
-                            "Accept invalid TLS certificates (self-signed servers)",
+                            &aulos_core::fl!("settings-accept-invalid-certs"),
                             pal.text_2,
                         );
                     });
@@ -1880,7 +1947,11 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
             ui.add_space(8.0);
         }
         if testing {
-            small_text(ui, "Testing connection…", pal.warn);
+            small_text(
+                ui,
+                &aulos_core::fl!("settings-testing-connection"),
+                pal.warn,
+            );
             ui.add_space(8.0);
         } else if let Some(s) = &status {
             let failed = s.contains(':');
@@ -1889,10 +1960,18 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            out.save = pill_button(ui, "Save", None, PillKind::Primary, 30.0, 0.0).clicked();
+            out.save = pill_button(
+                ui,
+                &aulos_core::fl!("save"),
+                None,
+                PillKind::Primary,
+                30.0,
+                0.0,
+            )
+            .clicked();
             out.test = pill_button_enabled(
                 ui,
-                "Test connection",
+                &aulos_core::fl!("settings-test-connection"),
                 Some(ph::PLUGS_CONNECTED),
                 PillKind::Secondary,
                 30.0,
@@ -1900,11 +1979,25 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
                 !testing,
             )
             .clicked();
-            out.close = pill_button(ui, "Cancel", None, PillKind::Ghost, 30.0, 0.0).clicked();
+            out.close = pill_button(
+                ui,
+                &aulos_core::fl!("settings-cancel"),
+                None,
+                PillKind::Ghost,
+                30.0,
+                0.0,
+            )
+            .clicked();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                out.remove =
-                    pill_button(ui, "Remove", Some(ph::TRASH), PillKind::Danger, 30.0, 0.0)
-                        .clicked();
+                out.remove = pill_button(
+                    ui,
+                    &aulos_core::fl!("remove"),
+                    Some(ph::TRASH),
+                    PillKind::Danger,
+                    30.0,
+                    0.0,
+                )
+                .clicked();
             });
         });
     });
@@ -1963,9 +2056,9 @@ fn save_server(app: &mut App, at: CardRef) {
         Kind::Mpd => {
             let s = &app.session.providers.mpd_edit_states[at.index];
             if s.name.trim().is_empty() || s.host.trim().is_empty() {
-                Some("Give the server a name and a host.")
+                Some(aulos_core::fl!("settings-err-name-host"))
             } else if s.port.trim().parse::<u16>().is_err() {
-                Some("The port must be a number between 1 and 65535.")
+                Some(aulos_core::fl!("settings-err-port"))
             } else {
                 None
             }
@@ -1973,19 +2066,19 @@ fn save_server(app: &mut App, at: CardRef) {
         Kind::Subsonic => {
             let s = &app.session.providers.subsonic_edit_states[at.index];
             if s.name.trim().is_empty() || s.url.trim().is_empty() {
-                Some("Give the server a name and a URL.")
+                Some(aulos_core::fl!("settings-err-name-url"))
             } else if !s.url.trim().starts_with("http://") && !s.url.trim().starts_with("https://")
             {
-                Some("The URL must start with http:// or https://.")
+                Some(aulos_core::fl!("settings-err-url-scheme"))
             } else if s.username.trim().is_empty() {
-                Some("Enter the username.")
+                Some(aulos_core::fl!("settings-err-username"))
             } else {
                 None
             }
         }
     };
     if let Some(p) = problem {
-        app.views.settings.edit_error = Some(p.to_owned());
+        app.views.settings.edit_error = Some(p);
         return;
     }
     match at.kind {
@@ -2001,7 +2094,7 @@ fn save_server(app: &mut App, at: CardRef) {
     app.views.settings.edit = None;
     app.views.settings.edit_error = None;
     app.views.settings.testing.clear();
-    app.toast("Server saved");
+    app.toast(aulos_core::fl!("settings-server-saved"));
 }
 
 fn remove_server(app: &mut App, at: CardRef) {
@@ -2020,16 +2113,33 @@ fn remove_server(app: &mut App, at: CardRef) {
 
 // ------------------------------------------------------------------ playback
 
-const REPLAY_GAIN: [(&str, ReplayGainMode); 4] = [
-    ("Off", ReplayGainMode::Off),
-    ("Track", ReplayGainMode::Track),
-    ("Album", ReplayGainMode::Album),
-    ("Auto", ReplayGainMode::Auto),
+const REPLAY_GAIN: [ReplayGainMode; 4] = [
+    ReplayGainMode::Off,
+    ReplayGainMode::Track,
+    ReplayGainMode::Album,
+    ReplayGainMode::Auto,
 ];
+
+fn replay_gain_label(mode: ReplayGainMode) -> String {
+    match mode {
+        ReplayGainMode::Off => aulos_core::fl!("replay-gain-off"),
+        ReplayGainMode::Track => aulos_core::fl!("replay-gain-track"),
+        ReplayGainMode::Album => aulos_core::fl!("replay-gain-album"),
+        ReplayGainMode::Auto => aulos_core::fl!("replay-gain-auto"),
+    }
+}
+
+fn auto_play_label(mode: AutoPlayMode) -> String {
+    match mode {
+        AutoPlayMode::Off => aulos_core::fl!("auto-play-off"),
+        AutoPlayMode::Random => aulos_core::fl!("auto-play-random"),
+        AutoPlayMode::Similar => aulos_core::fl!("auto-play-similar"),
+    }
+}
 
 fn sec_playback(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Playback", "");
+    heading(ui, &pal, &aulos_core::fl!("settings-playback"), "");
     ui.add_space(6.0);
     let cfg = &app.session.config.config;
     let (gapless, stop_after, crossfade, fade, replay, auto, party) = (
@@ -2046,8 +2156,8 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Gapless playback",
-        "Prepare the next track so consecutive tracks follow without a pause.",
+        &aulos_core::fl!("settings-gapless-title"),
+        &aulos_core::fl!("settings-gapless-desc"),
         false,
         gapless,
     ) {
@@ -2056,8 +2166,8 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Stop after current track",
-        "Playback stops at the end of every track instead of continuing with the queue.",
+        &aulos_core::fl!("settings-stop-after-title"),
+        &aulos_core::fl!("settings-stop-after-desc"),
         false,
         stop_after,
     ) {
@@ -2065,15 +2175,15 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
     }
 
     let label = if crossfade < 0.05 {
-        "Off".to_owned()
+        aulos_core::fl!("settings-off")
     } else {
-        format!("{crossfade:.1} s")
+        aulos_core::fl!("settings-seconds", value = format!("{crossfade:.1}"))
     };
     if let Some(f) = slider_row(
         ui,
         &pal,
-        "Crossfade",
-        "Overlap the end of one track with the next. Album tracks stay gapless.",
+        &aulos_core::fl!("settings-crossfade-title"),
+        &aulos_core::fl!("settings-crossfade-desc"),
         crossfade / 12.0,
         &label,
     ) {
@@ -2086,15 +2196,15 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
     }
 
     let label = if fade < 0.05 {
-        "Off".to_owned()
+        aulos_core::fl!("settings-off")
     } else {
-        format!("{fade:.1} s")
+        aulos_core::fl!("settings-seconds", value = format!("{fade:.1}"))
     };
     if let Some(f) = slider_row(
         ui,
         &pal,
-        "Fade on play, pause and stop",
-        "A short volume ramp instead of a hard cut.",
+        &aulos_core::fl!("settings-fade-title"),
+        &aulos_core::fl!("settings-fade-desc"),
         fade / max_fade,
         &label,
     ) {
@@ -2105,50 +2215,49 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
         }
     }
 
-    let labels: Vec<&str> = REPLAY_GAIN.iter().map(|(l, _)| *l).collect();
-    let sel = REPLAY_GAIN
-        .iter()
-        .position(|(_, m)| *m == replay)
-        .unwrap_or(0);
+    let labels: Vec<String> = REPLAY_GAIN.iter().map(|m| replay_gain_label(*m)).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let sel = REPLAY_GAIN.iter().position(|m| *m == replay).unwrap_or(0);
     if let Some(i) = seg_row(
         ui,
         &pal,
         "replaygain",
         "ReplayGain",
-        "Album mode keeps the dynamics between tracks of one album.",
+        &aulos_core::fl!("settings-replaygain-desc"),
         &labels,
         sel,
     ) {
-        let effect = app.session.set_replay_gain_mode(REPLAY_GAIN[i].1);
+        let effect = app.session.set_replay_gain_mode(REPLAY_GAIN[i]);
         app.run(effect);
         app.session.config.save();
     }
 
     let auto_modes = [
-        ("Off", AutoPlayMode::Off),
-        ("Random", AutoPlayMode::Random),
-        ("Similar", AutoPlayMode::Similar),
+        AutoPlayMode::Off,
+        AutoPlayMode::Random,
+        AutoPlayMode::Similar,
     ];
-    let labels: Vec<&str> = auto_modes.iter().map(|(l, _)| *l).collect();
-    let sel = auto_modes.iter().position(|(_, m)| *m == auto).unwrap_or(0);
+    let labels: Vec<String> = auto_modes.iter().map(|m| auto_play_label(*m)).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let sel = auto_modes.iter().position(|m| *m == auto).unwrap_or(0);
     if let Some(i) = seg_row(
         ui,
         &pal,
         "autoplay",
-        "When the queue ends",
-        "Keep playing random albums or music similar to what just played.",
+        &aulos_core::fl!("settings-autoplay-title"),
+        &aulos_core::fl!("settings-autoplay-desc"),
         &labels,
         sel,
     ) {
-        app.session.set_auto_play_mode(auto_modes[i].1);
+        app.session.set_auto_play_mode(auto_modes[i]);
         app.session.config.save();
     }
 
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Party mode",
-        "Endless random queue from the genres below (the whole library when none).",
+        &aulos_core::fl!("settings-party-title"),
+        &aulos_core::fl!("settings-party-desc"),
         false,
         party,
     ) {
@@ -2199,8 +2308,12 @@ fn party_genres(app: &mut App, ui: &mut Ui) {
                 toggle_genre = Some(genre.clone());
             }
         }
+        let add_label = aulos_core::fl!("genre-label");
         let (rect, resp) = ui.allocate_exact_size(
-            vec2(text_width(ui, "Genre", theme::regular(12.5)) + 36.0, 26.0),
+            vec2(
+                text_width(ui, &add_label, theme::regular(12.5)) + 36.0,
+                26.0,
+            ),
             Sense::click(),
         );
         ui.painter().rect_stroke(
@@ -2232,7 +2345,7 @@ fn party_genres(app: &mut App, ui: &mut Ui) {
             ui.painter(),
             label,
             Align::Min,
-            "Genre",
+            &add_label,
             theme::regular(12.5),
             pal.text_2,
         );
@@ -2247,7 +2360,11 @@ fn party_genres(app: &mut App, ui: &mut Ui) {
                 .take(MAX_GENRE_SUGGESTIONS)
                 .collect();
             if genres.is_empty() {
-                small_text(ui, "No more genres in the library", pal.text_3);
+                small_text(
+                    ui,
+                    &aulos_core::fl!("settings-party-no-more-genres"),
+                    pal.text_3,
+                );
             }
             egui::ScrollArea::vertical()
                 .max_height(260.0)
@@ -2296,8 +2413,8 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Equalizer",
-        "Ten bands, applied to local playback",
+        &aulos_core::fl!("equalizer"),
+        &aulos_core::fl!("settings-eq-note"),
     );
     ui.add_space(6.0);
     let cfg = &app.session.config.config;
@@ -2307,8 +2424,8 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Equalizer",
-        "Bypass it without losing your settings.",
+        &aulos_core::fl!("equalizer"),
+        &aulos_core::fl!("settings-eq-enabled-desc"),
         false,
         enabled,
     ) {
@@ -2327,14 +2444,14 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
     let dirty = app.session.equalizer.dirty;
     let current = match (&active, dirty) {
         (Some(n), false) => n.clone(),
-        (Some(n), true) => format!("{n} (modified)"),
-        (None, _) => "Custom".to_owned(),
+        (Some(n), true) => aulos_core::fl!("settings-eq-modified", name = n.as_str()),
+        (None, _) => aulos_core::fl!("settings-eq-custom"),
     };
     if let Some(i) = select_row(
         ui,
         &pal,
-        "Preset",
-        "Built-in shapes and your saved ones.",
+        &aulos_core::fl!("equalizer-section-preset"),
+        &aulos_core::fl!("settings-eq-preset-desc"),
         &current,
         &names,
     ) {
@@ -2342,12 +2459,12 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
         app.session.config.save();
     }
 
-    let label = format!("{preamp:+.1} dB");
+    let label = aulos_core::fl!("equalizer-preamp-value", db = format!("{preamp:+.1}"));
     if let Some(f) = slider_row(
         ui,
         &pal,
-        "Preamp",
-        "Lower it when boosted bands start to clip.",
+        &aulos_core::fl!("equalizer-section-preamp"),
+        &aulos_core::fl!("settings-eq-preamp-desc"),
         (preamp + 20.0) / 30.0,
         &label,
     ) {
@@ -2436,7 +2553,7 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
         if pill_button(
             ui,
-            "Reset to flat",
+            &aulos_core::fl!("settings-eq-reset-flat"),
             Some(ph::ARROWS_CLOCKWISE),
             PillKind::Secondary,
             28.0,
@@ -2453,7 +2570,7 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
         if custom_active {
             if pill_button_enabled(
                 ui,
-                "Save preset",
+                &aulos_core::fl!("settings-eq-save-preset"),
                 None,
                 PillKind::Secondary,
                 28.0,
@@ -2466,7 +2583,7 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
             }
             if pill_button(
                 ui,
-                "Delete preset",
+                &aulos_core::fl!("settings-eq-delete-preset"),
                 Some(ph::TRASH),
                 PillKind::Danger,
                 28.0,
@@ -2487,14 +2604,14 @@ fn sec_equalizer(app: &mut App, ui: &mut Ui) {
             ui,
             &pal,
             &mut st.eq_name,
-            "Save current settings as…",
+            &aulos_core::fl!("settings-eq-name-hint"),
             220.0,
             false,
         );
         let name = st.eq_name.trim().to_owned();
         if pill_button_enabled(
             ui,
-            "Save as",
+            &aulos_core::fl!("settings-eq-save-as"),
             None,
             PillKind::Secondary,
             28.0,
@@ -2516,27 +2633,23 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     ui.add_space(14.0);
     ui.label(
-        egui::RichText::new("AutoEQ headphone profiles")
+        egui::RichText::new(aulos_core::fl!("settings-autoeq-title"))
             .font(theme::semibold(13.0))
             .color(pal.text),
     );
-    small_text(
-        ui,
-        "Correction curves for your headphones, downloaded from the AutoEQ project.",
-        pal.text_2,
-    );
+    small_text(ui, &aulos_core::fl!("settings-autoeq-desc"), pal.text_2);
     ui.add_space(8.0);
     let loading = app.session.equalizer.autoeq_loading;
     let loaded = !app.session.equalizer.autoeq_profiles.is_empty();
     if !loaded {
         let label = if loading {
-            "Loading list…"
+            aulos_core::fl!("settings-autoeq-loading-list")
         } else {
-            "Load profile list"
+            aulos_core::fl!("settings-autoeq-load-list")
         };
         if pill_button_enabled(
             ui,
-            label,
+            &label,
             Some(ph::DOWNLOAD_SIMPLE),
             PillKind::Secondary,
             28.0,
@@ -2555,7 +2668,7 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
         ui,
         &pal,
         &mut st.eq_search,
-        "Search headphones (2+ letters)",
+        &aulos_core::fl!("settings-autoeq-search-hint"),
         260.0,
         false,
     );
@@ -2564,7 +2677,7 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
     if let Some(results) = autoeq::search_profiles(&app.session.equalizer.autoeq_profiles, &query) {
         ui.add_space(6.0);
         if results.is_empty() {
-            small_text(ui, "No profile matches", pal.text_3);
+            small_text(ui, &aulos_core::fl!("settings-autoeq-no-match"), pal.text_3);
         }
         for p in results.iter().take(8) {
             let (r, resp) =
@@ -2602,14 +2715,18 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
             }
         }
         if results.len() > 8 {
-            small_text(ui, "Keep typing to narrow the list.", pal.text_3);
+            small_text(
+                ui,
+                &aulos_core::fl!("settings-autoeq-keep-typing"),
+                pal.text_3,
+            );
         }
     }
     if let Some(path) = pick {
         let effect = app.session.fetch_autoeq_profile(path);
         app.run(effect);
         app.session.config.save();
-        app.toast("Applying AutoEQ profile");
+        app.toast(aulos_core::fl!("settings-autoeq-applying"));
     }
 }
 
@@ -2628,8 +2745,8 @@ fn sec_scrobbling(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Scrobbling",
-        "A play counts after 50% or 4 minutes",
+        &aulos_core::fl!("scrobbling"),
+        &aulos_core::fl!("settings-scrobbling-note"),
     );
     ui.add_space(10.0);
     let mut msgs: Vec<ScrobbleMessage> = Vec::new();
@@ -2649,8 +2766,8 @@ fn sec_scrobbling(app: &mut App, ui: &mut Ui) {
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "Scrobble radio and podcasts",
-        "Streams are off by default.",
+        &aulos_core::fl!("settings-scrobble-streams-title"),
+        &aulos_core::fl!("settings-scrobble-streams-desc"),
         false,
         streams,
     ) {
@@ -2660,8 +2777,8 @@ fn sec_scrobbling(app: &mut App, ui: &mut Ui) {
         if let Some(v) = toggle_row(
             ui,
             &pal,
-            "Love tracks on Last.fm",
-            "Favoriting a track loves it there too.",
+            &aulos_core::fl!("settings-love-title"),
+            &aulos_core::fl!("settings-love-desc"),
             true,
             love,
         ) {
@@ -2671,14 +2788,14 @@ fn sec_scrobbling(app: &mut App, ui: &mut Ui) {
         row(
             ui,
             &pal,
-            "Sync loved tracks",
-            "Loved tracks become favorites here, favorites become loved there.",
+            &aulos_core::fl!("settings-sync-loved-title"),
+            &aulos_core::fl!("settings-sync-loved-desc"),
             true,
             120.0,
             |ui| {
                 if pill_button_enabled(
                     ui,
-                    "Sync now",
+                    &aulos_core::fl!("settings-sync-now"),
                     Some(ph::ARROWS_CLOCKWISE),
                     PillKind::Secondary,
                     28.0,
@@ -2695,8 +2812,8 @@ fn sec_scrobbling(app: &mut App, ui: &mut Ui) {
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "Import history after connecting",
-        "Reads the service's listening history once a service is connected.",
+        &aulos_core::fl!("settings-import-on-connect-title"),
+        &aulos_core::fl!("settings-import-on-connect-desc"),
         true,
         on_connect,
     ) {
@@ -2727,15 +2844,20 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
     let (status, status_color) = match (&status_msg, connected) {
         (Some(s), _) => (s.clone(), if failed { pal.danger } else { pal.text_2 }),
         (None, true) => {
-            let mut s = format!("Connected as {user}");
-            if !enabled {
-                s.push_str(" · paused");
+            let s = if !enabled {
+                aulos_core::fl!("settings-svc-connected-paused", user = user.as_str())
             } else if queued > 0 {
-                s.push_str(&format!(" · {queued} waiting to send"));
-            }
+                aulos_core::fl!(
+                    "settings-svc-connected-queued",
+                    user = user.as_str(),
+                    count = queued
+                )
+            } else {
+                aulos_core::fl!("settings-svc-connected", user = user.as_str())
+            };
             (s, pal.text_2)
         }
-        (None, false) => ("Not connected".to_owned(), pal.text_3),
+        (None, false) => (aulos_core::fl!("settings-svc-not-connected"), pal.text_3),
     };
 
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
@@ -2760,7 +2882,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
     if connected {
         if pill_button(
             &mut child,
-            "Disconnect",
+            &aulos_core::fl!("scrobble-disconnect"),
             None,
             PillKind::Secondary,
             28.0,
@@ -2773,7 +2895,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
         if importing {
             if pill_button(
                 &mut child,
-                "Cancel import",
+                &aulos_core::fl!("scrobble-import-cancel"),
                 None,
                 PillKind::Ghost,
                 28.0,
@@ -2785,7 +2907,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
             }
         } else if pill_button_enabled(
             &mut child,
-            "Import history",
+            &aulos_core::fl!("settings-import-history"),
             Some(ph::DOWNLOAD_SIMPLE),
             PillKind::Ghost,
             28.0,
@@ -2804,7 +2926,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
         if pending {
             if pill_button_enabled(
                 &mut child,
-                "Complete connection",
+                &aulos_core::fl!("settings-complete-connection"),
                 None,
                 PillKind::Primary,
                 28.0,
@@ -2817,7 +2939,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
             }
         } else if pill_button_enabled(
             &mut child,
-            "Connect",
+            &aulos_core::fl!("scrobble-connect"),
             None,
             PillKind::Primary,
             28.0,
@@ -2868,7 +2990,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                     ui,
                     &pal,
                     &mut app.session.playback.scrobble.lb_token_input,
-                    "Paste your ListenBrainz user token",
+                    &aulos_core::fl!("settings-lb-token-hint"),
                     320.0,
                     true,
                 );
@@ -2881,7 +3003,11 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                     .is_empty();
                 if pill_button_enabled(
                     ui,
-                    if busy { "Checking…" } else { "Connect" },
+                    &if busy {
+                        aulos_core::fl!("settings-checking")
+                    } else {
+                        aulos_core::fl!("scrobble-connect")
+                    },
                     None,
                     PillKind::Primary,
                     30.0,
@@ -2894,17 +3020,13 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                 }
             });
             ui.add_space(2.0);
-            small_text(
-                ui,
-                "Find the token on listenbrainz.org under Settings → User token.",
-                pal.text_3,
-            );
+            small_text(ui, &aulos_core::fl!("settings-lb-token-help"), pal.text_3);
         }
         Service::LastFm => {
             ui.add_space(8.0);
             small_text(
                 ui,
-                "Last.fm needs your own API key and shared secret (last.fm/api/account/create).",
+                &aulos_core::fl!("settings-lastfm-keys-note"),
                 pal.text_3,
             );
             ui.add_space(6.0);
@@ -2914,7 +3036,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                     ui,
                     &pal,
                     &mut app.session.playback.scrobble.lastfm_key_input,
-                    "API key",
+                    &aulos_core::fl!("settings-api-key"),
                     240.0,
                     false,
                 );
@@ -2922,11 +3044,20 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                     ui,
                     &pal,
                     &mut app.session.playback.scrobble.lastfm_secret_input,
-                    "Shared secret",
+                    &aulos_core::fl!("settings-shared-secret"),
                     240.0,
                     true,
                 );
-                if pill_button(ui, "Save keys", None, PillKind::Secondary, 30.0, 0.0).clicked() {
+                if pill_button(
+                    ui,
+                    &aulos_core::fl!("settings-save-keys"),
+                    None,
+                    PillKind::Secondary,
+                    30.0,
+                    0.0,
+                )
+                .clicked()
+                {
                     msgs.push(ScrobbleMessage::SaveLastFmKeys);
                 }
             });
@@ -2944,7 +3075,7 @@ fn import_progress_card(app: &mut App, ui: &mut Ui) {
         let (fetched, total, matched, imported) = (p.fetched, p.total, p.matched, p.imported);
         let counts = match total {
             Some(t) => format!("{fetched} / {t}"),
-            None => format!("{fetched} read"),
+            None => aulos_core::fl!("settings-import-read", fetched = fetched),
         };
         let frac = total
             .filter(|t| *t > 0)
@@ -2967,9 +3098,9 @@ fn import_progress_card(app: &mut App, ui: &mut Ui) {
             ui.painter(),
             title,
             Align::Min,
-            &format!(
-                "Importing listening history from {}",
-                service.display_name()
+            &aulos_core::fl!(
+                "settings-import-progress-title",
+                service = service.display_name()
             ),
             theme::semibold(13.0),
             pal.text,
@@ -3005,8 +3136,10 @@ fn import_progress_card(app: &mut App, ui: &mut Ui) {
             ui.painter(),
             note,
             Align::Min,
-            &format!(
-                "{matched} matched in your library · {imported} added to the history. Matched plays power Home’s “rediscover” shelf."
+            &aulos_core::fl!(
+                "settings-import-summary",
+                matched = matched,
+                imported = imported
             ),
             theme::regular(12.0),
             pal.text_2,
@@ -3022,8 +3155,8 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     heading(
         ui,
         &pal,
-        "Online data",
-        "Off by default. Nothing leaves your machine until you turn it on.",
+        &aulos_core::fl!("settings-sec-online"),
+        &aulos_core::fl!("settings-online-note"),
     );
     ui.add_space(4.0);
     let cfg = &app.session.config.config;
@@ -3036,8 +3169,8 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Artist biographies",
-        "Wikipedia text for Local and MPD libraries. Subsonic servers use their own.",
+        &aulos_core::fl!("settings-bio-title"),
+        &aulos_core::fl!("settings-bio-desc"),
         true,
         bio,
     ) {
@@ -3047,8 +3180,8 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Artist photos",
-        "Deezer images for Local and MPD libraries. Subsonic servers use their own.",
+        &aulos_core::fl!("settings-photos-title"),
+        &aulos_core::fl!("settings-photos-desc"),
         true,
         photos,
     ) {
@@ -3058,8 +3191,8 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Radio station icons",
-        "Downloaded from each station's own server.",
+        &aulos_core::fl!("settings-radio-icons-title"),
+        &aulos_core::fl!("settings-radio-icons-desc"),
         true,
         radio_icons,
     ) {
@@ -3069,8 +3202,8 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "“Because you listened to…” on Home",
-        "Similar-artist shelves from your connected scrobbling service.",
+        &aulos_core::fl!("settings-because-title"),
+        &aulos_core::fl!("settings-because-desc"),
         true,
         suggestions,
     ) {
@@ -3080,19 +3213,27 @@ fn sec_online(app: &mut App, ui: &mut Ui) {
 
 fn sec_tagger(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Tag editor keys", "");
+    heading(ui, &pal, &aulos_core::fl!("settings-sec-tagger"), "");
     ui.add_space(4.0);
     let mut key = app.session.config.config.acoustid_api_key.clone();
     let mut key_changed = false;
     row(
         ui,
         &pal,
-        "AcoustID application key",
-        "Required for fingerprint lookups. Not a secret.",
+        &aulos_core::fl!("settings-acoustid-app-title"),
+        &aulos_core::fl!("settings-acoustid-app-desc"),
         true,
         260.0,
         |ui| {
-            key_changed = input(ui, &pal, &mut key, "Application key", 240.0, false).changed();
+            key_changed = input(
+                ui,
+                &pal,
+                &mut key,
+                &aulos_core::fl!("settings-acoustid-app-hint"),
+                240.0,
+                false,
+            )
+            .changed();
         },
     );
     if key_changed {
@@ -3102,30 +3243,42 @@ fn sec_tagger(app: &mut App, ui: &mut Ui) {
 
     let stored = app.session.config.acoustid_key_stored;
     let desc = match stored {
-        Some(true) => {
-            "Your own key is stored in the system keyring. Enter a new one to replace it, or save an empty field to delete it."
-        }
-        Some(false) => {
-            "Optional. Lets you submit fingerprints. Stored in the system keyring, never in the settings file."
-        }
-        None => "Checking the system keyring…",
+        Some(true) => aulos_core::fl!("settings-acoustid-user-desc-stored"),
+        Some(false) => aulos_core::fl!("settings-acoustid-user-desc-optional"),
+        None => aulos_core::fl!("settings-acoustid-user-desc-checking"),
     };
     let mut save = false;
-    row(ui, &pal, "AcoustID user key", desc, true, 330.0, |ui| {
-        save = pill_button(ui, "Save", None, PillKind::Secondary, 28.0, 0.0).clicked();
-        input(
-            ui,
-            &pal,
-            &mut app.views.settings.acoustid_input,
-            if stored == Some(true) {
-                "••••••••"
-            } else {
-                "User key"
-            },
-            240.0,
-            true,
-        );
-    });
+    row(
+        ui,
+        &pal,
+        &aulos_core::fl!("settings-acoustid-user-title"),
+        &desc,
+        true,
+        330.0,
+        |ui| {
+            save = pill_button(
+                ui,
+                &aulos_core::fl!("save"),
+                None,
+                PillKind::Secondary,
+                28.0,
+                0.0,
+            )
+            .clicked();
+            input(
+                ui,
+                &pal,
+                &mut app.views.settings.acoustid_input,
+                &if stored == Some(true) {
+                    "••••••••".to_owned()
+                } else {
+                    aulos_core::fl!("settings-acoustid-user-hint")
+                },
+                240.0,
+                true,
+            );
+        },
+    );
     if save {
         let key = app.views.settings.acoustid_input.trim().to_owned();
         app.views.settings.acoustid_input.clear();
@@ -3137,8 +3290,8 @@ fn sec_tagger(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Prefer Cover Art Archive covers",
-        "When applying a MusicBrainz release in the tag editor.",
+        &aulos_core::fl!("settings-caa-title"),
+        &aulos_core::fl!("settings-caa-desc"),
         true,
         caa,
     ) {
@@ -3149,17 +3302,38 @@ fn sec_tagger(app: &mut App, ui: &mut Ui) {
 
 fn sec_appearance(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Appearance", "");
+    heading(ui, &pal, &aulos_core::fl!("settings-appearance"), "");
     ui.add_space(4.0);
+    let tags = aulos_core::i18n::available_languages();
+    let mut names = vec![aulos_core::fl!("language-system")];
+    names.extend(tags.iter().map(|t| aulos_core::i18n::native_name(t)));
+    let current = &app.session.config.config.language;
+    let at = tags.iter().position(|t| t == current).map_or(0, |i| i + 1);
+    if let Some(i) = select_row(
+        ui,
+        &pal,
+        &aulos_core::fl!("language"),
+        &aulos_core::fl!("language-desc"),
+        &names[at],
+        &names,
+    ) {
+        let tag = if i == 0 { "" } else { tags[i - 1].as_str() };
+        app.set_language(tag);
+    }
     let mode = app.session.config.config.theme_mode;
-    let labels = ["System", "Dark", "Light"];
+    let labels = [
+        aulos_core::fl!("settings-theme-system"),
+        aulos_core::fl!("settings-theme-dark"),
+        aulos_core::fl!("settings-theme-light"),
+    ];
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     let sel = ThemeMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
     if let Some(i) = seg_row(
         ui,
         &pal,
         "theme",
-        "Theme",
-        "System follows your desktop's dark or light setting.",
+        &aulos_core::fl!("settings-theme-title"),
+        &aulos_core::fl!("settings-theme-desc"),
         &labels,
         sel,
     ) {
@@ -3170,8 +3344,8 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Tint the interface with cover colour",
-        "The accent follows the dominant colour of the playing album.",
+        &aulos_core::fl!("settings-tint-title"),
+        &aulos_core::fl!("settings-tint-desc"),
         false,
         tint,
     ) {
@@ -3180,8 +3354,8 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Reduce motion",
-        "Turns off fades, slides and other interface animations.",
+        &aulos_core::fl!("settings-reduce-motion-title"),
+        &aulos_core::fl!("settings-reduce-motion-desc"),
         false,
         reduce,
     ) {
@@ -3202,8 +3376,8 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
         ui,
         &pal,
         "ui-scale",
-        "Interface size",
-        "Scales the whole window. Ctrl + = / Ctrl + − / Ctrl + 0 change it anywhere.",
+        &aulos_core::fl!("settings-ui-scale-title"),
+        &aulos_core::fl!("settings-ui-scale-desc"),
         &labels,
         sel,
     ) {
@@ -3214,8 +3388,8 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
     if let Some(f) = slider_row(
         ui,
         &pal,
-        "Grid card size",
-        "Size of the cards in album, artist, genre, radio and podcast grids.",
+        &aulos_core::fl!("settings-grid-scale-title"),
+        &aulos_core::fl!("settings-grid-scale-desc"),
         (scale - 0.7) / 0.9,
         &label,
     ) {
@@ -3227,34 +3401,58 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
     }
 }
 
-const STARTUP_PAGES: [(&str, &str); 10] = [
-    ("Home", "home"),
-    ("Last visited page", "last"),
-    ("Albums", "albums"),
-    ("Artists", "artists"),
-    ("Songs", "songs"),
-    ("Genres", "genres"),
-    ("Folders", "folders"),
-    ("Playlists", "playlists"),
-    ("Podcasts", "podcasts"),
-    ("Radio", "radio"),
+/// The values `startup_page` is stored as, in the order the dropdown lists them.
+const STARTUP_PAGES: [&str; 10] = [
+    "home",
+    "last",
+    "albums",
+    "artists",
+    "songs",
+    "genres",
+    "folders",
+    "playlists",
+    "podcasts",
+    "radio",
 ];
+
+fn startup_page_label(key: &str) -> String {
+    match key {
+        "last" => aulos_core::fl!("settings-startup-last-visited"),
+        "albums" => aulos_core::fl!("albums"),
+        "artists" => aulos_core::fl!("artists"),
+        "songs" => aulos_core::fl!("songs"),
+        "genres" => aulos_core::fl!("genres"),
+        "folders" => aulos_core::fl!("folders"),
+        "playlists" => aulos_core::fl!("playlists"),
+        "podcasts" => aulos_core::fl!("podcasts"),
+        "radio" => aulos_core::fl!("radio"),
+        _ => aulos_core::fl!("home"),
+    }
+}
 
 fn sec_startup(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Startup page", "");
+    heading(ui, &pal, &aulos_core::fl!("settings-sec-startup"), "");
     ui.add_space(4.0);
     let mut name = app.session.config.config.user_name.clone();
     let mut edited = false;
     row(
         ui,
         &pal,
-        "Display name",
-        "Greets you on the Home page (“Good evening, Sam”). Leave empty for no name.",
+        &aulos_core::fl!("settings-display-name-title"),
+        &aulos_core::fl!("settings-display-name-desc"),
         false,
         250.0,
         |ui| {
-            edited = input(ui, &pal, &mut name, "Your name", 220.0, false).changed();
+            edited = input(
+                ui,
+                &pal,
+                &mut name,
+                &aulos_core::fl!("settings-display-name-hint"),
+                220.0,
+                false,
+            )
+            .changed();
         },
     );
     if edited {
@@ -3262,36 +3460,37 @@ fn sec_startup(app: &mut App, ui: &mut Ui) {
     }
     let cfg = &app.session.config.config;
     let page = cfg.startup_page.trim().to_owned();
-    let page_label = STARTUP_PAGES
+    let page_label = startup_page_label(&page);
+    let options: Vec<String> = STARTUP_PAGES
         .iter()
-        .find(|(_, k)| *k == page)
-        .map_or("Home", |(l, _)| *l);
-    let options: Vec<String> = STARTUP_PAGES.iter().map(|(l, _)| (*l).to_owned()).collect();
+        .map(|k| startup_page_label(k))
+        .collect();
     if let Some(i) = select_row(
         ui,
         &pal,
-        "Startup page",
-        "Opened when Aulos launches.",
-        page_label,
+        &aulos_core::fl!("settings-startup-page-title"),
+        &aulos_core::fl!("settings-startup-page-desc"),
+        &page_label,
         &options,
     ) {
-        app.session.config.config.startup_page = STARTUP_PAGES[i].1.to_owned();
+        app.session.config.config.startup_page = STARTUP_PAGES[i].to_owned();
         app.session.config.save();
     }
 
     let provider = app.session.config.config.startup_provider.trim().to_owned();
-    let mut ids: Vec<(String, String)> = vec![("last".to_owned(), "Last used source".to_owned())];
+    let last_source = aulos_core::fl!("settings-startup-last-source");
+    let mut ids: Vec<(String, String)> = vec![("last".to_owned(), last_source.clone())];
     ids.extend(app.session.providers.provider_list.iter().cloned());
     let label = ids
         .iter()
         .find(|(id, _)| *id == provider || (provider.is_empty() && id == "last"))
-        .map_or_else(|| "Last used source".to_owned(), |(_, n)| n.clone());
+        .map_or_else(|| last_source.clone(), |(_, n)| n.clone());
     let names: Vec<String> = ids.iter().map(|(_, n)| n.clone()).collect();
     if let Some(i) = select_row(
         ui,
         &pal,
-        "Startup source",
-        "The library Aulos opens with.",
+        &aulos_core::fl!("settings-startup-source-title"),
+        &aulos_core::fl!("settings-startup-source-desc"),
         &label,
         &names,
     ) {
@@ -3303,8 +3502,8 @@ fn sec_startup(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Start playing on launch",
-        "Plays your library as soon as it has loaded.",
+        &aulos_core::fl!("settings-autoplay-launch-title"),
+        &aulos_core::fl!("settings-autoplay-launch-desc"),
         false,
         auto_play,
     ) {
@@ -3315,7 +3514,12 @@ fn sec_startup(app: &mut App, ui: &mut Ui) {
 
 fn sec_desktop(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Background playback", "Desktop integration");
+    heading(
+        ui,
+        &pal,
+        &aulos_core::fl!("settings-sec-desktop"),
+        &aulos_core::fl!("settings-desktop-note"),
+    );
     ui.add_space(4.0);
     let cfg = &app.session.config.config;
     let (background, notify, inhibit) = (
@@ -3326,8 +3530,8 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Keep playing when the window is closed",
-        "The window minimizes instead of quitting while music plays; MPRIS and media keys keep working.",
+        &aulos_core::fl!("settings-background-title"),
+        &aulos_core::fl!("settings-background-desc"),
         false,
         background,
     ) {
@@ -3337,8 +3541,8 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Notify on track change",
-        "A desktop notification with the cover while the window isn't focused.",
+        &aulos_core::fl!("settings-notify-title"),
+        &aulos_core::fl!("settings-notify-desc"),
         false,
         notify,
     ) {
@@ -3348,8 +3552,8 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
     if let Some(on) = toggle_row(
         ui,
         &pal,
-        "Prevent suspend while playing",
-        "Holds a desktop inhibit lock during playback.",
+        &aulos_core::fl!("settings-inhibit-title"),
+        &aulos_core::fl!("settings-inhibit-desc"),
         false,
         inhibit,
     ) {
@@ -3361,14 +3565,19 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
 
 fn sec_experimental(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "Experimental", "Features still being tested");
+    heading(
+        ui,
+        &pal,
+        &aulos_core::fl!("settings-experimental"),
+        &aulos_core::fl!("settings-experimental-note"),
+    );
     ui.add_space(4.0);
     let on = app.session.config.config.experimental_converter;
     if let Some(v) = toggle_row(
         ui,
         &pal,
-        "File converter",
-        "Shows the Converter page: transcode and rip local files.",
+        &aulos_core::fl!("settings-converter-title"),
+        &aulos_core::fl!("settings-converter-desc"),
         false,
         on,
     ) {
@@ -3379,7 +3588,7 @@ fn sec_experimental(app: &mut App, ui: &mut Ui) {
 
 fn sec_about(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    heading(ui, &pal, "About", "");
+    heading(ui, &pal, &aulos_core::fl!("settings-about"), "");
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new("Aulos")
@@ -3388,20 +3597,16 @@ fn sec_about(app: &mut App, ui: &mut Ui) {
     );
     small_text(
         ui,
-        &format!("Version {}", env!("CARGO_PKG_VERSION")),
+        &aulos_core::fl!("settings-version", version = env!("CARGO_PKG_VERSION")),
         pal.text_2,
     );
-    small_text(
-        ui,
-        "A music player for your own library. Licensed under GPL-3.0-only.",
-        pal.text_2,
-    );
+    small_text(ui, &aulos_core::fl!("settings-about-blurb"), pal.text_2);
     ui.add_space(10.0);
     let repository = env!("CARGO_PKG_REPOSITORY");
     if !repository.is_empty()
         && pill_button(
             ui,
-            "Project page",
+            &aulos_core::fl!("settings-project-page"),
             Some(ph::LINK),
             PillKind::Secondary,
             28.0,

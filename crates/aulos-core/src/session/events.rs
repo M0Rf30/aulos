@@ -380,7 +380,9 @@ impl Session {
     /// they run.
     pub fn bootstrap() -> (Self, Vec<ProviderInitError>) {
         crate::migrate::migrate_legacy_dirs();
-        Self::new(Config::load())
+        let config = Config::load();
+        crate::i18n::init_for(&config.language);
+        Self::new(config)
     }
 
     /// Everything the backend kicks off at launch: the first-launch intro

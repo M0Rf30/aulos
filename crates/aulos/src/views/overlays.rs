@@ -307,7 +307,7 @@ fn body_text(ui: &mut Ui, pal: Palette, text: &str) {
 
 /// Right-aligned footer: the buttons in `(label, icon, kind, action)` order,
 /// first entry rightmost.
-fn footer(ui: &mut Ui, buttons: &[(&str, Option<&str>, PillKind, Act)]) -> Act {
+fn footer(ui: &mut Ui, buttons: &[(String, Option<&str>, PillKind, Act)]) -> Act {
     let mut act = Act::None;
     ui.add_space(16.0);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -329,7 +329,11 @@ fn connect_dialog(ctx: &Context, pal: Palette, st: &State, has_local: bool) -> A
             badge(ui, regular::WIFI_SLASH, pal.danger);
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                title(ui, pal, &format!("Can't reach {}", c.provider));
+                title(
+                    ui,
+                    pal,
+                    &aulos_core::fl!("overlays-connect-title", provider = c.provider.clone()),
+                );
                 ui.add_space(4.0);
                 body_text(ui, pal, &c.reason);
             });
@@ -337,22 +341,35 @@ fn connect_dialog(ctx: &Context, pal: Palette, st: &State, has_local: bool) -> A
         if c.attempts > 1 {
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(format!("{} attempts failed", c.attempts))
-                    .font(theme::mono(11.0))
-                    .color(pal.text_3),
+                egui::RichText::new(aulos_core::fl!(
+                    "overlays-connect-attempts",
+                    count = c.attempts
+                ))
+                .font(theme::mono(11.0))
+                .color(pal.text_3),
             );
         }
         let mut buttons = vec![
             (
-                "Retry",
+                aulos_core::fl!("overlays-retry"),
                 Some(regular::ARROW_CLOCKWISE),
                 PillKind::Primary,
                 Act::Retry,
             ),
-            ("Edit server", None, PillKind::Ghost, Act::EditServer),
+            (
+                aulos_core::fl!("overlays-edit-server"),
+                None,
+                PillKind::Ghost,
+                Act::EditServer,
+            ),
         ];
         if has_local {
-            buttons.push(("Show local only", None, PillKind::Ghost, Act::LocalOnly));
+            buttons.push((
+                aulos_core::fl!("overlays-local-only"),
+                None,
+                PillKind::Ghost,
+                Act::LocalOnly,
+            ));
         }
         footer(ui, &buttons)
     })
@@ -369,9 +386,13 @@ fn auth_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
             badge(ui, regular::LOCK_KEY, pal.warn);
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                title(ui, pal, &format!("Sign in to {name}"));
+                title(
+                    ui,
+                    pal,
+                    &aulos_core::fl!("overlays-auth-title", name = name.clone()),
+                );
                 ui.add_space(4.0);
-                body_text(ui, pal, "The server rejected these credentials.");
+                body_text(ui, pal, &aulos_core::fl!("overlays-auth-rejected"));
             });
         });
         ui.add_space(4.0);
@@ -381,14 +402,21 @@ fn auth_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
                 .color(pal.text_3),
         );
         ui.add_space(12.0);
-        field_label(ui, pal, "Username");
-        crate::widgets::text_field(ui, &mut d.username, "Username", 360.0);
+        field_label(ui, pal, &aulos_core::fl!("overlays-username"));
+        crate::widgets::text_field(
+            ui,
+            &mut d.username,
+            &aulos_core::fl!("overlays-username"),
+            360.0,
+        );
         ui.add_space(8.0);
-        field_label(ui, pal, "Password");
+        field_label(ui, pal, &aulos_core::fl!("overlays-password"));
         ui.add(
             TextEdit::singleline(&mut d.password)
                 .password(true)
-                .hint_text(egui::RichText::new("Password").color(pal.text_3))
+                .hint_text(
+                    egui::RichText::new(aulos_core::fl!("overlays-password")).color(pal.text_3),
+                )
                 .desired_width(360.0)
                 .margin(vec2(10.0, 6.0))
                 .font(theme::regular(13.0))
@@ -398,8 +426,18 @@ fn auth_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
         let mut act = footer(
             ui,
             &[
-                ("Sign in", None, PillKind::Primary, Act::SignIn),
-                ("Cancel", None, PillKind::Ghost, Act::Dismiss),
+                (
+                    aulos_core::fl!("overlays-sign-in"),
+                    None,
+                    PillKind::Primary,
+                    Act::SignIn,
+                ),
+                (
+                    aulos_core::fl!("overlays-cancel"),
+                    None,
+                    PillKind::Ghost,
+                    Act::Dismiss,
+                ),
             ],
         );
         if act == Act::SignIn && !can_sign_in {
@@ -441,8 +479,13 @@ fn prompt_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
         let mut act = footer(
             ui,
             &[
-                (p.submit.as_str(), None, PillKind::Primary, Act::Submit),
-                ("Cancel", None, PillKind::Ghost, Act::Dismiss),
+                (p.submit.clone(), None, PillKind::Primary, Act::Submit),
+                (
+                    aulos_core::fl!("overlays-cancel"),
+                    None,
+                    PillKind::Ghost,
+                    Act::Dismiss,
+                ),
             ],
         );
         if (enter && can_submit) || (act == Act::Submit && !can_submit) {

@@ -87,7 +87,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
     ui.add_space(4.0);
     Frame::NONE.inner_margin(margin).show(ui, |ui| {
         ui.label(
-            egui::RichText::new("Folders")
+            egui::RichText::new(aulos_core::fl!("folders"))
                 .font(theme::semibold(26.0))
                 .color(pal.text),
         );
@@ -101,8 +101,8 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
             widgets::empty_state(
                 ui,
                 regular::FOLDER_SIMPLE,
-                "No folders yet",
-                "Add a music folder in Settings and its directory structure will show up here.",
+                &aulos_core::fl!("folders-empty-title"),
+                &aulos_core::fl!("folders-empty-body"),
                 None,
             );
         }
@@ -122,7 +122,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if widgets::pill_button(
                     ui,
-                    "Add to queue",
+                    &aulos_core::fl!("queue-add"),
                     Some(regular::LIST_PLUS),
                     PillKind::Secondary,
                     30.0,
@@ -134,7 +134,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 }
                 if widgets::pill_button(
                     ui,
-                    "Play folder",
+                    &aulos_core::fl!("play-folder"),
                     Some(regular::PLAY),
                     PillKind::Primary,
                     30.0,
@@ -430,7 +430,7 @@ fn tree_panel(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &m
 fn dir_label(dir: &Path) -> String {
     match dir.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
-        None if dir.as_os_str().is_empty() => "Library".to_owned(),
+        None if dir.as_os_str().is_empty() => aulos_core::fl!("folders-root"),
         None => dir.to_string_lossy().into_owned(),
     }
 }
@@ -445,8 +445,8 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
         widgets::empty_state(
             ui,
             regular::FOLDER_OPEN,
-            "This folder is empty",
-            "There are no songs or subfolders here.",
+            &aulos_core::fl!("folder-empty"),
+            &aulos_core::fl!("folder-empty-hint"),
             None,
         );
         return;
@@ -457,7 +457,7 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
         quality: true,
         rating: !app.narrow,
     };
-    widgets::track_header(ui, cols, "#");
+    widgets::track_header(ui, cols, &aulos_core::fl!("songs-column-number"));
     let total = dirs.len() + direct.len();
     let playing = app.session.playback.current_track.as_ref().map(|t| t.id);
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -486,11 +486,7 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                         true,
                     );
                     let count = tree.track_count_in(dir, true);
-                    let count_text = if count == 1 {
-                        "1 song".to_owned()
-                    } else {
-                        format!("{count} songs")
-                    };
+                    let count_text = aulos_core::fl!("folders-song-count", count = count);
                     let w = paint_text(
                         ui.painter(),
                         Rect::from_min_max(

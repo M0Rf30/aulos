@@ -165,20 +165,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         notice(
             &ctx,
             rect,
-            &format!("The visualizer could not start: {failure}"),
+            &aulos_core::fl!("viz-start-failed", reason = failure.to_string()),
         );
     } else if frame.entries.is_none() {
-        notice(&ctx, rect, "Starting the visualizer…");
+        notice(&ctx, rect, &aulos_core::fl!("viz-starting"));
     } else if frame.entries.as_ref().is_some_and(|e| e.is_empty()) {
         let dir = aulos_core::visualizer::presets::user_preset_dir().map_or_else(
-            || "the presets folder".into(),
+            || aulos_core::fl!("viz-presets-folder"),
             |dir| dir.display().to_string(),
         );
-        notice(
-            &ctx,
-            rect,
-            &format!("No MilkDrop presets found. Put .milk / .milk2 files in {dir}"),
-        );
+        notice(&ctx, rect, &aulos_core::fl!("viz-no-presets", dir = dir));
     }
 
     for intent in intents {
@@ -228,7 +224,7 @@ fn chip<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-fn hud_button<'a>(glyph: &'a str, tip: &'a str) -> IconBtn<'a> {
+fn hud_button<'a>(glyph: &'a str, tip: impl Into<std::borrow::Cow<'a, str>>) -> IconBtn<'a> {
     IconBtn::new(glyph)
         .size(CHIP_H - 2.0)
         .icon_size(15.0)
@@ -250,7 +246,10 @@ fn top_bar(
         .show(ctx, |ui| {
             ui.set_opacity(alpha);
             chip(ui, |ui| {
-                if hud_button(regular::X, "Close (Esc)").show(ui).clicked() {
+                if hud_button(regular::X, aulos_core::fl!("viz-close"))
+                    .show(ui)
+                    .clicked()
+                {
                     out.push(Intent::Close);
                 }
             });
@@ -266,9 +265,13 @@ fn top_bar(
             ui.horizontal(|ui| {
                 chip(ui, |ui| {
                     let (glyph, tip, filled) = if settings.locked {
-                        (fill::LOCK, "Preset locked (L)", true)
+                        (fill::LOCK, aulos_core::fl!("viz-preset-locked-tip"), true)
                     } else {
-                        (regular::LOCK_OPEN, "Lock the preset (L)", false)
+                        (
+                            regular::LOCK_OPEN,
+                            aulos_core::fl!("viz-lock-preset-tip"),
+                            false,
+                        )
                     };
                     let mut button = hud_button(glyph, tip).filled(filled);
                     if settings.locked {
@@ -279,7 +282,7 @@ fn top_bar(
                     }
                     if settings.locked {
                         ui.label(
-                            egui::RichText::new("Preset locked")
+                            egui::RichText::new(aulos_core::fl!("viz-preset-locked"))
                                 .font(theme::regular(12.5))
                                 .color(Color32::WHITE),
                         );
@@ -289,7 +292,7 @@ fn top_bar(
                 chip(ui, |ui| {
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new("Beat")
+                        egui::RichText::new(aulos_core::fl!("viz-beat"))
                             .font(theme::regular(12.5))
                             .color(Color32::WHITE),
                     );
@@ -299,26 +302,26 @@ fn top_bar(
                         vec2(60.0, 20.0),
                         Color32::WHITE,
                     );
-                    resp.on_hover_text("Beat sensitivity");
+                    resp.on_hover_text(aulos_core::fl!("viz-beat-sensitivity"));
                     if let Some(v) = new {
                         out.push(Intent::Sensitivity(v * 2.0));
                     }
                     ui.add_space(6.0);
                 });
                 chip(ui, |ui| {
-                    if hud_button(regular::SKIP_BACK, "Previous preset (←)")
+                    if hud_button(regular::SKIP_BACK, aulos_core::fl!("viz-previous-preset"))
                         .show(ui)
                         .clicked()
                     {
                         out.push(Intent::Step(-1));
                     }
-                    if hud_button(regular::SHUFFLE, "Random preset")
+                    if hud_button(regular::SHUFFLE, aulos_core::fl!("viz-random-preset"))
                         .show(ui)
                         .clicked()
                     {
                         out.push(Intent::Random);
                     }
-                    if hud_button(regular::SKIP_FORWARD, "Next preset (→)")
+                    if hud_button(regular::SKIP_FORWARD, aulos_core::fl!("viz-next-preset"))
                         .show(ui)
                         .clicked()
                     {
@@ -326,17 +329,26 @@ fn top_bar(
                     }
                 });
                 chip(ui, |ui| {
-                    if hud_button(regular::LIST_MAGNIFYING_GLASS, "Preset browser (P)")
-                        .active(st.browser)
-                        .show(ui)
-                        .clicked()
+                    if hud_button(
+                        regular::LIST_MAGNIFYING_GLASS,
+                        aulos_core::fl!("viz-preset-browser"),
+                    )
+                    .active(st.browser)
+                    .show(ui)
+                    .clicked()
                     {
                         out.push(Intent::ToggleBrowser);
                     }
                     let (glyph, tip) = if st.fullscreen {
-                        (regular::ARROWS_IN_SIMPLE, "Leave fullscreen (F)")
+                        (
+                            regular::ARROWS_IN_SIMPLE,
+                            aulos_core::fl!("viz-leave-fullscreen"),
+                        )
                     } else {
-                        (regular::ARROWS_OUT_SIMPLE, "Fullscreen (F)")
+                        (
+                            regular::ARROWS_OUT_SIMPLE,
+                            aulos_core::fl!("viz-fullscreen"),
+                        )
                     };
                     if hud_button(glyph, tip).show(ui).clicked() {
                         out.push(Intent::ToggleFullscreen);
@@ -448,7 +460,7 @@ fn browser(
                     ui.set_width(BROWSER_W - 20.0);
                     ui.set_height(height - 20.0);
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    let hint = format!("Search {} presets", entries.len());
+                    let hint = aulos_core::fl!("viz-search-presets", count = entries.len());
                     let before = st.query.clone();
                     search_field(ui, &mut st.query, &hint, BROWSER_W - 20.0, search_id);
                     if before != st.query {
@@ -468,7 +480,7 @@ fn browser(
                     if st.rows.is_empty() {
                         ui.add_space(12.0);
                         ui.label(
-                            egui::RichText::new("No preset matches")
+                            egui::RichText::new(aulos_core::fl!("viz-no-match"))
                                 .font(theme::regular(12.5))
                                 .color(t.pal.text_3),
                         );

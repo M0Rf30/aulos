@@ -9,6 +9,7 @@ repository.workspace = true
 # UI-only crate: depends on `aulos-core` (the backend), never the other way round.
 [dependencies]
 aulos-core.workspace = true
+i18n-embed-fl.workspace = true
 eframe = "0.36.2"
 egui = "0.36.2"
 egui_extras = "0.36.2"

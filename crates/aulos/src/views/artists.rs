@@ -183,22 +183,21 @@ pub(crate) fn scanning_banner(
             pal.text_1,
         );
     } else {
-        left += paint_text(
-            &painter,
-            row(left),
-            Align::Min,
-            "Scanning ",
-            theme::regular(13.0),
-            pal.text_1,
-        );
-        left += paint_text(
-            &painter,
-            row(left),
-            Align::Min,
-            &progress.root,
-            theme::mono(12.0),
-            pal.text_1,
-        );
+        let title = aulos_core::fl!("scan-progress-title", root = progress.root.as_str());
+        // The folder path is set in mono; the surrounding words come from the
+        // translated sentence.
+        let (before, after) = title
+            .split_once(progress.root.as_str())
+            .unwrap_or((title.as_str(), ""));
+        for (text, font) in [
+            (before, theme::regular(13.0)),
+            (progress.root.as_str(), theme::mono(12.0)),
+            (after, theme::regular(13.0)),
+        ] {
+            if !text.is_empty() {
+                left += paint_text(&painter, row(left), Align::Min, text, font, pal.text_1);
+            }
+        }
     }
     let fraction = progress.fraction();
     let mut bar_right = right;
@@ -503,50 +502,83 @@ fn browse(app: &mut App, ui: &mut Ui) {
             .content_margin(Margin::ZERO)
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                Frame::NONE.inner_margin(Margin::symmetric(pad as i8, 0)).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    page_title(ui, &pal, "Artists", &count.to_string());
-                    ui.add_space(16.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        if chip(ui, "Album artists", !split, None).clicked() && split {
-                            out.split = Some(false);
-                        }
-                        if chip(ui, "All credited", split, None).clicked() && !split {
-                            out.split = Some(true);
-                        }
-                        if chip(ui, "Favourites", favourites_only, None).clicked() {
-                            out.toggle_favourites = true;
-                        }
-                    });
-                    ui.add_space(16.0);
-
-                    if lib.scanning && lib.artists.is_empty() {
-                        scanning_banner(ui, &pal, &lib.scan_progress.snapshot(), "Scanning your library…");
+                Frame::NONE
+                    .inner_margin(Margin::symmetric(pad as i8, 0))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        page_title(ui, &pal, &aulos_core::fl!("artists"), &count.to_string());
                         ui.add_space(16.0);
-                        skeleton_grid(ui);
-                    } else if count == 0 {
-                        empty(ui, a, favourites_only, &mut out);
-                    } else if list {
-                        list_body(ui, a, artists, rows, count, &mut out);
-                    } else {
-                        grid_body(ui, a, artists, rows, count, &mut out);
-                    }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if chip(
+                                ui,
+                                &aulos_core::fl!("artists-filter-album-artists"),
+                                !split,
+                                None,
+                            )
+                            .clicked()
+                                && split
+                            {
+                                out.split = Some(false);
+                            }
+                            if chip(
+                                ui,
+                                &aulos_core::fl!("artists-filter-all-credited"),
+                                split,
+                                None,
+                            )
+                            .clicked()
+                                && !split
+                            {
+                                out.split = Some(true);
+                            }
+                            if chip(
+                                ui,
+                                &aulos_core::fl!("filter-favourites"),
+                                favourites_only,
+                                None,
+                            )
+                            .clicked()
+                            {
+                                out.toggle_favourites = true;
+                            }
+                        });
+                        ui.add_space(16.0);
 
-                    if count > 0 && !online {
-                        ui.add_space(24.0);
-                        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
-                        paint_text(
-                            ui.painter(),
-                            rect,
-                            Align::Center,
-                            "Photos appear when Online data › Artist photos is on. Until then artists get initials on a tint.",
-                            theme::regular(12.0),
-                            pal.text_3,
-                        );
-                    }
-                    ui.add_space(32.0);
-                });
+                        if lib.scanning && lib.artists.is_empty() {
+                            scanning_banner(
+                                ui,
+                                &pal,
+                                &lib.scan_progress.snapshot(),
+                                &aulos_core::fl!("genres-scanning"),
+                            );
+                            ui.add_space(16.0);
+                            skeleton_grid(ui);
+                        } else if count == 0 {
+                            empty(ui, a, favourites_only, &mut out);
+                        } else if list {
+                            list_body(ui, a, artists, rows, count, &mut out);
+                        } else {
+                            grid_body(ui, a, artists, rows, count, &mut out);
+                        }
+
+                        if count > 0 && !online {
+                            ui.add_space(24.0);
+                            let (rect, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 16.0),
+                                Sense::hover(),
+                            );
+                            paint_text(
+                                ui.painter(),
+                                rect,
+                                Align::Center,
+                                &aulos_core::fl!("artists-photos-hint"),
+                                theme::regular(12.0),
+                                pal.text_3,
+                            );
+                        }
+                        ui.add_space(32.0);
+                    });
             });
     }
 
@@ -577,24 +609,24 @@ fn empty(ui: &mut Ui, a: &App, favourites_only: bool, out: &mut BrowseOut) {
         empty_state(
             ui,
             regular::MICROPHONE,
-            "No matching artists",
-            &format!("Nothing in your artists matches “{query}”."),
+            &aulos_core::fl!("artists-no-matches-title"),
+            &aulos_core::fl!("artists-no-matches-body", query = query.as_str()),
             None,
         );
     } else if favourites_only {
         empty_state(
             ui,
             regular::HEART,
-            "No favourite artists",
-            "Heart a few songs and the artists behind them show up here.",
+            &aulos_core::fl!("artists-no-favourites-title"),
+            &aulos_core::fl!("artists-no-favourites-body"),
             None,
         );
     } else if empty_state(
         ui,
         regular::MICROPHONE,
-        "No artists yet",
-        "Add a music folder or connect an MPD or Subsonic server. Artists appear as soon as the first files are scanned.",
-        Some("Open Settings"),
+        &aulos_core::fl!("artists-empty-title"),
+        &aulos_core::fl!("artists-empty-body"),
+        Some(&aulos_core::fl!("home-open-settings")),
     ) {
         out.settings = true;
     }
@@ -761,11 +793,26 @@ fn list_body(
         head.left() + 10.0 + 40.0 + GAP,
         (albums_l - GAP - head.left() - 64.0).max(0.0),
         Align::Min,
-        "ARTIST",
+        &aulos_core::fl!("artists-column-artist").to_uppercase(),
     );
-    label(albums_l, ALBUMS_W, Align::Max, "ALBUMS");
-    label(songs_l, SONGS_W, Align::Max, "SONGS");
-    label(length_l, LENGTH_W, Align::Max, "LENGTH");
+    label(
+        albums_l,
+        ALBUMS_W,
+        Align::Max,
+        &aulos_core::fl!("albums").to_uppercase(),
+    );
+    label(
+        songs_l,
+        SONGS_W,
+        Align::Max,
+        &aulos_core::fl!("songs").to_uppercase(),
+    );
+    label(
+        length_l,
+        LENGTH_W,
+        Align::Max,
+        &aulos_core::fl!("artists-column-length").to_uppercase(),
+    );
     painter.hline(
         head.x_range(),
         head.bottom() - 0.5,
@@ -932,15 +979,15 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
                         ui,
                         &pal,
                         &lib.scan_progress.snapshot(),
-                        "Loading your library…",
+                        &aulos_core::fl!("artists-loading"),
                     );
                 });
         } else if empty_state(
             ui,
             regular::MICROPHONE,
-            "Artist not found",
-            &format!("“{name}” is not in your library any more."),
-            Some("All artists"),
+            &aulos_core::fl!("artists-not-found-title"),
+            &aulos_core::fl!("artists-not-found-body", name = name),
+            Some(&aulos_core::fl!("artists-all")),
         ) {
             app.navigate(Route::Artists);
         }
@@ -1072,11 +1119,11 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
         .as_ref()
         .map(|t| t.genres.as_str())
         .unwrap_or("");
-    let mut summary = format!(
-        "{} · {} · {}",
-        artist.albums_label(),
-        plural(artist.track_count(), "song"),
-        format_duration_coarse(artist.total_secs)
+    let mut summary = aulos_core::fl!(
+        "artists-summary",
+        albums = artist.albums_label(),
+        songs = aulos_core::fl!("artists-song-count", count = artist.track_count()),
+        duration = format_duration_coarse(artist.total_secs)
     );
     if !genres.is_empty() {
         summary.push_str(" · ");
@@ -1095,7 +1142,7 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if pill_button(
                     ui,
-                    "Play",
+                    &aulos_core::fl!("play"),
                     Some(regular::PLAY),
                     PillKind::Primary,
                     34.0,
@@ -1107,7 +1154,7 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
                 }
                 if pill_button(
                     ui,
-                    "Shuffle",
+                    &aulos_core::fl!("shuffle"),
                     Some(regular::SHUFFLE),
                     PillKind::Secondary,
                     34.0,
@@ -1124,7 +1171,7 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
                     .size(34.0)
                     .icon_size(17.0)
                     .round(true)
-                    .tip("More")
+                    .tip(aulos_core::fl!("artists-more"))
                     .show(ui);
                 if let Some(action) = menus::artist_menu_click(&more, &artist.name) {
                     out.action = Some(action);
@@ -1136,10 +1183,6 @@ fn hero(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
             label_text(ui, &artist.name, theme::bold(42.0), pal.text);
         },
     );
-}
-
-fn plural(n: usize, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
@@ -1154,7 +1197,12 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
     if ranked.is_empty() {
         return;
     }
-    label_text(ui, "Top tracks", theme::semibold(17.0), a.pal.text);
+    label_text(
+        ui,
+        &aulos_core::fl!("artists-top-tracks"),
+        theme::semibold(17.0),
+        a.pal.text,
+    );
     ui.add_space(10.0);
     let current = a.session.playback.current_track.as_ref().map(|t| t.id);
     for (i, track) in ranked.iter().enumerate() {
@@ -1198,10 +1246,16 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
         .filter(|b| !b.trim().is_empty());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        label_text(ui, "About", theme::semibold(17.0), pal.text);
+        label_text(
+            ui,
+            &aulos_core::fl!("artists-about"),
+            theme::semibold(17.0),
+            pal.text,
+        );
         if bio.is_some() {
             let font = theme::mono(10.5);
-            let text = "via MusicBrainz · Wikipedia";
+            let text = aulos_core::fl!("artists-bio-source");
+            let text = text.as_str();
             let w = text_width(ui, text, font.clone()) + 12.0;
             let (rect, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
             ui.painter().rect_stroke(
@@ -1226,10 +1280,14 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
         );
         if preview.is_long {
             ui.add_space(6.0);
-            let label = if expanded { "Show less" } else { "Show more" };
+            let label = if expanded {
+                aulos_core::fl!("artist-bio-less")
+            } else {
+                aulos_core::fl!("artist-bio-more")
+            };
             let link = ui.add(
                 egui::Label::new(
-                    RichText::new(label)
+                    RichText::new(label.as_str())
                         .font(theme::medium(12.5))
                         .color(a.accent.text),
                 )
@@ -1248,13 +1306,13 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
         }
     } else if online {
         ui.label(
-            RichText::new("No biography found for this artist.")
+            RichText::new(aulos_core::fl!("artists-no-bio"))
                 .font(theme::regular(13.0))
                 .color(pal.text_2),
         );
     } else {
         ui.label(
-            RichText::new("Online data is opt-in · Settings › Online data")
+            RichText::new(aulos_core::fl!("artists-online-opt-in"))
                 .font(theme::regular(12.0))
                 .color(pal.text_3),
         );
@@ -1263,7 +1321,12 @@ fn about(ui: &mut Ui, a: &App, name: &str, out: &mut DetailOut) {
 
 fn discography(ui: &mut Ui, a: &App, artist: &Artist, out: &mut DetailOut) {
     let pal = a.pal;
-    label_text(ui, "Albums", theme::semibold(17.0), pal.text);
+    label_text(
+        ui,
+        &aulos_core::fl!("albums"),
+        theme::semibold(17.0),
+        pal.text,
+    );
     ui.add_space(12.0);
     let (card_w, gap_x, gap_y) = (148.0, 20.0, 24.0);
     let cell_h = card_w + 8.0 + 18.0 + 16.0;

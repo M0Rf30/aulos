@@ -124,7 +124,7 @@ pub(super) fn progress(app: &App) -> Progress {
     };
     let shown = Duration::from_secs_f32(frac * duration.as_secs_f32());
     let elapsed = if live {
-        "LIVE".to_owned()
+        aulos_core::fl!("now-playing-live")
     } else {
         format_duration(shown.as_secs())
     };
@@ -243,7 +243,7 @@ pub(super) fn transport_row(app: &mut App, ui: &mut Ui, row: Rect, st: &Transpor
             .icon_size(st.side_icon)
             .color(if shuffle { t.accent.text } else { SUB })
             .dot(shuffle)
-            .tip("Shuffle"),
+            .tip(aulos_core::fl!("shuffle")),
     ) {
         let u = app.session.toggle_shuffle();
         app.run(u);
@@ -257,7 +257,7 @@ pub(super) fn transport_row(app: &mut App, ui: &mut Ui, row: Rect, st: &Transpor
             .icon_size(st.skip_icon)
             .color(Color32::WHITE)
             .enabled(has_track)
-            .tip("Previous"),
+            .tip(aulos_core::fl!("previous")),
     ) {
         let u = app.session.previous_track();
         app.run(u);
@@ -284,7 +284,11 @@ pub(super) fn transport_row(app: &mut App, ui: &mut Ui, row: Rect, st: &Transpor
         true,
     );
     if resp
-        .on_hover_text(if playing { "Pause" } else { "Play" })
+        .on_hover_text(if playing {
+            aulos_core::fl!("pause")
+        } else {
+            aulos_core::fl!("play")
+        })
         .clicked()
     {
         app.toggle_play();
@@ -299,7 +303,7 @@ pub(super) fn transport_row(app: &mut App, ui: &mut Ui, row: Rect, st: &Transpor
             .icon_size(st.skip_icon)
             .color(Color32::WHITE)
             .enabled(has_track)
-            .tip("Next"),
+            .tip(aulos_core::fl!("next")),
     ) {
         let u = app.session.next_track();
         app.run(u);
@@ -317,7 +321,7 @@ pub(super) fn transport_row(app: &mut App, ui: &mut Ui, row: Rect, st: &Transpor
             .icon_size(st.side_icon)
             .color(if on { t.accent.text } else { SUB })
             .dot(on)
-            .tip("Repeat"),
+            .tip(aulos_core::fl!("repeat")),
     ) {
         let u = app.session.cycle_repeat();
         app.run(u);
@@ -338,7 +342,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.painter(),
             mid,
             Align::Center,
-            "Nothing playing",
+            &aulos_core::fl!("expanded-nothing-playing"),
             theme::semibold(16.0),
             SUB,
         );
@@ -403,7 +407,7 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
             .size(32.0)
             .icon_size(16.0)
             .color(Color32::WHITE)
-            .tip("Collapse (Esc)")
+            .tip(aulos_core::fl!("expanded-collapse-tip"))
             .show(ui)
     });
     if collapse.inner.clicked() {
@@ -419,7 +423,7 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
             .size(32.0)
             .icon_size(17.0)
             .color(SOFT)
-            .tip("Mini player")
+            .tip(aulos_core::fl!("mini-player"))
             .show(ui)
     });
     if mini.inner.clicked() {
@@ -437,7 +441,7 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
                 .size(32.0)
                 .icon_size(17.0)
                 .color(SOFT)
-                .tip("Visualizer")
+                .tip(aulos_core::fl!("viz-toggle"))
                 .show(ui)
         });
         if toggle.inner.clicked() {
@@ -469,16 +473,16 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
 
     let mid_w = (rect.width() - 2.0 * side).max(40.0);
     let heading = if track.is_some_and(|t| !t.album.is_empty()) {
-        "PLAYING FROM ALBUM"
+        aulos_core::fl!("expanded-heading-album").to_uppercase()
     } else {
-        "NOW PLAYING"
+        aulos_core::fl!("expanded-heading-now-playing").to_uppercase()
     };
     let label = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(mid_w, 14.0));
     paint_text_spaced(
         ui.painter(),
         label,
         Align::Center,
-        heading,
+        &heading,
         theme::semibold(10.5),
         CAPTION,
         1.05,
@@ -533,7 +537,7 @@ fn volume_popover(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
                 .size(32.0)
                 .icon_size(17.0)
                 .color(if muted { t.pal.danger } else { SOFT })
-                .tip("Volume")
+                .tip(aulos_core::fl!("volume"))
                 .show(ui)
         })
         .inner;
@@ -544,7 +548,11 @@ fn volume_popover(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
                 .size(28.0)
                 .icon_size(16.0)
                 .color(if muted { t.pal.danger } else { t.pal.text_2 })
-                .tip(if muted { "Unmute" } else { "Mute" })
+                .tip(if muted {
+                    aulos_core::fl!("expanded-unmute")
+                } else {
+                    aulos_core::fl!("expanded-mute")
+                })
                 .show(ui)
                 .clicked()
             {
@@ -584,7 +592,7 @@ fn volume_control(app: &mut App, ui: &mut Ui, right: f32, cy: f32) {
                 } else {
                     SOFT
                 })
-                .tip("Mute")
+                .tip(aulos_core::fl!("expanded-mute"))
                 .show(ui)
         })
         .inner
@@ -741,7 +749,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
                 .size(30.0)
                 .icon_size(22.0)
                 .color(SUB)
-                .tip("More")
+                .tip(aulos_core::fl!("expanded-more"))
                 .show(ui)
         })
         .inner;
@@ -762,9 +770,9 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     paint_icon(ui.painter(), heart.center(), glyph, 22.0, color, fav);
     if hresp
         .on_hover_text(if fav {
-            "Remove from favourites"
+            aulos_core::fl!("favorite-remove")
         } else {
-            "Add to favourites"
+            aulos_core::fl!("favorite-add")
         })
         .clicked()
     {
@@ -802,7 +810,10 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
         chip(
             ui,
             pos2(cx, chips_y),
-            &format!("RG {gain:+.1} dB").replace('-', "\u{2212}"),
+            &aulos_core::fl!(
+                "expanded-replaygain-chip",
+                gain = format!("{gain:+.1}").replace('-', "\u{2212}")
+            ),
             false,
             SOFT,
             Color32::WHITE.alpha(0.09),
@@ -857,8 +868,13 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
 
 fn right_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     // Tabs.
-    let labels = ["Lyrics", "Up next"];
-    let widths = labels.map(|l| text_width(ui, l, theme::semibold(13.0)) + 28.0);
+    let labels = [
+        aulos_core::fl!("lyrics"),
+        aulos_core::fl!("expanded-up-next"),
+    ];
+    let widths = labels
+        .each_ref()
+        .map(|l| text_width(ui, l, theme::semibold(13.0)) + 28.0);
     let tabs = Rect::from_min_size(col.min, vec2(widths[0] + widths[1] + 4.0 + 6.0, 36.0));
     ui.painter()
         .rect_filled(tabs, CornerRadius::same(8), Color32::from_black_alpha(71));
@@ -939,7 +955,7 @@ fn right_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
                 ui.painter(),
                 mid,
                 Align::Center,
-                "Nothing queued",
+                &aulos_core::fl!("expanded-nothing-queued"),
                 theme::semibold(15.0),
                 SUB,
             );
@@ -974,16 +990,16 @@ fn right_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
             ui.painter(),
             head,
             Align::Min,
-            "UP NEXT",
+            &aulos_core::fl!("expanded-up-next").to_uppercase(),
             theme::semibold(10.5),
             CAPTION,
             1.05,
         );
         let total: Duration = upcoming.iter().map(|t| t.duration).sum();
-        let more = format!(
-            "{} more \u{00B7} {}",
-            upcoming.len(),
-            format_duration_coarse(total.as_secs())
+        let more = aulos_core::fl!(
+            "expanded-more-queued",
+            count = upcoming.len(),
+            duration = format_duration_coarse(total.as_secs())
         );
         paint_text(
             ui.painter(),
@@ -1118,16 +1134,16 @@ fn lyrics_view(
     match lyrics {
         None => {
             let (title, hint) = if status.loading {
-                ("Looking for lyrics\u{2026}", "")
+                (aulos_core::fl!("expanded-lyrics-searching"), String::new())
             } else if status.searched {
                 (
-                    "No lyrics found",
-                    "Nothing embedded in the file or published online.",
+                    aulos_core::fl!("expanded-lyrics-not-found"),
+                    aulos_core::fl!("expanded-lyrics-not-found-hint"),
                 )
             } else {
                 (
-                    "No lyrics",
-                    "None embedded in the file or in a .lrc next to it.",
+                    aulos_core::fl!("expanded-lyrics-none"),
+                    aulos_core::fl!("expanded-lyrics-none-hint"),
                 )
             };
             let mid = Rect::from_center_size(area.center(), vec2(area.width(), 44.0));
@@ -1135,7 +1151,7 @@ fn lyrics_view(
                 ui.painter(),
                 Rect::from_min_size(mid.min, vec2(mid.width(), 22.0)),
                 Align::Center,
-                title,
+                &title,
                 theme::semibold(16.0),
                 SUB,
             );
@@ -1143,7 +1159,7 @@ fn lyrics_view(
                 ui.painter(),
                 Rect::from_min_size(pos2(mid.left(), mid.top() + 24.0), vec2(mid.width(), 20.0)),
                 Align::Center,
-                hint,
+                &hint,
                 theme::regular(13.0),
                 CAPTION,
             );
@@ -1154,7 +1170,7 @@ fn lyrics_view(
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
                         pill_button(
                             ui,
-                            "Search online",
+                            &aulos_core::fl!("expanded-search-online"),
                             Some(regular::MAGNIFYING_GLASS),
                             PillKind::Secondary,
                             32.0,

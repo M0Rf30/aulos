@@ -10,7 +10,7 @@ struct Item {
     route: Route,
     icon: &'static str,
     icon_fill: &'static str,
-    label: &'static str,
+    label: fn() -> String,
     key: Option<&'static str>,
 }
 
@@ -19,49 +19,49 @@ const LIBRARY: [Item; 7] = [
         route: Route::Home,
         icon: regular::HOUSE,
         icon_fill: fill::HOUSE,
-        label: "Home",
+        label: || aulos_core::fl!("sidebar-home"),
         key: Some("1"),
     },
     Item {
         route: Route::Albums,
         icon: regular::VINYL_RECORD,
         icon_fill: fill::VINYL_RECORD,
-        label: "Albums",
+        label: || aulos_core::fl!("sidebar-albums"),
         key: Some("2"),
     },
     Item {
         route: Route::Artists,
         icon: regular::MICROPHONE,
         icon_fill: fill::MICROPHONE,
-        label: "Artists",
+        label: || aulos_core::fl!("sidebar-artists"),
         key: Some("3"),
     },
     Item {
         route: Route::Songs,
         icon: regular::MUSIC_NOTES,
         icon_fill: fill::MUSIC_NOTES,
-        label: "Songs",
+        label: || aulos_core::fl!("sidebar-songs"),
         key: Some("4"),
     },
     Item {
         route: Route::Genres,
         icon: regular::SHAPES,
         icon_fill: fill::SHAPES,
-        label: "Genres",
+        label: || aulos_core::fl!("sidebar-genres"),
         key: Some("5"),
     },
     Item {
         route: Route::Folders,
         icon: regular::FOLDER_SIMPLE,
         icon_fill: fill::FOLDER_SIMPLE,
-        label: "Folders",
+        label: || aulos_core::fl!("sidebar-folders"),
         key: Some("6"),
     },
     Item {
         route: Route::Playlists,
         icon: regular::PLAYLIST,
         icon_fill: fill::PLAYLIST,
-        label: "Playlists",
+        label: || aulos_core::fl!("sidebar-playlists"),
         key: Some("7"),
     },
 ];
@@ -71,14 +71,14 @@ const LISTEN: [Item; 2] = [
         route: Route::Podcasts,
         icon: regular::MICROPHONE_STAGE,
         icon_fill: fill::MICROPHONE_STAGE,
-        label: "Podcasts",
+        label: || aulos_core::fl!("sidebar-podcasts"),
         key: Some("8"),
     },
     Item {
         route: Route::Radio,
         icon: regular::RADIO,
         icon_fill: fill::RADIO,
-        label: "Radio",
+        label: || aulos_core::fl!("sidebar-radio"),
         key: None,
     },
 ];
@@ -129,7 +129,7 @@ fn wide_row(
         ui.painter(),
         text_rect,
         Align::Min,
-        it.label,
+        &(it.label)(),
         theme::medium(13.0),
         fg,
     );
@@ -162,7 +162,7 @@ fn rail_row(ui: &mut Ui, pal: &Palette, it: &Item, selected: bool) -> Response {
         (it.icon, false)
     };
     paint_icon(ui.painter(), rect.center(), glyph, 18.0, fg, filled);
-    resp.on_hover_text(it.label)
+    resp.on_hover_text((it.label)())
 }
 
 fn logo(ui: &Ui, origin: egui::Pos2, accent: egui::Color32, ink: egui::Color32) {
@@ -234,7 +234,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.id().with("collapse"),
                 Sense::click(),
             )
-            .on_hover_text("Collapse sidebar");
+            .on_hover_text(aulos_core::fl!("sidebar-collapse"));
         paint_icon(
             ui.painter(),
             pos2(row.right() - 18.0, row.center().y),
@@ -265,20 +265,25 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
-                    section_label(ui, "LIBRARY", 10.0, false);
+                    section_label(ui, &aulos_core::fl!("sidebar-section-library"), 10.0, false);
                     for it in &LIBRARY {
                         if wide_row(ui, &pal, it, current == it.route, 32.0, 17.0, it.key).clicked()
                         {
                             goto(app, &it.route);
                         }
                     }
-                    section_label(ui, "LISTEN", 16.0, false);
+                    section_label(ui, &aulos_core::fl!("sidebar-section-listen"), 16.0, false);
                     for it in &LISTEN {
                         if wide_row(ui, &pal, it, current == it.route, 32.0, 17.0, None).clicked() {
                             goto(app, &it.route);
                         }
                     }
-                    if section_label(ui, "PLAYLISTS", 16.0, true) {
+                    if section_label(
+                        ui,
+                        &aulos_core::fl!("sidebar-section-playlists"),
+                        16.0,
+                        true,
+                    ) {
                         crate::views::playlists::begin_create(app);
                     }
                     playlist_list(app, ui, &pal);
@@ -290,7 +295,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     route: Route,
                     icon: &'static str,
                     icon_fill: &'static str,
-                    label: &'static str,
+                    label: fn() -> String,
                     lab: bool| {
             let selected = current == route;
             let it = Item {
@@ -321,7 +326,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     ui.painter(),
                     r,
                     Align::Center,
-                    "LAB",
+                    &aulos_core::fl!("sidebar-lab-badge"),
                     theme::mono_semibold(9.5),
                     pal.text_3,
                 );
@@ -333,7 +338,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             Route::Tagger,
             regular::TAG,
             fill::TAG,
-            "Tag editor",
+            || aulos_core::fl!("sidebar-tag-editor"),
             false,
         );
         if converter {
@@ -342,7 +347,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 Route::Converter,
                 regular::ARROWS_LEFT_RIGHT,
                 fill::ARROWS_LEFT_RIGHT,
-                "Converter",
+                || aulos_core::fl!("sidebar-converter"),
                 true,
             )
             .or(go);
@@ -363,7 +368,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             route: Route::Settings,
             icon: regular::GEAR_SIX,
             icon_fill: fill::GEAR_SIX,
-            label: "Settings",
+            label: || aulos_core::fl!("sidebar-settings"),
             key: None,
         };
         let resp = wide_row(
@@ -418,7 +423,9 @@ fn section_label(ui: &mut Ui, text: &str, top: f32, plus: bool) -> bool {
             },
             false,
         );
-        clicked = r.on_hover_text("New playlist").clicked();
+        clicked = r
+            .on_hover_text(aulos_core::fl!("sidebar-new-playlist"))
+            .clicked();
     }
     clicked
 }
@@ -549,7 +556,7 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
             if !app.narrow {
                 let resp = ui
                     .interact(row, ui.id().with("expand"), Sense::click())
-                    .on_hover_text("Expand sidebar");
+                    .on_hover_text(aulos_core::fl!("sidebar-expand"));
                 if resp.clicked() {
                     app.sidebar_collapsed = false;
                 }
@@ -613,7 +620,7 @@ fn rail(app: &mut App, ui: &mut Ui, pal: &Palette) {
                 route: Route::Settings,
                 icon: regular::GEAR_SIX,
                 icon_fill: fill::GEAR_SIX,
-                label: "Settings",
+                label: || aulos_core::fl!("sidebar-settings"),
                 key: None,
             };
             let resp = rail_row(ui, pal, &settings, current == Route::Settings);

@@ -340,6 +340,9 @@ pub struct Config {
     /// Interface zoom, [`Self::UI_SCALE_MIN`]–[`Self::UI_SCALE_MAX`]; 1.0
     /// follows the display's own scale factor unchanged. Loading clamps it.
     pub ui_scale: f32,
+    /// Interface language as a BCP 47 tag (`"it"`, `"pt-BR"`); empty follows
+    /// the system language.
+    pub language: String,
     /// Visualizer: keep the current preset instead of rotating.
     pub visualizer_locked: bool,
     /// Visualizer beat sensitivity, 0.0–2.0 (1.0 is neutral). Loading clamps it.
@@ -471,6 +474,7 @@ impl Default for Config {
             reduce_motion: false,
             grid_scale: 1.0,
             ui_scale: 1.0,
+            language: String::new(),
             visualizer_locked: false,
             visualizer_sensitivity: 1.0,
             visualizer_preset: None,

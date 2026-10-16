@@ -67,12 +67,12 @@ fn track_info(app: &mut App, ui: &mut Ui) {
         );
         ui.vertical(|ui| {
             ui.label(
-                egui::RichText::new("Nothing playing")
+                egui::RichText::new(aulos_core::fl!("nowbar-nothing-playing"))
                     .font(theme::semibold(13.5))
                     .color(t.pal.text_2),
             );
             ui.label(
-                egui::RichText::new("Pick an album or a song")
+                egui::RichText::new(aulos_core::fl!("nowbar-pick-something"))
                     .font(theme::regular(12.5))
                     .color(t.pal.text_3),
             );
@@ -158,9 +158,9 @@ fn track_info(app: &mut App, ui: &mut Ui) {
     paint_icon(ui.painter(), hrect.center(), glyph, 16.0, color, filled);
     if hresp
         .on_hover_text(if fav {
-            "Remove from favourites"
+            aulos_core::fl!("nowbar-favorite-remove")
         } else {
-            "Add to favourites"
+            aulos_core::fl!("nowbar-favorite-add")
         })
         .clicked()
     {
@@ -197,7 +197,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 .icon_size(16.0)
                 .color(if shuffle { t.accent.text } else { t.pal.text_2 })
                 .dot(shuffle)
-                .tip("Shuffle")
+                .tip(aulos_core::fl!("nowbar-shuffle"))
                 .show(ui)
                 .clicked()
             {
@@ -209,7 +209,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 .icon_size(17.0)
                 .color(t.pal.text)
                 .enabled(has_track)
-                .tip("Previous")
+                .tip(aulos_core::fl!("nowbar-previous"))
                 .show(ui)
                 .clicked()
             {
@@ -232,7 +232,11 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 true,
             );
             if resp
-                .on_hover_text(if playing { "Pause" } else { "Play" })
+                .on_hover_text(if playing {
+                    aulos_core::fl!("nowbar-pause")
+                } else {
+                    aulos_core::fl!("nowbar-play")
+                })
                 .clicked()
             {
                 app.toggle_play();
@@ -243,7 +247,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                     .icon_size(15.0)
                     .color(t.pal.text_2)
                     .enabled(has_track)
-                    .tip("Stop")
+                    .tip(aulos_core::fl!("nowbar-stop"))
                     .show(ui)
                     .clicked()
             {
@@ -255,7 +259,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 .icon_size(17.0)
                 .color(t.pal.text)
                 .enabled(has_track)
-                .tip("Next")
+                .tip(aulos_core::fl!("nowbar-next"))
                 .show(ui)
                 .clicked()
             {
@@ -271,7 +275,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
                 .icon_size(16.0)
                 .color(if on { t.accent.text } else { t.pal.text_2 })
                 .dot(on)
-                .tip("Repeat")
+                .tip(aulos_core::fl!("nowbar-repeat"))
                 .show(ui)
                 .clicked()
             {
@@ -292,7 +296,7 @@ fn transport(app: &mut App, ui: &mut Ui, col: Rect) {
     let (line, _) = ui.allocate_exact_size(vec2(width, 16.0), Sense::hover());
     let shown = Duration::from_secs_f32(frac * duration.as_secs_f32());
     let elapsed = if live {
-        "LIVE".to_owned()
+        aulos_core::fl!("nowbar-live")
     } else {
         format_duration(shown.as_secs())
     };
@@ -374,10 +378,11 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         regular::SPEAKER_HIGH
     };
     let muted = vol <= 0.001;
-    let mut speaker_btn =
-        IconBtn::new(speaker)
-            .icon_size(16.0)
-            .tip(if app.narrow { "Volume" } else { "Mute" });
+    let mut speaker_btn = IconBtn::new(speaker).icon_size(16.0).tip(if app.narrow {
+        aulos_core::fl!("nowbar-volume")
+    } else {
+        aulos_core::fl!("nowbar-mute")
+    });
     if muted {
         speaker_btn = speaker_btn.color(t.pal.danger);
     }
@@ -391,7 +396,11 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
                     .size(28.0)
                     .icon_size(16.0)
                     .color(if muted { t.pal.danger } else { t.pal.text_2 })
-                    .tip(if muted { "Unmute" } else { "Mute" })
+                    .tip(if muted {
+                        aulos_core::fl!("nowbar-unmute")
+                    } else {
+                        aulos_core::fl!("nowbar-mute")
+                    })
                     .show(ui)
                     .clicked()
                 {
@@ -417,7 +426,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     // Buttons, right to left: expand, [visualizer], properties, lyrics, queue.
     if IconBtn::new(regular::ARROWS_OUT_SIMPLE)
         .icon_size(16.0)
-        .tip("Expand")
+        .tip(aulos_core::fl!("nowbar-expand"))
         .show(ui)
         .clicked()
     {
@@ -428,7 +437,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         && app.viz_available()
         && IconBtn::new(regular::WAVEFORM)
             .icon_size(16.0)
-            .tip("Visualizer")
+            .tip(aulos_core::fl!("nowbar-visualizer"))
             .show(ui)
             .clicked()
     {
@@ -439,7 +448,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
         if IconBtn::new(regular::INFO)
             .icon_size(16.0)
             .active(open)
-            .tip("Properties")
+            .tip(aulos_core::fl!("nowbar-properties"))
             .show(ui)
             .clicked()
         {
@@ -456,7 +465,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     }
     if IconBtn::new(regular::MICROPHONE_STAGE)
         .icon_size(16.0)
-        .tip("Lyrics")
+        .tip(aulos_core::fl!("nowbar-lyrics"))
         .show(ui)
         .clicked()
     {
@@ -467,7 +476,7 @@ fn side_controls(app: &mut App, ui: &mut Ui) {
     if IconBtn::new(regular::QUEUE)
         .icon_size(16.0)
         .active(open)
-        .tip("Queue")
+        .tip(aulos_core::fl!("nowbar-queue"))
         .show(ui)
         .clicked()
     {

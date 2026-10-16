@@ -27,7 +27,14 @@ const LOADING_GRACE: Duration = Duration::from_millis(700);
 const ROW_H: f32 = 58.0;
 const TAB_SAVED: usize = 0;
 const TAB_DISCOVER: usize = 1;
-const MODES: [&str; 3] = ["Name", "Tag", "Country"];
+
+fn mode_labels() -> [String; 3] {
+    [
+        aulos_core::fl!("radio-mode-name"),
+        aulos_core::fl!("radio-mode-tag"),
+        aulos_core::fl!("radio-mode-country"),
+    ]
+}
 
 /// What the Discover list currently shows, so Retry can repeat it.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -110,12 +117,12 @@ fn padded<R>(ui: &mut Ui, pad: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-fn sort_label(order: SortOrder) -> &'static str {
+fn sort_label(order: SortOrder) -> String {
     match order {
-        SortOrder::Clickcount => "Most played",
-        SortOrder::Votes => "Most voted",
-        SortOrder::Name => "Name",
-        SortOrder::Bitrate => "Bitrate",
+        SortOrder::Clickcount => aulos_core::fl!("radio-sort-most-played"),
+        SortOrder::Votes => aulos_core::fl!("radio-sort-most-voted"),
+        SortOrder::Name => aulos_core::fl!("radio-sort-name"),
+        SortOrder::Bitrate => aulos_core::fl!("radio-sort-bitrate"),
     }
 }
 
@@ -190,13 +197,19 @@ fn header(ui: &mut Ui, cx: &Ctx, st: &mut State, radio: &RadioState, intents: &m
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
             ui.label(
-                RichText::new("Radio")
+                RichText::new(aulos_core::fl!("radio"))
                     .font(theme::semibold(26.0))
                     .color(cx.pal.text),
             );
-            let saved = format!("Saved · {}", radio.stations.len());
+            let saved = aulos_core::fl!("radio-tab-saved", count = radio.stations.len());
+            let discover_label = aulos_core::fl!("radio-tab-discover");
             let mut tab = st.tab;
-            if segmented(ui, &mut tab, &[saved.as_str(), "Discover"], 28.0) {
+            if segmented(
+                ui,
+                &mut tab,
+                &[saved.as_str(), discover_label.as_str()],
+                28.0,
+            ) {
                 st.tab = tab;
                 if tab == TAB_DISCOVER {
                     intents.push(Intent::DiscoverTab);
@@ -205,7 +218,7 @@ fn header(ui: &mut Ui, cx: &Ctx, st: &mut State, radio: &RadioState, intents: &m
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if pill_button(
                     ui,
-                    "Add by URL",
+                    &aulos_core::fl!("radio-add-by-url"),
                     Some(regular::PLUS),
                     PillKind::Secondary,
                     30.0,
@@ -225,13 +238,27 @@ fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
     padded(ui, cx.pad, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            text_field(ui, &mut st.add_name, "Station name (optional)", 180.0);
+            text_field(
+                ui,
+                &mut st.add_name,
+                &aulos_core::fl!("radio-add-name-placeholder"),
+                180.0,
+            );
             let resp = text_field(ui, &mut st.add_url, "https://example.com/stream.mp3", 320.0);
             if resp.changed() {
                 st.add_error = None;
             }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if pill_button(ui, "Add station", None, PillKind::Primary, 32.0, 0.0).clicked() || enter
+            if pill_button(
+                ui,
+                &aulos_core::fl!("radio-add-station"),
+                None,
+                PillKind::Primary,
+                32.0,
+                0.0,
+            )
+            .clicked()
+                || enter
             {
                 intents.push(Intent::SubmitAdd);
             }
@@ -264,7 +291,8 @@ fn search_box(ui: &mut Ui, cx: &Ctx, st: &mut State, id: egui::Id) -> bool {
     );
 
     let mode_font = theme::medium(12.0);
-    let widths: Vec<f32> = MODES
+    let modes = mode_labels();
+    let widths: Vec<f32> = modes
         .iter()
         .map(|m| text_width(ui, m, mode_font.clone()) + 16.0)
         .collect();
@@ -280,7 +308,7 @@ fn search_box(ui: &mut Ui, cx: &Ctx, st: &mut State, id: egui::Id) -> bool {
         );
         ui.painter().rect_filled(seg, CornerRadius::same(5), pal.bg);
         let mut x = seg.left() + 2.0;
-        for (i, (label, w)) in MODES.iter().zip(&widths).enumerate() {
+        for (i, (label, w)) in modes.iter().zip(&widths).enumerate() {
             let cell = Rect::from_min_size(pos2(x, seg.top() + 2.0), vec2(*w, 20.0));
             let resp = ui.interact(cell, id.with(("mode", i)), Sense::click());
             let sel = st.mode == i;
@@ -326,12 +354,12 @@ fn search_box(ui: &mut Ui, cx: &Ctx, st: &mut State, id: egui::Id) -> bool {
     );
     let hint = if discover {
         match st.mode {
-            0 => "Search stations by name",
-            1 => "Search by tag, e.g. jazz",
-            _ => "Country code, e.g. IT",
+            0 => aulos_core::fl!("radio-search-by-name"),
+            1 => aulos_core::fl!("radio-search-by-tag"),
+            _ => aulos_core::fl!("radio-search-by-country"),
         }
     } else {
-        "Filter saved stations"
+        aulos_core::fl!("radio-filter-saved")
     };
     let text = if discover {
         &mut st.search
@@ -355,7 +383,7 @@ fn chips(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             if chip(
                 ui,
-                "Popular",
+                &aulos_core::fl!("radio-preset-popular"),
                 st.last == Last::Preset(PresetKind::Popular),
                 None,
             )
@@ -365,7 +393,7 @@ fn chips(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
             }
             if chip(
                 ui,
-                "Top voted",
+                &aulos_core::fl!("radio-preset-top-voted"),
                 st.last == Last::Preset(PresetKind::TopVoted),
                 None,
             )
@@ -382,7 +410,7 @@ fn chips(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
             let order = st.sort.unwrap_or_default();
             let sort = chip(
                 ui,
-                &format!("Sort: {}", sort_label(order)),
+                &aulos_core::fl!("radio-sort-label", order = sort_label(order)),
                 false,
                 Some(regular::CARET_DOWN),
             );
@@ -457,9 +485,9 @@ fn saved(
         } else if empty_state(
             ui,
             regular::RADIO,
-            "No saved stations",
-            "Find stations in Discover and tap the heart, or add a stream URL.",
-            Some("Open Discover"),
+            &aulos_core::fl!("radio-saved-empty-title"),
+            &aulos_core::fl!("radio-saved-empty-body"),
+            Some(aulos_core::fl!("radio-open-discover").as_str()),
         ) {
             st.tab = TAB_DISCOVER;
             intents.push(Intent::DiscoverTab);
@@ -471,8 +499,8 @@ fn saved(
         empty_state(
             ui,
             regular::MAGNIFYING_GLASS,
-            "No matching stations",
-            "Try a different name or tag.",
+            &aulos_core::fl!("radio-no-filter-matches"),
+            &aulos_core::fl!("radio-no-filter-matches-hint"),
             None,
         );
         return;
@@ -526,18 +554,14 @@ fn discover(
         return;
     }
     if radio.search_error.is_some() {
-        let body = format!(
-            "Discover needs the online station directory. Your {} saved station{} still play.",
-            radio.stations.len(),
-            if radio.stations.len() == 1 { "" } else { "s" }
-        );
+        let body = aulos_core::fl!("radio-unreachable-body", count = radio.stations.len());
         let (retry, saved) = empty_state_actions(
             ui,
             regular::CELL_SIGNAL_X,
-            "Station directory is unreachable",
+            &aulos_core::fl!("radio-unreachable-title"),
             &body,
-            "Retry",
-            Some("Go to Saved"),
+            &aulos_core::fl!("radio-retry"),
+            Some(aulos_core::fl!("radio-go-to-saved").as_str()),
             true,
         );
         if retry {
@@ -556,8 +580,8 @@ fn discover(
             empty_state(
                 ui,
                 regular::RADIO,
-                "No stations found",
-                "Try a broader tag or clear the filters.",
+                &aulos_core::fl!("radio-no-results"),
+                &aulos_core::fl!("radio-no-results-hint"),
                 None,
             );
         }
@@ -589,7 +613,7 @@ fn result_row<'a>(
         parts.push(r.countrycode.clone());
     }
     if r.votes > 0 {
-        parts.push(format!("{} votes", compact(r.votes)));
+        parts.push(aulos_core::fl!("radio-votes", votes = compact(r.votes)));
     }
     RowData {
         name: &r.name,
@@ -688,7 +712,7 @@ fn station_row(
             badge(
                 ui.painter(),
                 pos2(name_x, rect.center().y - 10.0),
-                "ON AIR",
+                &aulos_core::fl!("radio-on-air"),
                 cx.accent.text,
                 cx.accent.fill.alpha(0.16),
             );
@@ -708,7 +732,7 @@ fn station_row(
                 ui.painter(),
                 meta_rect,
                 Align::Min,
-                &format!("\u{266A} Now: {n}"),
+                &aulos_core::fl!("radio-now", title = n),
                 theme::regular(12.0),
                 cx.accent.text,
             );
@@ -760,9 +784,9 @@ fn station_row(
         filled,
     );
     let heart = heart.on_hover_text(if d.saved {
-        "Remove from saved"
+        aulos_core::fl!("radio-remove-from-saved")
     } else {
-        "Save station"
+        aulos_core::fl!("radio-save-station")
     });
 
     if heart.clicked() {
@@ -775,25 +799,28 @@ fn station_row(
         intents.push(Intent::Play(d.target.clone()));
     }
     resp.context_menu(|ui| {
-        if ui.button("Play").clicked() {
+        if ui.button(aulos_core::fl!("play")).clicked() {
             intents.push(Intent::Play(d.target.clone()));
             ui.close();
         }
         match d.saved_id {
             Some(id) => {
-                if ui.button("Rename").clicked() {
+                if ui.button(aulos_core::fl!("radio-rename")).clicked() {
                     st.renaming = Some((id, d.name.to_owned()));
                     st.rename_focus = true;
                     ui.close();
                 }
-                if ui.button("Remove from saved").clicked() {
+                if ui
+                    .button(aulos_core::fl!("radio-remove-from-saved"))
+                    .clicked()
+                {
                     intents.push(Intent::Remove(id));
                     ui.close();
                 }
             }
             None => {
                 if let Target::Result(uuid) = &d.target
-                    && ui.button("Save station").clicked()
+                    && ui.button(aulos_core::fl!("radio-save-station")).clicked()
                 {
                     intents.push(Intent::SaveResult(uuid.clone()));
                     ui.close();
@@ -878,11 +905,18 @@ fn apply(app: &mut App, intent: Intent) {
             if let Some((station, effect)) = app.session.radio.remove(id) {
                 app.run(effect);
                 let name = station.name.clone();
+                // Fluent can't split around the bold station name, so format
+                // once with a sentinel and cut the message at it.
+                const MARK: &str = "\u{1}";
+                let msg = aulos_core::fl!("radio-removed-toast", name = MARK);
+                let (prefix, suffix) = msg.split_once(MARK).unwrap_or((&msg, ""));
+                let prefix = prefix.trim_end_matches('\u{2068}').to_owned();
+                let suffix = suffix.trim_start_matches('\u{2069}').to_owned();
                 app.toast_rich(
                     regular::TRASH,
-                    "Removed ",
+                    prefix,
                     name,
-                    " from saved stations",
+                    suffix,
                     Some(crate::app::ToastAction::RestoreStation(station)),
                 );
             }
@@ -931,7 +965,7 @@ fn apply(app: &mut App, intent: Intent) {
             match app.session.radio.add_by_url(name, url) {
                 Ok(effect) => {
                     app.run(effect);
-                    app.toast("Adding station…");
+                    app.toast(aulos_core::fl!("radio-adding-toast"));
                     let st = &mut app.views.radio;
                     st.add_open = false;
                     st.add_name.clear();
@@ -939,11 +973,10 @@ fn apply(app: &mut App, intent: Intent) {
                     st.add_error = None;
                 }
                 Err(UrlError::Empty) => {
-                    app.views.radio.add_error = Some("Enter a stream URL".to_owned())
+                    app.views.radio.add_error = Some(aulos_core::fl!("radio-add-url-required"))
                 }
                 Err(UrlError::NotHttp) => {
-                    app.views.radio.add_error =
-                        Some("The URL must start with http:// or https://".to_owned())
+                    app.views.radio.add_error = Some(aulos_core::fl!("radio-add-url-invalid"))
                 }
             }
         }

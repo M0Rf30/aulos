@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 .icon_size(15.0)
                 .enabled(app.can_go_back())
                 .color(t.pal.text_1)
-                .tip("Back")
+                .tip(aulos_core::fl!("toolbar-back"))
                 .show(ui);
             if back.clicked() {
                 app.go_back();
@@ -41,7 +41,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 .icon_size(15.0)
                 .enabled(app.can_go_forward())
                 .color(t.pal.text_1)
-                .tip("Forward")
+                .tip(aulos_core::fl!("toolbar-forward"))
                 .show(ui);
             if fwd.clicked() {
                 app.go_forward();
@@ -51,12 +51,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             // Search: min(320, 42%).
             let width = 320.0_f32.min(inner.width() * 0.42);
             let hint = if app.narrow {
-                "Search"
+                aulos_core::fl!("toolbar-search-short")
             } else {
-                "Search albums, artists, songs"
+                aulos_core::fl!("toolbar-search-long")
             };
             let id = app.search_id;
-            let resp = search_field(ui, &mut app.search, hint, width, id);
+            let resp = search_field(ui, &mut app.search, &hint, width, id);
             if resp.changed() {
                 let effect = app.session.set_search_query(app.search.clone());
                 app.run(effect);
@@ -202,8 +202,10 @@ fn sources_menu(app: &mut App, ui: &mut Ui) {
         .active_index
         .filter(|_| providers.provider_list.len() > 1)
         .and_then(|i| providers.provider_list.get(i))
-        .map_or("All sources", |(_, name)| name.as_str())
-        .to_owned();
+        .map_or_else(
+            || aulos_core::fl!("toolbar-all-sources"),
+            |(_, name)| name.clone(),
+        );
     let resp = dropdown_button(ui, regular::HARD_DRIVES, &label);
 
     let entries: Vec<(usize, String, bool)> = {

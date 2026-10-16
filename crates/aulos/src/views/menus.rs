@@ -142,12 +142,26 @@ fn track_menu_with(
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
-                if menu_item(ui, regular::MICROPHONE, "Go to artist", Trailing::None).clicked() {
+                if menu_item(
+                    ui,
+                    regular::MICROPHONE,
+                    &aulos_core::fl!("menu-go-to-artist"),
+                    Trailing::None,
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::Open(Route::Artist(
                         track.grouping_artist().to_owned(),
                     )));
                 }
-                if menu_item(ui, regular::INFO, "Properties", Trailing::Key("Alt ↵")).clicked() {
+                if menu_item(
+                    ui,
+                    regular::INFO,
+                    &aulos_core::fl!("properties"),
+                    Trailing::Key("Alt ↵"),
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::TrackProperties(track.clone()));
                 }
                 if is_taggable(track) {
@@ -164,19 +178,23 @@ fn track_menu_with(
 fn tag_items(ui: &mut Ui, tracks: &[Track]) -> Option<MenuAction> {
     let mut out = None;
     for (icon, label, action) in [
-        (regular::TAG, "Edit tags…", TagAction::Edit),
+        (
+            regular::TAG,
+            aulos_core::fl!("menu-edit-tags"),
+            TagAction::Edit,
+        ),
         (
             regular::MAGNIFYING_GLASS,
-            "Look up on MusicBrainz",
+            aulos_core::fl!("menu-lookup-musicbrainz"),
             TagAction::LookUp,
         ),
         (
             regular::FINGERPRINT,
-            "Scan with AcoustID",
+            aulos_core::fl!("menu-scan-acoustid"),
             TagAction::AcoustId,
         ),
     ] {
-        if menu_item(ui, icon, label, Trailing::None).clicked() {
+        if menu_item(ui, icon, &label, Trailing::None).clicked() {
             out = Some(MenuAction::Tag {
                 tracks: tracks.to_vec(),
                 action,
@@ -234,13 +252,20 @@ fn album_menu_with(
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
-                if menu_item(ui, regular::MICROPHONE, "Go to artist", Trailing::None).clicked() {
+                if menu_item(
+                    ui,
+                    regular::MICROPHONE,
+                    &aulos_core::fl!("menu-go-to-artist"),
+                    Trailing::None,
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::Open(Route::Artist(album.artist.clone())));
                 }
                 if menu_item(
                     ui,
                     regular::INFO,
-                    "Album properties",
+                    &aulos_core::fl!("album-properties"),
                     Trailing::Key("Alt ↵"),
                 )
                 .clicked()
@@ -298,14 +323,28 @@ fn genre_menu_with(response: &Response, name: &str, click: bool) -> Option<MenuA
             },
             tail: &|ui: &mut Ui, pal: Palette| {
                 let mut out = None;
-                if menu_item(ui, regular::SHUFFLE, "Shuffle", Trailing::None).clicked() {
+                if menu_item(
+                    ui,
+                    regular::SHUFFLE,
+                    &aulos_core::fl!("shuffle"),
+                    Trailing::None,
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::PlayGenre {
                         name: name.to_owned(),
                         shuffle: true,
                     });
                 }
                 separator(ui, pal);
-                if menu_item(ui, regular::SHAPES, "Go to genre", Trailing::None).clicked() {
+                if menu_item(
+                    ui,
+                    regular::SHAPES,
+                    &aulos_core::fl!("menus-go-to-genre"),
+                    Trailing::None,
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::Open(Route::Genre(name.to_owned())));
                 }
                 out
@@ -335,7 +374,14 @@ fn artist_menu_with(response: &Response, name: &str, click: bool) -> Option<Menu
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
-                if menu_item(ui, regular::MICROPHONE, "Go to artist", Trailing::None).clicked() {
+                if menu_item(
+                    ui,
+                    regular::MICROPHONE,
+                    &aulos_core::fl!("menu-go-to-artist"),
+                    Trailing::None,
+                )
+                .clicked()
+                {
                     out = Some(MenuAction::Open(Route::Artist(name.to_owned())));
                 }
                 out
@@ -453,24 +499,43 @@ fn main_column(
 ) -> (Option<MenuAction>, Option<(Rect, bool)>) {
     let mut out = None;
     let mut row = None;
-    if menu_item(ui, regular::PLAY, "Play", Trailing::Key("Enter")).clicked() {
+    if menu_item(
+        ui,
+        regular::PLAY,
+        &aulos_core::fl!("play"),
+        Trailing::Key("Enter"),
+    )
+    .clicked()
+    {
         out = Some((spec.play)(Play::Now));
     }
     if menu_item(
         ui,
         regular::ARROW_BEND_DOWN_RIGHT,
-        "Play next",
+        &aulos_core::fl!("queue-play-next"),
         Trailing::None,
     )
     .clicked()
     {
         out = Some((spec.play)(Play::Next));
     }
-    if menu_item(ui, regular::LIST_PLUS, "Add to queue", Trailing::None).clicked() {
+    if menu_item(
+        ui,
+        regular::LIST_PLUS,
+        &aulos_core::fl!("queue-add"),
+        Trailing::None,
+    )
+    .clicked()
+    {
         out = Some((spec.play)(Play::Queue));
     }
     if spec.playlists.is_some() {
-        let item = menu_item(ui, regular::PLAYLIST, "Add to playlist", Trailing::Caret);
+        let item = menu_item(
+            ui,
+            regular::PLAYLIST,
+            &aulos_core::fl!("menu-add-to-playlist"),
+            Trailing::Caret,
+        );
         row = Some((item.rect, item.hovered()));
     }
     let tail = (spec.tail)(ui, pal);
@@ -481,7 +546,14 @@ fn main_column(
 fn submenu(ui: &mut Ui, pal: Palette, spec: &Spec) -> Option<MenuAction> {
     let uris = (spec.uris)();
     let mut out = None;
-    if menu_item(ui, regular::PLUS, "New playlist…", Trailing::None).clicked() {
+    if menu_item(
+        ui,
+        regular::PLUS,
+        &aulos_core::fl!("menus-new-playlist"),
+        Trailing::None,
+    )
+    .clicked()
+    {
         out = Some(MenuAction::NewPlaylist(uris.clone()));
     }
     separator(ui, pal);
@@ -489,7 +561,7 @@ fn submenu(ui: &mut Ui, pal: Palette, spec: &Spec) -> Option<MenuAction> {
     if playlists.is_empty() {
         ui.add_space(4.0);
         ui.label(
-            egui::RichText::new("No playlists yet")
+            egui::RichText::new(aulos_core::fl!("menus-no-playlists"))
                 .font(theme::regular(12.5))
                 .color(pal.text_3),
         );
@@ -570,7 +642,10 @@ pub fn apply(app: &mut App, action: MenuAction) {
                     let update = app.session.play_album(index, 0);
                     app.run(update);
                 }
-                None => app.toast_error(format!("{album} is not in the library")),
+                None => app.toast_error(aulos_core::fl!(
+                    "menus-album-not-in-library",
+                    album = album.as_str()
+                )),
             }
         }
         MenuAction::QueueAlbum {
@@ -586,12 +661,15 @@ pub fn apply(app: &mut App, action: MenuAction) {
                 let update = app.session.queue_from(source, next);
                 app.run(update);
             }
-            None => app.toast_error(format!("{album} is not in the library")),
+            None => app.toast_error(aulos_core::fl!(
+                "menus-album-not-in-library",
+                album = album.as_str()
+            )),
         },
         MenuAction::PlayArtist(name) => {
             let tracks = artist_tracks(app, &name);
             if tracks.is_empty() {
-                app.toast_error(format!("No tracks for {name}"));
+                app.toast_error(aulos_core::fl!("menus-no-tracks-for", name = name.as_str()));
             } else {
                 let update = app.session.play_tracks(tracks, 0);
                 app.run(update);
@@ -600,7 +678,7 @@ pub fn apply(app: &mut App, action: MenuAction) {
         MenuAction::PlayGenre { name, shuffle } => {
             let tracks = app.session.library.tracks_in_genre(&name);
             if tracks.is_empty() {
-                app.toast_error(format!("No tracks for {name}"));
+                app.toast_error(aulos_core::fl!("menus-no-tracks-for", name = name.as_str()));
             } else {
                 let mut start = 0;
                 if shuffle {
@@ -620,7 +698,7 @@ pub fn apply(app: &mut App, action: MenuAction) {
         MenuAction::QueueGenre { name, next } => {
             let tracks = app.session.library.tracks_in_genre(&name);
             if tracks.is_empty() {
-                app.toast_error(format!("No tracks for {name}"));
+                app.toast_error(aulos_core::fl!("menus-no-tracks-for", name = name.as_str()));
             } else {
                 let placement = if next {
                     QueuePlacement::Next
@@ -634,7 +712,7 @@ pub fn apply(app: &mut App, action: MenuAction) {
         MenuAction::QueueArtist { name, next } => {
             let tracks = artist_tracks(app, &name);
             if tracks.is_empty() {
-                app.toast_error(format!("No tracks for {name}"));
+                app.toast_error(aulos_core::fl!("menus-no-tracks-for", name = name.as_str()));
             } else {
                 let placement = if next {
                     QueuePlacement::Next
@@ -654,10 +732,10 @@ pub fn apply(app: &mut App, action: MenuAction) {
         MenuAction::NewPlaylist(uris) => {
             overlays::prompt(
                 app,
-                "New playlist",
-                "Name",
-                "Playlist name",
-                "Create",
+                &aulos_core::fl!("menus-new-playlist-title"),
+                &aulos_core::fl!("menus-prompt-name"),
+                &aulos_core::fl!("menus-prompt-name-hint"),
+                &aulos_core::fl!("menus-prompt-create"),
                 move |app, name| {
                     save_as_playlist(app, name, uris);
                 },
@@ -814,7 +892,12 @@ mod tests {
     fn artist_context_menu_rows_stack_vertically() {
         assert_rows_stack(
             |r| artist_menu(r, "Someone"),
-            &["Play", "Play next", "Add to queue", "Go to artist"],
+            &[
+                "Play",
+                "Play next",
+                "Add to queue",
+                &aulos_core::fl!("menu-go-to-artist"),
+            ],
         );
     }
 

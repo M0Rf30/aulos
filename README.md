@@ -90,6 +90,10 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 - **Internet radio**: search the [radio-browser.info](https://www.radio-browser.info) directory by name, tag or country, or browse the most-clicked and most-voted stations. The title of the song currently playing is read from the stream. PLS/M3U links are supported, and dropped streams reconnect automatically.
 - **Podcasts**: find shows through the iTunes directory or subscribe to any RSS/Atom feed. Episodes can be streamed or downloaded for offline listening.
 
+### Languages
+
+English, Italian, German, French, Spanish and Brazilian Portuguese. The interface follows the system language; change it in Settings → Appearance → Language. Translations live in `i18n/<tag>/aulos.ftl` (Fluent); fixes and new languages are welcome.
+
 ### Desktop integration
 
 - **Media keys and now playing**: MPRIS on Linux, System Media Transport Controls on Windows, Now Playing on macOS, including cover art and seeking.

@@ -76,9 +76,9 @@ fn apply(app: &mut App, action: Action) {
                 .queue_from(QueueSource::Album { album, track: None }, next);
             app.run(u);
             app.toast(if next {
-                "Playing next"
+                aulos_core::fl!("albums-toast-playing-next")
             } else {
-                "Added to queue"
+                aulos_core::fl!("albums-toast-added-to-queue")
             });
         }
         Action::Menu(a) => menus::apply(app, a),
@@ -94,11 +94,11 @@ fn apply(app: &mut App, action: Action) {
 }
 
 /// The name shown for an album; untagged files have none.
-fn album_title(name: &str) -> &str {
+fn album_title(name: &str) -> std::borrow::Cow<'_, str> {
     if name.trim().is_empty() {
-        "Unknown album"
+        std::borrow::Cow::Owned(aulos_core::fl!("unknown-album"))
     } else {
-        name
+        std::borrow::Cow::Borrowed(name)
     }
 }
 
@@ -166,7 +166,7 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
 
     ui.add_space(4.0);
     if total == 0 {
-        padded(ui, pad, |ui| title_row(ui, "Albums", "0"));
+        padded(ui, pad, |ui| title_row(ui, &aulos_core::fl!("albums"), "0"));
         ui.add_space(16.0);
         if scanning {
             loading_state(app, ui, pad);
@@ -191,7 +191,7 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
     };
     padded(ui, pad, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        title_row(ui, "Albums", &visible.len().to_string());
+        title_row(ui, &aulos_core::fl!("albums"), &visible.len().to_string());
         ui.add_space(17.0);
         filter_chips(app, ui, &decades, &genres);
         if searching {
@@ -209,18 +209,18 @@ fn list_page(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         padded(ui, pad, |ui| {
             let (title, body, button) = if searching {
                 (
-                    "No albums match",
-                    "Nothing in your library matches this search.",
-                    "Clear search",
+                    aulos_core::fl!("albums-no-match-search-title"),
+                    aulos_core::fl!("albums-no-match-search-body"),
+                    aulos_core::fl!("albums-no-match-search-clear"),
                 )
             } else {
                 (
-                    "No albums match these filters",
-                    "Try a different kind, decade or genre.",
-                    "Clear filters",
+                    aulos_core::fl!("albums-no-match-filters-title"),
+                    aulos_core::fl!("albums-no-match-filters-body"),
+                    aulos_core::fl!("albums-no-match-filters-clear"),
                 )
             };
-            if empty_state(ui, regular::VINYL_RECORD, title, body, Some(button)) {
+            if empty_state(ui, regular::VINYL_RECORD, &title, &body, Some(&button)) {
                 if searching {
                     actions.push(Action::ClearSearch);
                 } else {
@@ -242,15 +242,24 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         let kinds = [
-            ("All", None),
-            ("Albums", Some(ReleaseKind::Album)),
-            ("EPs", Some(ReleaseKind::Ep)),
-            ("Singles", Some(ReleaseKind::Single)),
-            ("Compilations", Some(ReleaseKind::Compilation)),
-            ("Live", Some(ReleaseKind::Live)),
+            (aulos_core::fl!("albums-filter-all"), None),
+            (aulos_core::fl!("albums"), Some(ReleaseKind::Album)),
+            (aulos_core::fl!("albums-filter-eps"), Some(ReleaseKind::Ep)),
+            (
+                aulos_core::fl!("albums-filter-singles"),
+                Some(ReleaseKind::Single),
+            ),
+            (
+                aulos_core::fl!("albums-filter-compilations"),
+                Some(ReleaseKind::Compilation),
+            ),
+            (
+                aulos_core::fl!("albums-filter-live"),
+                Some(ReleaseKind::Live),
+            ),
         ];
         for (label, kind) in kinds {
-            if chip(ui, label, app.views.albums.filter.kind == kind, None).clicked() {
+            if chip(ui, &label, app.views.albums.filter.kind == kind, None).clicked() {
                 app.views.albums.filter.set_kind(kind);
             }
         }
@@ -264,14 +273,17 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) 
             let current = app.views.albums.filter.decade;
             let label = match current {
                 Some(d) => format!("{d}s"),
-                None => "Decade".to_owned(),
+                None => aulos_core::fl!("albums-filter-decade"),
             };
             let resp = chip(ui, &label, current.is_some(), Some(regular::CARET_DOWN));
             let mut chosen: Option<Option<u32>> = None;
             egui::Popup::menu(&resp).show(|ui| {
                 ui.set_min_width(120.0);
                 if ui
-                    .selectable_label(current.is_none(), "Any decade")
+                    .selectable_label(
+                        current.is_none(),
+                        aulos_core::fl!("albums-filter-any-decade"),
+                    )
                     .clicked()
                 {
                     chosen = Some(None);
@@ -293,7 +305,9 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) 
         }
         if !genres.is_empty() {
             let current = app.views.albums.filter.genre.clone();
-            let label = current.clone().unwrap_or_else(|| "Genre".to_owned());
+            let label = current
+                .clone()
+                .unwrap_or_else(|| aulos_core::fl!("genre-label"));
             let resp = chip(ui, &label, current.is_some(), Some(regular::CARET_DOWN));
             let mut chosen: Option<Option<String>> = None;
             egui::Popup::menu(&resp).show(|ui| {
@@ -302,7 +316,10 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) 
                     .max_height(320.0)
                     .show(ui, |ui| {
                         if ui
-                            .selectable_label(current.is_none(), "Any genre")
+                            .selectable_label(
+                                current.is_none(),
+                                aulos_core::fl!("albums-filter-any-genre"),
+                            )
                             .clicked()
                         {
                             chosen = Some(None);
@@ -324,7 +341,14 @@ fn filter_chips(app: &mut App, ui: &mut Ui, decades: &[u32], genres: &[String]) 
             }
         }
         let favourites = app.views.albums.filter.favourites;
-        if chip(ui, "Favourites", favourites, None).clicked() {
+        if chip(
+            ui,
+            &aulos_core::fl!("albums-filter-favourites"),
+            favourites,
+            None,
+        )
+        .clicked()
+        {
             app.views.albums.filter.set_favourites(!favourites);
         }
     });
@@ -342,16 +366,25 @@ fn search_banner(app: &App, ui: &mut Ui, matches: usize, total: usize, actions: 
                 .color(pal.text),
         );
         ui.label(
-            egui::RichText::new(format!("of {total} albums match “{}”", app.search.trim()))
-                .font(theme::regular(13.0))
-                .color(pal.text_2),
+            egui::RichText::new(aulos_core::fl!(
+                "albums-search-match-summary",
+                total = total,
+                query = app.search.trim()
+            ))
+            .font(theme::regular(13.0))
+            .color(pal.text_2),
         );
         ui.label(egui::RichText::new("·").color(pal.text_5));
-        for (n, noun, route) in [
-            (artists, "artist", Route::Artists),
-            (songs, "song", Route::Songs),
+        for (text, route) in [
+            (
+                aulos_core::fl!("albums-search-artist-count", count = artists),
+                Route::Artists,
+            ),
+            (
+                aulos_core::fl!("albums-search-song-count", count = songs),
+                Route::Songs,
+            ),
         ] {
-            let text = format!("{n} {noun}{}", if n == 1 { "" } else { "s" });
             if ui
                 .add(
                     egui::Label::new(
@@ -369,7 +402,7 @@ fn search_banner(app: &App, ui: &mut Ui, matches: usize, total: usize, actions: 
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                egui::RichText::new("clears")
+                egui::RichText::new(aulos_core::fl!("albums-search-clears"))
                     .font(theme::regular(13.0))
                     .color(pal.text_2),
             );
@@ -386,7 +419,7 @@ fn scan_banner(app: &App, ui: &mut Ui) {
         ui,
         &app.pal,
         &lib.scan_progress.snapshot(),
-        "Scanning your library…",
+        &aulos_core::fl!("albums-scanning"),
     );
 }
 
@@ -424,38 +457,71 @@ fn library_empty_state(ui: &mut Ui) -> bool {
     let t = Theme::get(ui.ctx());
     let mut go = false;
     let avail = ui.available_rect_before_wrap();
-    ui.allocate_ui_with_layout(vec2(avail.width(), avail.height().max(320.0)), Layout::top_down(Align::Center), |ui| {
-        ui.add_space(((avail.height() - 260.0) * 0.4).max(32.0));
-        let (rect, _) = ui.allocate_exact_size(vec2(27.0, 52.0), Sense::hover());
-        let skew = |r: Rect, color| {
-            let s = (-14.0_f32).to_radians().tan();
-            let dx = |y: f32| s * (y - rect.center().y);
-            let pts = vec![pos2(r.left() + dx(r.top()), r.top()), pos2(r.right() + dx(r.top()), r.top()), pos2(r.right() + dx(r.bottom()), r.bottom()), pos2(r.left() + dx(r.bottom()), r.bottom())];
-            ui.painter().add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-        };
-        skew(Rect::from_min_size(rect.min, vec2(10.0, 52.0)), t.pal.reed);
-        skew(Rect::from_min_size(pos2(rect.min.x + 17.0, rect.max.y - 38.0), vec2(10.0, 38.0)), t.pal.surface_hi);
-        ui.add_space(24.0);
-        ui.label(egui::RichText::new("Nothing on the shelves yet").font(theme::semibold(21.0)).color(t.pal.text));
-        ui.add_space(8.0);
-        ui.allocate_ui(vec2(440.0_f32.min(avail.width()), 48.0), |ui| {
-            ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new("Add a music folder or connect an MPD or Subsonic server. Scanning runs in the background — play the first album as soon as it lands.")
-                        .font(theme::regular(14.0))
-                        .color(t.pal.text_2),
-                );
+    ui.allocate_ui_with_layout(
+        vec2(avail.width(), avail.height().max(320.0)),
+        Layout::top_down(Align::Center),
+        |ui| {
+            ui.add_space(((avail.height() - 260.0) * 0.4).max(32.0));
+            let (rect, _) = ui.allocate_exact_size(vec2(27.0, 52.0), Sense::hover());
+            let skew = |r: Rect, color| {
+                let s = (-14.0_f32).to_radians().tan();
+                let dx = |y: f32| s * (y - rect.center().y);
+                let pts = vec![
+                    pos2(r.left() + dx(r.top()), r.top()),
+                    pos2(r.right() + dx(r.top()), r.top()),
+                    pos2(r.right() + dx(r.bottom()), r.bottom()),
+                    pos2(r.left() + dx(r.bottom()), r.bottom()),
+                ];
+                ui.painter()
+                    .add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+            };
+            skew(Rect::from_min_size(rect.min, vec2(10.0, 52.0)), t.pal.reed);
+            skew(
+                Rect::from_min_size(pos2(rect.min.x + 17.0, rect.max.y - 38.0), vec2(10.0, 38.0)),
+                t.pal.surface_hi,
+            );
+            ui.add_space(24.0);
+            ui.label(
+                egui::RichText::new(aulos_core::fl!("albums-empty-title"))
+                    .font(theme::semibold(21.0))
+                    .color(t.pal.text),
+            );
+            ui.add_space(8.0);
+            ui.allocate_ui(vec2(440.0_f32.min(avail.width()), 48.0), |ui| {
+                ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(aulos_core::fl!("albums-empty-body"))
+                            .font(theme::regular(14.0))
+                            .color(t.pal.text_2),
+                    );
+                });
             });
-        });
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            let w = 170.0 + 190.0 + 8.0;
-            ui.add_space(((ui.available_width() - w) * 0.5).max(0.0));
-            ui.spacing_mut().item_spacing.x = 8.0;
-            go |= pill_button(ui, "Add music folder", Some(regular::FOLDER_PLUS), PillKind::Accent, 34.0, 170.0).clicked();
-            go |= pill_button(ui, "Connect a server", Some(regular::PLUGS_CONNECTED), PillKind::Secondary, 34.0, 190.0).clicked();
-        });
-    });
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                let w = 170.0 + 190.0 + 8.0;
+                ui.add_space(((ui.available_width() - w) * 0.5).max(0.0));
+                ui.spacing_mut().item_spacing.x = 8.0;
+                go |= pill_button(
+                    ui,
+                    &aulos_core::fl!("albums-empty-add-folder"),
+                    Some(regular::FOLDER_PLUS),
+                    PillKind::Accent,
+                    34.0,
+                    170.0,
+                )
+                .clicked();
+                go |= pill_button(
+                    ui,
+                    &aulos_core::fl!("albums-empty-connect-server"),
+                    Some(regular::PLUGS_CONNECTED),
+                    PillKind::Secondary,
+                    34.0,
+                    190.0,
+                )
+                .clicked();
+            });
+        },
+    );
     go
 }
 
@@ -576,7 +642,7 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                             ui.painter(),
                             Rect::from_min_max(pos2(badge.left() + 27.0, badge.top()), badge.max),
                             Align::Min,
-                            "Playing",
+                            &aulos_core::fl!("albums-playing-badge"),
                             theme::semibold(11.5),
                             accent.fill,
                         );
@@ -590,7 +656,7 @@ fn grid(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                         ui.painter(),
                         title_rect,
                         Align::Min,
-                        album_title(&album.name),
+                        &album_title(&album.name),
                         theme::semibold(13.5),
                         if playing {
                             accent.text
@@ -709,14 +775,38 @@ fn list(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
     let cap = |r: Rect, align: Align, text: &str| {
         paint_text_spaced(ui.painter(), r, align, text, font.clone(), pal.text_3, 0.66);
     };
-    cap(hc.name, Align::Min, "ALBUM");
-    cap(hc.year, Align::Min, "YEAR");
+    cap(
+        hc.name,
+        Align::Min,
+        &aulos_core::fl!("albums-column-album").to_uppercase(),
+    );
+    cap(
+        hc.year,
+        Align::Min,
+        &aulos_core::fl!("albums-column-year").to_uppercase(),
+    );
     if let Some(k) = hc.kind {
-        cap(k, Align::Min, "KIND");
+        cap(
+            k,
+            Align::Min,
+            &aulos_core::fl!("albums-column-kind").to_uppercase(),
+        );
     }
-    cap(hc.tracks, Align::Max, "TRACKS");
-    cap(hc.length, Align::Max, "LENGTH");
-    cap(hc.quality, Align::Min, "QUALITY");
+    cap(
+        hc.tracks,
+        Align::Max,
+        &aulos_core::fl!("albums-column-tracks").to_uppercase(),
+    );
+    cap(
+        hc.length,
+        Align::Max,
+        &aulos_core::fl!("albums-column-length").to_uppercase(),
+    );
+    cap(
+        hc.quality,
+        Align::Min,
+        &aulos_core::fl!("albums-column-quality").to_uppercase(),
+    );
     ui.painter().hline(
         hinner.x_range(),
         hrect.bottom() - 0.5,
@@ -785,7 +875,7 @@ fn list(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                     ui.painter(),
                     name_top,
                     Align::Min,
-                    album_title(&album.name),
+                    &album_title(&album.name),
                     theme::semibold(13.0),
                     if playing { accent.text } else { pal.text },
                 );
@@ -817,10 +907,10 @@ fn list(app: &App, ui: &mut Ui, pad: f32, visible: &[usize], actions: &mut Vec<A
                         ui.painter(),
                         k,
                         Align::Min,
-                        if album.is_compilation() {
-                            "Compilation"
+                        &if album.is_compilation() {
+                            aulos_core::fl!("albums-kind-compilation")
                         } else {
-                            "Album"
+                            aulos_core::fl!("albums-kind-album")
                         },
                         theme::regular(13.0),
                         pal.text_2,
@@ -888,9 +978,12 @@ fn find_album(app: &mut App, key: &str) -> Option<usize> {
 fn duration_text(secs: u64) -> String {
     let (h, m) = (secs / 3600, secs % 3600 / 60);
     if h > 0 {
-        format!("{h} h {m} min")
+        aulos_core::fl!("albums-duration-hours", hours = h, minutes = m)
     } else {
-        format!("{} min", (secs as f64 / 60.0).round() as u64)
+        aulos_core::fl!(
+            "albums-duration-minutes",
+            minutes = ((secs as f64 / 60.0).round() as u64)
+        )
     }
 }
 
@@ -939,16 +1032,22 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
         padded(ui, pad, |ui| {
             let scanning = app.session.library.scanning;
             let (title, body) = if scanning {
-                ("Loading album…", "The library is still being scanned.")
+                (
+                    aulos_core::fl!("albums-detail-loading-title"),
+                    aulos_core::fl!("albums-detail-loading-body"),
+                )
             } else {
-                ("Album not found", "It is no longer in your library.")
+                (
+                    aulos_core::fl!("albums-detail-missing-title"),
+                    aulos_core::fl!("albums-detail-missing-body"),
+                )
             };
             if empty_state(
                 ui,
                 regular::VINYL_RECORD,
-                title,
-                body,
-                Some("Back to albums"),
+                &title,
+                &body,
+                Some(&aulos_core::fl!("back-to-albums")),
             ) {
                 actions.push(Action::Go(Route::Albums));
             }
@@ -991,7 +1090,8 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                             pal.text_3,
                             false,
                         );
-                        let label = format!("Disc {}", track.disc_number.max(1));
+                        let label =
+                            aulos_core::fl!("albums-disc", number = track.disc_number.max(1));
                         paint_text(
                             ui.painter(),
                             Rect::from_min_max(pos2(r.left() + 36.0, r.top()), r.max),
@@ -1081,11 +1181,12 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
         ui.painter(),
         kind,
         Align::Min,
-        if album.is_compilation() {
-            "COMPILATION"
+        &if album.is_compilation() {
+            aulos_core::fl!("albums-kind-compilation")
         } else {
-            "ALBUM"
-        },
+            aulos_core::fl!("albums-kind-album")
+        }
+        .to_uppercase(),
         theme::semibold(11.0),
         pal.text_3,
         0.66,
@@ -1094,7 +1195,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
         ui.painter(),
         title,
         Align::Min,
-        album_title(&album.name),
+        &album_title(&album.name),
         theme::bold(if app.narrow { 28.0 } else { 34.0 }),
         pal.text,
     );
@@ -1129,7 +1230,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
     if album.year > 0 {
         parts.push(album.year.to_string());
     }
-    parts.push(format!("{n} song{}", if n == 1 { "" } else { "s" }));
+    parts.push(aulos_core::fl!("albums-song-count", count = n));
     parts.push(duration_text(album.total_secs));
     let meta_text = parts.join(" · ");
     let mw = paint_text(
@@ -1165,7 +1266,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
             ui.spacing_mut().item_spacing.x = 8.0;
             if pill_button(
                 ui,
-                "Play",
+                &aulos_core::fl!("play"),
                 Some(regular::PLAY),
                 PillKind::Primary,
                 34.0,
@@ -1180,7 +1281,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
             }
             if pill_button(
                 ui,
-                "Shuffle",
+                &aulos_core::fl!("shuffle"),
                 Some(regular::SHUFFLE),
                 PillKind::Secondary,
                 34.0,
@@ -1192,7 +1293,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
             }
             if pill_button(
                 ui,
-                "Play next",
+                &aulos_core::fl!("queue-play-next"),
                 Some(regular::QUEUE),
                 PillKind::Secondary,
                 34.0,
@@ -1207,7 +1308,7 @@ fn hero(app: &App, ui: &mut Ui, album: &Album, idx: usize, actions: &mut Vec<Act
             }
             if pill_button(
                 ui,
-                "Add to queue",
+                &aulos_core::fl!("queue-add"),
                 Some(regular::LIST_PLUS),
                 PillKind::Secondary,
                 34.0,

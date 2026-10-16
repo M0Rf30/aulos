@@ -342,12 +342,18 @@ fn handle_event(app: &mut App, event: TaggerEvent) {
             start_load(app, paths, select, None);
             run_ready_action(app);
         }
-        E::FilesPicked(Err(error)) | E::FolderPicked(Err(error)) => {
-            notice(app, true, format!("Couldn't add the files: {error}"))
-        }
+        E::FilesPicked(Err(error)) | E::FolderPicked(Err(error)) => notice(
+            app,
+            true,
+            aulos_core::fl!("tagger-ui-add-files-failed", error = error.to_string()),
+        ),
         E::FolderPicked(Ok(dir)) => spawn(app, work::folder_files(dir)),
         E::ImagePicked(Ok(picture)) => app.session.tagger.add_picture(&picture),
-        E::ImagePicked(Err(error)) => notice(app, true, format!("Couldn't add the image: {error}")),
+        E::ImagePicked(Err(error)) => notice(
+            app,
+            true,
+            aulos_core::fl!("tagger-ui-add-image-failed", error = error.to_string()),
+        ),
         E::FilesLoaded { generation, files } => {
             app.session.tagger.finish_load(generation, files);
             run_ready_action(app);
@@ -395,11 +401,7 @@ fn handle_event(app: &mut App, event: TaggerEvent) {
         {
             ScanStep::Pending => {}
             ScanStep::FetchRelease(request) => spawn(app, work::release(request)),
-            ScanStep::NoMatch => notice(
-                app,
-                false,
-                "AcoustID didn't recognise enough of these files to pick a release.",
-            ),
+            ScanStep::NoMatch => notice(app, false, aulos_core::fl!("tagger-ui-scan-unrecognised")),
         },
         E::FileSaved { file, result } => {
             if let Some(summary) = app.session.tagger.finish_save(file, result) {
@@ -414,14 +416,17 @@ fn handle_event(app: &mut App, event: TaggerEvent) {
             let failed = results.len() - ok;
             app.session.tagger.finish_submit(generation, results);
             if failed == 0 {
-                let text = if ok == 1 {
-                    "1 fingerprint submitted.".to_owned()
-                } else {
-                    format!("{ok} fingerprints submitted.")
-                };
-                notice(app, false, text);
+                notice(
+                    app,
+                    false,
+                    aulos_core::fl!("tagger-ui-submitted", count = ok),
+                );
             } else {
-                notice(app, true, format!("{ok} submitted, {failed} failed."));
+                notice(
+                    app,
+                    true,
+                    aulos_core::fl!("tagger-ui-submit-partial", ok = ok, failed = failed),
+                );
             }
         }
         E::SubmitAborted { generation, error } => {
@@ -429,15 +434,21 @@ fn handle_event(app: &mut App, event: TaggerEvent) {
             notice(app, true, error);
         }
         E::SeedOpened(Ok(())) => {}
-        E::SeedOpened(Err(error)) => {
-            notice(app, true, format!("Couldn't open MusicBrainz: {error}"))
-        }
+        E::SeedOpened(Err(error)) => notice(
+            app,
+            true,
+            aulos_core::fl!("tagger-ui-open-mb-failed", error = error.to_string()),
+        ),
     }
 }
 
 fn report_open(app: &mut App, result: Result<(), String>) {
     if let Err(error) = result {
-        notice(app, true, format!("Couldn't open the page: {error}"));
+        notice(
+            app,
+            true,
+            aulos_core::fl!("tagger-ui-open-page-failed", error = error.to_string()),
+        );
     }
 }
 
@@ -469,7 +480,7 @@ fn start_lookup(app: &mut App) {
         Some(request) => spawn(app, work::search(request)),
         None => {
             if app.session.tagger.lookup().is_none() {
-                notice(app, true, "There are no files to look up.");
+                notice(app, true, aulos_core::fl!("tagger-ui-no-files-lookup"));
             }
         }
     }
@@ -478,7 +489,7 @@ fn start_lookup(app: &mut App) {
 fn start_seed(app: &mut App, cluster: Option<ClusterKey>) {
     let files = app.session.tagger.seed_files(cluster.as_ref());
     if files.is_empty() {
-        notice(app, true, "There are no files to add as a release.");
+        notice(app, true, aulos_core::fl!("tagger-ui-no-files-release"));
         return;
     }
     spawn(app, work::open_seed(files));
@@ -486,15 +497,11 @@ fn start_seed(app: &mut App, cluster: Option<ClusterKey>) {
 
 fn start_scan(app: &mut App) {
     let Some(key) = app.session.config.config.acoustid_key().map(str::to_owned) else {
-        notice(
-            app,
-            true,
-            "Set an AcoustID application key in Settings to identify files by their audio.",
-        );
+        notice(app, true, aulos_core::fl!("tagger-ui-key-missing-notice"));
         return;
     };
     let Some(start) = app.session.tagger.begin_scan() else {
-        notice(app, true, "There are no files to scan.");
+        notice(app, true, aulos_core::fl!("tagger-ui-no-files-scan"));
         return;
     };
     spawn_all(app, work::scan(start, key));
@@ -502,16 +509,12 @@ fn start_scan(app: &mut App) {
 
 fn start_submit(app: &mut App) {
     let Some(start) = app.session.tagger.begin_submit() else {
-        notice(
-            app,
-            true,
-            "None of these files has a MusicBrainz recording ID to submit.",
-        );
+        notice(app, true, aulos_core::fl!("tagger-ui-no-recording-ids"));
         return;
     };
     let Some(app_key) = app.session.config.config.acoustid_key().map(str::to_owned) else {
-        let error = "Set an AcoustID application key in Settings to identify files by their audio.";
-        app.session.tagger.abort_submit(start.generation, error);
+        let error = aulos_core::fl!("tagger-ui-key-missing-notice");
+        app.session.tagger.abort_submit(start.generation, &error);
         notice(app, true, error);
         return;
     };
@@ -521,7 +524,7 @@ fn start_submit(app: &mut App) {
 fn start_save(app: &mut App) {
     let jobs = app.session.tagger.begin_save();
     if jobs.is_empty() {
-        notice(app, false, "There are no changes to save.");
+        notice(app, false, aulos_core::fl!("tagger-ui-no-changes"));
         return;
     }
     spawn_all(app, jobs.into_iter().map(work::save));
@@ -532,17 +535,20 @@ fn start_save(app: &mut App) {
 fn after_save(app: &mut App, summary: SaveSummary) {
     let saved = summary.written.len();
     if summary.failed == 0 {
-        let text = if saved == 1 {
-            "Saved 1 file.".to_owned()
-        } else {
-            format!("Saved {saved} files.")
-        };
-        notice(app, false, text);
+        notice(
+            app,
+            false,
+            aulos_core::fl!("tagger-ui-saved", count = saved),
+        );
     } else {
         notice(
             app,
             true,
-            format!("{saved} saved, {} failed.", summary.failed),
+            aulos_core::fl!(
+                "tagger-ui-save-partial",
+                saved = saved,
+                failed = summary.failed
+            ),
         );
     }
     // Covers of the albums the files left or joined are stale now.
@@ -567,21 +573,22 @@ fn after_save(app: &mut App, summary: SaveSummary) {
 
 /// The files the user picked, as an event; an empty list when cancelled.
 async fn pick_files() -> TaggerEvent {
+    let filter_name = aulos_core::fl!("tagger-ui-filter-audio");
     let filter = Filter::new(
-        "Audio files",
+        &filter_name,
         aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
             .iter()
             .copied(),
     );
     TaggerEvent::FilesPicked(Ok(dialogs::pick_files(
-        "Add files to the tag editor",
+        &aulos_core::fl!("tagger-ui-pick-files"),
         Some(&filter),
     )
     .await))
 }
 
 async fn pick_folder() -> TaggerEvent {
-    match dialogs::pick_folder("Add a folder to the tag editor").await {
+    match dialogs::pick_folder(&aulos_core::fl!("tagger-ui-pick-folder")).await {
         Some(dir) => TaggerEvent::FolderPicked(Ok(dir)),
         // Cancelled: nothing to add.
         None => TaggerEvent::FilesPicked(Ok(Vec::new())),
@@ -589,8 +596,9 @@ async fn pick_folder() -> TaggerEvent {
 }
 
 async fn pick_image(kind: u8) -> TaggerEvent {
-    let filter = Filter::new("Images", ["png", "jpg", "jpeg", "webp", "bmp"]);
-    match dialogs::pick_file("Choose an image", Some(&filter)).await {
+    let filter_name = aulos_core::fl!("tagger-ui-filter-images");
+    let filter = Filter::new(&filter_name, ["png", "jpg", "jpeg", "webp", "bmp"]);
+    match dialogs::pick_file(&aulos_core::fl!("tagger-ui-pick-image"), Some(&filter)).await {
         Some(path) => work::read_image(path, kind).await,
         // Cancelled: nothing to add.
         None => TaggerEvent::FilesPicked(Ok(Vec::new())),
@@ -609,12 +617,9 @@ fn tone_color(pal: &Palette, tone: Tone) -> Color32 {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
-    }
+/// "1 file" / "N files".
+fn files_text(n: usize) -> String {
+    aulos_core::fl!("tagger-files-count", count = n)
 }
 
 fn first_line(text: &str) -> Cow<'_, str> {
@@ -1257,21 +1262,37 @@ fn header_left(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     let key_set = app.session.config.config.acoustid_key().is_some();
     ui.spacing_mut().item_spacing.x = 8.0;
     ui.label(
-        RichText::new("Tag editor")
+        RichText::new(aulos_core::fl!("tagger-title"))
             .font(theme::semibold(22.0))
             .color(pal.text),
     );
     ui.add_space(8.0);
-    if tool_icon(ui, &pal, regular::FILE_PLUS, "Add files…", true).clicked() {
+    if tool_icon(
+        ui,
+        &pal,
+        regular::FILE_PLUS,
+        &aulos_core::fl!("tagger-add-files"),
+        true,
+    )
+    .clicked()
+    {
         acts.push(Act::Msg(TaggerMessage::AddFiles));
     }
-    if tool_icon(ui, &pal, regular::FOLDER_PLUS, "Add folder…", true).clicked() {
+    if tool_icon(
+        ui,
+        &pal,
+        regular::FOLDER_PLUS,
+        &aulos_core::fl!("tagger-add-folder"),
+        true,
+    )
+    .clicked()
+    {
         acts.push(Act::Msg(TaggerMessage::AddFolder));
     }
     let lookup = tool_button(
         ui,
         &pal,
-        "MusicBrainz lookup",
+        &aulos_core::fl!("tagger-lookup-title"),
         regular::MAGNIFYING_GLASS,
         Look::Tool,
         !facts.busy && facts.has_target,
@@ -1282,13 +1303,13 @@ fn header_left(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     let scan = tool_button(
         ui,
         &pal,
-        "AcoustID scan",
+        &aulos_core::fl!("tagger-ui-scan-button"),
         regular::FINGERPRINT,
         Look::Tool,
         !facts.busy && facts.has_target && key_set,
     );
     if !key_set {
-        scan.on_disabled_hover_text("Set an AcoustID application key in Settings to scan.");
+        scan.on_disabled_hover_text(aulos_core::fl!("tagger-ui-scan-disabled-hover"));
     } else if scan.clicked() {
         acts.push(Act::Msg(TaggerMessage::Scan));
     }
@@ -1296,7 +1317,7 @@ fn header_left(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         ui,
         &pal,
         regular::LIST_PLUS,
-        "Add these files as a new release on MusicBrainz",
+        &aulos_core::fl!("tagger-add-as-release-tooltip"),
         !st.is_empty() && !facts.busy,
     )
     .clicked()
@@ -1318,7 +1339,7 @@ fn header_scan(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let total = scan.files.len();
     let (label, frac, busy) = match scan.phase {
         ScanPhase::Running => (
-            format!("Fingerprinting {} / {total}", scan.done),
+            aulos_core::fl!("tagger-ui-scan-progress", done = scan.done, total = total),
             if total == 0 {
                 0.0
             } else {
@@ -1326,7 +1347,7 @@ fn header_scan(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             },
             false,
         ),
-        ScanPhase::Resolving => ("Loading the matching release…".to_owned(), 0.0, true),
+        ScanPhase::Resolving => (aulos_core::fl!("tagger-ui-scan-loading-release"), 0.0, true),
         ScanPhase::Done | ScanPhase::NoMatch | ScanPhase::Cancelled => return,
     };
     ui.add_space(8.0);
@@ -1351,7 +1372,7 @@ fn header_scan(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         hit,
         Id::new("tagger-cancel-scan"),
         regular::X,
-        "Cancel scan",
+        &aulos_core::fl!("tagger-scan-cancel"),
         true,
     ) {
         acts.push(Act::Msg(TaggerMessage::CancelScan));
@@ -1365,9 +1386,9 @@ fn header_right(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     ui.spacing_mut().item_spacing.x = 8.0;
 
     let save_label = match st.save_progress() {
-        Some((done, total)) => format!("Saving {done} / {total}…"),
-        None if facts.savable > 0 => format!("Save {}", plural(facts.savable, "file", "files")),
-        None => "Save".to_owned(),
+        Some((done, total)) => aulos_core::fl!("tagger-saving", done = done, total = total),
+        None if facts.savable > 0 => aulos_core::fl!("tagger-ui-save-files", count = facts.savable),
+        None => aulos_core::fl!("tagger-save"),
     };
     if tool_button(
         ui,
@@ -1385,9 +1406,9 @@ fn header_right(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     let user_key = app.session.config.acoustid_key_stored == Some(true);
     let can_submit = !facts.busy && facts.submittable > 0 && key_set && user_key;
     let submit_label = if facts.submittable > 0 {
-        format!("Submit AcoustIDs ({})", facts.submittable)
+        aulos_core::fl!("tagger-submit-count", count = facts.submittable)
     } else {
-        "Submit AcoustIDs".to_owned()
+        aulos_core::fl!("tagger-submit")
     };
     let submit = tool_button(
         ui,
@@ -1398,9 +1419,7 @@ fn header_right(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         can_submit,
     );
     if !can_submit && facts.submittable > 0 && !user_key {
-        submit.on_disabled_hover_text(
-            "Save your AcoustID API key in Settings to submit fingerprints.",
-        );
+        submit.on_disabled_hover_text(aulos_core::fl!("tagger-ui-submit-key-hover"));
     } else if submit.clicked() {
         acts.push(Act::Msg(TaggerMessage::SubmitAcoustIds));
     }
@@ -1408,7 +1427,7 @@ fn header_right(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     let revert = tool_button(
         ui,
         &pal,
-        "Revert",
+        &aulos_core::fl!("tagger-revert"),
         regular::ARROW_COUNTER_CLOCKWISE,
         Look::Ghost,
         !st.is_saving() && facts.unsaved > 0,
@@ -1434,7 +1453,17 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         } else {
             regular::INFO
         };
-        if banner(ui, &pal, tone, icon, &n.text, Bar::None, &["Dismiss"]).is_some() {
+        if banner(
+            ui,
+            &pal,
+            tone,
+            icon,
+            &n.text,
+            Bar::None,
+            &[&aulos_core::fl!("tagger-dismiss")],
+        )
+        .is_some()
+        {
             acts.push(Act::Msg(TaggerMessage::DismissNotice));
         }
     }
@@ -1447,10 +1476,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
                 .filter(|f| f.has_unsaved_edits())
                 .count(),
         };
-        let text = format!(
-            "Discard unsaved edits? {} will lose their changes.",
-            plural(unsaved, "file", "files")
-        );
+        let text = aulos_core::fl!("tagger-ui-discard-banner", count = unsaved);
         match banner(
             ui,
             &pal,
@@ -1458,7 +1484,10 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             regular::WARNING,
             &text,
             Bar::None,
-            &["Discard", "Cancel"],
+            &[
+                &aulos_core::fl!("tagger-discard"),
+                &aulos_core::fl!("tagger-cancel"),
+            ],
         ) {
             Some(0) => acts.push(Act::Msg(TaggerMessage::ConfirmDiscard)),
             Some(_) => acts.push(Act::Msg(TaggerMessage::CancelDiscard)),
@@ -1483,11 +1512,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
                 .map(|f| f.id)
                 .collect();
             if !odd.is_empty() {
-                let text = format!(
-                    "{} {} a different Album artist than the rest of the selection.",
-                    plural(odd.len(), "file", "files"),
-                    if odd.len() == 1 { "has" } else { "have" }
-                );
+                let text = aulos_core::fl!("tagger-ui-album-artist-mismatch", count = odd.len());
                 if banner(
                     ui,
                     &pal,
@@ -1495,7 +1520,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
                     regular::WARNING,
                     &text,
                     Bar::None,
-                    &["Show files"],
+                    &[&aulos_core::fl!("tagger-ui-show-files")],
                 )
                 .is_some()
                 {
@@ -1509,30 +1534,30 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     }
     let key_set = app.session.config.config.acoustid_key().is_some();
     if !key_set && !st.is_empty() {
-        let text = "AcoustID needs an application key. Scanning and submitting fingerprints requires a free AcoustID application key. Add it in Settings.";
+        let text = aulos_core::fl!("tagger-ui-key-missing-banner");
         if banner(
             ui,
             &pal,
             pal.warn,
             regular::WARNING,
-            text,
+            &text,
             Bar::None,
-            &["Open Settings"],
+            &[&aulos_core::fl!("tagger-open-settings")],
         )
         .is_some()
         {
             acts.push(Act::Msg(TaggerMessage::OpenSettings));
         }
     } else if app.session.config.acoustid_key_stored == Some(false) && facts.submittable > 0 {
-        let text = "Submitting needs your AcoustID API key. Add your personal AcoustID API key in Settings to submit fingerprints.";
+        let text = aulos_core::fl!("tagger-ui-user-key-missing-banner");
         if banner(
             ui,
             &pal,
             pal.warn,
             regular::WARNING,
-            text,
+            &text,
             Bar::None,
-            &["Open Settings"],
+            &[&aulos_core::fl!("tagger-open-settings")],
         )
         .is_some()
         {
@@ -1545,10 +1570,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
         match scan.phase {
             ScanPhase::Running => {}
             ScanPhase::Resolving => {
-                let text = format!(
-                    "AcoustID identified {}. Loading the matching release…",
-                    plural(scan.identified, "file", "files")
-                );
+                let text = aulos_core::fl!("tagger-ui-scan-identified", count = scan.identified);
                 if banner(
                     ui,
                     &pal,
@@ -1556,7 +1578,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
                     regular::FINGERPRINT,
                     &text,
                     Bar::Busy,
-                    &["Cancel scan"],
+                    &[&aulos_core::fl!("tagger-scan-cancel")],
                 )
                 .is_some()
                 {
@@ -1564,18 +1586,16 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
                 }
             }
             ScanPhase::NoMatch => {
-                let text = format!(
-                    "AcoustID found no release for these files ({} of {total} identified).",
-                    scan.identified
+                let text = aulos_core::fl!(
+                    "tagger-scan-no-match",
+                    identified = scan.identified,
+                    total = total
                 );
                 banner(ui, &pal, pal.warn, regular::WARNING, &text, Bar::None, &[]);
             }
             ScanPhase::Done | ScanPhase::Cancelled => {
                 if failures > 0 {
-                    let text = format!(
-                        "{} could not be fingerprinted or looked up.",
-                        plural(failures, "file", "files")
-                    );
+                    let text = aulos_core::fl!("tagger-scan-failures", count = failures);
                     banner(ui, &pal, pal.warn, regular::WARNING, &text, Bar::None, &[]);
                 }
             }
@@ -1587,7 +1607,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             &pal,
             pal.reed,
             regular::PAPER_PLANE_TILT,
-            "Submitting fingerprints to AcoustID…",
+            &aulos_core::fl!("tagger-submitting"),
             Bar::Busy,
             &[],
         );
@@ -1603,7 +1623,7 @@ fn banners(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             &pal,
             pal.reed,
             regular::FLOPPY_DISK,
-            &format!("Saving {done} of {total}…"),
+            &aulos_core::fl!("tagger-saving", done = done, total = total),
             Bar::Fraction(frac),
             &[],
         );
@@ -1683,9 +1703,10 @@ fn files_panel(app: &App, ui: &mut Ui, rect: Rect, facts: &Facts, acts: &mut Vec
         vec2(strip.width() - 16.0 - buttons_w - 4.0, 28.0),
     );
     let mut filter = app.views.tagger.filter.clone();
+    let filter_hint = aulos_core::fl!("tagger-ui-filter-placeholder");
     let tb = TextBox {
         left_pad: 26.0,
-        ..TextBox::new(Id::new("tagger-filter"), "Filter files")
+        ..TextBox::new(Id::new("tagger-filter"), &filter_hint)
     };
     let resp = text_box(ui, &pal, input, &tb, &mut filter);
     paint_icon(
@@ -1708,7 +1729,7 @@ fn files_panel(app: &App, ui: &mut Ui, rect: Rect, facts: &Facts, acts: &mut Vec
         remove,
         Id::new("tagger-remove"),
         regular::TRASH_SIMPLE,
-        "Remove the selected files from the editor",
+        &aulos_core::fl!("tagger-ui-remove-selected-tooltip"),
         !busy && st.selected_count() > 0,
     ) {
         acts.push(Act::Msg(TaggerMessage::RemoveSelected));
@@ -1719,7 +1740,7 @@ fn files_panel(app: &App, ui: &mut Ui, rect: Rect, facts: &Facts, acts: &mut Vec
         clear,
         Id::new("tagger-clear"),
         regular::BROOM,
-        "Remove every file from the editor",
+        &aulos_core::fl!("tagger-ui-clear-all-tooltip"),
         !busy && !st.is_empty(),
     ) {
         acts.push(Act::Msg(TaggerMessage::ClearAll));
@@ -1760,7 +1781,7 @@ fn files_empty(app: &App, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
             ui.painter(),
             label,
             Align::Min,
-            &format!("Reading {}…", plural(st.loading(), "file", "files")),
+            &aulos_core::fl!("tagger-loading", count = st.loading()),
             theme::regular(11.5),
             pal.text_2,
         );
@@ -1793,15 +1814,22 @@ fn files_empty(app: &App, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
             .color(pal.text_3),
     );
     cui.label(
-        RichText::new("No files yet")
+        RichText::new(aulos_core::fl!("tagger-empty-title"))
             .font(theme::semibold(15.0))
             .color(pal.text),
     );
-    cui.add(egui::Label::new(RichText::new("Add audio files or a folder to edit their tags. Files can also be sent here from the library with “Edit tags…”.").font(theme::regular(12.0)).color(pal.text_2)).wrap());
+    cui.add(
+        egui::Label::new(
+            RichText::new(aulos_core::fl!("tagger-empty-hint"))
+                .font(theme::regular(12.0))
+                .color(pal.text_2),
+        )
+        .wrap(),
+    );
     cui.add_space(4.0);
     if pill_button_enabled(
         &mut cui,
-        "Add files",
+        &aulos_core::fl!("tagger-ui-add-files-button"),
         Some(regular::FILE_PLUS),
         PillKind::Primary,
         30.0,
@@ -1814,7 +1842,7 @@ fn files_empty(app: &App, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
     }
     if pill_button_enabled(
         &mut cui,
-        "Add folder",
+        &aulos_core::fl!("tagger-ui-add-folder-button"),
         Some(regular::FOLDER_PLUS),
         PillKind::Secondary,
         30.0,
@@ -1838,7 +1866,7 @@ fn file_list(app: &App, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
             ui.painter(),
             label,
             Align::Min,
-            "No file matches the filter.",
+            &aulos_core::fl!("tagger-ui-no-filter-match"),
             theme::regular(12.0),
             pal.text_3,
         );
@@ -1940,14 +1968,17 @@ fn cluster_header(
     let busy = st.is_busy();
     let key_set = app.session.config.config.acoustid_key().is_some();
     resp.context_menu(|ui| {
-        if ui.button("Select this album").clicked() {
+        if ui
+            .button(aulos_core::fl!("tagger-cluster-select"))
+            .clicked()
+        {
             acts.push(Act::Msg(TaggerMessage::SelectCluster(key.clone())));
             ui.close();
         }
         if ui
             .add_enabled(
                 !busy && editable,
-                egui::Button::new("Look up this album on MusicBrainz"),
+                egui::Button::new(aulos_core::fl!("tagger-cluster-lookup")),
             )
             .clicked()
         {
@@ -1957,7 +1988,7 @@ fn cluster_header(
         if ui
             .add_enabled(
                 !busy && editable && key_set,
-                egui::Button::new("Scan this album with AcoustID"),
+                egui::Button::new(aulos_core::fl!("tagger-cluster-scan")),
             )
             .clicked()
         {
@@ -1968,7 +1999,7 @@ fn cluster_header(
             && ui
                 .add_enabled(
                     !busy,
-                    egui::Button::new("Add this album as a release on MusicBrainz"),
+                    egui::Button::new(aulos_core::fl!("tagger-cluster-add-release")),
                 )
                 .clicked()
         {
@@ -2027,22 +2058,22 @@ fn cluster_header(
     // Labels.
     let text_left = cover.right() + 8.0;
     let title = if unclustered {
-        "Files without an album".to_owned()
+        aulos_core::fl!("tagger-unclustered")
     } else if cluster.album.is_empty() {
-        "Unknown album".to_owned()
+        aulos_core::fl!("tagger-ui-unknown-album")
     } else {
         cluster.album.clone()
     };
     let artist = if unclustered {
         String::new()
     } else if cluster.various {
-        "Various artists".to_owned()
+        aulos_core::fl!("tagger-various-artists")
     } else if cluster.artist.is_empty() {
-        "Unknown artist".to_owned()
+        aulos_core::fl!("tagger-unknown-artist")
     } else {
         cluster.artist.clone()
     };
-    let meta = labels::dotted([artist, plural(cluster.files.len(), "file", "files")]);
+    let meta = labels::dotted([artist, files_text(cluster.files.len())]);
     let text_rect = |top: f32, h: f32| {
         Rect::from_min_size(
             pos2(text_left, rect.top() + top),
@@ -2119,7 +2150,7 @@ fn file_row(
     }
     let score = match (&file.assignment, mark) {
         (Some(a), _) => Some((format!("{}%", labels::percent(a.score)), pal.text_3)),
-        (None, Mark::Unmatched) => Some(("no match".to_owned(), pal.warn)),
+        (None, Mark::Unmatched) => Some((aulos_core::fl!("tagger-ui-no-match"), pal.warn)),
         (None, Mark::None) => None,
     };
     if let Some((text, color)) = score {
@@ -2186,30 +2217,42 @@ fn file_row(
         match &file.status {
             FileStatus::Unchanged => {}
             FileStatus::Modified => {
-                ui.label(RichText::new("Unsaved changes").color(pal.warn));
+                ui.label(RichText::new(aulos_core::fl!("tagger-status-modified")).color(pal.warn));
             }
             FileStatus::Saving => {
-                ui.label("Saving…");
+                ui.label(aulos_core::fl!("tagger-status-saving"));
             }
             FileStatus::Saved => {
-                ui.label(RichText::new("Saved").color(pal.ok));
+                ui.label(RichText::new(aulos_core::fl!("tagger-status-saved")).color(pal.ok));
             }
             FileStatus::Error(error) => {
-                ui.label(RichText::new(format!("Could not save: {error}")).color(pal.danger));
+                ui.label(
+                    RichText::new(aulos_core::fl!(
+                        "tagger-status-error",
+                        error = error.to_string()
+                    ))
+                    .color(pal.danger),
+                );
             }
         }
         if let Some(a) = &file.assignment {
-            ui.label(format!(
-                "→ {} {} {}%",
-                a.number,
-                a.title,
-                labels::percent(a.score)
+            ui.label(aulos_core::fl!(
+                "tagger-assignment",
+                number = a.number.to_string(),
+                title = a.title.as_str(),
+                score = labels::percent(a.score)
             ));
         } else if mark == Mark::Unmatched {
-            ui.label(RichText::new("No matching track on the release").color(pal.warn));
+            ui.label(RichText::new(aulos_core::fl!("tagger-unmatched")).color(pal.warn));
         }
         if let Some(reason) = file.read_only_reason() {
-            ui.label(RichText::new(format!("Read-only: {reason}")).color(pal.warn));
+            ui.label(
+                RichText::new(aulos_core::fl!(
+                    "tagger-ui-read-only-reason",
+                    reason = reason.to_string()
+                ))
+                .color(pal.warn),
+            );
         }
     });
 }
@@ -2226,17 +2269,21 @@ fn files_footer(app: &App, ui: &mut Ui, rect: Rect, facts: &Facts, acts: &mut Ve
     );
     let total = st.files().len();
     let selected = st.selected_count();
-    let mut summary = format!("{} · {selected} selected", plural(total, "file", "files"));
+    let mut parts = vec![
+        files_text(total),
+        aulos_core::fl!("tagger-selected-count", count = selected),
+    ];
     if st.loading() > 0 {
-        summary.push_str(&format!(" · reading {}…", st.loading()));
+        parts.push(aulos_core::fl!("tagger-loading", count = st.loading()));
     }
+    let summary = labels::dotted(parts);
     let y = rect.center().y;
     let mut x = rect.right() - 8.0;
     let (next, clicked) = link_right(
         ui,
         &pal,
         Id::new("tagger-revert-all"),
-        "Revert all",
+        &aulos_core::fl!("tagger-revert-all"),
         x,
         y,
         facts.unsaved > 0 && !st.is_saving(),
@@ -2246,11 +2293,17 @@ fn files_footer(app: &App, ui: &mut Ui, rect: Rect, facts: &Facts, acts: &mut Ve
     }
     x = next;
     let (label, msg) = if selected < total {
-        ("Select all", TaggerMessage::SelectAll)
+        (
+            aulos_core::fl!("tagger-select-all"),
+            TaggerMessage::SelectAll,
+        )
     } else {
-        ("Clear", TaggerMessage::ClearSelection)
+        (
+            aulos_core::fl!("tagger-clear"),
+            TaggerMessage::ClearSelection,
+        )
     };
-    let (next, clicked) = link_right(ui, &pal, Id::new("tagger-select-all"), label, x, y, true);
+    let (next, clicked) = link_right(ui, &pal, Id::new("tagger-select-all"), &label, x, y, true);
     if clicked {
         acts.push(Act::Msg(msg));
     }
@@ -2335,11 +2388,14 @@ fn meta_card(app: &App, ui: &mut Ui, facts: &Facts, pinned: bool, acts: &mut Vec
                             .color(pal.text_3),
                     );
                     let (title, body) = if st.is_empty() {
-                        ("Nothing to edit", "Add files to see and edit their tags.")
+                        (
+                            aulos_core::fl!("tagger-ui-meta-nothing-title"),
+                            aulos_core::fl!("tagger-ui-meta-nothing-hint"),
+                        )
                     } else {
                         (
-                            "Nothing selected",
-                            "Select one or more files to see and edit their tags.",
+                            aulos_core::fl!("tagger-metadata-empty-title"),
+                            aulos_core::fl!("tagger-metadata-empty-hint"),
                         )
                     };
                     ui.label(
@@ -2360,10 +2416,12 @@ fn meta_card(app: &App, ui: &mut Ui, facts: &Facts, pinned: bool, acts: &mut Vec
 
             // Captions.
             let (caps, _) = ui.allocate_exact_size(vec2(width, CAPTIONS_H), Sense::hover());
-            for (col, text) in meta_cols(caps)
-                .iter()
-                .zip(["FIELD", "ON DISK", "NEW VALUE"])
-            {
+            let captions = [
+                aulos_core::fl!("tagger-ui-col-field"),
+                aulos_core::fl!("tagger-ui-col-disk"),
+                aulos_core::fl!("tagger-ui-col-new"),
+            ];
+            for (col, text) in meta_cols(caps).iter().zip(&captions) {
                 paint_text_spaced(
                     ui.painter(),
                     Rect::from_min_max(
@@ -2395,7 +2453,7 @@ fn meta_card(app: &App, ui: &mut Ui, facts: &Facts, pinned: bool, acts: &mut Vec
                     ui.painter(),
                     r,
                     Align::Min,
-                    "The selected files can't be edited, so their tags are shown read-only.",
+                    &aulos_core::fl!("tagger-metadata-readonly"),
                     theme::regular(11.5),
                     pal.warn,
                 );
@@ -2459,7 +2517,7 @@ fn meta_top_bar(app: &App, ui: &mut Ui, facts: &Facts) {
                 pos2(right, inner.bottom()),
             ),
             Align::Max,
-            "edited",
+            &aulos_core::fl!("tagger-ui-edited"),
             theme::regular(12.0),
             pal.text_2,
         );
@@ -2475,7 +2533,7 @@ fn meta_top_bar(app: &App, ui: &mut Ui, facts: &Facts) {
                 pos2(right, inner.bottom()),
             ),
             Align::Max,
-            "read-only",
+            &aulos_core::fl!("tagger-ui-readonly-label"),
             theme::regular(12.0),
             pal.text_3,
         );
@@ -2491,12 +2549,12 @@ fn meta_top_bar(app: &App, ui: &mut Ui, facts: &Facts) {
     }
 
     let title = match selected {
-        0 => "No files selected".to_owned(),
+        0 => aulos_core::fl!("tagger-ui-no-files-selected"),
         1 => st
             .selected_files()
             .first()
             .map_or_else(String::new, |f| f.file_name()),
-        n => format!("{n} files selected"),
+        n => aulos_core::fl!("tagger-metadata-selection", count = n),
     };
     let ink = if selected == 0 { pal.text_3 } else { pal.text };
     let avail = Rect::from_min_max(
@@ -2584,7 +2642,7 @@ fn field_row(app: &App, ui: &mut Ui, row: &FieldRow, editable: bool, acts: &mut 
         FieldValue::Mixed => paint_italic(
             ui,
             disk,
-            "(different values)",
+            &aulos_core::fl!("tagger-different-values"),
             theme::regular(12.5),
             pal.text_3,
         ),
@@ -2615,20 +2673,20 @@ fn field_row(app: &App, ui: &mut Ui, row: &FieldRow, editable: bool, acts: &mut 
             Id::new(("tag-field-multi", &row.key)),
             Sense::hover(),
         )
-        .on_hover_text("This value spans several lines and can't be edited here.");
+        .on_hover_text(aulos_core::fl!("tagger-multiline-tooltip"));
         return;
     }
     let mut buf = st.input_text(row);
     let hint = if row.new.is_mixed() {
-        "(different values)"
+        aulos_core::fl!("tagger-different-values")
     } else {
-        ""
+        String::new()
     };
     let tb = TextBox {
         changed: row.changed,
         right_pad: if editable { ACTIONS_W } else { 0.0 },
         enabled: editable,
-        ..TextBox::new(Id::new(("tag-field", &row.key)), hint)
+        ..TextBox::new(Id::new(("tag-field", &row.key)), &hint)
     };
     let resp = text_box(ui, &pal, boxed, &tb, &mut buf);
     if resp.changed() {
@@ -2647,7 +2705,7 @@ fn field_row(app: &App, ui: &mut Ui, row: &FieldRow, editable: bool, acts: &mut 
                 revert,
                 Id::new(("tag-revert", &row.key)),
                 regular::ARROW_COUNTER_CLOCKWISE,
-                "Put this field back to what is on disk",
+                &aulos_core::fl!("tagger-revert-field"),
                 true,
             )
         {
@@ -2660,7 +2718,7 @@ fn field_row(app: &App, ui: &mut Ui, row: &FieldRow, editable: bool, acts: &mut 
                 delete,
                 Id::new(("tag-delete", &row.key)),
                 regular::TRASH,
-                "Remove this field",
+                &aulos_core::fl!("tagger-delete-field"),
                 true,
             )
         {
@@ -2703,7 +2761,7 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
             pos2(rect.right() - 12.0, rect.bottom()),
         ),
         Align::Min,
-        "Add field",
+        &aulos_core::fl!("tagger-ui-add-field-toggle"),
         theme::regular(12.5),
         pal.text_2,
     );
@@ -2729,10 +2787,10 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
     // Row 1: known field dropdown + custom name.
     let known_w = (inner.width() * 0.45).min(220.0);
     let known_rect = Rect::from_min_size(inner.min, vec2(known_w, 28.0));
-    let known_value = draft
-        .known
-        .and_then(|i| KNOWN_KEYS.get(i))
-        .map_or_else(|| "Choose a field…".to_owned(), |k| labels::field_label(k));
+    let known_value = draft.known.and_then(|i| KNOWN_KEYS.get(i)).map_or_else(
+        || aulos_core::fl!("tagger-add-field-known"),
+        |k| labels::field_label(k),
+    );
     let dd = Dropdown {
         id: Id::new("tag-add-known"),
         value: &known_value,
@@ -2751,9 +2809,10 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
         pos2(inner.right(), inner.top() + 28.0),
     );
     let mut custom = draft.custom.clone();
+    let custom_hint = aulos_core::fl!("tagger-add-field-custom");
     let tb = TextBox {
         enabled: editable,
-        ..TextBox::new(Id::new("tag-add-custom"), "Custom field name")
+        ..TextBox::new(Id::new("tag-add-custom"), &custom_hint)
     };
     let custom_resp = text_box(ui, &pal, custom_rect, &tb, &mut custom);
     if custom_resp.changed() {
@@ -2768,9 +2827,10 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
         pos2(inner.right() - add_w - 6.0, row2 + 28.0),
     );
     let mut value = draft.value.clone();
+    let value_hint = aulos_core::fl!("tagger-add-field-value");
     let tb = TextBox {
         enabled: editable,
-        ..TextBox::new(Id::new("tag-add-value"), "Value")
+        ..TextBox::new(Id::new("tag-add-value"), &value_hint)
     };
     let value_resp = text_box(ui, &pal, value_rect, &tb, &mut value);
     if value_resp.changed() {
@@ -2788,7 +2848,7 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
     );
     if pill_button_enabled(
         &mut add_ui,
-        "Add",
+        &aulos_core::fl!("tagger-add-field"),
         None,
         PillKind::Secondary,
         28.0,
@@ -2822,11 +2882,7 @@ fn add_field_footer(app: &App, ui: &mut Ui, width: f32, editable: bool, acts: &m
             .max_rect(hint_rect)
             .layout(Layout::top_down(Align::Min)),
     );
-    hint(
-        &mut hui,
-        &pal,
-        "Multiple values: separate them with “; ”. Only list fields such as genre or artists are split.",
-    );
+    hint(&mut hui, &pal, &aulos_core::fl!("tagger-multi-hint"));
 }
 
 // ---------------------------------------------------------------- side cards
@@ -2843,15 +2899,15 @@ fn cover_card(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
     let pal = app.pal;
     let st = &app.session.tagger;
     card(ui, &pal, |ui| {
-        caps_label(ui, "COVER ART");
+        caps_label(ui, &aulos_core::fl!("tagger-ui-cover-caps"));
         if st.selected_count() == 0 {
-            hint(ui, &pal, "Select one or more files to see their pictures.");
+            hint(ui, &pal, &aulos_core::fl!("tagger-ui-cover-select"));
             return;
         }
         let editable = facts.selection_editable;
         let pictures = st.pictures();
         if pictures.is_empty() {
-            hint(ui, &pal, "No embedded pictures.");
+            hint(ui, &pal, &aulos_core::fl!("tagger-cover-empty"));
         } else {
             let any_changed = pictures.iter().any(|p| p.changed);
             let gap = 8.0;
@@ -2880,7 +2936,7 @@ fn cover_card(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             ui.spacing_mut().item_spacing.x = 6.0;
             if pill_button_enabled(
                 ui,
-                "Add picture",
+                &aulos_core::fl!("tagger-ui-cover-add-picture"),
                 Some(regular::IMAGE),
                 PillKind::Secondary,
                 28.0,
@@ -2913,7 +2969,7 @@ fn cover_card(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             if pill_button_enabled(
                 ui,
-                "Revert pictures",
+                &aulos_core::fl!("tagger-cover-revert"),
                 Some(regular::ARROW_COUNTER_CLOCKWISE),
                 PillKind::Ghost,
                 28.0,
@@ -2926,7 +2982,7 @@ fn cover_card(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             }
             if pill_button_enabled(
                 ui,
-                "Fetch cover",
+                &aulos_core::fl!("tagger-ui-cover-fetch"),
                 Some(regular::DOWNLOAD_SIMPLE),
                 PillKind::Secondary,
                 28.0,
@@ -2939,11 +2995,7 @@ fn cover_card(app: &App, ui: &mut Ui, facts: &Facts, acts: &mut Vec<Act>) {
             }
         });
         if !release_loaded {
-            hint(
-                ui,
-                &pal,
-                "Look up a release first to fetch its front cover from the Cover Art Archive.",
-            );
+            hint(ui, &pal, &aulos_core::fl!("tagger-ui-cover-fetch-hint"));
         }
     });
 }
@@ -2990,7 +3042,7 @@ fn picture_cell(
             Id::new(("tag-pic", picture.hash, picture.kind)),
             Sense::hover(),
         )
-        .on_hover_text("Decoding…");
+        .on_hover_text(aulos_core::fl!("tagger-cover-placeholder"));
     }
 
     // Type and remove.
@@ -3027,7 +3079,7 @@ fn picture_cell(
             trash,
             Id::new(("tag-pic-remove", hash, kind)),
             regular::TRASH,
-            "Remove this picture",
+            &aulos_core::fl!("tagger-cover-remove"),
             true,
         ) {
             acts.push(Act::Msg(TaggerMessage::RemovePicture { hash, kind }));
@@ -3047,12 +3099,20 @@ fn picture_cell(
             pal.text,
         );
     }
-    let details = format!("{} · {}", picture.mime, labels::format_size(picture.bytes));
+    let details = aulos_core::fl!(
+        "tagger-cover-details",
+        mime = picture.mime.as_str(),
+        size = labels::format_size(picture.bytes)
+    );
     label_text(ui, &details, theme::mono(10.5), pal.text_3);
     if picture.files < picture.of {
         label_text(
             ui,
-            &format!("in {} of {} files", picture.files, picture.of),
+            &aulos_core::fl!(
+                "tagger-cover-in-files",
+                count = picture.files,
+                total = picture.of
+            ),
             theme::regular(11.0),
             pal.warn,
         );
@@ -3065,15 +3125,15 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let Some(lookup) = st.lookup() else { return };
     card(ui, &pal, |ui| {
         let title = match lookup.source {
-            LookupSource::Search => "MUSICBRAINZ RELEASES",
-            LookupSource::AcoustId => "ACOUSTID RESULT",
+            LookupSource::Search => aulos_core::fl!("tagger-ui-lookup-caps-musicbrainz"),
+            LookupSource::AcoustId => aulos_core::fl!("tagger-ui-lookup-caps-acoustid"),
         };
         let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
         paint_text_spaced(
             ui.painter(),
             Rect::from_min_max(head.min, pos2(head.right() - 24.0, head.bottom())),
             Align::Min,
-            title,
+            &title,
             theme::semibold(10.5),
             pal.text_3,
             0.84,
@@ -3085,20 +3145,24 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             close,
             Id::new("tag-lookup-close"),
             regular::X,
-            "Close",
+            &aulos_core::fl!("tagger-lookup-close"),
             true,
         ) {
             acts.push(Act::Msg(TaggerMessage::CloseLookup));
         }
-        hint(ui, &pal, &plural(lookup.targets.len(), "file", "files"));
+        hint(
+            ui,
+            &pal,
+            &aulos_core::fl!("tagger-lookup-files", count = lookup.targets.len()),
+        );
         if lookup.source == LookupSource::AcoustId
             && let Some(choice) = &lookup.acoustid_choice
         {
-            let text = format!(
-                "AcoustID matched {} of {} files to {}",
-                choice.covered.len(),
-                lookup.targets.len(),
-                choice.title
+            let text = aulos_core::fl!(
+                "tagger-lookup-acoustid-summary",
+                matched = choice.covered.len(),
+                total = lookup.targets.len(),
+                release = choice.title.as_str()
             );
             tone_hint(ui, &pal, &text, Tone::Accent);
         }
@@ -3109,13 +3173,15 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         let mut album = lookup.album.clone();
         let width = ui.available_width();
         let (r1, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
-        let tb = TextBox::new(Id::new("tag-query-artist"), "Artist");
+        let artist_hint = aulos_core::fl!("tagger-lookup-artist");
+        let tb = TextBox::new(Id::new("tag-query-artist"), &artist_hint);
         let artist_resp = text_box(ui, &pal, r1, &tb, &mut artist);
         if artist_resp.changed() {
             acts.push(Act::Msg(TaggerMessage::QueryArtist(artist)));
         }
         let (r2, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
-        let tb = TextBox::new(Id::new("tag-query-album"), "Album or release title");
+        let album_hint = aulos_core::fl!("tagger-lookup-album");
+        let tb = TextBox::new(Id::new("tag-query-album"), &album_hint);
         let album_resp = text_box(ui, &pal, r2, &tb, &mut album);
         if album_resp.changed() {
             acts.push(Act::Msg(TaggerMessage::QueryAlbum(album)));
@@ -3126,7 +3192,7 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         }
         if pill_button_enabled(
             ui,
-            "Search",
+            &aulos_core::fl!("tagger-lookup-search"),
             Some(regular::MAGNIFYING_GLASS),
             PillKind::Secondary,
             28.0,
@@ -3140,19 +3206,17 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
 
         // Candidates.
         match &lookup.candidates {
-            Remote::Idle => hint(ui, &pal, "Type an artist and an album, then search."),
-            Remote::Loading => busy_line(ui, &pal, "Searching MusicBrainz…"),
+            Remote::Idle => hint(ui, &pal, &aulos_core::fl!("tagger-lookup-idle")),
+            Remote::Loading => busy_line(ui, &pal, &aulos_core::fl!("tagger-lookup-searching")),
             Remote::Failed(error) => tone_hint(
                 ui,
                 &pal,
-                &format!("The search failed: {error}"),
+                &aulos_core::fl!("tagger-lookup-failed", error = error.to_string()),
                 Tone::Danger,
             ),
-            Remote::Ready(items) if items.is_empty() => hint(
-                ui,
-                &pal,
-                "No release found. Adjust the artist or album and search again.",
-            ),
+            Remote::Ready(items) if items.is_empty() => {
+                hint(ui, &pal, &aulos_core::fl!("tagger-lookup-none"))
+            }
             Remote::Ready(items) => {
                 let shown = items.len().min(CANDIDATES_SHOWN);
                 let spacing = ui.spacing().item_spacing.y;
@@ -3245,11 +3309,11 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
     let st = &app.session.tagger;
     match &lookup.release {
         Remote::Idle => {}
-        Remote::Loading => busy_line(ui, &pal, "Loading the release…"),
+        Remote::Loading => busy_line(ui, &pal, &aulos_core::fl!("tagger-lookup-loading-release")),
         Remote::Failed(error) => tone_hint(
             ui,
             &pal,
-            &format!("The release could not be loaded: {error}"),
+            &aulos_core::fl!("tagger-lookup-release-failed", error = error.to_string()),
             Tone::Danger,
         ),
         Remote::Ready(release) => {
@@ -3261,10 +3325,10 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                             .color(pal.ok),
                     );
                     ui.label(
-                        RichText::new(format!(
-                            "Matched {} of {} files",
-                            plan.matched(),
-                            plan.entries.len()
+                        RichText::new(aulos_core::fl!(
+                            "tagger-lookup-matched",
+                            matched = plan.matched(),
+                            total = plan.entries.len()
                         ))
                         .font(theme::semibold(12.5))
                         .color(pal.text),
@@ -3275,11 +3339,7 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                     hint(
                         ui,
                         &pal,
-                        &format!(
-                            "{} on the release ha{} no file.",
-                            plural(unused, "track", "tracks"),
-                            if unused == 1 { "s" } else { "ve" }
-                        ),
+                        &aulos_core::fl!("tagger-lookup-unused", count = unused),
                     );
                 }
                 let names: Vec<String> = plan
@@ -3291,37 +3351,33 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                 if !names.is_empty() {
                     let (shown, more) = labels::name_list(&names, 5);
                     let text = if more == 0 {
-                        format!("Not matched: {shown}")
+                        aulos_core::fl!("tagger-lookup-unmatched", files = shown)
                     } else {
-                        format!("Not matched: {shown} and {more} more")
+                        aulos_core::fl!("tagger-lookup-unmatched-more", files = shown, more = more)
                     };
                     tone_hint(ui, &pal, &text, Tone::Warning);
                 }
                 match &lookup.cover {
                     Remote::Idle if !app.session.config.config.tagger_use_caa_cover => {
-                        hint(
-                            ui,
-                            &pal,
-                            "The front cover is not fetched automatically (see Settings). Use “Fetch cover” below.",
-                        );
+                        hint(ui, &pal, &aulos_core::fl!("tagger-ui-lookup-cover-off"));
                     }
                     Remote::Idle => {}
-                    Remote::Loading => busy_line(ui, &pal, "Fetching the front cover…"),
+                    Remote::Loading => {
+                        busy_line(ui, &pal, &aulos_core::fl!("tagger-lookup-cover-loading"))
+                    }
                     Remote::Failed(error) => tone_hint(
                         ui,
                         &pal,
-                        &format!("The front cover could not be fetched: {error}"),
+                        &aulos_core::fl!("tagger-lookup-cover-failed", error = error.to_string()),
                         Tone::Warning,
                     ),
-                    Remote::Ready(None) => hint(
-                        ui,
-                        &pal,
-                        "The Cover Art Archive has no front cover for this release.",
-                    ),
+                    Remote::Ready(None) => {
+                        hint(ui, &pal, &aulos_core::fl!("tagger-lookup-cover-none"))
+                    }
                     Remote::Ready(Some(_)) => tone_hint(
                         ui,
                         &pal,
-                        "Front cover found on the Cover Art Archive.",
+                        &aulos_core::fl!("tagger-lookup-cover-found"),
                         Tone::Success,
                     ),
                 }
@@ -3330,7 +3386,7 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                 if pill_button_enabled(
                     ui,
-                    "Open on MusicBrainz",
+                    &aulos_core::fl!("tagger-lookup-open"),
                     Some(regular::ARROW_SQUARE_OUT),
                     PillKind::Secondary,
                     28.0,
@@ -3344,7 +3400,7 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                 if lookup.applied()
                     && pill_button_enabled(
                         ui,
-                        "Discard release",
+                        &aulos_core::fl!("tagger-lookup-discard"),
                         Some(regular::ARROW_COUNTER_CLOCKWISE),
                         PillKind::Ghost,
                         28.0,
@@ -3375,7 +3431,7 @@ fn acoustid_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         return;
     }
     card(ui, &pal, |ui| {
-        let mut title = "ACOUSTID".to_owned();
+        let mut title = String::from("ACOUSTID");
         if let [only] = selected.as_slice() {
             let name = only
                 .edited
@@ -3395,10 +3451,10 @@ fn acoustid_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             0.84,
         );
         if let Some(scan) = st.scan() {
-            let text = format!(
-                "Identified {} of {} files.",
-                scan.identified,
-                scan.files.len()
+            let text = aulos_core::fl!(
+                "tagger-ui-identified",
+                identified = scan.identified,
+                total = scan.files.len()
             );
             ui.label(
                 RichText::new(text)
@@ -3460,7 +3516,11 @@ fn acoustid_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             }
         }
         if files.len() > 8 {
-            hint(ui, &pal, &format!("and {} more", files.len() - 8));
+            hint(
+                ui,
+                &pal,
+                &aulos_core::fl!("tagger-ui-and-more", count = (files.len() - 8)),
+            );
         }
 
         if let [only] = selected.as_slice() {
@@ -3476,7 +3536,7 @@ fn acoustid_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                         0.0,
                         true,
                     )
-                    .on_hover_text("Open this AcoustID on acoustid.org")
+                    .on_hover_text(aulos_core::fl!("tagger-acoustid-open"))
                     .clicked()
                 {
                     acts.push(Act::Msg(TaggerMessage::OpenAcoustIdPage(
@@ -3486,14 +3546,14 @@ fn acoustid_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 if let Some(recording) = only.known_recording_id()
                     && pill_button_enabled(
                         ui,
-                        "Recording",
+                        &aulos_core::fl!("tagger-ui-recording-link"),
                         Some(regular::ARROW_SQUARE_OUT),
                         PillKind::Ghost,
                         26.0,
                         0.0,
                         true,
                     )
-                    .on_hover_text("Open the recording on MusicBrainz")
+                    .on_hover_text(aulos_core::fl!("tagger-recording-open"))
                     .clicked()
                 {
                     acts.push(Act::Msg(TaggerMessage::OpenRecordingPage(recording)));

@@ -190,20 +190,41 @@ fn header(
         t.pal.text_3,
         0.66,
     );
-    cell(ui, l.title, Align::Min, "TITLE", SortField::Title);
+    cell(
+        ui,
+        l.title,
+        Align::Min,
+        &aulos_core::fl!("widgets-column-title"),
+        SortField::Title,
+    );
     if let Some(r) = l.artist {
-        cell(ui, r, Align::Min, "ARTIST", SortField::Artist);
+        cell(
+            ui,
+            r,
+            Align::Min,
+            &aulos_core::fl!("widgets-column-artist"),
+            SortField::Artist,
+        );
     }
     if let Some(r) = l.album {
-        cell(ui, r, Align::Min, "ALBUM", SortField::Album);
+        cell(
+            ui,
+            r,
+            Align::Min,
+            &aulos_core::fl!("widgets-column-album"),
+            SortField::Album,
+        );
     }
-    for (r, text) in [(l.quality, "QUALITY"), (l.rating, "RATING")] {
+    for (r, text) in [
+        (l.quality, aulos_core::fl!("widgets-column-quality")),
+        (l.rating, aulos_core::fl!("widgets-column-rating")),
+    ] {
         if let Some(r) = r {
             paint_text_spaced(
                 ui.painter(),
                 r,
                 Align::Min,
-                text,
+                &text,
                 font.clone(),
                 t.pal.text_3,
                 0.66,

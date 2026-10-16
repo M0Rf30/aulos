@@ -27,7 +27,7 @@ pub struct IconBtn<'a> {
     dot: bool,
     enabled: bool,
     color: Option<Color32>,
-    tip: Option<&'a str>,
+    tip: Option<std::borrow::Cow<'a, str>>,
     round: bool,
 }
 
@@ -77,8 +77,8 @@ impl<'a> IconBtn<'a> {
         self.color = Some(c);
         self
     }
-    pub fn tip(mut self, t: &'a str) -> Self {
-        self.tip = Some(t);
+    pub fn tip(mut self, t: impl Into<std::borrow::Cow<'a, str>>) -> Self {
+        self.tip = Some(t.into());
         self
     }
     pub fn round(mut self, v: bool) -> Self {

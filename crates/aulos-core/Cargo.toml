@@ -249,6 +249,7 @@ visualizer = ["dep:pipewire"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+fluent-syntax = "0.12"
 
 [[bench]]
 name = "db_grouping"

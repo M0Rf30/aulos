@@ -111,10 +111,10 @@ pub enum ToastAction {
 }
 
 impl ToastAction {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::RestoreStation(_) => "Undo",
-            Self::AllowMusicFolders => "Allow",
+            Self::RestoreStation(_) => aulos_core::fl!("app-toast-undo"),
+            Self::AllowMusicFolders => aulos_core::fl!("app-toast-allow"),
         }
     }
 }
@@ -426,37 +426,40 @@ impl App {
         use aulos_core::session::PlaybackNotice;
         match notice {
             SessionNotice::Playback(PlaybackNotice::Queued(n)) => {
-                self.toast(if *n == 1 {
-                    "Added 1 track to the queue".to_owned()
-                } else {
-                    format!("Added {n} tracks to the queue")
-                });
+                self.toast(aulos_core::fl!("app-toast-queued", count = (*n)));
             }
             SessionNotice::Playback(PlaybackNotice::OpenFilesFailed) => {
-                self.toast_error("Could not open those files")
+                self.toast_error(aulos_core::fl!("app-toast-open-files-failed"))
             }
-            SessionNotice::Playback(PlaybackNotice::PlayFailed(reason)) => {
-                self.toast_error(format!("Playback failed: {reason}"))
-            }
-            SessionNotice::ProviderActionFailed(reason) => {
-                self.toast_error(format!("Action failed: {reason}"))
-            }
+            SessionNotice::Playback(PlaybackNotice::PlayFailed(reason)) => self.toast_error(
+                aulos_core::fl!("app-toast-playback-failed", reason = reason.to_string()),
+            ),
+            SessionNotice::ProviderActionFailed(reason) => self.toast_error(aulos_core::fl!(
+                "app-toast-action-failed",
+                reason = reason.to_string()
+            )),
             SessionNotice::ProviderConnectFailed { provider, reason } => {
                 views::overlays::on_connect_failed(self, provider, reason);
             }
-            SessionNotice::PlaylistsImported(files) => {
-                self.toast(format!("Imported {} playlist file(s)", files.len()))
-            }
-            SessionNotice::PlaylistImportFailed(reason) => {
-                self.toast_error(format!("Playlist import failed: {reason}"))
-            }
+            SessionNotice::PlaylistsImported(files) => self.toast(aulos_core::fl!(
+                "app-toast-playlists-imported",
+                count = files.len()
+            )),
+            SessionNotice::PlaylistImportFailed(reason) => self.toast_error(aulos_core::fl!(
+                "app-toast-playlist-import-failed",
+                reason = reason.to_string()
+            )),
             SessionNotice::Podcast(notice) => self.show_podcast_notice(notice),
             SessionNotice::Radio(notice) => self.show_radio_notice(notice),
             SessionNotice::Convert(ConvertNotice::QueueFinished { done, failed }) => {
                 if *failed == 0 {
-                    self.toast(format!("Converted {done} file(s)"));
+                    self.toast(aulos_core::fl!("app-toast-converted", count = (*done)));
                 } else {
-                    self.toast_error(format!("Converted {done} file(s), {failed} failed"));
+                    self.toast_error(aulos_core::fl!(
+                        "app-toast-converted-failed",
+                        count = (*done),
+                        failed = (*failed)
+                    ));
                 }
             }
         }
@@ -464,29 +467,43 @@ impl App {
 
     fn show_podcast_notice(&mut self, notice: &PodcastNotice) {
         match notice {
-            PodcastNotice::Subscribed { name } => self.toast(format!("Subscribed to {name}")),
-            PodcastNotice::SubscribeFailed { reason } => {
-                self.toast_error(format!("Could not subscribe: {reason}"))
-            }
-            PodcastNotice::UnsubscribeFailed { reason } => {
-                self.toast_error(format!("Could not unsubscribe: {reason}"))
-            }
-            PodcastNotice::DownloadFailed { reason } => {
-                self.toast_error(format!("Download failed: {reason}"))
-            }
+            PodcastNotice::Subscribed { name } => self.toast(aulos_core::fl!(
+                "app-toast-subscribed",
+                name = name.to_string()
+            )),
+            PodcastNotice::SubscribeFailed { reason } => self.toast_error(aulos_core::fl!(
+                "app-toast-subscribe-failed",
+                reason = reason.to_string()
+            )),
+            PodcastNotice::UnsubscribeFailed { reason } => self.toast_error(aulos_core::fl!(
+                "app-toast-unsubscribe-failed",
+                reason = reason.to_string()
+            )),
+            PodcastNotice::DownloadFailed { reason } => self.toast_error(aulos_core::fl!(
+                "app-toast-download-failed",
+                reason = reason.to_string()
+            )),
         }
     }
 
     fn show_radio_notice(&mut self, notice: &RadioNotice) {
         match notice {
-            RadioNotice::Saved { name } => self.toast(format!("Saved {name}")),
-            RadioNotice::AlreadySaved { name } => self.toast(format!("{name} is already saved")),
-            RadioNotice::SaveFailed { reason } => {
-                self.toast_error(format!("Could not save the station: {reason}"))
-            }
-            RadioNotice::PlayFailed { reason } => {
-                self.toast_error(format!("Could not play the station: {reason}"))
-            }
+            RadioNotice::Saved { name } => self.toast(aulos_core::fl!(
+                "app-toast-station-saved",
+                name = name.to_string()
+            )),
+            RadioNotice::AlreadySaved { name } => self.toast(aulos_core::fl!(
+                "app-toast-station-already-saved",
+                name = name.to_string()
+            )),
+            RadioNotice::SaveFailed { reason } => self.toast_error(aulos_core::fl!(
+                "app-toast-station-save-failed",
+                reason = reason.to_string()
+            )),
+            RadioNotice::PlayFailed { reason } => self.toast_error(aulos_core::fl!(
+                "app-toast-station-play-failed",
+                reason = reason.to_string()
+            )),
         }
     }
 
@@ -692,7 +709,7 @@ impl App {
         }
         if open {
             let Some(render_state) = self.render_state.clone() else {
-                self.toast_error("The visualizer needs the GPU renderer");
+                self.toast_error(aulos_core::fl!("app-toast-visualizer-needs-gpu"));
                 return;
             };
             let ppp = self.ctx.pixels_per_point();
@@ -933,6 +950,18 @@ impl App {
         self.session.config.config.ui_scale = scale;
         self.session.config.save();
         self.apply_zoom();
+    }
+
+    /// Sets and saves the interface language (`""` follows the system) and
+    /// switches the loaded translations at once.
+    pub fn set_language(&mut self, language: &str) {
+        if self.session.config.config.language == language {
+            return;
+        }
+        self.session.config.config.language = language.to_owned();
+        self.session.config.save();
+        aulos_core::i18n::init_for(language);
+        self.ctx.request_repaint();
     }
 
     fn apply_zoom(&self) {
