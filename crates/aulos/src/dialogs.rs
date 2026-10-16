@@ -6,6 +6,9 @@
 //! on Windows and `NSOpenPanel` on macOS. All are async and never block the
 //! UI thread; a cancelled dialog is simply `None` / an empty list.
 //!
+//! Android has no portal either: its pickers report a cancelled dialog too, and
+//! the library reads the shared Music folder.
+//!
 //! A browser cannot hand out filesystem paths, so there every picker reports
 //! a cancelled dialog, except [`pick_music_folder`]: a music folder is
 //! granted through the browser and named by a virtual path (see
@@ -15,8 +18,8 @@ use std::path::PathBuf;
 
 /// A named set of file extensions (no leading dot) the dialog offers.
 #[cfg_attr(
-    target_arch = "wasm32",
-    allow(dead_code, reason = "the browser has no dialog to filter")
+    any(target_arch = "wasm32", target_os = "android"),
+    allow(dead_code, reason = "the browser and Android have no dialog to filter")
 )]
 pub struct Filter<'a> {
     pub name: &'a str,
@@ -32,7 +35,7 @@ impl<'a> Filter<'a> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod native {
     use super::*;
 
@@ -85,23 +88,23 @@ mod native {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub use native::*;
 
 /// One or more files; always empty in the browser (see the module docs).
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub async fn pick_files(_title: &str, _filter: Option<&Filter<'_>>) -> Vec<PathBuf> {
     Vec::new()
 }
 
 /// A single file; always `None` in the browser.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub async fn pick_file(_title: &str, _filter: Option<&Filter<'_>>) -> Option<PathBuf> {
     None
 }
 
 /// A folder; always `None` in the browser.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub async fn pick_folder(_title: &str) -> Option<PathBuf> {
     None
 }
@@ -122,7 +125,7 @@ pub async fn pick_music_folder(_title: &str) -> Result<Option<PathBuf>, String> 
 }
 
 /// A file to write; always `None` in the browser.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub async fn save_file(
     _title: &str,
     _file_name: &str,

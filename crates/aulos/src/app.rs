@@ -1142,6 +1142,17 @@ impl App {
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
+        // Android draws edge to edge: keep the content clear of the system bars.
+        #[cfg(target_os = "android")]
+        if let Some([left, top, right, bottom]) = crate::android::system_insets() {
+            let ppp = ctx.pixels_per_point();
+            raw_input.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
+                left: left / ppp,
+                right: right / ppp,
+                top: top / ppp,
+                bottom: bottom / ppp,
+            }));
+        }
         // Smoke shots must not show hover tints or tooltips from a stray pointer.
         if self.smoke.is_some() {
             raw_input.events.retain(|e| {
@@ -1210,6 +1221,11 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Edge to edge on Android: lay out inside the system bars.
+        #[cfg(target_os = "android")]
+        let mut inset_ui = ui.new_child(egui::UiBuilder::new().max_rect(ui.ctx().content_rect()));
+        #[cfg(target_os = "android")]
+        let ui = &mut inset_ui;
         let ctx = ui.ctx().clone();
         self.sync_theme(&ctx);
         Theme {

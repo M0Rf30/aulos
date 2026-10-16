@@ -126,7 +126,7 @@ pub struct NativeWindow(
 
 /// A change of the published state, handed to the backend task.
 #[cfg_attr(
-    target_arch = "wasm32",
+    any(target_arch = "wasm32", target_os = "android"),
     allow(
         dead_code,
         reason = "only the desktop backends publish media-session state"
@@ -151,7 +151,7 @@ struct SharedState {
 impl SharedState {
     /// A fresh shared state and the receiving end of its update channel.
     #[cfg_attr(
-        target_arch = "wasm32",
+        any(target_arch = "wasm32", target_os = "android"),
         allow(
             dead_code,
             reason = "only the desktop backends publish media-session state"

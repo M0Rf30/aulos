@@ -90,6 +90,21 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 - **Internet radio**: search the [radio-browser.info](https://www.radio-browser.info) directory by name, tag or country, or browse the most-clicked and most-voted stations. The title of the song currently playing is read from the stream. PLS/M3U links are supported, and dropped streams reconnect automatically.
 - **Podcasts**: find shows through the iTunes directory or subscribe to any RSS/Atom feed. Episodes can be streamed or downloaded for offline listening.
 
+### Android
+
+A universal APK (arm64-v8a and x86_64, Android 8.0+) is attached to every release. Library scanning reads the shared `Music` folder (the app asks for the audio permission on first launch); Subsonic/OpenSubsonic servers work as on the desktop. MPD, the tag editor's file dialogs and the converter's pickers are desktop-only for now.
+
+[<img src="resources/badges/badge_obtainium.png" alt="Get it on Obtainium" height="48">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22io.github.m0rf30.aulos%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FM0Rf30%2Faulos%22%2C%22author%22%3A%22M0Rf30%22%2C%22name%22%3A%22Aulos%22%7D)
+
+Verification info:
+
+- Package ID: `io.github.m0rf30.aulos`
+- SHA-256 hash of the signing certificate:
+  ```text
+  8F:45:99:C9:AE:A2:26:37:47:7A:53:90:01:61:B4:1F:C6:2F:F4:1F:EC:69:69:87:B9:8A:0C:A2:1F:BD:BA:06
+  ```
+  (Check with `apksigner verify --print-certs aulos-<version>-android.apk`; the `.sha256` file next to the APK covers the file itself.)
+
 ### Languages
 
 English, Italian, German, French, Spanish and Brazilian Portuguese. The interface follows the system language; change it in Settings → Appearance → Language. Translations live in `i18n/<tag>/aulos.ftl` (Fluent); fixes and new languages are welcome.
