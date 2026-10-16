@@ -146,7 +146,7 @@ jobs:
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" >/dev/null || true
-          cargo apk build -p aulos --lib --locked
+          cargo apk build -p aulos --lib
 
       - uses: actions/upload-artifact@v7
         with:

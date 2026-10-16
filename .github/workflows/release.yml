@@ -267,7 +267,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" >/dev/null || true
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/aulos.keystore"
           export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/aulos.keystore"
-          cargo apk build --release -p aulos --lib --locked --features visualizer
+          cargo apk build --release -p aulos --lib --features visualizer
           mkdir -p dist
           # Named after the tag so Obtainium's version detection and the other
           # assets line up.
