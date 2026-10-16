@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "aulos"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aulos-core",
  "chrono",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "aulos-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "apple-native-keyring-store",
  "ashpd",
