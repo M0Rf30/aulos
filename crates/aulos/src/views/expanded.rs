@@ -759,7 +759,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     let fav = app
         .session
         .library
-        .favorite_state(Some(track), &track.id.to_string())
+        .favorite_state(Some(track), &track.key())
         .unwrap_or(track.is_favorite);
     let heart = Rect::from_min_size(pos2(x0 + w - 30.0, info + 28.0 + extra), vec2(30.0, 30.0));
     // Track menu ("…") left of the heart.

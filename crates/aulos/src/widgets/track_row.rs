@@ -407,7 +407,7 @@ pub fn track_row(
     let fav = app
         .session
         .library
-        .favorite_state(None, &track.id.to_string())
+        .favorite_state(None, &track.key())
         .unwrap_or(track.is_favorite);
     let heart_hit = Rect::from_center_size(
         l.heart.center(),

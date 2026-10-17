@@ -1133,7 +1133,7 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                     }
                     if let Some(stars) = out.set_rating {
                         actions.push(Action::Rate {
-                            id: track.id.to_string(),
+                            id: track.key(),
                             stars,
                         });
                     }

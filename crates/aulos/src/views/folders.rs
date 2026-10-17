@@ -690,7 +690,7 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
                     .library
                     .tracks
                     .get(index)
-                    .map(|t| t.id.to_string())
+                    .map(aulos_core::library::Track::key)
                 {
                     let effect = app.session.set_rating(id, n);
                     app.run(effect);

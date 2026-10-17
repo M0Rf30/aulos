@@ -47,7 +47,7 @@ pub fn plan_sync(tracks: &[Track], loved: &[(String, String)]) -> LovedSyncPlan 
         let key = loved_key(&t.artist, &t.title);
         if remote.contains(&key) {
             if !t.is_favorite {
-                plan.to_favorite.push(t.id.to_string());
+                plan.to_favorite.push(t.key());
             }
         } else if t.is_favorite
             && plan.to_love.len() < MAX_BULK_LOVES

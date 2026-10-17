@@ -683,7 +683,7 @@ impl LibraryState {
     /// copies of those).
     pub fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
         let mut visit = |track: &mut Track| {
-            if track.id.to_string() == track_id {
+            if track.has_key(track_id) {
                 f(track);
             }
         };
@@ -708,13 +708,13 @@ impl LibraryState {
     #[must_use]
     pub fn favorite_state(&self, current: Option<&Track>, track_id: &str) -> Option<bool> {
         if let Some(ct) = current
-            && ct.id.to_string() == track_id
+            && ct.has_key(track_id)
         {
             return Some(ct.is_favorite);
         }
         self.tracks
             .iter()
-            .find(|t| t.id.to_string() == track_id)
+            .find(|t| t.has_key(track_id))
             .map(|t| t.is_favorite)
     }
 
@@ -723,13 +723,13 @@ impl LibraryState {
     #[must_use]
     pub fn rating_state(&self, current: Option<&Track>, track_id: &str) -> Option<u8> {
         if let Some(ct) = current
-            && ct.id.to_string() == track_id
+            && ct.has_key(track_id)
         {
             return ct.rating;
         }
         self.tracks
             .iter()
-            .find(|t| t.id.to_string() == track_id)
+            .find(|t| t.has_key(track_id))
             .and_then(|t| t.rating)
     }
 }

@@ -637,7 +637,7 @@ impl App {
     }
 
     pub fn toggle_favorite(&mut self, track: &Track) {
-        let effect = self.session.toggle_favorite(track.id.to_string());
+        let effect = self.session.toggle_favorite(track.key());
         self.run(effect);
     }
 

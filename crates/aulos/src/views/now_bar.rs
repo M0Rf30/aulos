@@ -221,7 +221,7 @@ fn track_info(app: &mut App, ui: &mut Ui) {
     let fav = app
         .session
         .library
-        .favorite_state(Some(&track), &track.id.to_string())
+        .favorite_state(Some(&track), &track.key())
         .unwrap_or(track.is_favorite);
     let heart_w = 16.0 + 12.0 + 2.0;
     let quality = App::quality_of(&track);

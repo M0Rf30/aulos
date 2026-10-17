@@ -179,7 +179,7 @@ impl Session {
     fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
         self.library.for_each_track(track_id, &mut f);
         if let Some(ct) = self.playback.current_track.as_mut()
-            && ct.id.to_string() == track_id
+            && ct.has_key(track_id)
         {
             f(ct);
         }

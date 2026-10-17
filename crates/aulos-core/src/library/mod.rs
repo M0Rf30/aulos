@@ -131,6 +131,29 @@ pub struct Track {
 }
 
 impl Track {
+    /// The identifier the active provider addresses this track by in
+    /// favorite/rating calls: the database row id for local tracks, and
+    /// the provider's own id (Subsonic song id, MPD path; stored in
+    /// `path`) for remote ones, whose `id` is `0` while live.
+    #[must_use]
+    pub fn key(&self) -> String {
+        if &*self.provider_id == "local" {
+            self.id.to_string()
+        } else {
+            self.path.to_string_lossy().into_owned()
+        }
+    }
+
+    /// Whether [`Self::key`] equals `key`, without allocating.
+    #[must_use]
+    pub fn has_key(&self, key: &str) -> bool {
+        if &*self.provider_id == "local" {
+            key.parse::<i64>() == Ok(self.id)
+        } else {
+            self.path.to_str() == Some(key)
+        }
+    }
+
     /// Format duration as `H:MM:SS` when at least an hour, otherwise `M:SS`.
     pub fn duration_string(&self) -> String {
         crate::format::format_duration(self.duration.as_secs())
@@ -508,5 +531,33 @@ mod derived_tests {
         artist.push_album(a2);
         assert_eq!((artist.album_count(), artist.track_count()), (2, 3));
         assert_eq!(artist.total_secs, 6);
+    }
+}
+
+#[cfg(test)]
+mod track_key_tests {
+    use crate::session::test_support::track;
+    use std::path::PathBuf;
+
+    #[test]
+    fn local_tracks_are_addressed_by_row_id() {
+        let mut t = track(42);
+        t.provider_id = "local".into();
+        assert_eq!(t.key(), "42");
+        assert!(t.has_key("42"));
+        assert!(!t.has_key("0"));
+    }
+
+    #[test]
+    fn remote_tracks_are_addressed_by_provider_id_not_the_zero_row_id() {
+        let mut a = track(0);
+        a.provider_id = "navidrome".into();
+        a.path = PathBuf::from("song-a");
+        let mut b = a.clone();
+        b.path = PathBuf::from("song-b");
+        assert_eq!(a.key(), "song-a");
+        assert!(a.has_key("song-a"));
+        assert!(!a.has_key("0"));
+        assert_ne!(a.key(), b.key());
     }
 }
