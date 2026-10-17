@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use symphonia::core::codecs::CodecParameters;
@@ -420,7 +421,7 @@ fn format_label(info: &TechInfo) -> Option<String> {
 /// Remote tracks and unreadable files contribute only what the library already
 /// stores on [`Track`] (sample rate, bitrate, year, duration) and count towards
 /// [`AlbumSummary::unprobed`].
-pub fn summarize_album(tracks: &[Track]) -> AlbumSummary {
+pub fn summarize_album(tracks: &[Arc<Track>]) -> AlbumSummary {
     let mut s = AlbumSummary {
         track_count: tracks.len(),
         ..AlbumSummary::default()

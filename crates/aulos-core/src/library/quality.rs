@@ -11,6 +11,7 @@
 
 use super::Track;
 use std::path::Path;
+use std::sync::Arc;
 
 /// A track's audio quality tier, ordered worst → best so
 /// [`album_quality`] can fold a whole album down to its best tier with
@@ -130,7 +131,7 @@ pub fn classify(path: &Path, sample_rate: u32, _bitrate: u32) -> AudioQuality {
 /// The best quality tier across an album's tracks — `Unknown` for an empty
 /// slice, since there is nothing to grade.
 #[must_use]
-pub fn album_quality(tracks: &[Track]) -> AudioQuality {
+pub fn album_quality(tracks: &[Arc<Track>]) -> AudioQuality {
     tracks
         .iter()
         .map(|track| classify(&track.path, track.sample_rate, track.bitrate))
@@ -252,9 +253,9 @@ mod tests {
     #[test]
     fn album_quality_picks_the_best_of_a_mixed_slice() {
         let tracks = vec![
-            track("a.mp3", 44_100, 320),
-            track("b.flac", 96_000, 2304),
-            track("c", 0, 0),
+            Arc::new(track("a.mp3", 44_100, 320)),
+            Arc::new(track("b.flac", 96_000, 2304)),
+            Arc::new(track("c", 0, 0)),
         ];
         assert_eq!(album_quality(&tracks), AudioQuality::HiRes);
     }

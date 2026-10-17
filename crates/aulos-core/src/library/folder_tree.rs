@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::Track;
 use crate::fl;
@@ -70,7 +71,7 @@ impl FolderTree {
     /// (and every ancestor up to the root) becomes a node, and the
     /// track's index is recorded against its immediate directory.
     #[must_use]
-    pub fn build(tracks: &[Track]) -> FolderTree {
+    pub fn build(tracks: &[Arc<Track>]) -> FolderTree {
         let mut nodes: HashMap<PathBuf, FolderNode> = HashMap::new();
         nodes.entry(root()).or_default();
 
@@ -213,7 +214,7 @@ impl FolderTree {
     /// Total playing time, in seconds, of every track at or beneath `dir`
     /// (indices that fall outside `tracks` are ignored).
     #[must_use]
-    pub fn total_secs_in(&self, dir: &Path, tracks: &[Track]) -> u64 {
+    pub fn total_secs_in(&self, dir: &Path, tracks: &[Arc<Track>]) -> u64 {
         let mut total = 0u64;
         self.visit_tracks(dir, true, &mut |i| {
             if let Some(track) = tracks.get(i) {
@@ -232,7 +233,7 @@ impl FolderTree {
     pub fn first_cover<'a, V>(
         &self,
         dir: &Path,
-        tracks: &[Track],
+        tracks: &[Arc<Track>],
         covers: &'a HashMap<String, V>,
     ) -> Option<&'a V> {
         if covers.is_empty() {
@@ -475,8 +476,8 @@ mod tests {
     use std::time::Duration;
 
     /// Minimal `Track` carrying only the field this module reads (`path`).
-    fn track(path: &str) -> Track {
-        Track {
+    fn track(path: &str) -> Arc<Track> {
+        Arc::new(Track {
             id: 0,
             path: PathBuf::from(path),
             title: String::new(),
@@ -500,7 +501,7 @@ mod tests {
             release_type: String::new(),
             added_at: 0,
             favorited_at: 0,
-        }
+        })
     }
 
     #[test]

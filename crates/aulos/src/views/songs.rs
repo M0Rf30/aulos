@@ -241,13 +241,7 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
                 }
             }
             Intent::Rate(index, n) => {
-                if let Some(id) = app
-                    .session
-                    .library
-                    .tracks
-                    .get(index)
-                    .map(aulos_core::library::Track::key)
-                {
+                if let Some(id) = app.session.library.tracks.get(index).map(|t| t.key()) {
                     let effect = app.session.set_rating(id, n);
                     app.run(effect);
                 }
@@ -266,7 +260,7 @@ fn shuffle_all(app: &mut App) {
         let update = app.session.toggle_shuffle();
         app.run(update);
     }
-    let tracks = app.session.library.tracks.clone();
+    let tracks = aulos_core::library::owned_tracks(&app.session.library.tracks);
     let nanos = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)

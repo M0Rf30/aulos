@@ -219,12 +219,22 @@ impl Track {
 
     /// Sort tracks by disc number, then track number.
     pub fn sort_by_disc_and_track(tracks: &mut [Track]) {
-        tracks.sort_by(|a, b| {
-            a.disc_number
-                .cmp(&b.disc_number)
-                .then(a.track_number.cmp(&b.track_number))
-        });
+        tracks.sort_by(Self::disc_track_order);
     }
+
+    /// Disc number, then track number.
+    pub fn disc_track_order(a: &Track, b: &Track) -> std::cmp::Ordering {
+        a.disc_number
+            .cmp(&b.disc_number)
+            .then(a.track_number.cmp(&b.track_number))
+    }
+}
+
+/// Owned copies of shared library tracks, for queues and players that take
+/// `Track` by value.
+#[must_use]
+pub fn owned_tracks(tracks: &[Arc<Track>]) -> Vec<Track> {
+    tracks.iter().map(|t| Track::clone(t)).collect()
 }
 
 /// An album aggregated from library tracks.
@@ -238,7 +248,7 @@ pub struct Album {
     pub name: String,
     pub artist: String,
     pub year: u32,
-    pub tracks: Vec<Track>,
+    pub tracks: Vec<Arc<Track>>,
     pub cover_source: Option<CoverSource>,
     /// `CoverArt::album_key(artist, name)`: key into the cover image maps.
     pub cover_key: String,
@@ -266,7 +276,7 @@ impl Album {
             name,
             artist,
             year,
-            tracks,
+            tracks: tracks.into_iter().map(Arc::new).collect(),
             cover_source,
             cover_key: String::new(),
             quality: quality::AudioQuality::Unknown,
@@ -347,7 +357,7 @@ impl Album {
 #[derive(Debug, Clone)]
 pub struct Artist {
     pub name: String,
-    pub albums: Vec<Album>,
+    pub albums: Vec<Arc<Album>>,
     /// Number of tracks across all albums.
     pub track_total: usize,
     /// Total duration of all albums in whole seconds.
@@ -356,7 +366,7 @@ pub struct Artist {
 
 impl Artist {
     /// Build an artist from its albums, computing the cached sums once.
-    pub fn new(name: String, albums: Vec<Album>) -> Self {
+    pub fn new(name: String, albums: Vec<Arc<Album>>) -> Self {
         let track_total = albums.iter().map(|a| a.tracks.len()).sum();
         let total_secs = albums.iter().map(|a| a.total_secs).sum();
         Self {
@@ -368,7 +378,7 @@ impl Artist {
     }
 
     /// Append an album, keeping the cached sums current.
-    pub fn push_album(&mut self, album: Album) {
+    pub fn push_album(&mut self, album: Arc<Album>) {
         self.track_total += album.tracks.len();
         self.total_secs += album.total_secs;
         self.albums.push(album);
@@ -508,7 +518,7 @@ mod derived_tests {
     fn refresh_derived_follows_artist_override_and_new_tracks() {
         let mut album = Album::from_tracks("Record".into(), vec![track("a.mp3", 1000, 0)], None);
         album.artist = "Other".into();
-        album.tracks.push(track("b.flac", 2000, 44_100));
+        album.tracks.push(Arc::new(track("b.flac", 2000, 44_100)));
         album.refresh_derived();
         assert_eq!(album.cover_key, CoverArt::album_key("Other", "Record"));
         assert_eq!(album.quality, quality::AudioQuality::CdLossless);
@@ -525,10 +535,10 @@ mod derived_tests {
             vec![track("b.mp3", 2000, 0), track("c.mp3", 3000, 0)],
             None,
         );
-        let mut artist = Artist::new("Band".into(), vec![a1]);
+        let mut artist = Artist::new("Band".into(), vec![Arc::new(a1)]);
         assert_eq!((artist.album_count(), artist.track_count()), (1, 1));
         assert_eq!(artist.total_secs, 1);
-        artist.push_album(a2);
+        artist.push_album(Arc::new(a2));
         assert_eq!((artist.album_count(), artist.track_count()), (2, 3));
         assert_eq!(artist.total_secs, 6);
     }

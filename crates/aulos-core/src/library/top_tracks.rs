@@ -5,6 +5,7 @@
 //! and favourites, then in library order.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::Track;
 
@@ -22,8 +23,12 @@ pub struct ArtistTop {
 /// track id) first; ties and unplayed tracks fall back to the rating, then
 /// favourites, then the given order (the sort is stable).
 #[must_use]
-pub fn rank_top_tracks(tracks: &[Track], plays: &HashMap<i64, u32>, limit: usize) -> Vec<Track> {
-    let mut ranked: Vec<&Track> = tracks.iter().collect();
+pub fn rank_top_tracks(
+    tracks: &[Arc<Track>],
+    plays: &HashMap<i64, u32>,
+    limit: usize,
+) -> Vec<Track> {
+    let mut ranked: Vec<&Track> = tracks.iter().map(Arc::as_ref).collect();
     ranked.sort_by(|a, b| {
         let played = |t: &Track| plays.get(&t.id).copied().unwrap_or(0);
         played(b)
@@ -73,11 +78,11 @@ mod tests {
     #[test]
     fn plays_beat_rating_and_ties_fall_back_to_rating_then_favourite() {
         let tracks = vec![
-            track(1, Some(5), false),
-            track(2, None, false),
-            track(3, Some(3), true),
-            track(4, None, true),
-            track(5, Some(3), false),
+            Arc::new(track(1, Some(5), false)),
+            Arc::new(track(2, None, false)),
+            Arc::new(track(3, Some(3), true)),
+            Arc::new(track(4, None, true)),
+            Arc::new(track(5, Some(3), false)),
         ];
         let plays = HashMap::from([(2, 9), (4, 9), (5, 1)]);
         // 2 and 4 tie on plays (4 is a favourite but 2 is first: same
@@ -90,9 +95,9 @@ mod tests {
     #[test]
     fn without_any_plays_rating_and_favourites_rank() {
         let tracks = vec![
-            track(1, None, false),
-            track(2, Some(4), false),
-            track(3, None, true),
+            Arc::new(track(1, None, false)),
+            Arc::new(track(2, Some(4), false)),
+            Arc::new(track(3, None, true)),
         ];
         assert_eq!(
             ids(&rank_top_tracks(&tracks, &HashMap::new(), 5)),

@@ -6,6 +6,7 @@ use crate::app::App;
 use crate::theme::{self, Theme};
 use crate::views::menus::{self, MenuAction};
 use crate::widgets::{self, Columns, PillKind, paint_icon, paint_text, row_height};
+use aulos_core::library::Track;
 use aulos_core::library::folder_tree::{FolderState, FolderTree};
 use aulos_core::session::QueuePlacement;
 use egui::{
@@ -672,7 +673,7 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
                 let direct = folder.tree().direct_tracks(&dir);
                 let tracks: Vec<_> = direct
                     .iter()
-                    .filter_map(|&i| app.session.library.tracks.get(i).cloned())
+                    .filter_map(|&i| app.session.library.tracks.get(i).map(|t| Track::clone(t)))
                     .collect();
                 if let Some(position) = direct.iter().position(|&i| i == index) {
                     let update = app.session.play_tracks(tracks, position);
@@ -685,13 +686,7 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
                 }
             }
             Intent::Rate(index, n) => {
-                if let Some(id) = app
-                    .session
-                    .library
-                    .tracks
-                    .get(index)
-                    .map(aulos_core::library::Track::key)
-                {
+                if let Some(id) = app.session.library.tracks.get(index).map(|t| t.key()) {
                     let effect = app.session.set_rating(id, n);
                     app.run(effect);
                 }
@@ -725,6 +720,6 @@ fn folder_tracks(app: &App) -> Vec<aulos_core::library::Track> {
         .tree()
         .tracks_in(&dir, true)
         .into_iter()
-        .filter_map(|i| app.session.library.tracks.get(i).cloned())
+        .filter_map(|i| app.session.library.tracks.get(i).map(|t| Track::clone(t)))
         .collect()
 }

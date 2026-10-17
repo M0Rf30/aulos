@@ -221,7 +221,12 @@ impl Session {
                 albums
                     .iter()
                     .filter_map(|a| self.library.find_album_exact(&a.artist, &a.name))
-                    .flat_map(|idx| self.library.albums[idx].tracks.iter().cloned())
+                    .flat_map(|idx| {
+                        self.library.albums[idx]
+                            .tracks
+                            .iter()
+                            .map(|t| Track::clone(t))
+                    })
                     .collect()
             })
             .unwrap_or_default()

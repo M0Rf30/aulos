@@ -9,6 +9,7 @@
 use super::source_allowed;
 use crate::library::Track;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Upper bound on favorites pushed to Last.fm by a single sync.
 pub const MAX_BULK_LOVES: usize = 500;
@@ -36,7 +37,7 @@ pub struct LovedSyncPlan {
 /// Matches `tracks` against the remote `loved` `(artist, title)` list.
 /// Tracks whose provider is not scrobble-eligible are ignored.
 #[must_use]
-pub fn plan_sync(tracks: &[Track], loved: &[(String, String)]) -> LovedSyncPlan {
+pub fn plan_sync(tracks: &[Arc<Track>], loved: &[(String, String)]) -> LovedSyncPlan {
     let remote: HashSet<String> = loved.iter().map(|(a, t)| loved_key(a, t)).collect();
     let mut plan = LovedSyncPlan::default();
     let mut seen: HashSet<String> = HashSet::new();
@@ -67,8 +68,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn track(id: i64, artist: &str, title: &str, favorite: bool) -> Track {
-        Track {
+    fn track(id: i64, artist: &str, title: &str, favorite: bool) -> Arc<Track> {
+        Arc::new(Track {
             id,
             path: PathBuf::new(),
             title: title.to_string(),
@@ -92,7 +93,7 @@ mod tests {
             release_type: String::new(),
             added_at: 0,
             favorited_at: 0,
-        }
+        })
     }
 
     #[test]
@@ -127,7 +128,7 @@ mod tests {
 
     #[test]
     fn plan_caps_bulk_loves() {
-        let tracks: Vec<Track> = (0..(MAX_BULK_LOVES as i64 + 10))
+        let tracks: Vec<Arc<Track>> = (0..(MAX_BULK_LOVES as i64 + 10))
             .map(|i| track(i, "Artist", &format!("Song {i}"), true))
             .collect();
         let plan = plan_sync(&tracks, &[]);

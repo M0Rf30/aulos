@@ -10,6 +10,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +69,7 @@ fn year_key(year: u32) -> Reverse<u32> {
 
 /// Sort `albums` by `sort`. Ties fall back to the title, so the order is
 /// stable across reloads.
-pub fn sort_albums(albums: &mut [Album], sort: AlbumSort) {
+pub fn sort_albums(albums: &mut [Arc<Album>], sort: AlbumSort) {
     match sort {
         AlbumSort::RecentlyAdded => {
             albums.sort_by_cached_key(|a| (Reverse(a.added_at), name_key(&a.name)));
@@ -101,7 +102,7 @@ pub fn sort_artists(artists: &mut [Artist], sort: AlbumSort) {
 
 /// Sort `genres` by `sort`, judging recency and year by the `tracks` that
 /// carry each genre.
-pub fn sort_genres(genres: &mut [String], tracks: &[Track], sort: AlbumSort) {
+pub fn sort_genres(genres: &mut [String], tracks: &[Arc<Track>], sort: AlbumSort) {
     if matches!(sort, AlbumSort::Title | AlbumSort::Artist) {
         genres.sort_by_cached_key(|g| name_key(g));
         return;
@@ -126,17 +127,17 @@ pub fn sort_genres(genres: &mut [String], tracks: &[Track], sort: AlbumSort) {
 mod tests {
     use super::*;
 
-    fn album(name: &str, artist: &str, year: u32, added_at: i64) -> Album {
+    fn album(name: &str, artist: &str, year: u32, added_at: i64) -> Arc<Album> {
         let mut a = Album::new(name.into(), artist.into(), year, Vec::new(), None);
         a.added_at = added_at;
-        a
+        Arc::new(a)
     }
 
-    fn names(albums: &[Album]) -> Vec<&str> {
+    fn names(albums: &[Arc<Album>]) -> Vec<&str> {
         albums.iter().map(|a| a.name.as_str()).collect()
     }
 
-    fn sample() -> Vec<Album> {
+    fn sample() -> Vec<Arc<Album>> {
         vec![
             album("beta", "Zed", 1999, 10),
             album("Alpha", "Yan", 2020, 30),
@@ -205,9 +206,9 @@ mod tests {
             favorited_at: 0,
         };
         let tracks = vec![
-            track("Rock", 1975, 5),
-            track("Jazz", 1960, 9),
-            track("Pop", 2010, 1),
+            Arc::new(track("Rock", 1975, 5)),
+            Arc::new(track("Jazz", 1960, 9)),
+            Arc::new(track("Pop", 2010, 1)),
         ];
         let mut genres: Vec<String> = ["Rock", "Jazz", "Pop"].map(String::from).to_vec();
         sort_genres(&mut genres, &tracks, AlbumSort::Title);

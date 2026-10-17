@@ -1129,7 +1129,7 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                         });
                     }
                     if out.toggle_favorite {
-                        actions.push(Action::Favorite(track.clone()));
+                        actions.push(Action::Favorite(aulos_core::library::Track::clone(track)));
                     }
                     if let Some(stars) = out.set_rating {
                         actions.push(Action::Rate {

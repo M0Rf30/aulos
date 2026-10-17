@@ -348,7 +348,7 @@ impl Smoke {
                     .library
                     .albums
                     .get(album)
-                    .map(|a| a.tracks.clone())
+                    .map(|a| aulos_core::library::owned_tracks(&a.tracks))
                     .unwrap_or_default();
                 for track in &mut tracks {
                     track.source_uri = silence.to_string_lossy().into_owned();

@@ -7,6 +7,7 @@ use super::covers::{CachedThumb, CoverThumb, ThumbStamp};
 use super::smart_playlist::SmartPlaylist;
 use super::{Album, Artist, Track};
 use rusqlite::{Connection, params};
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -645,7 +646,7 @@ impl LibraryDb {
     /// and ratings are app-only state that must survive a retag) this also
     /// syncs favorite, rating and ReplayGain from the provider, which is
     /// their source of truth for a remote library.
-    pub fn upsert_remote_tracks(&self, tracks: &[Track]) -> Result<(), String> {
+    pub fn upsert_remote_tracks<T: Borrow<Track>>(&self, tracks: &[T]) -> Result<(), String> {
         let tx = self
             .conn
             .unchecked_transaction()
@@ -673,7 +674,7 @@ impl LibraryDb {
                         rg_album_gain=excluded.rg_album_gain, favorited_at=excluded.favorited_at",
                 )
                 .map_err(|e| format!("Upsert error: {e}"))?;
-            for track in tracks {
+            for track in tracks.iter().map(Borrow::borrow) {
                 stmt.execute(params![
                     track.path.to_string_lossy().as_ref(),
                     track.title,
@@ -957,7 +958,7 @@ impl LibraryDb {
         for track in tracks {
             let key = (track.album.clone(), track.album_artist.clone());
             if let Some(&idx) = index.get(&key) {
-                albums[idx].tracks.push(track);
+                albums[idx].tracks.push(Arc::new(track));
             } else {
                 let idx = albums.len();
                 index.insert(key, idx);
@@ -968,7 +969,7 @@ impl LibraryDb {
                     Vec::new(),
                     None,
                 );
-                album.tracks.push(track);
+                album.tracks.push(Arc::new(track));
                 albums.push(album);
             }
         }
@@ -998,12 +999,12 @@ impl LibraryDb {
 
         for album in albums {
             if let Some(&idx) = index.get(&album.artist) {
-                artists[idx].push_album(album);
+                artists[idx].push_album(Arc::new(album));
             } else {
                 let idx = artists.len();
                 let name = album.artist.clone();
                 index.insert(name.clone(), idx);
-                artists.push(Artist::new(name, vec![album]));
+                artists.push(Artist::new(name, vec![Arc::new(album)]));
             }
         }
 

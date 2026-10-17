@@ -10,6 +10,7 @@ use super::history::{
 };
 use super::state::names_match;
 use super::{Album, Track};
+use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -66,11 +67,11 @@ impl HomeCache {
 
 /// Every track of every album credited to `artist`, album by album.
 #[must_use]
-pub fn artist_tracks(albums: &[Album], artist: &str) -> Vec<Track> {
+pub fn artist_tracks(albums: &[Arc<Album>], artist: &str) -> Vec<Track> {
     albums
         .iter()
         .filter(|a| names_match(&a.artist, artist))
-        .flat_map(|a| a.tracks.iter().cloned())
+        .flat_map(|a| a.tracks.iter().map(|t| Track::clone(t)))
         .collect()
 }
 
@@ -108,8 +109,12 @@ fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
 
 /// Up to `limit` randomly chosen titled albums.
 #[must_use]
-pub fn random_album_refs(albums: &[Album], limit: usize) -> Vec<AlbumRef> {
-    let candidates: Vec<&Album> = albums.iter().filter(|a| !a.name.is_empty()).collect();
+pub fn random_album_refs(albums: &[Arc<Album>], limit: usize) -> Vec<AlbumRef> {
+    let candidates: Vec<&Album> = albums
+        .iter()
+        .map(Arc::as_ref)
+        .filter(|a| !a.name.is_empty())
+        .collect();
     shuffled(candidates)
         .into_iter()
         .take(limit)
@@ -119,9 +124,10 @@ pub fn random_album_refs(albums: &[Album], limit: usize) -> Vec<AlbumRef> {
 
 /// Albums released in the decade starting at `decade`, by year then artist.
 #[must_use]
-pub fn decade_albums(albums: &[Album], decade: u32) -> Vec<AlbumRef> {
+pub fn decade_albums(albums: &[Arc<Album>], decade: u32) -> Vec<AlbumRef> {
     let mut found: Vec<AlbumRef> = albums
         .iter()
+        .map(Arc::as_ref)
         .filter(|a| !a.name.is_empty() && decade_of(a.year) == Some(decade))
         .map(album_ref)
         .collect();
@@ -138,7 +144,7 @@ pub fn decade_albums(albums: &[Album], decade: u32) -> Vec<AlbumRef> {
 /// database: random picks, decades, recently added albums and favourites
 /// (as of `now`, Unix seconds) from the albums in memory.
 #[must_use]
-pub fn home_from_albums(albums: &[Album], now: i64) -> HomeData {
+pub fn home_from_albums(albums: &[Arc<Album>], now: i64) -> HomeData {
     let mut decades: Vec<DecadeCount> = Vec::new();
     for album in albums.iter().filter(|a| !a.name.is_empty()) {
         if let Some(decade) = decade_of(album.year) {
@@ -152,6 +158,7 @@ pub fn home_from_albums(albums: &[Album], now: i64) -> HomeData {
 
     let mut added: Vec<&Album> = albums
         .iter()
+        .map(Arc::as_ref)
         .filter(|a| !a.name.is_empty() && a.added_at > 0)
         .collect();
     added.sort_by_key(|a| std::cmp::Reverse(a.added_at));
@@ -168,7 +175,7 @@ pub fn home_from_albums(albums: &[Album], now: i64) -> HomeData {
         .iter()
         .flat_map(|a| a.tracks.iter())
         .filter(|t| t.is_favorite)
-        .cloned()
+        .map(|t| Track::clone(t))
         .collect();
     favourites.sort_by_key(|t| std::cmp::Reverse(t.favorited_at));
     let favourites_total = favourites.len() as u32;
@@ -225,17 +232,17 @@ mod tests {
         }
     }
 
-    fn album(name: &str, artist: &str, year: u32, tracks: u32) -> Album {
-        Album::new(
+    fn album(name: &str, artist: &str, year: u32, tracks: u32) -> Arc<Album> {
+        Arc::new(Album::new(
             name.into(),
             artist.into(),
             year,
             (1..=tracks).map(|n| track(name, artist, n)).collect(),
             None,
-        )
+        ))
     }
 
-    fn library() -> Vec<Album> {
+    fn library() -> Vec<Arc<Album>> {
         vec![
             album("A", "Alpha", 1975, 2),
             album("B", "Beta", 1984, 3),

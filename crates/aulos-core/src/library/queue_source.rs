@@ -9,6 +9,7 @@
 
 use super::state::LibraryState;
 use super::{Playlist, Track};
+use std::sync::Arc;
 
 /// Which tracks a queue action refers to. `track: None` means every track
 /// of the entity, `Some(i)` the single track at index `i` within it.
@@ -40,6 +41,15 @@ fn select<T: Clone>(items: &[T], index: Option<usize>) -> Vec<T> {
     }
 }
 
+/// [`select`] over shared library tracks, cloning only what is selected
+/// into owned queue entries.
+fn select_shared(items: &[Arc<Track>], index: Option<usize>) -> Vec<Track> {
+    match index {
+        None => items.iter().map(|t| Track::clone(t)).collect(),
+        Some(i) => items.get(i).map(|t| Track::clone(t)).into_iter().collect(),
+    }
+}
+
 impl QueueSource {
     /// Resolve `self` to the tracks it refers to, against `library` and the
     /// caller's `playlists`.
@@ -49,7 +59,7 @@ impl QueueSource {
             Self::Album { album, track } => library
                 .albums
                 .get(album)
-                .map(|a| select(&a.tracks, track))
+                .map(|a| select_shared(&a.tracks, track))
                 .unwrap_or_default(),
             Self::ArtistAlbum {
                 artist,
@@ -59,7 +69,7 @@ impl QueueSource {
                 .artists
                 .get(artist)
                 .and_then(|a| a.albums.get(album))
-                .map(|a| select(&a.tracks, track))
+                .map(|a| select_shared(&a.tracks, track))
                 .unwrap_or_default(),
             Self::Genre { track } => select(&library.genre_tracks, track),
             Self::Playlist { playlist, track } => playlists

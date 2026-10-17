@@ -17,7 +17,7 @@ use super::{Session, mpd};
 use crate::config::{RepeatMode, ReplayGainMode};
 use crate::desktop::{inhibit, notify};
 use crate::library::queue_source::QueueSource;
-use crate::library::{LibraryScanner, Track};
+use crate::library::{LibraryScanner, Track, owned_tracks};
 use crate::mpris::{LoopMode, MprisCommand, MprisSnapshot, MprisStatus};
 use crate::player::extras::{InhibitStep, toggle_party_genre, toggle_stop_after, wants_inhibit};
 use crate::player::{
@@ -154,7 +154,7 @@ impl Session {
     pub fn play_album(&mut self, album: usize, start: usize) -> PlaybackUpdate {
         match self.library.albums.get(album) {
             Some(album) => {
-                let tracks = album.tracks.clone();
+                let tracks = owned_tracks(&album.tracks);
                 self.play_tracks(tracks, start)
             }
             None => PlaybackUpdate::none(),
@@ -173,7 +173,7 @@ impl Session {
             .artists
             .get(artist)
             .and_then(|a| a.albums.get(album))
-            .map(|a| a.tracks.clone());
+            .map(|a| owned_tracks(&a.tracks));
         match tracks {
             Some(tracks) => self.play_tracks(tracks, start),
             None => PlaybackUpdate::none(),
@@ -182,7 +182,7 @@ impl Session {
 
     /// Plays the whole library starting at `index`.
     pub fn play_library_track(&mut self, index: usize) -> PlaybackUpdate {
-        let tracks = self.library.tracks.clone();
+        let tracks = owned_tracks(&self.library.tracks);
         self.play_tracks(tracks, index)
     }
 
@@ -250,7 +250,7 @@ impl Session {
                 let result = if !player.queue_is_empty() {
                     player.resume_queue()
                 } else if !self.library.tracks.is_empty() {
-                    player.set_queue(self.library.tracks.clone(), 0)
+                    player.set_queue(owned_tracks(&self.library.tracks), 0)
                 } else {
                     Ok(None)
                 };
@@ -1184,6 +1184,7 @@ impl Session {
             .tracks
             .iter()
             .find(|t| t.id.to_string() == track_id)
+            .map(|t| &**t)
             .or(self
                 .playback
                 .current_track
@@ -1261,6 +1262,7 @@ mod tests {
     use super::super::test_support::{test_session, test_session_persisting, track};
     use super::*;
     use crate::config::Config;
+    use std::sync::Arc;
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
@@ -1333,7 +1335,7 @@ mod tests {
             result: Ok(true),
         };
         let mut session = test_session();
-        session.library.tracks = vec![track(5)];
+        session.library.tracks = vec![Arc::new(track(5))];
         session.playback.current_track = Some(track(6));
         for id in ["5", "6", "9"] {
             session.playback.scrobble.suppress_next_love(id.into());

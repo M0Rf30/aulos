@@ -8,6 +8,7 @@
 //! reused until the library changes.
 
 use super::{Album, Artist, Track};
+use std::sync::Arc;
 
 /// Separator between fields inside a combined key (never typed in a query).
 const SEP: char = '\u{1}';
@@ -28,9 +29,9 @@ impl SearchIndex {
     pub fn ensure(
         &mut self,
         generation: u64,
-        albums: &[Album],
+        albums: &[Arc<Album>],
         artists: &[Artist],
-        tracks: &[Track],
+        tracks: &[Arc<Track>],
     ) {
         if self.built_gen == Some(generation)
             && self.albums.len() == albums.len()

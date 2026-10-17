@@ -14,6 +14,7 @@ use std::rc::Rc;
 use super::Album;
 use super::compilations::decade_of;
 use super::release_kind::ReleaseKind;
+use std::sync::Arc;
 
 /// Current chip selection. The default selects everything.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,7 +72,7 @@ impl AlbumFilter {
 
     /// Indices into `albums` of the albums passing the filter, in order.
     #[must_use]
-    pub fn visible_indices(&self, albums: &[Album]) -> Vec<usize> {
+    pub fn visible_indices(&self, albums: &[Arc<Album>]) -> Vec<usize> {
         albums
             .iter()
             .enumerate()
@@ -83,7 +84,7 @@ impl AlbumFilter {
 
 /// Distinct decades (ascending) present among `albums`.
 #[must_use]
-pub fn decades_present(albums: &[Album]) -> Vec<u32> {
+pub fn decades_present(albums: &[Arc<Album>]) -> Vec<u32> {
     let mut decades: Vec<u32> = albums.iter().filter_map(|a| decade_of(a.year)).collect();
     decades.sort_unstable();
     decades.dedup();
@@ -93,8 +94,8 @@ pub fn decades_present(albums: &[Album]) -> Vec<u32> {
 /// Distinct genres (sorted, case-insensitively unique) present among
 /// `albums`.
 #[must_use]
-pub fn genres_present(albums: &[Album]) -> Vec<String> {
-    let mut genres: Vec<String> = albums.iter().flat_map(Album::genres).collect();
+pub fn genres_present(albums: &[Arc<Album>]) -> Vec<String> {
+    let mut genres: Vec<String> = albums.iter().flat_map(|a| a.genres()).collect();
     genres.sort_by_key(|g| g.to_lowercase());
     genres.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     genres
@@ -135,7 +136,7 @@ impl AlbumFilterCache {
 
     /// `(visible positions, decades present, genres present)` for `albums`
     /// under `filter`.
-    pub fn get(&self, epoch: u64, filter: &AlbumFilter, albums: &[Album]) -> FilterView {
+    pub fn get(&self, epoch: u64, filter: &AlbumFilter, albums: &[Arc<Album>]) -> FilterView {
         let key = (epoch, filter.clone(), albums.len());
         let mut entry = self.inner.borrow_mut();
         if self.stale.replace(false) || entry.key.as_ref() != Some(&key) {
@@ -157,12 +158,18 @@ impl AlbumFilterCache {
 mod tests {
     use super::*;
 
-    fn album(artist: &str, year: u32) -> Album {
-        Album::new("A".into(), artist.into(), year, Vec::new(), None)
+    fn album(artist: &str, year: u32) -> Arc<Album> {
+        Arc::new(Album::new(
+            "A".into(),
+            artist.into(),
+            year,
+            Vec::new(),
+            None,
+        ))
     }
 
     /// An album of `n` ten-minute tracks tagged `release_type` and `genre`.
-    fn tagged(name: &str, release_type: &str, genre: &str, favourite: bool) -> Album {
+    fn tagged(name: &str, release_type: &str, genre: &str, favourite: bool) -> Arc<Album> {
         let tracks = (1..=12)
             .map(|i| crate::library::Track {
                 id: i,
@@ -190,7 +197,7 @@ mod tests {
                 favorited_at: 0,
             })
             .collect();
-        Album::new(name.into(), "Band".into(), 2001, tracks, None)
+        Arc::new(Album::new(name.into(), "Band".into(), 2001, tracks, None))
     }
 
     #[test]

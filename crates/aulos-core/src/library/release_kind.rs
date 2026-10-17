@@ -11,6 +11,7 @@
 //! and finally to the track count and total duration, the same thresholds
 //! streaming catalogues use.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::Track;
@@ -138,7 +139,7 @@ impl ReleaseKind {
     /// the number of tracks present, so a partly ripped 12-track album is
     /// not mistaken for a single.
     #[must_use]
-    pub fn of_album(title: &str, artist: &str, tracks: &[Track]) -> Self {
+    pub fn of_album(title: &str, artist: &str, tracks: &[Arc<Track>]) -> Self {
         let tagged = tracks.iter().find_map(|t| Self::from_tag(&t.release_type));
         if super::compilations::is_various_artists(artist) || tagged == Some(Self::Compilation) {
             return Self::Compilation;
@@ -234,7 +235,7 @@ mod tests {
     }
 
     fn album_of(title: &str, artist: &str, tags: &str, n: u32, secs: u64) -> ReleaseKind {
-        let tracks: Vec<Track> = (1..=n).map(|i| track(tags, i, secs)).collect();
+        let tracks: Vec<Arc<Track>> = (1..=n).map(|i| Arc::new(track(tags, i, secs))).collect();
         ReleaseKind::of_album(title, artist, &tracks)
     }
 
@@ -345,7 +346,7 @@ mod tests {
     #[test]
     fn a_partly_present_album_is_not_a_single() {
         // Two tracks numbered 3 and 11 of a longer album.
-        let tracks = vec![track("", 3, 200), track("", 11, 200)];
+        let tracks = vec![Arc::new(track("", 3, 200)), Arc::new(track("", 11, 200))];
         assert_eq!(
             ReleaseKind::of_album("Songs", "Band", &tracks),
             ReleaseKind::Album

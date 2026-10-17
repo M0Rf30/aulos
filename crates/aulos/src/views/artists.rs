@@ -939,7 +939,7 @@ fn artist_tracks(app: &App, idx: usize) -> Vec<Track> {
             artist
                 .albums
                 .iter()
-                .flat_map(|album| album.tracks.iter().cloned())
+                .flat_map(|album| album.tracks.iter().map(|t| Track::clone(t)))
                 .collect()
         })
         .unwrap_or_default()

@@ -382,7 +382,7 @@ fn apply(app: &mut App, intent: Intent) {
                 .and_then(|index| app.session.library.albums.get(index).cloned());
             match album {
                 Some(album) => {
-                    let effect = app.session.open_album_properties(album);
+                    let effect = app.session.open_album_properties(Album::clone(&album));
                     app.run(effect);
                 }
                 None => app.toast_error(aulos_core::fl!(

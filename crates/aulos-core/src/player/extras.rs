@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::desktop::{inhibit, notify};
 use crate::library::Track;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -142,7 +143,7 @@ impl PlaybackExtrasState {
         &mut self,
         player: Option<&mut Player>,
         current: Option<&Track>,
-        all_tracks: &[Track],
+        all_tracks: &[Arc<Track>],
         config: &Config,
     ) {
         let Some(player) = player else {
@@ -155,7 +156,7 @@ impl PlaybackExtrasState {
         &mut self,
         player: &mut Player,
         current: Option<&Track>,
-        all_tracks: &[Track],
+        all_tracks: &[Arc<Track>],
         config: &Config,
     ) {
         if player.active_backend_type() != ActiveBackend::Local
@@ -226,7 +227,7 @@ impl PlaybackExtrasState {
         &mut self,
         player: Option<&mut Player>,
         current: Option<&Track>,
-        all_tracks: &[Track],
+        all_tracks: &[Arc<Track>],
         config: &Config,
     ) -> Option<Vec<Track>> {
         self.top_up_dry = None;

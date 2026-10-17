@@ -7,7 +7,7 @@ use crate::app::{App, Route, Sheet};
 use crate::theme::{self, Palette, Theme};
 use crate::widgets::paint_icon;
 use aulos_core::library::queue_source::QueueSource;
-use aulos_core::library::{Album, Playlist, Track};
+use aulos_core::library::{Album, Playlist, Track, owned_tracks};
 use aulos_core::session::QueuePlacement;
 use aulos_core::tagger::{TagAction, is_taggable};
 use egui::{
@@ -166,7 +166,7 @@ fn track_menu_with(
                 }
                 if is_taggable(track) {
                     separator(ui, pal);
-                    out = tag_items(ui, std::slice::from_ref(track)).or(out);
+                    out = tag_items(ui, || vec![track.clone()]).or(out);
                 }
                 out
             },
@@ -175,7 +175,7 @@ fn track_menu_with(
 }
 
 /// The tag-editor rows shared by the track and album menus.
-fn tag_items(ui: &mut Ui, tracks: &[Track]) -> Option<MenuAction> {
+fn tag_items(ui: &mut Ui, tracks: impl Fn() -> Vec<Track>) -> Option<MenuAction> {
     let mut out = None;
     for (icon, label, action) in [
         (
@@ -196,7 +196,7 @@ fn tag_items(ui: &mut Ui, tracks: &[Track]) -> Option<MenuAction> {
     ] {
         if menu_item(ui, icon, &label, Trailing::None).clicked() {
             out = Some(MenuAction::Tag {
-                tracks: tracks.to_vec(),
+                tracks: tracks(),
                 action,
             });
         }
@@ -272,9 +272,9 @@ fn album_menu_with(
                 {
                     out = Some(MenuAction::AlbumProperties(album.clone()));
                 }
-                if album.tracks.iter().any(is_taggable) {
+                if album.tracks.iter().any(|t| is_taggable(t)) {
                     separator(ui, pal);
-                    out = tag_items(ui, &album.tracks).or(out);
+                    out = tag_items(ui, || owned_tracks(&album.tracks)).or(out);
                 }
                 out
             },
@@ -767,7 +767,7 @@ fn artist_tracks(app: &App, name: &str) -> Vec<Track> {
             artist
                 .albums
                 .iter()
-                .flat_map(|album| album.tracks.iter().cloned())
+                .flat_map(|album| album.tracks.iter().map(|t| Track::clone(t)))
                 .collect()
         })
         .unwrap_or_default()

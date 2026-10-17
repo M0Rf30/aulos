@@ -22,6 +22,7 @@
 use crate::config::{AutoPlayMode, RepeatMode};
 use crate::library::Track;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Score for sharing an artist (track artist or album artist).
@@ -206,8 +207,8 @@ impl SeedProfile {
 }
 
 /// All of an album's tracks in disc/track order.
-fn album_tracks(library: &[Track], indices: &[usize]) -> Vec<Track> {
-    let mut tracks: Vec<Track> = indices.iter().map(|&i| library[i].clone()).collect();
+fn album_tracks(library: &[Arc<Track>], indices: &[usize]) -> Vec<Track> {
+    let mut tracks: Vec<Track> = indices.iter().map(|&i| Track::clone(&library[i])).collect();
     Track::sort_by_disc_and_track(&mut tracks);
     tracks
 }
@@ -221,7 +222,7 @@ fn album_tracks(library: &[Track], indices: &[usize]) -> Vec<Track> {
 /// tokens) restricts the pool; empty = anywhere. Tracks in `exclude` (and
 /// albums they belong to) are skipped, unless that would leave nothing.
 pub fn select_random_album(
-    library: &[Track],
+    library: &[Arc<Track>],
     exclude: &HashSet<i64>,
     genres: &[String],
     rng: &mut Rng,
@@ -263,7 +264,7 @@ pub fn select_random_album(
 /// few. Falls back to [`select_random_album`] when nothing is similar.
 pub fn select_similar_album(
     seed: &Track,
-    library: &[Track],
+    library: &[Arc<Track>],
     exclude: &HashSet<i64>,
     rng: &mut Rng,
 ) -> Vec<Track> {
@@ -316,7 +317,7 @@ pub fn select_similar_album(
 /// tokens; empty = the whole library) and avoiding `exclude`. Falls back
 /// to repeating already-queued tracks only when the pool is exhausted.
 pub fn select_party_tracks(
-    library: &[Track],
+    library: &[Arc<Track>],
     genres: &[String],
     exclude: &HashSet<i64>,
     count: usize,
@@ -344,7 +345,7 @@ pub fn select_party_tracks(
     }
     eligible[..take]
         .iter()
-        .map(|&i| library[i].clone())
+        .map(|&i| Track::clone(&library[i]))
         .collect()
 }
 
@@ -391,7 +392,7 @@ pub fn plan_top_up(
 pub fn continuation(
     kind: TopUp,
     seed: Option<&Track>,
-    library: &[Track],
+    library: &[Arc<Track>],
     party_genres: &[String],
     exclude: &HashSet<i64>,
     rng: &mut Rng,
@@ -457,8 +458,8 @@ mod tests {
 
     /// Seed: Artist A, "A1", Rock, 1995. Library: A's other album, a Rock
     /// album by B (same era), a Jazz album by C, and the seed's own album.
-    fn library() -> Vec<Track> {
-        vec![
+    fn library() -> Vec<Arc<Track>> {
+        [
             track(1, "A", "A1", "Rock", 1995, 1),
             track(2, "A", "A1", "Rock", 1995, 2),
             track(3, "A", "A2", "Pop", 2010, 1),
@@ -468,6 +469,9 @@ mod tests {
             track(7, "C", "C1", "Jazz", 1960, 2),
             track(8, "C", "C1", "Jazz", 1960, 1),
         ]
+        .into_iter()
+        .map(Arc::new)
+        .collect()
     }
 
     #[test]
@@ -586,7 +590,7 @@ mod tests {
     fn radio_and_podcasts_are_never_auto_queued() {
         let mut lib = library();
         for t in &mut lib {
-            t.provider_id = "radio".into();
+            Arc::make_mut(t).provider_id = "radio".into();
         }
         let mut rng = Rng::from_seed(1);
         assert!(select_random_album(&lib, &HashSet::new(), &[], &mut rng).is_empty());

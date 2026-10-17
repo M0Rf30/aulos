@@ -75,8 +75,8 @@ pub enum LibraryEvent {
     Loaded {
         generation: u64,
         provider_id: String,
-        tracks: Vec<Track>,
-        albums: Vec<Album>,
+        tracks: Vec<Arc<Track>>,
+        albums: Vec<Arc<Album>>,
         covers: CoverSet,
     },
     /// A cached snapshot of a remote provider's library, read from the
@@ -89,15 +89,15 @@ pub enum LibraryEvent {
     CacheSeeded {
         generation: u64,
         provider_id: String,
-        tracks: Vec<Track>,
-        albums: Vec<Album>,
+        tracks: Vec<Arc<Track>>,
+        albums: Vec<Arc<Album>>,
         covers: CoverSet,
     },
     /// An incremental batch of albums from a remote provider.
     Batch {
         generation: u64,
         provider_id: String,
-        albums: Vec<Album>,
+        albums: Vec<Arc<Album>>,
         covers: CoverSet,
     },
     /// Incremental loading is complete.
@@ -788,7 +788,7 @@ impl Session {
             return Effect::none();
         };
         let name = artist.name.clone();
-        let tracks: Vec<Track> = artist
+        let tracks: Vec<Arc<Track>> = artist
             .albums
             .iter()
             .flat_map(|a| a.tracks.iter().cloned())
@@ -885,11 +885,17 @@ async fn load_local(
 ) -> LibraryEvent {
     // One query: the flat track list is the albums' tracks (a second
     // `browse_tracks` would re-read and re-group the whole table).
-    let albums = provider.browse_albums().await.unwrap_or_else(|e| {
-        tracing::error!("browse_albums failed: {e}");
-        Vec::new()
-    });
-    let tracks: Vec<Track> = albums
+    let albums: Vec<Arc<Album>> = provider
+        .browse_albums()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("browse_albums failed: {e}");
+            Vec::new()
+        })
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let tracks: Vec<Arc<Track>> = albums
         .iter()
         .flat_map(|a| a.tracks.iter().cloned())
         .collect();
@@ -1104,7 +1110,7 @@ async fn keyed_cover(
 }
 
 /// Covers of one batch of albums, fetched concurrently.
-async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> CoverSet {
+async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Arc<Album>]) -> CoverSet {
     let fetches: Vec<_> = albums
         .iter()
         .map(|album| {
@@ -1156,7 +1162,7 @@ async fn store_sync_marker(provider_id: &str, marker: Option<i64>) {
 async fn refresh_cached_favorites(
     subsonic: &crate::provider::subsonic::SubsonicProvider,
     provider_id: &str,
-    cached: &[Track],
+    cached: &[Arc<Track>],
 ) -> Vec<(String, bool)> {
     use crate::provider::MusicProvider as _;
     let Ok(starred) = subsonic.list_favorites().await else {
@@ -1191,11 +1197,16 @@ async fn refresh_cached_favorites(
 
 /// The Subsonic provider's own cached library, if one was persisted by an
 /// earlier sync: `None` on the first ever sync, or if the cache is empty.
-async fn cached_provider_snapshot(provider_id: &str) -> Option<(Vec<Track>, Vec<Album>)> {
+async fn cached_provider_snapshot(provider_id: &str) -> Option<(Vec<Arc<Track>>, Vec<Arc<Album>>)> {
     let provider_id = provider_id.to_string();
     crate::task::spawn_blocking(move || {
         let db = LibraryDb::open(&crate::paths::library_db_path()).ok()?;
-        let albums = db.all_albums(Some(&provider_id)).ok()?;
+        let albums: Vec<Arc<Album>> = db
+            .all_albums(Some(&provider_id))
+            .ok()?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
         if albums.is_empty() {
             return None;
         }
@@ -1227,9 +1238,9 @@ async fn cached_provider_covers(provider_id: &str) -> CoverSet {
 /// database, so the next provider switch or app restart can paint this
 /// library from the cache instead of starting from a blank screen while the
 /// network resync runs.
-async fn persist_provider_batch(provider_id: &str, albums: &[Album], covers: &CoverSet) {
+async fn persist_provider_batch(provider_id: &str, albums: &[Arc<Album>], covers: &CoverSet) {
     let provider_id = provider_id.to_string();
-    let tracks: Vec<Track> = albums
+    let tracks: Vec<Arc<Track>> = albums
         .iter()
         .flat_map(|a| a.tracks.iter().cloned())
         .collect();
@@ -1334,6 +1345,7 @@ async fn load_incremental(
                         continue;
                     }
                 };
+                let albums: Vec<Arc<Album>> = albums.into_iter().map(Arc::new).collect();
                 let covers = batch_covers(&provider, &albums).await;
                 _ = tx
                     .send(LibraryEvent::Batch {
@@ -1412,6 +1424,7 @@ async fn load_incremental(
                 if albums.is_empty() {
                     break;
                 }
+                let albums: Vec<Arc<Album>> = albums.into_iter().map(Arc::new).collect();
                 let batch_count = albums.len();
                 tracing::debug!("Subsonic batch: offset={offset}, albums={batch_count}");
                 for album in &albums {
@@ -1479,12 +1492,12 @@ mod tests {
     use crate::library::Playlist;
     use bytes::Bytes;
 
-    fn album(name: &str, artist: &str, first_track_id: i64) -> Album {
+    fn album(name: &str, artist: &str, first_track_id: i64) -> Arc<Album> {
         let mut t = track(first_track_id);
         t.title = format!("{name} song");
         t.album = name.into();
         t.artist = artist.into();
-        Album::new(name.into(), artist.into(), 2000, vec![t], None)
+        Arc::new(Album::new(name.into(), artist.into(), 2000, vec![t], None))
     }
 
     fn thumb(fingerprint: u64) -> CoverThumb {
@@ -1503,7 +1516,7 @@ mod tests {
             .collect()
     }
 
-    fn loaded(session: &mut Session, albums: Vec<Album>, covers: CoverSet) -> LibraryApplied {
+    fn loaded(session: &mut Session, albums: Vec<Arc<Album>>, covers: CoverSet) -> LibraryApplied {
         let generation = session.library.begin_reload_generation();
         let tracks = albums.iter().flat_map(|a| a.tracks.clone()).collect();
         session.apply_library_event(LibraryEvent::Loaded {
@@ -1904,7 +1917,7 @@ mod tests {
     fn batch(
         session: &mut Session,
         generation: u64,
-        albums: Vec<Album>,
+        albums: Vec<Arc<Album>>,
         c: CoverSet,
     ) -> LibraryApplied {
         session.apply_library_event(LibraryEvent::Batch {

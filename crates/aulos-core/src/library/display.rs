@@ -145,7 +145,9 @@ impl Album {
     /// its first track; an album lives in one provider).
     #[must_use]
     pub fn is_taggable(&self) -> bool {
-        self.tracks.first().is_some_and(crate::tagger::is_taggable)
+        self.tracks
+            .first()
+            .is_some_and(|t| crate::tagger::is_taggable(t))
     }
 }
 

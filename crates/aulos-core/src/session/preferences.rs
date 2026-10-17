@@ -136,6 +136,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{test_session, test_session_persisting, track};
+    use std::sync::Arc;
 
     #[test]
     fn visualizer_prefs_are_clamped_stored_and_persisted() {
@@ -188,7 +189,7 @@ mod tests {
         let _ = session.autoplay_on_launch();
         assert!(!session.playback.autoplay_pending);
 
-        session.library.tracks = vec![track(1)];
+        session.library.tracks = vec![Arc::new(track(1))];
         session.playback.autoplay_pending = true;
         let _ = session.autoplay_on_launch();
         assert!(!session.playback.autoplay_pending);

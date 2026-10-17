@@ -819,7 +819,7 @@ impl MusicProvider for MpdProvider {
                 let mut album = Album::from_tracks(album_name.clone(), tracks, cover_source);
                 album.artist = artist_name.clone();
                 album.refresh_derived();
-                artist_albums.push(album);
+                artist_albums.push(Arc::new(album));
             }
 
             artist_albums.sort_by_key(|a| a.year);

@@ -90,8 +90,8 @@ fn primary_artist(name: &str) -> Option<&str> {
 /// whole reload finishes.
 struct ReloadStaging {
     generation: u64,
-    tracks: Vec<Track>,
-    albums: Vec<Album>,
+    tracks: Vec<Arc<Track>>,
+    albums: Vec<Arc<Album>>,
 }
 
 /// Search-filtered copies of the library lists, plus the index maps that
@@ -106,11 +106,11 @@ pub struct SearchFilter {
     /// Whether the lists below hold the results of a non-empty query (the
     /// query of the last refresh, not necessarily the latest typed one).
     active: bool,
-    albums: Vec<Album>,
+    albums: Vec<Arc<Album>>,
     album_map: Vec<usize>,
     artists: Vec<Artist>,
     artist_map: Vec<usize>,
-    tracks: Vec<Track>,
+    tracks: Vec<Arc<Track>>,
     track_map: Vec<usize>,
     playlists: Vec<Playlist>,
     playlist_map: Vec<usize>,
@@ -137,11 +137,49 @@ impl SearchFilter {
     }
 }
 
+/// Copy-on-write edits of shared tracks and albums, remembering the edited
+/// copy of each original so every holder ends up on the same allocation.
+#[derive(Default)]
+struct SharedEdits {
+    tracks: HashMap<*const Track, Arc<Track>>,
+    albums: HashMap<*const Album, Arc<Album>>,
+}
+
+impl SharedEdits {
+    fn edit_track(&mut self, track: &mut Arc<Track>, id: &str, f: &mut impl FnMut(&mut Track)) {
+        if !track.has_key(id) {
+            return;
+        }
+        let original = Arc::as_ptr(track);
+        if let Some(edited) = self.tracks.get(&original) {
+            *track = Arc::clone(edited);
+            return;
+        }
+        f(Arc::make_mut(track));
+        self.tracks.insert(original, Arc::clone(track));
+    }
+
+    fn edit_album(&mut self, album: &mut Arc<Album>, id: &str, f: &mut impl FnMut(&mut Track)) {
+        let original = Arc::as_ptr(album);
+        if let Some(edited) = self.albums.get(&original) {
+            *album = Arc::clone(edited);
+            return;
+        }
+        if !album.tracks.iter().any(|t| t.has_key(id)) {
+            return;
+        }
+        for track in &mut Arc::make_mut(album).tracks {
+            self.edit_track(track, id, f);
+        }
+        self.albums.insert(original, Arc::clone(album));
+    }
+}
+
 /// Library data plus the bookkeeping derived from it.
 #[derive(Default)]
 pub struct LibraryState {
-    pub tracks: Vec<Track>,
-    pub albums: Vec<Album>,
+    pub tracks: Vec<Arc<Track>>,
+    pub albums: Vec<Arc<Album>>,
     pub artists: Vec<Artist>,
     /// All distinct genres from the active provider.
     pub genres: Vec<String>,
@@ -259,7 +297,7 @@ impl LibraryState {
     }
 
     /// Accumulate a batch into the staging buffer (no-op without one).
-    pub fn stage_albums(&mut self, albums: Vec<Album>) {
+    pub fn stage_albums(&mut self, albums: Vec<Arc<Album>>) {
         if let Some(staging) = self.reload_staging.as_mut() {
             for album in &albums {
                 staging.tracks.extend(album.tracks.iter().cloned());
@@ -273,10 +311,10 @@ impl LibraryState {
     ///
     /// Returns whether the search filter must be refreshed: a query is
     /// active, or compilations are hidden and the batch brought one.
-    pub fn append_batch(&mut self, albums: &[Album], config: &Config) -> bool {
+    pub fn append_batch(&mut self, albums: &[Arc<Album>], config: &Config) -> bool {
         for album in albums {
             self.tracks.extend(album.tracks.iter().cloned());
-            self.albums.push(album.clone());
+            self.albums.push(Arc::clone(album));
         }
         self.merge_artists_from_batch(albums, config);
         !self.search_query.trim().is_empty()
@@ -286,7 +324,12 @@ impl LibraryState {
 
     /// Replace the visible lists wholesale (single-shot reload) and rebuild
     /// the artist index from the new albums.
-    pub fn replace_loaded(&mut self, tracks: Vec<Track>, albums: Vec<Album>, config: &Config) {
+    pub fn replace_loaded(
+        &mut self,
+        tracks: Vec<Arc<Track>>,
+        albums: Vec<Arc<Album>>,
+        config: &Config,
+    ) {
         self.tracks = tracks;
         self.albums = albums;
         sort_albums(&mut self.albums, config.albums_sort);
@@ -300,9 +343,9 @@ impl LibraryState {
     /// album that would become empty); the caller reloads instead.
     pub fn patch_tracks(&mut self, updated: &[Track], removed: &[String], config: &Config) -> bool {
         use std::collections::{HashMap, HashSet};
-        let upd: HashMap<&str, &Track> = updated
+        let upd: HashMap<&str, Arc<Track>> = updated
             .iter()
-            .filter_map(|t| t.path.to_str().map(|p| (p, t)))
+            .filter_map(|t| t.path.to_str().map(|p| (p, Arc::new(t.clone()))))
             .collect();
         let rem: HashSet<&str> = removed.iter().map(String::as_str).collect();
         if upd.len() != updated.len() {
@@ -335,11 +378,11 @@ impl LibraryState {
             return false;
         }
 
-        let patch = |tracks: &mut Vec<Track>| {
+        let patch = |tracks: &mut Vec<Arc<Track>>| {
             tracks.retain(|t| t.path.to_str().is_none_or(|p| !rem.contains(p)));
             for track in tracks.iter_mut() {
                 if let Some(new) = track.path.to_str().and_then(|p| upd.get(p)) {
-                    *track = (*new).clone();
+                    *track = Arc::clone(new);
                 }
             }
         };
@@ -350,8 +393,9 @@ impl LibraryState {
                     .is_some_and(|p| upd.contains_key(p) || rem.contains(p))
             });
             if touched {
+                let album = Arc::make_mut(album);
                 patch(&mut album.tracks);
-                Track::sort_by_disc_and_track(&mut album.tracks);
+                album.tracks.sort_by(|a, b| Track::disc_track_order(a, b));
                 album.refresh_derived();
             }
         }
@@ -417,7 +461,7 @@ impl LibraryState {
     /// appending to existing artists or creating new ones. Avatars aren't
     /// generated here at all — UIs build a placeholder on the fly, and real
     /// photos are fetched lazily.
-    fn merge_artists_from_batch(&mut self, new_albums: &[Album], config: &Config) {
+    fn merge_artists_from_batch(&mut self, new_albums: &[Arc<Album>], config: &Config) {
         self.generation += 1;
         // Build an index over the current artists list for O(1) lookup.
         let mut index: HashMap<String, usize> = self
@@ -442,12 +486,12 @@ impl LibraryState {
 
             for name in names {
                 if let Some(&idx) = index.get(&name) {
-                    self.artists[idx].push_album(album.clone());
+                    self.artists[idx].push_album(Arc::clone(album));
                 } else {
                     let idx = self.artists.len();
                     index.insert(name.clone(), idx);
                     self.artists
-                        .push(Artist::new(name.clone(), vec![album.clone()]));
+                        .push(Artist::new(name.clone(), vec![Arc::clone(album)]));
                 }
             }
         }
@@ -534,7 +578,7 @@ impl LibraryState {
 
         for (i, album) in self.albums.iter().enumerate() {
             if self.search_index.album_matches(i, &query) {
-                filtered.albums.push(album.clone());
+                filtered.albums.push(Arc::clone(album));
                 filtered.album_map.push(i);
             }
         }
@@ -550,7 +594,7 @@ impl LibraryState {
 
         for (i, track) in self.tracks.iter().enumerate() {
             if self.search_index.track_matches(i, &query) {
-                filtered.tracks.push(track.clone());
+                filtered.tracks.push(Arc::clone(track));
                 filtered.track_map.push(i);
             }
         }
@@ -602,7 +646,7 @@ impl LibraryState {
 
     /// The albums to show: the search results, or all of them.
     #[must_use]
-    pub fn visible_albums(&self) -> &[Album] {
+    pub fn visible_albums(&self) -> &[Arc<Album>] {
         if self.filtered.active {
             &self.filtered.albums
         } else {
@@ -623,7 +667,7 @@ impl LibraryState {
 
     /// The tracks to show: the search results, or all of them.
     #[must_use]
-    pub fn visible_tracks(&self) -> &[Track] {
+    pub fn visible_tracks(&self) -> &[Arc<Track>] {
         if self.filtered.active {
             &self.filtered.tracks
         } else {
@@ -745,7 +789,7 @@ impl LibraryState {
         self.albums
             .iter()
             .find(|a| a.artist == artist && a.name == album_name)
-            .map(Album::cover_hint)
+            .map(|a| a.cover_hint())
     }
 
     /// Every library track whose genre matches `genre`, ignoring case.
@@ -754,33 +798,27 @@ impl LibraryState {
         self.tracks
             .iter()
             .filter(|t| t.genre.eq_ignore_ascii_case(genre))
-            .cloned()
+            .map(|t| Track::clone(t))
             .collect()
     }
 
-    /// Apply `f` to every copy of the track with `track_id` held here
-    /// (flat list, albums and artists' albums, and the search-result
-    /// copies of those).
+    /// Apply `f` to the track with `track_id` wherever the library holds
+    /// it (flat list, albums, artists' albums and the search results).
+    ///
+    /// The holders share one allocation per track and album, so each is
+    /// copied on write once and the copy is shared again by every holder.
     pub fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
-        let mut visit = |track: &mut Track| {
-            if track.has_key(track_id) {
-                f(track);
-            }
-        };
-        let albums = self.albums.iter_mut().chain(&mut self.filtered.albums);
-        for album in albums {
-            album.tracks.iter_mut().for_each(&mut visit);
+        let mut memo = SharedEdits::default();
+        for album in self.albums.iter_mut().chain(&mut self.filtered.albums) {
+            memo.edit_album(album, track_id, &mut f);
         }
         let artists = self.artists.iter_mut().chain(&mut self.filtered.artists);
-        for artist in artists {
-            for album in &mut artist.albums {
-                album.tracks.iter_mut().for_each(&mut visit);
-            }
+        for album in artists.flat_map(|artist| artist.albums.iter_mut()) {
+            memo.edit_album(album, track_id, &mut f);
         }
-        self.tracks
-            .iter_mut()
-            .chain(&mut self.filtered.tracks)
-            .for_each(&mut visit);
+        for track in self.tracks.iter_mut().chain(&mut self.filtered.tracks) {
+            memo.edit_track(track, track_id, &mut f);
+        }
     }
 
     /// Current favourite state of a track, if known locally. `current` (the
@@ -831,20 +869,21 @@ mod tests {
 
     fn lib_with(tracks: Vec<Track>) -> LibraryState {
         let mut lib = LibraryState::default();
+        let tracks: Vec<Arc<Track>> = tracks.into_iter().map(Arc::new).collect();
         let mut by_album: Vec<Album> = Vec::new();
         for t in &tracks {
             match by_album.iter_mut().find(|a| a.name == t.album) {
-                Some(a) => a.tracks.push(t.clone()),
-                None => by_album.push(Album::new(
-                    t.album.clone(),
-                    t.album_artist.clone(),
-                    0,
-                    vec![t.clone()],
-                    None,
-                )),
+                Some(a) => a.tracks.push(Arc::clone(t)),
+                None => {
+                    let mut album =
+                        Album::new(t.album.clone(), t.album_artist.clone(), 0, Vec::new(), None);
+                    album.tracks.push(Arc::clone(t));
+                    by_album.push(album);
+                }
             }
         }
-        lib.replace_loaded(tracks, by_album, &Config::default());
+        let albums = by_album.into_iter().map(Arc::new).collect();
+        lib.replace_loaded(tracks, albums, &Config::default());
         lib
     }
 
@@ -925,8 +964,20 @@ mod tests {
     fn find_album_prefers_exact_identity_then_falls_back_to_name() {
         let lib = LibraryState {
             albums: vec![
-                Album::new("Hits".into(), "Alpha".into(), 1990, Vec::new(), None),
-                Album::new("Hits".into(), "Beta".into(), 1991, Vec::new(), None),
+                Arc::new(Album::new(
+                    "Hits".into(),
+                    "Alpha".into(),
+                    1990,
+                    Vec::new(),
+                    None,
+                )),
+                Arc::new(Album::new(
+                    "Hits".into(),
+                    "Beta".into(),
+                    1991,
+                    Vec::new(),
+                    None,
+                )),
             ],
             ..LibraryState::default()
         };

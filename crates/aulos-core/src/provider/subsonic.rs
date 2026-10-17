@@ -531,7 +531,7 @@ impl MusicProvider for SubsonicProvider {
                     album.artist = artist_id3.name.clone();
                     album.year = album_detail.year.unwrap_or(0) as u32;
                     album.refresh_derived();
-                    artist_albums.push(album);
+                    artist_albums.push(Arc::new(album));
                 }
 
                 artist_albums.sort_by_key(|a| a.year);

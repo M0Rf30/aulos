@@ -161,7 +161,7 @@ fn apply(app: &mut App, out: Out) {
             play_shuffled(app, tracks);
         }
         Act::ShuffleAll => {
-            let tracks = app.session.library.tracks.clone();
+            let tracks = aulos_core::library::owned_tracks(&app.session.library.tracks);
             play_shuffled(app, tracks);
         }
         Act::Goto(route) => app.navigate(route),
