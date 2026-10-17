@@ -150,13 +150,39 @@ fn is_lossless_codec(short_name: &str) -> bool {
         || short_name.starts_with("dsd")
 }
 
-/// Bit depth of a stream: `params.bits_per_sample` for lossless codecs
-/// only. Containers like Matroska report a nominal sample width for lossy
-/// codecs too, and a lossy stream has no bit depth.
+/// Bit depth of a stream, `None` when the container does not say. The MP4
+/// demuxer leaves `bits_per_sample` unset for ALAC, whose depth only lives in
+/// the codec's magic cookie, so that one is read from there.
+pub(crate) fn stream_bit_depth(
+    params: &symphonia::core::codecs::audio::AudioCodecParameters,
+) -> Option<u32> {
+    use symphonia::core::codecs::audio::well_known::CODEC_ID_ALAC;
+    params.bits_per_sample.filter(|&b| b > 0).or_else(|| {
+        (params.codec == CODEC_ID_ALAC)
+            .then(|| params.extra_data.as_deref().and_then(alac_cookie_bit_depth))
+            .flatten()
+    })
+}
+
+/// Bit depth stored in an ALAC magic cookie (`frame_length: u32`,
+/// `compatible_version: u8`, `bit_depth: u8`, …), which may be preceded by
+/// the `frma` and `alac` atoms of a QuickTime `wave` box.
+fn alac_cookie_bit_depth(mut cookie: &[u8]) -> Option<u32> {
+    for atom in [b"frma", b"alac"] {
+        if cookie.get(4..8) == Some(atom.as_slice()) {
+            cookie = cookie.get(12..)?;
+        }
+    }
+    cookie.get(5).map(|&b| u32::from(b)).filter(|&b| b > 0)
+}
+
+/// Bit depth of a stream: [`stream_bit_depth`] for lossless codecs only.
+/// Containers like Matroska report a nominal sample width for lossy codecs
+/// too, and a lossy stream has no bit depth.
 pub(crate) fn lossless_bit_depth(
     params: &symphonia::core::codecs::audio::AudioCodecParameters,
 ) -> Option<u32> {
-    let bits = params.bits_per_sample.filter(|&b| b > 0)?;
+    let bits = stream_bit_depth(params)?;
     let codec = symphonia::default::get_codecs()
         .get_audio_decoder(params.codec)
         .map(|r| r.codec.info)?;
@@ -372,7 +398,7 @@ pub fn probe(path: &Path) -> Result<TechInfo, String> {
         // Containers like Matroska report a nominal sample width for lossy
         // codecs too; a lossy stream has no bit depth.
         let lossy = info.lossless == Some(false);
-        info.bits_per_sample = params.bits_per_sample.filter(|&b| b > 0 && !lossy);
+        info.bits_per_sample = stream_bit_depth(params).filter(|_| !lossy);
         if let Some(ch) = &params.channels {
             let n = ch.count();
             info.channels = u32::try_from(n).ok().filter(|&n| n > 0);
@@ -495,6 +521,36 @@ mod tests {
         assert_eq!(bitrate_kbps(39_990, Duration::from_secs(1)), Some(320));
         assert_eq!(bitrate_kbps(40_000, Duration::ZERO), None);
         assert_eq!(bitrate_kbps(0, Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn alac_depth_comes_from_the_magic_cookie() {
+        let mut cookie = vec![0, 0, 0x10, 0, 0, 24, 40, 10, 14, 2];
+        cookie.resize(24, 0);
+        assert_eq!(alac_cookie_bit_depth(&cookie), Some(24));
+        // Preceded by the `frma` and `alac` atoms of a QuickTime wave box.
+        let mut wrapped = vec![0, 0, 0, 12, b'f', b'r', b'm', b'a', b'a', b'l', b'a', b'c'];
+        wrapped.extend([0, 0, 0, 12, b'a', b'l', b'a', b'c', 0, 0, 0, 0]);
+        wrapped.extend_from_slice(&cookie);
+        assert_eq!(alac_cookie_bit_depth(&wrapped), Some(24));
+        assert_eq!(alac_cookie_bit_depth(&cookie[..5]), None);
+        cookie[5] = 0;
+        assert_eq!(alac_cookie_bit_depth(&cookie), None);
+    }
+
+    /// ALAC in MP4 carries no sample width in the sample entry; the scanner
+    /// and the Properties drawer must both still report 16 and 24 bits.
+    #[test]
+    fn alac_files_report_their_bit_depth() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/probe");
+        for (name, depth) in [("alac16.m4a", 16), ("alac24.m4a", 24)] {
+            let path = dir.join(name);
+            let scanned = tags::probe(&path, false).expect(name).properties;
+            assert_eq!(scanned.bit_depth, depth, "{name} (scanner)");
+            let info = probe(&path).expect(name);
+            assert_eq!(info.bits_per_sample, Some(depth), "{name} (properties)");
+            assert_eq!(info.lossless, Some(true), "{name}");
+        }
     }
 
     #[test]

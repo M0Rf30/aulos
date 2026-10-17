@@ -18,12 +18,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Name of the SQL scalar function [`register_sql_functions`] installs: the
-/// quality tier code of a `(path, sample_rate)` pair.
+/// quality tier code of a `(path, sample_rate, bit_depth)` triple.
 const QUALITY_FN: &str = "aulos_quality";
 
 /// Quality tier code of the current `tracks` row; `''` when the format is
 /// not recognised, so `is not` rules still match such tracks.
-const QUALITY_EXPR: &str = "COALESCE(aulos_quality(path, sample_rate), '')";
+const QUALITY_EXPR: &str = "COALESCE(aulos_quality(path, sample_rate, bit_depth), '')";
 
 /// Correlated subquery: recorded plays of the current `tracks` row.
 const PLAY_COUNT_EXPR: &str = "(SELECT COUNT(*) FROM play_history WHERE track_id = tracks.id)";
@@ -209,13 +209,15 @@ impl QualityTier {
 pub(crate) fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.create_scalar_function(
         QUALITY_FN,
-        2,
+        3,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
             let path: String = ctx.get(0)?;
             let rate: Option<i64> = ctx.get(1)?;
             let rate = rate.and_then(|r| u32::try_from(r).ok()).unwrap_or(0);
-            Ok(QualityTier::of(classify(Path::new(&path), rate, 0)).map(QualityTier::code))
+            let depth: Option<i64> = ctx.get(2)?;
+            let depth = depth.and_then(|d| u32::try_from(d).ok()).unwrap_or(0);
+            Ok(QualityTier::of(classify(Path::new(&path), rate, depth)).map(QualityTier::code))
         },
     )
 }

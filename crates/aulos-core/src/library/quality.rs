@@ -87,20 +87,18 @@ fn extension_of(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// Classify a track's audio quality tier from its file extension and
-/// sample rate.
+/// Classify a track's audio quality tier from its file extension, sample
+/// rate and bit depth.
 ///
-/// `bitrate` is accepted so every call site can pass all three metadata
-/// values it has on hand uniformly, but today's rules don't need it —
-/// tier is decided entirely by container/codec and sample rate.
-///
-/// `m4a` is the one genuinely ambiguous extension: it holds either ALAC
-/// (lossless) or AAC (lossy), and nothing on `Track` says which. This
-/// treats it as lossy unless the sample rate is above 48 kHz, since AAC
-/// almost never ships above that while hi-res ALAC commonly does — CD-rate
-/// ALAC (44.1/48 kHz) is misclassified as `Lossy` under this heuristic.
+/// `bit_depth` is only ever stored for lossless streams (`0` for lossy or
+/// unknown), which settles `m4a`, the one ambiguous extension: it holds
+/// either ALAC (lossless) or AAC (lossy). With a bit depth it is ALAC; without
+/// one it is treated as lossy unless the sample rate is above 48 kHz, since
+/// AAC almost never ships above that while hi-res ALAC commonly does (a file
+/// scanned before the depth was read from the ALAC header keeps `0`, and CD-rate
+/// ALAC of that kind stays `Lossy` until it is rescanned).
 #[must_use]
-pub fn classify(path: &Path, sample_rate: u32, _bitrate: u32) -> AudioQuality {
+pub fn classify(path: &Path, sample_rate: u32, bit_depth: u32) -> AudioQuality {
     let Some(ext) = extension_of(path) else {
         return AudioQuality::Unknown;
     };
@@ -117,6 +115,8 @@ pub fn classify(path: &Path, sample_rate: u32, _bitrate: u32) -> AudioQuality {
         "m4a" => {
             if is_hi_res {
                 AudioQuality::HiRes
+            } else if bit_depth > 0 {
+                AudioQuality::CdLossless
             } else {
                 AudioQuality::Lossy
             }
@@ -134,7 +134,7 @@ pub fn classify(path: &Path, sample_rate: u32, _bitrate: u32) -> AudioQuality {
 pub fn album_quality(tracks: &[Arc<Track>]) -> AudioQuality {
     tracks
         .iter()
-        .map(|track| classify(&track.path, track.sample_rate, track.bitrate))
+        .map(|track| classify(&track.path, track.sample_rate, track.bit_depth))
         .max()
         .unwrap_or(AudioQuality::Unknown)
 }
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn flac_at_cd_rate_is_cd_lossless() {
         assert_eq!(
-            classify(Path::new("song.flac"), 44_100, 900),
+            classify(Path::new("song.flac"), 44_100, 16),
             AudioQuality::CdLossless
         );
     }
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn flac_above_cd_rate_is_hi_res() {
         assert_eq!(
-            classify(Path::new("song.flac"), 96_000, 2304),
+            classify(Path::new("song.flac"), 96_000, 24),
             AudioQuality::HiRes
         );
     }
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn mp3_is_lossy() {
         assert_eq!(
-            classify(Path::new("song.mp3"), 44_100, 320),
+            classify(Path::new("song.mp3"), 44_100, 0),
             AudioQuality::Lossy
         );
     }
@@ -209,8 +209,16 @@ mod tests {
     #[test]
     fn m4a_at_cd_rate_is_treated_as_lossy_aac() {
         assert_eq!(
-            classify(Path::new("song.m4a"), 44_100, 256),
+            classify(Path::new("song.m4a"), 44_100, 0),
             AudioQuality::Lossy
+        );
+    }
+
+    #[test]
+    fn m4a_with_a_bit_depth_is_cd_rate_alac() {
+        assert_eq!(
+            classify(Path::new("song.m4a"), 44_100, 16),
+            AudioQuality::CdLossless
         );
     }
 
@@ -225,7 +233,7 @@ mod tests {
     #[test]
     fn no_extension_is_unknown() {
         assert_eq!(
-            classify(Path::new("song"), 44_100, 320),
+            classify(Path::new("song"), 44_100, 0),
             AudioQuality::Unknown
         );
     }
