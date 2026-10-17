@@ -35,7 +35,8 @@ impl ListenBrainz {
             .send()
             .map_err(net_error)?;
         let status = resp.status().as_u16();
-        let text = resp.text().unwrap_or_default();
+        let text =
+            crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES).unwrap_or_default();
         classify_response(status, &text)
     }
 }
@@ -116,7 +117,8 @@ pub fn validate_token(base_url: &str, token: &str) -> Result<String, ScrobbleErr
         .send()
         .map_err(net_error)?;
     let status = resp.status().as_u16();
-    let body = resp.text().map_err(net_error)?;
+    let body = crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES)
+        .map_err(super::ScrobbleError::Transient)?;
     parse_validate_response(status, &body)
 }
 

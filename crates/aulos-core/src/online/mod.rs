@@ -18,12 +18,16 @@ use std::time::Duration;
 
 /// Shared blocking HTTP client for episode downloads, which stream to a
 /// file on a worker thread (desktop and Android only). Built once so
-/// requests reuse the connection pool and TLS session cache, with an
-/// explicit timeout so a stalled server can't hang the blocking task.
+/// requests reuse the connection pool and TLS session cache. Unlike the
+/// blocking default (30 s for the whole request) there is no total timeout,
+/// so a long episode can finish; connecting is bounded, and TCP keepalive
+/// drops a peer that vanished (reqwest's blocking client has no read
+/// timeout). The body size is capped by the download loop.
 pub static HTTP_CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
     crate::http::blocking_builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(None::<Duration>)
         .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| crate::http::blocking_client())
 });
@@ -50,12 +54,16 @@ pub(crate) fn request_error(what: &str, url: &str, error: &reqwest::Error) -> St
     }
 }
 
+/// Largest icon / artwork body [`fetch_icon`] accepts.
+const ICON_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Fetches a podcast artwork / station favicon URL and decodes it into RGBA
 /// pixels at most [`ONLINE_ICON_MAX_DIM`](crate::library::CoverArt::ONLINE_ICON_MAX_DIM)
 /// on a side. The fetch is async; the decode is CPU work and runs on the
 /// blocking pool, off the async reactor.
 pub async fn fetch_icon(url: String) -> Option<(u32, u32, Vec<u8>)> {
-    let bytes = http().get(&url).send().await.ok()?.bytes().await.ok()?;
+    let response = http().get(&url).send().await.ok()?;
+    let bytes = read_capped_response(response, ICON_MAX_BYTES).await.ok()?;
     crate::task::spawn_blocking(move || {
         crate::library::CoverArt::decode_thumbnail(
             &bytes,
@@ -125,6 +133,18 @@ pub(crate) async fn read_capped_response(
         }
         Ok(body.to_vec())
     }
+}
+
+/// Largest JSON/text API response read by [`read_capped_text`] callers.
+pub(crate) const API_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// [`read_capped_body`] decoded as (lossy) UTF-8 text.
+pub(crate) fn read_capped_text(
+    response: crate::http::blocking::Response,
+    max_bytes: u64,
+) -> Result<String, String> {
+    let bytes = read_capped_body(response, max_bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Reads a blocking HTTP response body into memory, capped at `max_bytes`.

@@ -505,9 +505,8 @@ fn get_json(url: &str) -> Result<Value, SimilarError> {
         .send()
         .map_err(|e| SimilarError::Network(e.to_string()))?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .map_err(|e| SimilarError::Network(e.to_string()))?;
+    let body =
+        super::read_capped_text(resp, super::API_MAX_BYTES).map_err(SimilarError::Network)?;
     match status {
         200..=299 => serde_json::from_str(&body)
             .map_err(|_| SimilarError::Network("unexpected response".into())),
@@ -578,9 +577,8 @@ impl SimilarArtists for LastFmSimilar {
             .send()
             .map_err(|e| SimilarError::Network(e.to_string()))?;
         let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .map_err(|e| SimilarError::Network(e.to_string()))?;
+        let body =
+            super::read_capped_text(resp, super::API_MAX_BYTES).map_err(SimilarError::Network)?;
         use crate::online::scrobble::ScrobbleError;
         match crate::online::scrobble::audioscrobbler::parse_response(status, &body) {
             Ok(v) => Ok(parse_lastfm_similar(&v)),

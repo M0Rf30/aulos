@@ -455,7 +455,7 @@ impl ListenBrainzSource {
                 header_num(&resp, "X-RateLimit-Reset-In"),
             );
             let reset_in: Option<u64> = header_num(&resp, "X-RateLimit-Reset-In");
-            let body = resp.text().map_err(|e| net_error(e).to_string())?;
+            let body = crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES)?;
             match status {
                 200 => {
                     let v = serde_json::from_str(&body)
@@ -616,7 +616,7 @@ impl AudioscrobblerSource {
                 }
             };
             let status = resp.status().as_u16();
-            let body = resp.text().map_err(|e| net_error(e).to_string())?;
+            let body = crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES)?;
             match audioscrobbler::parse_response(status, &body) {
                 Ok(v) => return Ok(v),
                 Err(ScrobbleError::Transient(m)) => {

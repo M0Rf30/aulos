@@ -351,6 +351,9 @@ pub enum DownloadError {
     Failed(String),
 }
 
+/// Hard cap on one episode download (2 GiB).
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Smallest number of bytes between two progress reports.
 const PROGRESS_STEP_BYTES: u64 = 128 * 1024;
 
@@ -422,6 +425,11 @@ fn copy_with_progress(
             .write_all(&buf[..n])
             .map_err(|e| DownloadError::Failed(format!("Write download error: {e}")))?;
         received += n as u64;
+        if received > MAX_DOWNLOAD_BYTES {
+            return Err(DownloadError::Failed(format!(
+                "Download exceeded the {MAX_DOWNLOAD_BYTES} byte limit"
+            )));
+        }
         if received - reported >= PROGRESS_STEP_BYTES {
             reported = received;
             on_progress(received, total);

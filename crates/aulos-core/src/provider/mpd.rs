@@ -289,8 +289,11 @@ impl MpdProvider {
     /// Helper: open a fresh TCP+MPD connection, returning `(Client, ConnectionEvents)`.
     async fn open_connection(&self) -> Result<(Client, ConnectionEvents), ProviderError> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
-        let stream = TcpStream::connect(&addr)
+        let stream = crate::task::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
             .await
+            .map_err(|_| {
+                ProviderError::NotConnected(format!("TCP connect to {addr}: timed out after 10 s"))
+            })?
             .map_err(|e| ProviderError::NotConnected(format!("TCP connect to {addr}: {e}")))?;
 
         let (client, events) =

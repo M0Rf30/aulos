@@ -306,11 +306,15 @@ mod web {
                 self
             }
 
-            pub fn timeout(self, _timeout: Duration) -> Self {
+            pub fn timeout(self, _timeout: impl Into<Option<Duration>>) -> Self {
                 self
             }
 
             pub fn connect_timeout(self, _timeout: Duration) -> Self {
+                self
+            }
+
+            pub fn tcp_keepalive(self, _interval: impl Into<Option<Duration>>) -> Self {
                 self
             }
 

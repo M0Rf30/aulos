@@ -243,12 +243,22 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     let bytes = crate::library::CoverArt::extract_from_file(path)?;
     let ext = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "png"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
     } else {
         "jpg"
     };
+    // Keyed by content as well as track id: ids can be reused (rescans,
+    // other providers) and the file must not serve another cover's art.
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    };
     let dir = crate::paths::cache_dir().join("mpris");
     std::fs::create_dir_all(&dir).ok()?;
-    let file_path = dir.join(format!("{track_id}.{ext}"));
+    let file_path = dir.join(format!("{track_id}-{hash:016x}.{ext}"));
     if !file_path.exists() {
         std::fs::write(&file_path, &bytes).ok()?;
     }

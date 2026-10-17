@@ -131,7 +131,8 @@ fn post(
         .send()
         .map_err(net_error)?;
     let status = resp.status().as_u16();
-    let body = resp.text().map_err(net_error)?;
+    let body = crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES)
+        .map_err(ScrobbleError::Transient)?;
     parse_response(status, &body)
 }
 
@@ -371,7 +372,8 @@ pub fn get_loved_tracks(
         );
         let resp = http_client().get(url).send().map_err(net_error)?;
         let status = resp.status().as_u16();
-        let body = resp.text().map_err(net_error)?;
+        let body = crate::online::read_capped_text(resp, crate::online::API_MAX_BYTES)
+            .map_err(ScrobbleError::Transient)?;
         let v = parse_response(status, &body)?;
         let (pairs, total_pages) = parse_loved_tracks(&v);
         out.extend(pairs);
