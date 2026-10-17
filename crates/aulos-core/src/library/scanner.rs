@@ -49,6 +49,9 @@ impl LibraryScanner {
 
         db.begin_batch()?;
         let mut pending = 0usize;
+        // Paths the walk reached; anything under a complete root that is
+        // not here is gone, with no second stat pass over the database.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for dir in roots {
             progress.set_root(dir);
             let mut complete = true;
@@ -75,6 +78,7 @@ impl LibraryScanner {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => {
                         tracing::warn!("Cannot access track {}: {error}", path.display());
+                        seen.insert(path.to_string_lossy().into_owned());
                         complete = false;
                         continue;
                     }
@@ -87,6 +91,7 @@ impl LibraryScanner {
                     .unwrap_or(0);
 
                 let path_str = path.to_string_lossy();
+                seen.insert(path_str.clone().into_owned());
                 if let Some(&existing_mtime) = known_mtimes.get(path_str.as_ref())
                     && existing_mtime == mtime
                 {
@@ -118,7 +123,9 @@ impl LibraryScanner {
         }
 
         db.commit_batch()?;
-        let removed = db.remove_missing_tracks(&complete_roots)?;
+        let removed = db.remove_local_tracks_beneath(&complete_roots, |path| {
+            !seen.contains(path.to_string_lossy().as_ref())
+        })?;
         if removed > 0 {
             tracing::info!("Removed {removed} missing tracks from library");
         }
