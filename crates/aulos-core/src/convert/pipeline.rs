@@ -599,7 +599,7 @@ impl AudioSource {
             .sample_rate
             .ok_or_else(|| ConvertError::Decode("source has no sample rate".to_owned()))?;
         let channels = audio.channels.as_ref().map_or(2, |c| c.count() as u16);
-        let bits_per_sample = audio.bits_per_sample;
+        let bits_per_sample = crate::library::tech_info::stream_bit_depth(&audio);
         let total_frames = track.num_frames;
         let time_base = track.time_base;
 
@@ -781,6 +781,17 @@ impl AudioSource {
 
 #[cfg(test)]
 mod tests {
+    /// ALAC states its depth only in the codec's magic cookie; FLAC "Auto"
+    /// needs it to keep a 16-bit source at 16 bits instead of padding to 24.
+    #[test]
+    fn alac_sources_report_their_bit_depth() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/probe");
+        for (name, depth) in [("alac16.m4a", 16), ("alac24.m4a", 24)] {
+            let source = AudioSource::open(&dir.join(name)).expect(name);
+            assert_eq!(source.bits_per_sample, Some(depth), "{name}");
+        }
+    }
+
     use super::*;
     use crate::library::tagio::EditPicture;
     use crate::library::tags as track_tags;
