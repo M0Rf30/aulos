@@ -908,6 +908,9 @@ fn input(
         .font(theme::regular(13.0))
         .background_color(pal.bg);
     let resp = ui.add(edit);
+    if password {
+        crate::widgets::mark_password(ui.ctx(), resp.id);
+    }
     ui.painter().rect_stroke(
         resp.rect,
         CornerRadius::same(6),

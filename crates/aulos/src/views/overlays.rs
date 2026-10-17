@@ -411,7 +411,7 @@ fn auth_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
         );
         ui.add_space(8.0);
         field_label(ui, pal, &aulos_core::fl!("overlays-password"));
-        ui.add(
+        let password = ui.add(
             TextEdit::singleline(&mut d.password)
                 .password(true)
                 .hint_text(
@@ -422,6 +422,7 @@ fn auth_dialog(ctx: &Context, pal: Palette, st: &mut State) -> Act {
                 .font(theme::regular(13.0))
                 .background_color(pal.surface_2),
         );
+        crate::widgets::mark_password(ui.ctx(), password.id);
         let can_sign_in = !d.username.trim().is_empty();
         let mut act = footer(
             ui,

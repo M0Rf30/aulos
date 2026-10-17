@@ -195,22 +195,45 @@ pub fn set_clipboard_text(text: &str) {
 
 /// The system bars and display cutout, in pixels: `[left, top, right, bottom]`.
 /// The activity draws edge to edge, so the app keeps its content out of them.
-/// The deprecated `getSystemWindowInset*` getters are the ones that exist on
-/// every API level from 26. Asked of the window at most twice a second; `None` until it has insets.
+/// `None` until the window has insets. See [`window_insets`].
 pub fn system_insets() -> Option<[f32; 4]> {
+    window_insets().map(|insets| insets.system)
+}
+
+/// The height the soft keyboard covers at the bottom of the window, in pixels
+/// (0 while it is hidden or the window has no insets yet).
+pub fn ime_bottom() -> f32 {
+    window_insets().map_or(0.0, |insets| insets.ime_bottom)
+}
+
+/// What the window reports it is covered by, in pixels.
+#[derive(Clone, Copy)]
+struct WindowInsets {
+    /// `[left, top, right, bottom]` of the bars and the cutout (the
+    /// deprecated `getSystemWindowInset*` getters are the ones that exist on
+    /// every API level from 26).
+    system: [f32; 4],
+    /// The soft keyboard's height: `getInsets(Type.ime())` on API 30+, before
+    /// that what the system bottom inset adds to the stable one.
+    ime_bottom: f32,
+}
+
+/// Asked of the window at most a few times a second (the keyboard shows and
+/// hides within that time).
+fn window_insets() -> Option<WindowInsets> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    static CACHE: Mutex<Option<(Instant, Option<[f32; 4]>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, Option<WindowInsets>)>> = Mutex::new(None);
     let mut cache = CACHE.lock().ok()?;
     if let Some((at, value)) = *cache
-        && at.elapsed() < Duration::from_millis(500)
+        && at.elapsed() < Duration::from_millis(150)
     {
         return value;
     }
     let (vm, activity) = host()?;
     let mut env = vm.attach_current_thread().ok()?;
-    let read = (|| -> jni::errors::Result<Option<[f32; 4]>> {
+    let read = (|| -> jni::errors::Result<Option<WindowInsets>> {
         let window = env
             .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
             .l()?;
@@ -231,12 +254,33 @@ pub fn system_insets() -> Option<[f32; 4]> {
         let mut side = |name: &str| -> jni::errors::Result<f32> {
             Ok(env.call_method(&insets, name, "()I", &[])?.i()? as f32)
         };
-        Ok(Some([
+        let system = [
             side("getSystemWindowInsetLeft")?,
             side("getSystemWindowInsetTop")?,
             side("getSystemWindowInsetRight")?,
             side("getSystemWindowInsetBottom")?,
-        ]))
+        ];
+        let stable_bottom = side("getStableInsetBottom")?;
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        let ime_bottom = if sdk >= 30 {
+            let ime = env
+                .call_static_method("android/view/WindowInsets$Type", "ime", "()I", &[])?
+                .i()?;
+            let ime = env
+                .call_method(
+                    &insets,
+                    "getInsets",
+                    "(I)Landroid/graphics/Insets;",
+                    &[jni::objects::JValue::Int(ime)],
+                )?
+                .l()?;
+            env.get_field(&ime, "bottom", "I")?.i()? as f32
+        } else {
+            (system[3] - stable_bottom).max(0.0)
+        };
+        Ok(Some(WindowInsets { system, ime_bottom }))
     })();
     let value = match read {
         Ok(value) => value,

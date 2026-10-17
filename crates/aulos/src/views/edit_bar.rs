@@ -6,7 +6,8 @@
 //! paste and a text field has no selection menu. This module bridges the
 //! gap: the system clipboard (`android::clipboard_text`) feeds egui's paste
 //! events and receives its copies, and a small bar above the focused text
-//! field offers Paste, Select all, Copy and Cut.
+//! field offers Paste, Select all, Copy and Cut (the last two not on password
+//! fields, where egui ignores them), kept above the soft keyboard.
 //!
 //! A bar button cannot act in the frame it is tapped (the field was drawn
 //! earlier in that frame), so it records a [`Command`] that [`begin`]
@@ -110,7 +111,22 @@ pub fn show(ctx: &Context) {
         return;
     };
     let selected = state.cursor.char_range().is_some_and(|r| !r.is_empty());
-    let screen = ctx.content_rect();
+    // egui ignores Copy and Cut on a password field: do not offer them.
+    let copyable = !crate::widgets::is_password(ctx, id);
+    // Above the soft keyboard too. The safe area may already include it; the
+    // higher of the two limits wins.
+    let screen = {
+        let content = ctx.content_rect();
+        let keyboard_top =
+            ctx.viewport_rect().bottom() - android::ime_bottom() / ctx.pixels_per_point();
+        egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(
+                content.right(),
+                content.bottom().min(keyboard_top).max(content.top()),
+            ),
+        )
+    };
     let above = field.top() - HEIGHT - 10.0 >= screen.top();
     let pos = egui::pos2(
         field.left(),
@@ -149,7 +165,7 @@ pub fn show(ctx: &Context) {
                         };
                         button(ui, aulos_core::fl!("edit-paste"), Command::Paste);
                         button(ui, aulos_core::fl!("edit-select-all"), Command::SelectAll);
-                        if selected {
+                        if selected && copyable {
                             button(ui, aulos_core::fl!("edit-copy"), Command::Copy);
                             button(ui, aulos_core::fl!("edit-cut"), Command::Cut);
                         }

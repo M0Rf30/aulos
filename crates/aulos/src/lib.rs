@@ -6,7 +6,7 @@
 //!
 //! Entry points: a desktop window (`eframe::run_native`) and, on
 //! `wasm32`, a canvas in a web page (`eframe::WebRunner`), built with Trunk; and, on Android, `android_main` (see
-//! `android.rs`), built into a `cdylib` by `cargo apk`.
+//! `android/`), built into a `cdylib` by `cargo apk`.
 
 #[cfg(target_os = "android")]
 mod android;
