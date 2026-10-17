@@ -385,6 +385,17 @@ impl SubsonicProvider {
         Ok((albums, has_more))
     }
 
+    /// The server's library-change marker (`getIndexes` `lastModified`,
+    /// the last scan time on Navidrome and OpenSubsonic servers); `None`
+    /// when the server does not report one or the request fails.
+    pub async fn library_marker(&self) -> Option<i64> {
+        self.client
+            .get_indexes(None, None)
+            .await
+            .ok()
+            .and_then(|indexes| indexes.last_modified)
+    }
+
     /// Build a `CoverSource` from a Subsonic cover art ID.
     fn cover_source_from_id(&self, cover_id: &Option<String>) -> Option<CoverSource> {
         cover_id.as_ref().and_then(|id| {

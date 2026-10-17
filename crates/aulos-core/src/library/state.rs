@@ -293,6 +293,17 @@ impl LibraryState {
         self.rebuild_artists(config);
     }
 
+    /// Drop the staged refresh of `generation` without swapping it in.
+    pub fn cancel_reload(&mut self, generation: u64) {
+        if self
+            .reload_staging
+            .as_ref()
+            .is_some_and(|s| s.generation == generation)
+        {
+            self.reload_staging = None;
+        }
+    }
+
     /// Finish an incremental reload tagged `generation`: swap the staged
     /// refresh in (if one was running) and run the final sort.
     ///

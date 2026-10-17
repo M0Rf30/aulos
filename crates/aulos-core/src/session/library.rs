@@ -60,6 +60,14 @@ pub enum LibraryEvent {
         provider_id: String,
         count: usize,
     },
+    /// A remote provider's cached library is still current (its server
+    /// marker is unchanged), so the full resync was skipped; `favorites`
+    /// are the favorite flags that differ from the cache.
+    SyncSkipped {
+        generation: u64,
+        provider_id: String,
+        favorites: Vec<(String, bool)>,
+    },
     /// The whole library of a database-backed provider, in one piece.
     Loaded {
         generation: u64,
@@ -633,6 +641,25 @@ impl Session {
                 self.refresh_search();
                 LibraryApplied::Completed { covers }
             }
+            LibraryEvent::SyncSkipped {
+                generation,
+                provider_id,
+                favorites,
+            } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return LibraryApplied::Stale;
+                }
+                self.library.scanning = false;
+                // Keep the seeded cache: drop the (empty) staging instead of
+                // swapping it in.
+                self.library.cancel_reload(generation);
+                let covers = self.library.covers.complete_staged(false);
+                for (key, state) in &favorites {
+                    self.set_favorite_local(key, *state);
+                }
+                self.refresh_search();
+                LibraryApplied::Completed { covers }
+            }
             LibraryEvent::TopTracksLoaded { artist, tracks } => {
                 self.library.artist_top = Some(ArtistTop { artist, tracks });
                 LibraryApplied::Done
@@ -1062,6 +1089,76 @@ async fn batch_covers(provider: &Arc<dyn MusicProvider>, albums: &[Album]) -> Co
         .await
 }
 
+/// Whether a remote provider's cached library can be kept as is: there is
+/// one, and the server reports the same library marker it was synced at.
+/// A server without a marker always gets the full sync.
+fn can_skip_sync(has_cache: bool, cached: Option<i64>, server: Option<i64>) -> bool {
+    has_cache && matches!((cached, server), (Some(a), Some(b)) if a == b)
+}
+
+async fn sync_marker(provider_id: &str) -> Option<i64> {
+    let provider_id = provider_id.to_string();
+    crate::task::spawn_blocking(move || {
+        LibraryDb::open(&crate::paths::library_db_path())
+            .ok()
+            .and_then(|db| db.sync_marker(&provider_id))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn store_sync_marker(provider_id: &str, marker: Option<i64>) {
+    let provider_id = provider_id.to_string();
+    crate::task::spawn_blocking(move || {
+        if let Ok(db) = LibraryDb::open(&crate::paths::library_db_path())
+            && let Err(e) = db.set_sync_marker(&provider_id, marker)
+        {
+            tracing::warn!("Failed to store sync marker for {provider_id}: {e}");
+        }
+    })
+    .await
+    .ok();
+}
+
+/// Compare the server's starred songs with the cached tracks' favorite
+/// flags, persist the differences and return them (`path` key, new state).
+async fn refresh_cached_favorites(
+    subsonic: &crate::provider::subsonic::SubsonicProvider,
+    provider_id: &str,
+    cached: &[Track],
+) -> Vec<(String, bool)> {
+    use crate::provider::MusicProvider as _;
+    let Ok(starred) = subsonic.list_favorites().await else {
+        return Vec::new();
+    };
+    let starred: HashSet<String> = starred
+        .iter()
+        .map(|t| t.path.to_string_lossy().into_owned())
+        .collect();
+    let changes: Vec<(String, bool)> = cached
+        .iter()
+        .filter_map(|t| {
+            let key = t.path.to_string_lossy();
+            let now = starred.contains(key.as_ref());
+            (now != t.is_favorite).then(|| (key.into_owned(), now))
+        })
+        .collect();
+    if !changes.is_empty() {
+        let (provider_id, saved) = (provider_id.to_string(), changes.clone());
+        crate::task::spawn_blocking(move || {
+            if let Ok(db) = LibraryDb::open(&crate::paths::library_db_path())
+                && let Err(e) = db.set_cached_favorites(&provider_id, &saved)
+            {
+                tracing::warn!("Failed to store refreshed favorites: {e}");
+            }
+        })
+        .await
+        .ok();
+    }
+    changes
+}
+
 /// The Subsonic provider's own cached library, if one was persisted by an
 /// earlier sync: `None` on the first ever sync, or if the cache is empty.
 async fn cached_provider_snapshot(provider_id: &str) -> Option<(Vec<Track>, Vec<Album>)> {
@@ -1232,17 +1329,37 @@ async fn load_incremental(
             // provider switch or app restart doesn't sit on a blank screen
             // for as long as the full network resync (hundreds of albums)
             // takes; the batches below replace it once ready.
-            if let Some((tracks, albums)) = cached_provider_snapshot(&provider_id).await {
+            let cached = cached_provider_snapshot(&provider_id).await;
+            if let Some((tracks, albums)) = &cached {
                 let covers = cached_provider_covers(&provider_id).await;
                 _ = tx
                     .send(LibraryEvent::CacheSeeded {
                         generation,
                         provider_id: provider_id.clone(),
-                        tracks,
-                        albums,
+                        tracks: tracks.clone(),
+                        albums: albums.clone(),
                         covers,
                     })
                     .await;
+            }
+
+            // The marker is read before the sync starts, so changes landing
+            // while it runs are caught by the next one.
+            let server_marker = subsonic.library_marker().await;
+            let cached_marker = sync_marker(&provider_id).await;
+            if let Some((cached_tracks, _)) = &cached
+                && can_skip_sync(true, cached_marker, server_marker)
+            {
+                let favorites =
+                    refresh_cached_favorites(&subsonic, &provider_id, cached_tracks).await;
+                _ = tx
+                    .send(LibraryEvent::SyncSkipped {
+                        generation,
+                        provider_id,
+                        favorites,
+                    })
+                    .await;
+                return;
             }
 
             let mut offset: i32 = 0;
@@ -1307,6 +1424,7 @@ async fn load_incremental(
             // not reached yet, so only clean up after a full pass.
             if synced_fully {
                 prune_provider_cache(&provider_id, &keep_paths, &keep_keys).await;
+                store_sync_marker(&provider_id, server_marker).await;
             }
         }
         // Database-backed providers load in one piece (`load_local`); the
@@ -1374,6 +1492,16 @@ mod tests {
             .iter()
             .map(|a| a.name.as_str())
             .collect()
+    }
+
+    #[test]
+    fn sync_is_skipped_only_for_a_cache_at_the_servers_marker() {
+        assert!(can_skip_sync(true, Some(5), Some(5)));
+        assert!(!can_skip_sync(true, Some(5), Some(6)));
+        assert!(!can_skip_sync(true, None, Some(5)));
+        assert!(!can_skip_sync(true, Some(5), None));
+        assert!(!can_skip_sync(true, None, None));
+        assert!(!can_skip_sync(false, Some(5), Some(5)));
     }
 
     #[test]

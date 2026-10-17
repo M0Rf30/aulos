@@ -518,6 +518,26 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v14 commit error: {e}"))?;
         }
 
+        if version < 15 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v15 transaction error: {e}"))?;
+            // The server-side library marker (e.g. last scan time) a remote
+            // provider's cached library was synced at, so an unchanged
+            // server skips the full resync.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS remote_sync_state (
+                    provider_id TEXT PRIMARY KEY,
+                    marker      INTEGER NOT NULL
+                );
+                PRAGMA user_version=15;",
+            )
+            .map_err(|e| format!("Migration v15 error: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v15 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -808,6 +828,7 @@ impl LibraryDb {
 
     /// Remove all tracks for a given provider (used when a provider is removed from config).
     pub fn remove_provider_tracks(&self, provider_id: &str) -> Result<usize, String> {
+        self.set_sync_marker(provider_id, None)?;
         let count = self
             .conn
             .execute(
@@ -816,6 +837,63 @@ impl LibraryDb {
             )
             .map_err(|e| format!("Delete error: {e}"))?;
         Ok(count)
+    }
+
+    /// The server library marker `provider_id`'s cache was last synced at.
+    pub fn sync_marker(&self, provider_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT marker FROM remote_sync_state WHERE provider_id = ?1",
+                params![provider_id],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// Record (or with `None` forget) the server library marker of a sync.
+    pub fn set_sync_marker(&self, provider_id: &str, marker: Option<i64>) -> Result<(), String> {
+        let result = match marker {
+            Some(marker) => self.conn.execute(
+                "INSERT INTO remote_sync_state (provider_id, marker) VALUES (?1, ?2)
+                 ON CONFLICT(provider_id) DO UPDATE SET marker = excluded.marker",
+                params![provider_id, marker],
+            ),
+            None => self.conn.execute(
+                "DELETE FROM remote_sync_state WHERE provider_id = ?1",
+                params![provider_id],
+            ),
+        };
+        result
+            .map(|_| ())
+            .map_err(|e| format!("Sync marker error: {e}"))
+    }
+
+    /// Set the favorite flag of cached remote tracks, keyed by `path`.
+    pub fn set_cached_favorites(
+        &self,
+        provider_id: &str,
+        changes: &[(String, bool)],
+    ) -> Result<(), String> {
+        let now = crate::unix_now();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Favorites transaction error: {e}"))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE tracks SET is_favorite = ?1,
+                        favorited_at = CASE WHEN ?1 = 1 THEN ?2 ELSE 0 END
+                     WHERE provider = ?3 AND path = ?4",
+                )
+                .map_err(|e| format!("Favorites error: {e}"))?;
+            for (path, state) in changes {
+                stmt.execute(params![state, now, provider_id, path])
+                    .map_err(|e| format!("Favorites error: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Favorites commit error: {e}"))
     }
 
     /// Get all tracks, optionally filtered by provider, ordered by album then track number.
@@ -2021,7 +2099,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert!(
             db.conn
@@ -2054,7 +2132,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
