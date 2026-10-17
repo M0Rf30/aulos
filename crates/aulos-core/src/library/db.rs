@@ -493,6 +493,23 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v13 commit error: {e}"))?;
         }
 
+        if version < 14 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v14 transaction error: {e}"))?;
+            // The cascade from `tracks` looks up `playlist_tracks` by
+            // `track_id`; without this index every deleted track scans it.
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track
+                     ON playlist_tracks(track_id);
+                 PRAGMA user_version=14;",
+            )
+            .map_err(|e| format!("Migration v14 error: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v14 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1711,8 +1728,8 @@ impl LibraryDb {
                     playlist.id = id;
                     playlist.name = name;
                     playlist.track_count = self
-                        .smart_playlist_tracks(&playlist, None)
-                        .map(|t| t.len())
+                        .smart_playlist_match_count(&playlist)
+                        .map(|n| playlist.limit.map_or(n, |l| n.min(l as usize)))
                         .unwrap_or(0);
                     playlists.push(playlist);
                 }
@@ -1964,7 +1981,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            13
+            14
         );
         assert!(
             db.conn
@@ -1997,7 +2014,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            13
+            14
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();

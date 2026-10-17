@@ -111,6 +111,10 @@ pub trait AudioOutput: Send {
     }
 }
 
+/// How long [`CpalOutput::write`] waits for room in the sample channel
+/// before declaring the device stalled.
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct CpalOutput {
     device: Device,
     stream: Option<Stream>,
@@ -456,9 +460,31 @@ impl CpalOutput {
         match &self.sample_sender {
             Some(sender) => {
                 if n > 0 {
-                    sender
-                        .send(out)
-                        .map_err(|_| PlayerError("Failed to send samples to output".to_owned()))?;
+                    // A blocking `send` would hang forever if the device
+                    // stops draining (unplug, xrun) and then freeze every
+                    // caller that joins this thread; give up after a bound.
+                    use std::sync::mpsc::TrySendError;
+                    let deadline = web_time::Instant::now() + SEND_TIMEOUT;
+                    let mut payload = out;
+                    loop {
+                        match sender.try_send(payload) {
+                            Ok(()) => break,
+                            Err(TrySendError::Disconnected(_)) => {
+                                return Err(PlayerError(
+                                    "Failed to send samples to output".to_owned(),
+                                ));
+                            }
+                            Err(TrySendError::Full(back)) => {
+                                if web_time::Instant::now() >= deadline {
+                                    return Err(PlayerError(
+                                        "Audio device stopped consuming samples".to_owned(),
+                                    ));
+                                }
+                                payload = back;
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                            }
+                        }
+                    }
                 }
                 Ok(n)
             }

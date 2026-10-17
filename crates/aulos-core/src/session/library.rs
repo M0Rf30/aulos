@@ -377,6 +377,7 @@ impl Session {
         // Filter out directories and non-existent-but-not-deleted paths.
         let paths: Vec<PathBuf> = paths
             .into_iter()
+            .filter(|p| LibraryScanner::is_audio_file(p))
             .filter(|p| p.is_file() || !p.exists())
             .collect();
         if paths.is_empty() {
@@ -789,14 +790,16 @@ async fn load_local(
     generation: u64,
     provider_id: String,
 ) -> LibraryEvent {
-    let tracks = provider.browse_tracks().await.unwrap_or_else(|e| {
-        tracing::error!("browse_tracks failed: {e}");
-        Vec::new()
-    });
+    // One query: the flat track list is the albums' tracks (a second
+    // `browse_tracks` would re-read and re-group the whole table).
     let albums = provider.browse_albums().await.unwrap_or_else(|e| {
         tracing::error!("browse_albums failed: {e}");
         Vec::new()
     });
+    let tracks: Vec<Track> = albums
+        .iter()
+        .flat_map(|a| a.tracks.iter().cloned())
+        .collect();
 
     // Thumbnails persisted by earlier launches: an album whose cover file
     // is unchanged skips the full-size decode.
@@ -1033,7 +1036,10 @@ async fn cached_provider_snapshot(provider_id: &str) -> Option<(Vec<Track>, Vec<
         if albums.is_empty() {
             return None;
         }
-        let tracks = db.all_tracks(Some(&provider_id)).ok()?;
+        let tracks = albums
+            .iter()
+            .flat_map(|a| a.tracks.iter().cloned())
+            .collect();
         Some((tracks, albums))
     })
     .await
