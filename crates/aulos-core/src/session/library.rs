@@ -56,7 +56,10 @@ pub enum LibraryEvent {
     /// An incremental (watcher) scan finished; `count` tracks were updated.
     /// Unlike [`Self::ScanComplete`] it neither supersedes a running
     /// scan/reload nor touches the progress state.
-    PathsScanned { provider_id: String, count: usize },
+    PathsScanned {
+        provider_id: String,
+        count: usize,
+    },
     /// The whole library of a database-backed provider, in one piece.
     Loaded {
         generation: u64,
