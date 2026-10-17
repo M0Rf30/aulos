@@ -366,8 +366,56 @@ enum EngineCommand {
 /// A track queued via [`PlaybackEngine::queue_next`] for gapless/crossfade
 /// look-ahead — mirrors rmpd's `next_song` slot (see the report's §7).
 struct PendingTrack {
-    source: PlaySource,
+    source: PendingSource,
     replay_gain_db: Option<f32>,
+}
+
+/// How a queued track becomes a decoder at the track boundary.
+enum PendingSource {
+    /// Opened on the playback thread when claimed (local files: a fast
+    /// header probe).
+    Lazy(PlaySource),
+    /// Being opened on a helper thread, so the boundary only claims the
+    /// result instead of waiting on an HTTP connect + probe. Dropping the
+    /// receiver (slot cleared, replaced, stop, engine drop) makes the
+    /// helper's `send` fail once its open returns, which drops the decoder
+    /// and with it the connection; nothing waits on the helper.
+    Opening(std::sync::mpsc::Receiver<Result<SymphoniaDecoder>>),
+}
+
+impl PendingSource {
+    fn new(source: PlaySource) -> Self {
+        if matches!(source, PlaySource::LocalFile(_)) {
+            return Self::Lazy(source);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("aulos-next-open".into())
+            .spawn({
+                let tx = tx.clone();
+                move || {
+                    let _ = tx.send(source.open_decoder());
+                }
+            });
+        match spawned {
+            Ok(_) => Self::Opening(rx),
+            Err(e) => {
+                tracing::warn!("cannot spawn next-track opener: {e}");
+                drop(tx);
+                // Receiver reports a disconnect, i.e. a failed open.
+                Self::Opening(rx)
+            }
+        }
+    }
+
+    fn open(self) -> Result<SymphoniaDecoder> {
+        match self {
+            Self::Lazy(source) => source.open_decoder(),
+            Self::Opening(rx) => rx
+                .recv()
+                .map_err(|_| PlayerError("next-track opener ended without a result".into()))?,
+        }
+    }
 }
 
 /// What to run on the freshly spawned playback thread.
@@ -679,7 +727,7 @@ impl PlaybackEngine {
     /// the current crossfade setting, not by the caller.
     pub fn queue_next(&self, source: PlaySource, replay_gain_db: Option<f32>) {
         *self.next_track.lock() = Some(PendingTrack {
-            source,
+            source: PendingSource::new(source),
             replay_gain_db,
         });
         // Matches the old `TrackBoundarySource`'s eager reset: queuing a next
@@ -865,7 +913,7 @@ fn resolve_start(start: ThreadStart) -> Result<SymphoniaDecoder> {
 /// open is treated as "nothing pending", never propagated as a hard error).
 fn open_pending(pending: PendingTrack) -> Option<(SymphoniaDecoder, f32)> {
     let gain = pending.replay_gain_db.map(db_to_linear).unwrap_or(1.0);
-    match pending.source.open_decoder() {
+    match pending.source.open() {
         Ok(decoder) => Some((decoder, gain)),
         Err(e) => {
             tracing::warn!("failed to open pre-queued next track: {e}");
