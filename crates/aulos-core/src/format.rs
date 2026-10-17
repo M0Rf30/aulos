@@ -71,9 +71,10 @@ pub fn format_bitrate(kbps: u32) -> String {
     format!("{kbps} kbps")
 }
 
-/// Integer with `,` thousands separators: `2,304`.
-pub fn format_thousands(n: u32) -> String {
-    let digits = n.to_string();
+/// Integer with `,` thousands separators: `2,304`. Takes any unsigned integer
+/// up to 64 bits (`usize` counts go through `as u64`).
+pub fn format_thousands(n: impl Into<u64>) -> String {
+    let digits = n.into().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
@@ -237,10 +238,15 @@ mod tests {
 
     #[test]
     fn thousands_separators() {
-        assert_eq!(format_thousands(0), "0");
-        assert_eq!(format_thousands(320), "320");
-        assert_eq!(format_thousands(2_304), "2,304");
-        assert_eq!(format_thousands(1_234_567), "1,234,567");
+        assert_eq!(format_thousands(0_u32), "0");
+        assert_eq!(format_thousands(320_u32), "320");
+        assert_eq!(format_thousands(2_304_u32), "2,304");
+        assert_eq!(format_thousands(1_234_567_u32), "1,234,567");
+        // Counts of any width: the library views pass `len() as u64`.
+        assert_eq!(format_thousands(999_u16), "999");
+        assert_eq!(format_thousands(1_000_u64), "1,000");
+        assert_eq!(format_thousands(4_812_usize as u64), "4,812");
+        assert_eq!(format_thousands(u64::MAX), "18,446,744,073,709,551,615");
     }
 
     #[test]

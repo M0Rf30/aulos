@@ -2,6 +2,7 @@ use crate::theme;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Align, Color32, FontId, Painter, Rect, Ui, pos2};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) fn is_icon(s: &str) -> bool {
     s.chars()
@@ -200,7 +201,13 @@ pub fn marquee_text(
         color,
     );
     fade_edges(&p, rect, bg, 14.0);
-    ui.ctx().request_repaint();
+    // Nothing moves while it holds at the start: wake up when the hold ends.
+    let wake = if t < PAUSE {
+        Duration::from_secs_f64(PAUSE - t)
+    } else {
+        Duration::from_millis(16)
+    };
+    ui.ctx().request_repaint_after(wake);
 }
 
 /// Left/right gradient fade of `bg` over `rect`'s edges.

@@ -8,7 +8,7 @@ use crate::widgets::{
     paint_text, pill_button, quality_badge, seed_colors, skeleton, text_width,
 };
 use aulos_core::config::ViewMode;
-use aulos_core::format::{format_duration, format_duration_coarse};
+use aulos_core::format::{format_duration, format_duration_coarse, format_thousands};
 use aulos_core::library::display::bio_preview;
 use aulos_core::library::scan_progress::ScanSnapshot;
 use aulos_core::library::{Artist, Track};
@@ -130,19 +130,6 @@ pub(crate) fn vertical_gradient(painter: &Painter, rect: Rect, top: Color32, bot
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// `1204` → `"1,204"`.
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// The "Scanning ~/Music" strip of the loading state: a determinate bar
 /// with a `done / total` counter once the scan has counted its files,
 /// an indeterminate sweep before that (and for loads that report no
@@ -204,8 +191,8 @@ pub(crate) fn scanning_banner(
     if fraction.is_some() {
         let counter = format!(
             "{} / {}",
-            thousands(progress.done),
-            thousands(progress.total)
+            format_thousands(progress.done as u64),
+            format_thousands(progress.total as u64)
         );
         let w = text_width(ui, &counter, theme::mono(12.0));
         paint_text(

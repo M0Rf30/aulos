@@ -1222,6 +1222,7 @@ menus-new-playlist-title = Neue Playlist
 menus-prompt-name = Name
 menus-prompt-name-hint = Name der Playlist
 menus-prompt-create = Erstellen
+menus-key-enter = Eingabe
 
 # artists (views/artists.rs)
 artists-filter-album-artists = Album-Künstler

@@ -503,7 +503,7 @@ fn main_column(
         ui,
         regular::PLAY,
         &aulos_core::fl!("play"),
-        Trailing::Key("Enter"),
+        Trailing::Key(&aulos_core::fl!("menus-key-enter")),
     )
     .clicked()
     {
@@ -893,9 +893,9 @@ mod tests {
         assert_rows_stack(
             |r| artist_menu(r, "Someone"),
             &[
-                "Play",
-                "Play next",
-                "Add to queue",
+                &aulos_core::fl!("play"),
+                &aulos_core::fl!("queue-play-next"),
+                &aulos_core::fl!("queue-add"),
                 &aulos_core::fl!("menu-go-to-artist"),
             ],
         );
@@ -906,11 +906,11 @@ mod tests {
         assert_rows_stack(
             |r| genre_menu(r, "Jazz"),
             &[
-                "Play",
-                "Play next",
-                "Add to queue",
-                "Shuffle",
-                "Go to genre",
+                &aulos_core::fl!("play"),
+                &aulos_core::fl!("queue-play-next"),
+                &aulos_core::fl!("queue-add"),
+                &aulos_core::fl!("shuffle"),
+                &aulos_core::fl!("menus-go-to-genre"),
             ],
         );
     }

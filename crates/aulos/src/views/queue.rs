@@ -5,7 +5,7 @@ use super::{menus, overlays};
 use crate::app::{App, Sheet};
 use crate::theme::{self, Palette};
 use crate::widgets::{
-    PillKind, caps_label, cover_image, empty_state, icon_button, paint_icon, paint_text,
+    PillKind, cover_image, empty_state, icon_button, paint_icon, paint_text, paint_text_spaced,
     pill_button, pill_button_enabled,
 };
 use aulos_core::format::format_duration_coarse;
@@ -21,6 +21,8 @@ const HEADER_H: f32 = 52.0;
 const FOOTER_H: f32 = 52.0;
 const NOW_H: f32 = 56.0;
 const ROW_H: f32 = 46.0;
+/// Height of a group heading (`PLAYING NEXT`, `FROM <ALBUM>`…).
+const GROUP_H: f32 = 28.0;
 
 #[derive(Default)]
 pub struct State {
@@ -30,7 +32,7 @@ pub struct State {
     /// dragged item goes in front of, or the queue length for the end.
     drop_slot: Option<usize>,
     /// Absolute queue index and screen rect of every upcoming row drawn last
-    /// frame (read by the smoke drag script).
+    /// frame, i.e. the visible ones (read by the smoke drag script).
     rows: Vec<(usize, Rect)>,
 }
 
@@ -52,6 +54,9 @@ enum Intent {
 pub fn show(app: &mut App, ctx: &Context) {
     if app.sheet != Some(Sheet::Queue) {
         theme::motion::slide_in(ctx, Id::new("aulos_queue_sheet_slide"), false);
+        // A drag never outlives the sheet: its drop is settled while drawing.
+        app.views.queue.dragging = None;
+        app.views.queue.drop_slot = None;
         return;
     }
     let mut st = std::mem::take(&mut app.views.queue);
@@ -135,6 +140,16 @@ fn draw(app: &App, ctx: &Context, st: &mut State) -> Vec<Intent> {
                     }
                 });
         });
+
+    // Settle the drag here, not on the dragged row: scrolling can virtualize
+    // that row away before the pointer is released.
+    if st.dragging.is_some()
+        && !ctx.input(|i| i.pointer.any_down())
+        && let (Some(from), Some(slot)) = (st.dragging.take(), st.drop_slot.take())
+        && let Some(to) = super::drop_target(from, slot)
+    {
+        out.push(Intent::Move { from, to });
+    }
     out
 }
 
@@ -217,6 +232,8 @@ fn body(
     (groups, context_label): (&[QueueGroup], Option<&str>),
     out: &mut Vec<Intent>,
 ) {
+    st.rows.clear();
+    st.drop_slot = None;
     ui.add_space(8.0);
     if now.is_none() && upcoming.is_empty() {
         empty_state(
@@ -229,7 +246,7 @@ fn body(
         return;
     }
     if let Some(track) = now {
-        group_label(ui, &aulos_core::fl!("queue-group-now-playing"));
+        group_label(ui, app.pal, &aulos_core::fl!("queue-group-now-playing"));
         now_row(ui, app, track);
         ui.add_space(8.0);
     }
@@ -243,26 +260,49 @@ fn body(
         );
         return;
     }
-    let mut rows = Vec::with_capacity(upcoming.len());
+
+    // The upcoming list is one tall allocation; only the headings and rows
+    // that intersect the view are placed (by arithmetic, so the cost does not
+    // grow with the queue).
+    let width = ui.available_width();
+    let total_h: f32 = groups.iter().map(|g| group_height(g.len)).sum();
+    let (area, _) = ui.allocate_exact_size(vec2(width, total_h), Sense::hover());
+    let view = ui.clip_rect();
+    let mut top = area.top();
     for group in groups {
-        group_label(ui, &group_title(group, context_label));
-        for abs in group.start..group.start + group.len {
-            let Some(track) = abs.checked_sub(up_start).and_then(|n| upcoming.get(n)) else {
-                continue;
-            };
-            let rect = up_row(ui, app, st, track, abs, out);
-            rows.push((abs, rect));
+        let bottom = top + group_height(group.len);
+        if bottom >= view.top() && top <= view.bottom() {
+            let head = Rect::from_min_size(pos2(area.left(), top), vec2(width, GROUP_H));
+            paint_group_label(ui, app.pal, head, &group_title(group, context_label));
+            let rows_top = top + GROUP_H;
+            let first = ((view.top() - rows_top) / ROW_H).floor().max(0.0) as usize;
+            let end =
+                (((view.bottom() - rows_top) / ROW_H).ceil().max(0.0) as usize).min(group.len);
+            for n in first..end {
+                let abs = group.start + n;
+                let Some(track) = abs.checked_sub(up_start).and_then(|k| upcoming.get(k)) else {
+                    continue;
+                };
+                let rect = Rect::from_min_size(
+                    pos2(area.left() + 8.0, rows_top + n as f32 * ROW_H),
+                    vec2(width - 16.0, ROW_H),
+                );
+                up_row(ui, app, st, track, abs, rect, out);
+                st.rows.push((abs, rect));
+            }
         }
+        top = bottom;
     }
 
-    st.rows.clone_from(&rows);
-    // Drop slot and indicator, from this frame's row rects.
+    // Drop slot and indicator, from the visible row rects: the row under the
+    // pointer, or after the last visible one when the pointer is past it.
+    let rows = &st.rows;
     let pointer_y = ui.ctx().input(|i| i.pointer.interact_pos()).map(|p| p.y);
     st.drop_slot = match (st.dragging, pointer_y) {
         (Some(_), Some(y)) => Some(
             rows.iter()
                 .find(|(_, r)| y < r.center().y)
-                .map_or(up_start + upcoming.len(), |(i, _)| *i),
+                .map_or_else(|| rows.last().map_or(up_start, |(i, _)| i + 1), |(i, _)| *i),
         ),
         _ => None,
     };
@@ -283,6 +323,11 @@ fn body(
     ui.add_space(8.0);
 }
 
+/// Height of a group: its heading and `len` rows.
+fn group_height(len: usize) -> f32 {
+    GROUP_H + len as f32 * ROW_H
+}
+
 /// Heading of a run of upcoming rows: `PLAYING NEXT`, `FROM <ALBUM> · 9 LEFT`
 /// (`UP NEXT` when the queue was not started from a single album) or
 /// `ADDED TO QUEUE`.
@@ -301,11 +346,25 @@ fn group_title(group: &QueueGroup, context_label: Option<&str>) -> String {
     }
 }
 
-fn group_label(ui: &mut Ui, text: &str) {
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        caps_label(ui, text);
-    });
+/// A group heading on its own row.
+fn group_label(ui: &mut Ui, pal: Palette, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), GROUP_H), Sense::hover());
+    paint_group_label(ui, pal, rect, text);
+}
+
+/// Paints a group heading (`LIBRARY`-style caps label) inside `rect`,
+/// vertically centred.
+fn paint_group_label(ui: &Ui, pal: Palette, rect: Rect, text: &str) {
+    let text_rect = Rect::from_min_max(pos2(rect.left() + 14.0, rect.top()), rect.max);
+    paint_text_spaced(
+        ui.painter(),
+        text_rect,
+        Align::Min,
+        text,
+        theme::semibold(10.5),
+        pal.text_3,
+        0.84,
+    );
 }
 
 /// The playing track: tinted panel, cover, title and artist, and a static
@@ -358,106 +417,100 @@ fn now_row(ui: &mut Ui, app: &App, track: &Track) -> Rect {
 }
 
 /// An upcoming row: grip, cover, title and artist, duration, and remove.
-/// Click jumps to it; dragging moves it.
+/// Click jumps to it; dragging moves it. The drop of a drag is settled in
+/// [`draw`], not here.
 fn up_row(
     ui: &mut Ui,
     app: &App,
     st: &mut State,
     track: &Track,
     abs: usize,
+    rect: Rect,
     out: &mut Vec<Intent>,
-) -> Rect {
+) {
     let pal = app.pal;
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let width = ui.available_width() - 8.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click_and_drag());
+    let resp = ui.interact(
+        rect,
+        Id::new(("aulos_queue_row", abs)),
+        Sense::click_and_drag(),
+    );
 
-        if resp.drag_started() {
-            st.dragging = Some(abs);
-        }
-        if resp.drag_stopped()
-            && let (Some(from), Some(slot)) = (st.dragging.take(), st.drop_slot.take())
-            && let Some(to) = super::drop_target(from, slot)
-        {
-            out.push(Intent::Move { from, to });
-        }
-        if resp.clicked() {
-            out.push(Intent::Jump(abs));
-        }
+    if resp.drag_started() {
+        st.dragging = Some(abs);
+    }
+    if resp.clicked() {
+        out.push(Intent::Jump(abs));
+    }
 
-        let cy = rect.center().y;
-        let x_rect = Rect::from_center_size(pos2(rect.right() - 18.0, cy), vec2(24.0, 24.0));
-        let remove = ui.interact(x_rect, Id::new(("aulos_queue_remove", abs)), Sense::click());
-        if remove.clicked() {
-            out.push(Intent::Remove(abs));
-        }
+    let cy = rect.center().y;
+    let x_rect = Rect::from_center_size(pos2(rect.right() - 18.0, cy), vec2(24.0, 24.0));
+    let remove = ui.interact(x_rect, Id::new(("aulos_queue_remove", abs)), Sense::click());
+    if remove.clicked() {
+        out.push(Intent::Remove(abs));
+    }
 
-        let hovered = resp.hovered() && st.dragging.is_none();
-        let key = track.cover_key();
-        let cover_rect = Rect::from_min_size(pos2(rect.left() + 26.0, cy - 18.0), vec2(36.0, 36.0));
-        if hovered || st.dragging == Some(abs) {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(6), pal.seg_sel);
-        }
-        cover_image(ui, &app.covers, cover_rect, app.covers.thumb(&key), &key, 4);
+    let hovered = resp.hovered() && st.dragging.is_none();
+    let key = track.cover_key();
+    let cover_rect = Rect::from_min_size(pos2(rect.left() + 26.0, cy - 18.0), vec2(36.0, 36.0));
+    if hovered || st.dragging == Some(abs) {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), pal.seg_sel);
+    }
+    cover_image(ui, &app.covers, cover_rect, app.covers.thumb(&key), &key, 4);
 
-        let p = ui.painter();
-        // Grip and remove show on hover only.
-        if hovered || st.dragging == Some(abs) || remove.hovered() {
-            paint_icon(
-                p,
-                pos2(rect.left() + 10.0, cy),
-                regular::DOTS_SIX_VERTICAL,
-                14.0,
-                pal.text_3,
-                false,
-            );
-            paint_icon(
-                p,
-                x_rect.center(),
-                regular::X,
-                13.0,
-                if remove.hovered() {
-                    pal.text
-                } else {
-                    pal.text_3
-                },
-                false,
-            );
-        }
-        paint_text(
+    let p = ui.painter();
+    // Grip and remove show on hover only.
+    if hovered || st.dragging == Some(abs) || remove.hovered() {
+        paint_icon(
             p,
-            Rect::from_min_max(
-                pos2(rect.right() - 90.0, cy - 8.0),
-                pos2(rect.right() - 36.0, cy + 8.0),
-            ),
-            Align::Max,
-            &track.duration_string(),
-            theme::mono(11.0),
-            pal.text_2,
+            pos2(rect.left() + 10.0, cy),
+            regular::DOTS_SIX_VERTICAL,
+            14.0,
+            pal.text_3,
+            false,
         );
-        let x0 = cover_rect.right() + 10.0;
-        let x1 = rect.right() - 96.0;
-        paint_text(
+        paint_icon(
             p,
-            Rect::from_min_max(pos2(x0, cy - 17.0), pos2(x1, cy)),
-            Align::Min,
-            &track.title,
-            theme::regular(13.0),
-            pal.text,
+            x_rect.center(),
+            regular::X,
+            13.0,
+            if remove.hovered() {
+                pal.text
+            } else {
+                pal.text_3
+            },
+            false,
         );
-        paint_text(
-            p,
-            Rect::from_min_max(pos2(x0, cy), pos2(x1, cy + 16.0)),
-            Align::Min,
-            track.grouping_artist(),
-            theme::regular(11.5),
-            pal.text_2,
-        );
-        rect
-    })
-    .inner
+    }
+    paint_text(
+        p,
+        Rect::from_min_max(
+            pos2(rect.right() - 90.0, cy - 8.0),
+            pos2(rect.right() - 36.0, cy + 8.0),
+        ),
+        Align::Max,
+        &track.duration_string(),
+        theme::mono(11.0),
+        pal.text_2,
+    );
+    let x0 = cover_rect.right() + 10.0;
+    let x1 = rect.right() - 96.0;
+    paint_text(
+        p,
+        Rect::from_min_max(pos2(x0, cy - 17.0), pos2(x1, cy)),
+        Align::Min,
+        &track.title,
+        theme::regular(13.0),
+        pal.text,
+    );
+    paint_text(
+        p,
+        Rect::from_min_max(pos2(x0, cy), pos2(x1, cy + 16.0)),
+        Align::Min,
+        track.grouping_artist(),
+        theme::regular(11.5),
+        pal.text_2,
+    );
 }
 
 fn apply(app: &mut App, intent: Intent) {

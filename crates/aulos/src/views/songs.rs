@@ -5,6 +5,7 @@ use crate::app::App;
 use crate::theme;
 use crate::views::menus::{self, MenuAction};
 use crate::widgets::{self, Columns, HEADER_HEIGHT, PillKind, row_height};
+use aulos_core::format::format_thousands;
 use aulos_core::library::state::SortField;
 use egui::{Frame, Margin, ScrollArea, Sense, Ui, vec2};
 use egui_phosphor::regular;
@@ -38,19 +39,6 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let intents = draw(app, ui, &mut state);
     app.views.songs = state;
     apply(app, intents);
-}
-
-/// `4812` → `4,812`.
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// `13 d 6 h`, `2 h 44 m`, `5 m`.
@@ -97,7 +85,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 ui.label(
                     egui::RichText::new(format!(
                         "{} · {}",
-                        thousands(tracks.len()),
+                        format_thousands(tracks.len() as u64),
                         total_label(total_secs)
                     ))
                     .font(theme::mono(13.0))

@@ -40,7 +40,10 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
+/// Repaint interval of the busy spinner and the indeterminate rail.
+const BUSY_FRAME: Duration = Duration::from_millis(50);
 /// Width of the files panel (wide / narrow layout).
 const FILES_W: f32 = 240.0;
 const FILES_W_NARROW: f32 = 200.0;
@@ -841,7 +844,7 @@ fn paint_spinner(ui: &Ui, center: Pos2, size: f32, color: Color32) {
     ui.painter().add(
         TextShape::new(pos, galley, color).with_angle_and_anchor(time * 6.0, Align2::CENTER_CENTER),
     );
-    ui.ctx().request_repaint();
+    ui.ctx().request_repaint_after(BUSY_FRAME);
 }
 
 /// A spinner followed by `text`.
@@ -889,7 +892,7 @@ fn paint_busy_rail(ui: &Ui, rect: Rect, fill: Color32, track: Color32) {
     if seg_rect.width() > 0.0 {
         ui.painter().rect_filled(seg_rect, radius, fill);
     }
-    ui.ctx().request_repaint();
+    ui.ctx().request_repaint_after(BUSY_FRAME);
 }
 
 /// What a banner shows under its text.
