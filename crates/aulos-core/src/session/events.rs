@@ -92,7 +92,7 @@ pub enum SessionEvent {
     /// An MPD connection event from [`BackgroundKey::MpdIdle`].
     Mpd(MpdEvent),
     /// A polled MPD status from [`BackgroundKey::MpdStatus`].
-    MpdStatus(MpdStatusUpdate),
+    MpdStatus(Box<MpdStatusUpdate>),
     /// The filesystem watcher reported these changed paths.
     FilesChanged(Vec<PathBuf>),
     /// Position ticker while playing locally ([`BackgroundKey::PlaybackTick`]).
@@ -130,7 +130,6 @@ session_event_from! {
     ConvertEvent => Convert,
     ArtistInfoOutcome => ArtistInfo,
     MpdEvent => Mpd,
-    MpdStatusUpdate => MpdStatus,
 }
 
 impl<E: Into<SessionEvent> + Send + 'static> Effect<E> {
@@ -490,7 +489,7 @@ impl Session {
             streams.push((
                 BackgroundKey::MpdStatus(Arc::clone(&provider_id)),
                 status_stream(mpd.client(), provider_id)
-                    .map(SessionEvent::MpdStatus)
+                    .map(|status| SessionEvent::MpdStatus(Box::new(status)))
                     .boxed(),
             ));
         }
@@ -694,7 +693,7 @@ impl Session {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                self.apply_mpd_status(status).into()
+                self.apply_mpd_status(*status).into()
             }
             SessionEvent::FilesChanged(paths) => self.files_changed(paths).into(),
             SessionEvent::PlaybackTick => self.playback_tick().into(),
