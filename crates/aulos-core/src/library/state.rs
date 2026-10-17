@@ -179,6 +179,9 @@ pub struct LibraryState {
     pub covers: CoverStore,
     /// Whether a library scan/reload is in flight.
     pub scanning: bool,
+    /// A watcher batch changed tracks while a scan was running: reload
+    /// when that scan completes.
+    pub reload_after_scan: bool,
     /// The ranked top tracks of the artist page last loaded.
     pub artist_top: Option<ArtistTop>,
     /// How far the running scan is; shared with the scanning thread.

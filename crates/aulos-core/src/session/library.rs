@@ -53,6 +53,10 @@ pub enum LibraryEvent {
         provider_id: String,
         count: usize,
     },
+    /// An incremental (watcher) scan finished; `count` tracks were updated.
+    /// Unlike [`Self::ScanComplete`] it neither supersedes a running
+    /// scan/reload nor touches the progress state.
+    PathsScanned { provider_id: String, count: usize },
     /// The whole library of a database-backed provider, in one piece.
     Loaded {
         generation: u64,
@@ -404,7 +408,18 @@ impl Session {
             .await
             .unwrap_or(0)
         };
-        self.rescan_local(work)
+        match self.providers.registry.active_shared() {
+            Some(p) if p.provider_type() == ProviderType::Local => {
+                let provider_id = self.providers.registry.active_id().to_string();
+                Effect::future(async move {
+                    LibraryEvent::PathsScanned {
+                        provider_id,
+                        count: work.await,
+                    }
+                })
+            }
+            _ => Effect::none(),
+        }
     }
 
     /// (Re)load the active provider's library. A database-backed provider
@@ -488,12 +503,30 @@ impl Session {
                 tracing::info!("Library scan complete: {count} tracks updated");
                 // Only reload if tracks actually changed, to avoid
                 // unnecessary view rebuilds (which reset scroll position).
-                let reload = if count > 0 || self.library.tracks.is_empty() {
+                let pending = std::mem::take(&mut self.library.reload_after_scan);
+                let reload = if count > 0 || pending || self.library.tracks.is_empty() {
                     self.reload_library()
                 } else {
                     Reload::none()
                 };
                 LibraryApplied::ScanComplete { reload }
+            }
+            LibraryEvent::PathsScanned { provider_id, count } => {
+                if provider_id != self.providers.registry.active_id() {
+                    return LibraryApplied::Stale;
+                }
+                if count == 0 {
+                    return LibraryApplied::Done;
+                }
+                if self.library.scanning {
+                    // A full scan/reload is running; its completion reloads
+                    // (reloading now would supersede it).
+                    self.library.reload_after_scan = true;
+                    return LibraryApplied::Done;
+                }
+                LibraryApplied::ScanComplete {
+                    reload: self.reload_library(),
+                }
             }
             LibraryEvent::Loaded {
                 generation,
