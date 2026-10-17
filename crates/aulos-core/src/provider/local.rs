@@ -136,9 +136,20 @@ impl MusicProvider for LocalProvider {
 
     async fn sync_library(&self, progress: Arc<ScanProgress>) -> Result<usize, ProviderError> {
         self.blocking(move |shared| {
-            let db = shared.lock_db()?;
-            LibraryScanner::scan(&db, &shared.music_dirs, &progress)
-                .map_err(ProviderError::Database)
+            // The scan runs on a connection of its own: holding the shared
+            // one would block every other database call until it ends.
+            let own = shared.lock_db()?.file_path();
+            match own {
+                Some(path) => {
+                    let db = LibraryDb::open(&path).map_err(ProviderError::Database)?;
+                    LibraryScanner::scan(&db, &shared.music_dirs, &progress)
+                }
+                None => {
+                    let db = shared.lock_db()?;
+                    LibraryScanner::scan(&db, &shared.music_dirs, &progress)
+                }
+            }
+            .map_err(ProviderError::Database)
         })
         .await
     }

@@ -96,6 +96,14 @@ impl LibraryDb {
         Ok(db)
     }
 
+    /// The database file backing this connection (`None` in memory).
+    pub fn file_path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
     /// Open an in-memory database (useful for tests).
     pub fn open_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("DB error: {e}"))?;
