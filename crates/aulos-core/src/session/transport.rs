@@ -217,9 +217,10 @@ impl Session {
     }
 
     /// Reads the tags of ad-hoc audio files (outside any library) off-thread;
-    /// the readable ones arrive as [`PlaybackEvent::FilesRead`].
-    pub fn read_audio_files(&self, paths: Vec<PathBuf>) -> Effect<PlaybackEvent> {
-        Effect::blocking(
+    /// the readable ones arrive as [`PlaybackEvent::FilesRead`] and replace
+    /// the queue.
+    pub fn open_files(&self, paths: Vec<PathBuf>) -> PlaybackUpdate {
+        PlaybackUpdate::effect(Effect::blocking(
             move || {
                 Ok(paths
                     .into_iter()
@@ -233,7 +234,7 @@ impl Session {
                     .collect::<Vec<_>>())
             },
             |tracks| PlaybackEvent::FilesRead(tracks.unwrap_or_default()),
-        )
+        ))
     }
 
     // -- Transport -----------------------------------------------------

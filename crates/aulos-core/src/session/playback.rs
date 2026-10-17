@@ -35,7 +35,7 @@ pub enum PlaybackEvent {
     /// An online lyrics lookup finished.
     Lyrics(Option<Lyrics>),
     /// The tags of the audio files given to
-    /// [`Session::read_audio_files`](super::Session::read_audio_files) were
+    /// [`Session::open_files`](super::Session::open_files) were
     /// read (unreadable files are skipped).
     FilesRead(Vec<Track>),
     /// A podcast position write finished (nothing to do).

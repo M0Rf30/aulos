@@ -878,6 +878,17 @@ impl App {
         }
     }
 
+    /// Plays audio files opened from outside the library (file manager,
+    /// command line, another instance's `OpenUri`): tags are read off-thread,
+    /// then the readable ones replace the queue.
+    pub fn open_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let update = self.session.open_files(paths);
+        self.run(update);
+    }
+
     /// Carries out a command from the media session: window commands here,
     /// playback ones in the session.
     fn media_command(&mut self, command: MprisCommand) {
@@ -888,6 +899,10 @@ impl App {
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             MprisCommand::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            MprisCommand::OpenUri(uri) => match aulos_core::file_uri_to_path(&uri) {
+                Some(path) => self.open_files(vec![path]),
+                None => tracing::warn!("MPRIS OpenUri: unsupported or invalid URI: {uri}"),
+            },
             command => {
                 let update = self.session.apply_mpris_command(command);
                 self.run(update);

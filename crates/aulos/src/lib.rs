@@ -48,6 +48,15 @@ pub fn run() -> eframe::Result {
         .init();
     aulos_core::i18n::init_from_system();
 
+    // Files from "Open With" (`Exec=aulos %U`) or the command line. A running
+    // instance takes them over, so a second player never starts.
+    let open_paths = aulos_core::desktop::open_args::from_env();
+    if !open_paths.is_empty()
+        && aulos_core::desktop::open_args::hand_off_to_running_instance(&open_paths)
+    {
+        return Ok(());
+    }
+
     // `Session::bootstrap` builds providers that need a runtime handle; the
     // guard keeps one entered on this (the UI) thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -78,10 +87,15 @@ pub fn run() -> eframe::Result {
             ..Default::default()
         };
         let handle = handle.clone();
+        let open_paths = open_paths.clone();
         eframe::run_native(
             "Aulos",
             options,
-            Box::new(|cc| Ok(Box::new(app::App::new(cc, handle)))),
+            Box::new(|cc| {
+                let mut app = app::App::new(cc, handle);
+                app.open_files(open_paths);
+                Ok(Box::new(app))
+            }),
         )
     };
     // Vulkan alone keeps Mesa's GL stack (libgallium, LLVM; ~50 MB) from
