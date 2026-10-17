@@ -21,8 +21,10 @@ yanked = "warn"
 ignore = [
     # paste is a feature-complete proc-macro, pulled in transitively (image -> exr -> pulp)
     "RUSTSEC-2024-0436",
-    # ttf-parser is unmaintained; pulled in transitively by the UI stack, no replacement we control
-    "RUSTSEC-2026-0192",
+    # zbus family is unmaintained; pulled in by ashpd, mpris-server and the secret-service keyring, no replacement we control
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
 ]
 
 [licenses]

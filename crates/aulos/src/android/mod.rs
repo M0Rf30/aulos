@@ -4,11 +4,16 @@
 //! The Android entry: `cargo apk` packages this crate's `cdylib` as a
 //! `NativeActivity`, whose glue calls [`android_main`] on its own thread.
 
+pub mod media;
+
 use android_activity::AndroidApp;
 
 /// The JavaVM and the activity object of this process, set once by
 /// [`android_main`] (raw pointers kept as integers so they are `Sync`).
 static HOST: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+
+/// The app's private files directory, set once by [`android_main`].
+static BASE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// The attached-thread JNI handles of [`HOST`].
 fn host() -> Option<(jni::JavaVM, jni::objects::JObject<'static>)> {
@@ -81,6 +86,61 @@ fn ensure_audio_permission(base: Option<&std::path::Path>) {
     })();
     if let Err(error) = result {
         tracing::warn!("audio permission request failed: {error}");
+        let _ = env.exception_clear();
+    }
+    if let Some(file) = asked {
+        let _ = std::fs::write(file, b"");
+    }
+}
+
+/// Asks, once per install, for the notification permission (Android 13+; before
+/// that notifications need none), so the playback notification shows. Called
+/// when playback first starts, so the dialog explains itself. Never waits: the
+/// service plays either way, only its notification stays hidden when denied.
+fn ask_notification_permission() {
+    use jni::objects::JValue;
+    let asked = BASE
+        .get()
+        .map(|base| base.join("notification_permission_asked"));
+    if asked.as_ref().is_none_or(|file| file.exists()) {
+        return;
+    }
+    let Some((vm, activity)) = host() else { return };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let result = (|| -> jni::errors::Result<()> {
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        if sdk < 33 {
+            return Ok(());
+        }
+        let permission = env.new_string("android.permission.POST_NOTIFICATIONS")?;
+        let granted = env
+            .call_method(
+                &activity,
+                "checkSelfPermission",
+                "(Ljava/lang/String;)I",
+                &[JValue::Object(&permission)],
+            )?
+            .i()?
+            == 0;
+        if granted {
+            return Ok(());
+        }
+        let class = env.find_class("java/lang/String")?;
+        let list = env.new_object_array(1, class, &permission)?;
+        env.call_method(
+            &activity,
+            "requestPermissions",
+            "([Ljava/lang/String;I)V",
+            &[JValue::Object(&list), JValue::Int(2)],
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!("notification permission request failed: {error}");
         let _ = env.exception_clear();
     }
     if let Some(file) = asked {
@@ -308,6 +368,7 @@ fn android_main(android: AndroidApp) {
     let base = android.internal_data_path();
     if let Some(base) = &base {
         aulos_core::paths::set_android_base(base.clone());
+        let _ = BASE.set(base.clone());
     }
     if let Ok(logcat) = tracing_android::layer("Aulos") {
         tracing_subscriber::registry()
@@ -338,4 +399,7 @@ fn android_main(android: AndroidApp) {
     ) {
         tracing::error!("Aulos failed to start: {error}");
     }
+    // The activity is gone: the notification and the foreground service must
+    // not outlive it (nothing would be left to drive playback).
+    media::shutdown();
 }

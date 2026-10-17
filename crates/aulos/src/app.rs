@@ -1239,6 +1239,10 @@ impl eframe::App for App {
         for command in crate::media_session::sync(ctx, &mut self.session) {
             self.media_command(command);
         }
+        #[cfg(target_os = "android")]
+        for command in crate::android::media::sync(ctx, &mut self.session) {
+            self.media_command(command);
+        }
         views::tagger::pump(self);
         views::settings::pump(self);
         self.update_art();

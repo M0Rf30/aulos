@@ -43,11 +43,15 @@ jobs:
         # Ignores mirror deny.toml: transitive, unmaintained crates we do not
         # control.
         #   RUSTSEC-2024-0436 paste (unmaintained)
-        #   RUSTSEC-2026-0192 ttf-parser (unmaintained)
+        #   RUSTSEC-2026-0370 zvariant (unmaintained)
+        #   RUSTSEC-2026-0371 zbus_names (unmaintained)
+        #   RUSTSEC-2026-0372 zvariant_derive (unmaintained)
         run: >-
           cargo audit --deny warnings
           --ignore RUSTSEC-2024-0436
-          --ignore RUSTSEC-2026-0192
+          --ignore RUSTSEC-2026-0370
+          --ignore RUSTSEC-2026-0371
+          --ignore RUSTSEC-2026-0372
 
   deny:
     name: Cargo Deny
