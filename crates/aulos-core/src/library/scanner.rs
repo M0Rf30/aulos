@@ -7,14 +7,10 @@
 use super::scan_progress::ScanProgress;
 use super::tags;
 use super::{Track, db::LibraryDb};
+use crate::player::engine::decoder::SUPPORTED_EXTENSIONS;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
-
-/// Supported audio file extensions.
-pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "ape", "wv", "dsf", "dff",
-];
 
 /// Scans music directories and populates the library database.
 pub struct LibraryScanner;
@@ -202,7 +198,11 @@ impl LibraryScanner {
     pub(crate) fn is_audio_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+            .is_some_and(|ext| {
+                SUPPORTED_EXTENSIONS
+                    .iter()
+                    .any(|supported| supported.eq_ignore_ascii_case(ext))
+            })
     }
 
     /// Read metadata from an audio file via symphonia (see `super::tags`).

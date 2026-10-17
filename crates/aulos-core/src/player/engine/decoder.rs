@@ -45,9 +45,21 @@ pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 /// or library scanner. Symphonia's probe is content-based and doesn't
 /// strictly require a matching extension — this list only ever feeds a
 /// [`Hint`], never gates whether a file is attempted.
+///
+/// Mirrors every audio extension the Symphonia fork's demuxers declare
+/// (`support_format!` in each `symphonia-format-*`/`-bundle-*`/`-codec-*`
+/// crate, enabled by the `all` + `dsd` features), plus `alac` (stored in an
+/// MP4 container) and `mka` (Matroska audio, probed by content). Video-only
+/// extensions (avi, mkv, mov, flv, wmv, asf, MPEG-PS/TS, rm/rmvb, ogv/ogm...)
+/// are deliberately left out: this is a music player.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "mp3", "ogg", "oga", "opus", "wav", "wave", "aiff", "aif", "m4a", "mp4", "aac", "alac",
-    "ape", "wv", "mpc", "dsf", "dff", "webm", "mka", "caf",
+    "16sv", "8svx", "aac", "adif", "adp", "ads", "adx", "afc", "aif", "aifc", "aiff", "alac",
+    "amr", "ape", "ast", "au", "awb", "bcstm", "bfstm", "brstm", "bw64", "caf", "dff", "dsf",
+    "dtk", "flac", "hca", "iec61937", "iff", "latm", "lc3", "loas", "m4a", "m4b", "m4p", "m4r",
+    "maud", "mka", "mp+", "mp1", "mp2", "mp3", "mp4", "mpc", "mpp", "msbc", "msf", "oga", "ogg",
+    "ogx", "opus", "qcp", "ra", "rf64", "rma", "sbc", "shn", "snd", "spdif", "spx", "ss2", "svag",
+    "svx", "tak", "tta", "vag", "voc", "vpk", "vqe", "vqf", "vql", "w64", "wav", "wave", "webm",
+    "wma", "wv", "xvag",
 ];
 
 /// Minimal audio format descriptor. Dependency-free by design — aulos has no
