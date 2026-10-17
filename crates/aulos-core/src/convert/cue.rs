@@ -139,8 +139,21 @@ pub fn parse_file_name(input: &str) -> Option<String> {
     input.lines().find_map(|raw_line| {
         let line = raw_line.trim();
         let (keyword, rest) = split_keyword(line);
-        (keyword == "FILE").then(|| unquote(rest.split_whitespace().next().unwrap_or(rest)))
+        (keyword == "FILE").then(|| file_token(rest))
     })
+}
+
+/// The file name of a `FILE` line's argument: a quoted name (spaces
+/// allowed) or the first whitespace-delimited token; the trailing type
+/// (`WAVE`, ...) is dropped.
+fn file_token(rest: &str) -> String {
+    if let Some(quoted) = rest.strip_prefix('"') {
+        return match quoted.find('"') {
+            Some(end) => quoted[..end].to_owned(),
+            None => quoted.to_owned(),
+        };
+    }
+    rest.split_whitespace().next().unwrap_or(rest).to_owned()
 }
 
 /// Splits a line into its leading keyword and the (trimmed) remainder.
@@ -170,8 +183,12 @@ fn parse_timestamp(ts: &str) -> Option<Duration> {
     if parts.next().is_some() {
         return None;
     }
-    let total_frames = minutes * 60 * 75 + seconds * 75 + frames;
-    Some(Duration::from_secs_f64(total_frames as f64 / 75.0))
+    let total_frames = minutes
+        .checked_mul(60 * 75)?
+        .checked_add(seconds.checked_mul(75)?)?
+        .checked_add(frames)?;
+    let nanos = (total_frames % 75) * 1_000_000_000 / 75;
+    Some(Duration::new(total_frames / 75, u32::try_from(nanos).ok()?))
 }
 
 #[cfg(test)]
@@ -216,6 +233,23 @@ FILE "animals.flac" WAVE
     #[test]
     fn parses_file_name() {
         assert_eq!(parse_file_name(FIXTURE), Some("animals.flac".to_owned()));
+    }
+
+    #[test]
+    fn parses_file_names_with_spaces_and_unquoted() {
+        assert_eq!(
+            parse_file_name("FILE \"My Album.flac\" WAVE\n"),
+            Some("My Album.flac".to_owned())
+        );
+        assert_eq!(
+            parse_file_name("FILE album.flac WAVE\n"),
+            Some("album.flac".to_owned())
+        );
+    }
+
+    #[test]
+    fn overflowing_timestamp_is_rejected() {
+        assert_eq!(parse_timestamp("99999999999999999:00:00"), None);
     }
 
     #[test]

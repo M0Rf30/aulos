@@ -139,7 +139,12 @@ pub fn spawn_encoder(
         _ => unreachable!("spawn_encoder is only ever called for requires_ffmpeg formats"),
     };
     cmd.arg("-f").arg(muxer);
-    cmd.arg(out_path);
+    // A relative path starting with '-' would be parsed as an option.
+    if out_path.is_relative() && out_path.to_string_lossy().starts_with('-') {
+        cmd.arg(Path::new(".").join(out_path));
+    } else {
+        cmd.arg(out_path);
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

@@ -33,10 +33,16 @@ pub struct SourceInfo {
 /// The audio file a CUE sheet at `cue_path` refers to, and the sheet's text.
 pub(crate) fn cue_audio_path(cue_path: &Path, cue_text: &str) -> Option<PathBuf> {
     let name = cue::parse_file_name(cue_text)?;
+    // Only the final component (either separator style) is honoured, so a
+    // sheet can't point outside its own directory.
+    let name = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
     Some(
         cue_path
             .parent()
-            .map_or_else(|| PathBuf::from(&name), |dir| dir.join(&name)),
+            .map_or_else(|| PathBuf::from(name), |dir| dir.join(name)),
     )
 }
 
