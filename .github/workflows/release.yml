@@ -268,6 +268,9 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/aulos.keystore"
           export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/aulos.keystore"
           cargo apk build --release -p aulos --lib --features visualizer
+          # Adds the playback service (classes.dex + manifest <service>) and
+          # signs again with the same release key.
+          crates/aulos/android/package.sh release
           mkdir -p dist
           # Named after the tag so Obtainium's version detection and the other
           # assets line up.

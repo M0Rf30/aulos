@@ -135,6 +135,15 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android26-clang
           cargo clippy --target aarch64-linux-android -p aulos --lib --locked -- -D warnings
 
+      # classes.dex is committed and made by build_dex.py: it must still be
+      # what the generator writes, and a well-formed dex.
+      - name: Check classes.dex
+        run: |
+          set -euo pipefail
+          python3 crates/aulos/android/check_dex.py crates/aulos/android/classes.dex
+          python3 -B crates/aulos/android/build_dex.py "$RUNNER_TEMP/classes.dex"
+          cmp crates/aulos/android/classes.dex "$RUNNER_TEMP/classes.dex"
+
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
 
@@ -147,6 +156,8 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" >/dev/null || true
           cargo apk build -p aulos --lib
+          # Adds the playback service (classes.dex + manifest <service>).
+          crates/aulos/android/package.sh debug
 
       - uses: actions/upload-artifact@v7
         with:
