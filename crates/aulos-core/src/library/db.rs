@@ -1189,6 +1189,22 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// Remove the local tracks beneath directory `dir` (a deleted or moved
+    /// folder); returns how many were removed.
+    pub fn remove_local_tracks_under(&self, dir: &Path) -> Result<usize, String> {
+        let mut prefix = dir.to_string_lossy().trim_end_matches('/').to_string();
+        prefix = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        self.conn
+            .execute(
+                "DELETE FROM tracks WHERE provider = 'local' AND path LIKE ?1 ESCAPE '\\'",
+                params![format!("{prefix}/%")],
+            )
+            .map_err(|e| format!("Delete under dir error: {e}"))
+    }
+
     /// Get track mtime to determine if rescan is needed.
     pub fn get_track_mtime(&self, path: &str) -> Option<i64> {
         self.conn
@@ -2278,6 +2294,24 @@ mod tests {
         let results = db.search_tracks("track_1", None).unwrap();
         assert_eq!(results.len(), 1, "unexpected matches: {results:?}");
         assert_eq!(results[0].title, "track_1");
+    }
+
+    #[test]
+    fn removing_a_folder_drops_only_the_tracks_beneath_it() {
+        let db = LibraryDb::open_memory().unwrap();
+        for p in [
+            "/m/a_b/1.flac",
+            "/m/a_b/sub/2.flac",
+            "/m/axb/3.flac",
+            "/m/a_b.flac",
+        ] {
+            insert_local(&db, Path::new(p));
+        }
+        assert_eq!(
+            db.remove_local_tracks_under(Path::new("/m/a_b")).unwrap(),
+            2
+        );
+        assert_eq!(db.all_tracks(None).unwrap().len(), 2);
     }
 
     #[test]

@@ -381,11 +381,11 @@ impl Session {
     /// The filesystem watcher saw `paths` change: incrementally scan them
     /// when the local library is active.
     pub fn files_changed(&mut self, paths: Vec<PathBuf>) -> Effect<LibraryEvent> {
-        // Filter out directories and non-existent-but-not-deleted paths.
+        // Cheap, stat-free prefilter: audio files and extension-less paths
+        // (folders); `scan_paths` decides what each one is off the UI thread.
         let paths: Vec<PathBuf> = paths
             .into_iter()
-            .filter(|p| LibraryScanner::is_audio_file(p))
-            .filter(|p| p.is_file() || !p.exists())
+            .filter(|p| LibraryScanner::is_audio_file(p) || p.extension().is_none())
             .collect();
         if paths.is_empty() {
             return Effect::none();

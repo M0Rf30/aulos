@@ -47,14 +47,14 @@ impl LibraryScanner {
             progress.add_total(found);
         }
 
-        db.begin_batch()?;
-        let mut pending = 0usize;
         // Paths the walk reached; anything under a complete root that is
         // not here is gone, with no second stat pass over the database.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for dir in roots {
             progress.set_root(dir);
             let mut complete = true;
+            // Files that are new or changed, probed in parallel below.
+            let mut todo: Vec<(PathBuf, i64)> = Vec::new();
             for entry in WalkDir::new(dir).follow_links(true) {
                 let entry = match entry {
                     Ok(entry) => entry,
@@ -71,15 +71,18 @@ impl LibraryScanner {
                 if !Self::is_audio_file(path) {
                     continue;
                 }
-                progress.advance();
 
                 let metadata = match std::fs::metadata(path) {
                     Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        progress.advance();
+                        continue;
+                    }
                     Err(error) => {
                         tracing::warn!("Cannot access track {}: {error}", path.display());
                         seen.insert(path.to_string_lossy().into_owned());
                         complete = false;
+                        progress.advance();
                         continue;
                     }
                 };
@@ -92,37 +95,36 @@ impl LibraryScanner {
 
                 let path_str = path.to_string_lossy();
                 seen.insert(path_str.clone().into_owned());
-                if let Some(&existing_mtime) = known_mtimes.get(path_str.as_ref())
-                    && existing_mtime == mtime
-                {
+                if known_mtimes.get(path_str.as_ref()) == Some(&mtime) {
+                    progress.advance();
                     continue;
                 }
+                todo.push((path.to_path_buf(), mtime));
+            }
 
-                match Self::read_metadata(path) {
-                    Ok(track) => {
-                        if let Err(e) = db.upsert_track(&track, mtime) {
-                            tracing::error!("Failed to insert track {}: {e}", path.display());
-                        } else {
-                            count += 1;
-                            pending += 1;
-                            if pending >= UPSERT_BATCH {
-                                db.commit_batch()?;
-                                db.begin_batch()?;
-                                pending = 0;
+            for chunk in todo.chunks(UPSERT_BATCH) {
+                let probed = Self::probe_parallel(chunk, progress);
+                db.begin_batch()?;
+                for ((path, mtime), result) in chunk.iter().zip(probed) {
+                    match result {
+                        Ok(track) => match db.upsert_track(&track, *mtime) {
+                            Ok(()) => count += 1,
+                            Err(e) => {
+                                tracing::error!("Failed to insert track {}: {e}", path.display());
                             }
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to read metadata for {}: {e}", path.display());
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to read metadata for {}: {e}", path.display());
-                    }
                 }
+                db.commit_batch()?;
             }
             if complete {
                 complete_roots.push(dir.clone());
             }
         }
 
-        db.commit_batch()?;
         let removed = db.remove_local_tracks_beneath(&complete_roots, |path| {
             !seen.contains(path.to_string_lossy().as_ref())
         })?;
@@ -130,6 +132,46 @@ impl LibraryScanner {
             tracing::info!("Removed {removed} missing tracks from library");
         }
         Ok(count)
+    }
+
+    /// Read the tags of `files` on a few worker threads (tag probing is
+    /// IO- and parse-bound and was strictly serial), in input order.
+    fn probe_parallel(
+        files: &[(PathBuf, i64)],
+        progress: &ScanProgress,
+    ) -> Vec<Result<Track, String>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let workers = std::thread::available_parallelism()
+            .map_or(2, std::num::NonZero::get)
+            .clamp(1, 8)
+            .min(files.len().max(1));
+        let next = AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(
+            std::iter::repeat_with(|| None)
+                .take(files.len())
+                .collect::<Vec<Option<Result<Track, String>>>>(),
+        );
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((path, _)) = files.get(i) else { break };
+                        let result = Self::read_metadata(path);
+                        progress.advance();
+                        if let Ok(mut all) = results.lock() {
+                            all[i] = Some(result);
+                        }
+                    }
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err("probe worker ended early".to_string())))
+            .collect()
     }
 
     /// Whether `dir` can be walked: it exists and is a directory.
@@ -165,39 +207,16 @@ impl LibraryScanner {
         let mut count = 0;
 
         for path in paths {
-            if path.exists() {
-                // File exists — add or update if it's an audio file.
-                if !Self::is_audio_file(path) {
-                    continue;
-                }
-
-                let mtime = std::fs::metadata(path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-
-                let path_str = path.to_string_lossy();
-                if let Some(existing_mtime) = db.get_track_mtime(&path_str)
-                    && existing_mtime == mtime
-                {
-                    continue; // File hasn't changed
-                }
-
-                match Self::read_metadata(path) {
-                    Ok(track) => {
-                        if let Err(e) = db.upsert_track(&track, mtime) {
-                            tracing::error!("Failed to upsert track {}: {e}", path.display());
-                        } else {
-                            count += 1;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read metadata for {}: {e}", path.display());
+            if path.is_dir() {
+                // A created or moved-in folder: index the audio beneath it.
+                for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+                    if entry.file_type().is_file() {
+                        count += Self::scan_file(db, entry.path());
                     }
                 }
-            } else {
+            } else if path.exists() {
+                count += Self::scan_file(db, path);
+            } else if Self::is_audio_file(path) {
                 // File was deleted — remove from database.
                 let path_str = path.to_string_lossy();
                 if db.get_track_mtime(&path_str).is_some() {
@@ -207,10 +226,42 @@ impl LibraryScanner {
                         count += 1;
                     }
                 }
+            } else {
+                // A deleted or moved-away folder: drop what was beneath it.
+                match db.remove_local_tracks_under(path) {
+                    Ok(n) => count += n,
+                    Err(e) => tracing::error!("Failed to remove {}: {e}", path.display()),
+                }
             }
         }
 
         Ok(count)
+    }
+
+    /// Add or update one existing file; returns `1` when the library changed.
+    fn scan_file(db: &LibraryDb, path: &Path) -> usize {
+        if !Self::is_audio_file(path) {
+            return 0;
+        }
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let path_str = path.to_string_lossy();
+        if db.get_track_mtime(&path_str) == Some(mtime) {
+            return 0; // File hasn't changed
+        }
+        match Self::read_metadata(path) {
+            Ok(track) => match db.upsert_track(&track, mtime) {
+                Ok(()) => return 1,
+                Err(e) => tracing::error!("Failed to upsert track {}: {e}", path.display()),
+            },
+            Err(e) => tracing::warn!("Failed to read metadata for {}: {e}", path.display()),
+        }
+        0
     }
 
     /// Check if a path is a supported audio file.
