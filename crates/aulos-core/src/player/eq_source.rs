@@ -165,17 +165,64 @@ impl BiquadState {
 // Shared coefficients for all 10 bands
 // ---------------------------------------------------------------------------
 
-/// Shared atomic storage for EQ coefficients across all bands.
-/// Each band uses 3 AtomicU64 slots (see `BiquadCoeffs::store/load`).
-pub type SharedCoeffs = Arc<[[AtomicU64; 3]; NUM_BANDS]>;
+/// Largest band gain magnitude (dB) the equalizer accepts.
+pub const BAND_GAIN_LIMIT_DB: f32 = 12.0;
+/// Lowest preamp (dB).
+pub const PREAMP_MIN_DB: f32 = -20.0;
+/// Highest preamp (dB).
+pub const PREAMP_MAX_DB: f32 = 10.0;
 
-/// Create a new shared coefficients array initialized to identity.
+/// Clamps a band gain to ±[`BAND_GAIN_LIMIT_DB`]; non-finite becomes 0.
+#[must_use]
+pub fn clamp_band_db(gain_db: f32) -> f32 {
+    if gain_db.is_finite() {
+        gain_db.clamp(-BAND_GAIN_LIMIT_DB, BAND_GAIN_LIMIT_DB)
+    } else {
+        0.0
+    }
+}
+
+/// Clamps a preamp to [`PREAMP_MIN_DB`]..=[`PREAMP_MAX_DB`]; non-finite
+/// becomes 0.
+#[must_use]
+pub fn clamp_preamp_db(preamp_db: f32) -> f32 {
+    if preamp_db.is_finite() {
+        preamp_db.clamp(PREAMP_MIN_DB, PREAMP_MAX_DB)
+    } else {
+        0.0
+    }
+}
+
+/// Converts a gain in dB to a linear amplitude factor.
+#[must_use]
+pub fn db_to_linear(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+/// Atomic state shared between the UI-side [`EqController`] and the audio
+/// thread's [`EqFilter`]s.
+pub struct SharedEq {
+    /// Per-band coefficients; each band uses 3 `AtomicU64` slots (see
+    /// `BiquadCoeffs::store/load`).
+    bands: [[AtomicU64; 3]; NUM_BANDS],
+    /// Linear preamp gain as `f32` bits.
+    preamp: AtomicU32,
+}
+
+/// Shared handle to the EQ's atomic state.
+pub type SharedCoeffs = Arc<SharedEq>;
+
+/// Create a new shared EQ state initialized to identity filters and unity
+/// preamp.
 pub fn new_shared_coeffs() -> SharedCoeffs {
-    Arc::new(std::array::from_fn(|_| {
-        let slots: [AtomicU64; 3] = std::array::from_fn(|_| AtomicU64::new(0));
-        BiquadCoeffs::IDENTITY.store(&slots);
-        slots
-    }))
+    Arc::new(SharedEq {
+        bands: std::array::from_fn(|_| {
+            let slots: [AtomicU64; 3] = std::array::from_fn(|_| AtomicU64::new(0));
+            BiquadCoeffs::IDENTITY.store(&slots);
+            slots
+        }),
+        preamp: AtomicU32::new(1.0_f32.to_bits()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +278,21 @@ impl EqController {
             self.sample_rate,
             BANDWIDTH_OCTAVES,
         );
-        c.store(&self.coeffs[index]);
+        c.store(&self.coeffs.bands[index]);
+    }
+
+    /// Set the preamp (dB, clamped to -20..+10). Applied by the audio
+    /// filter only while the EQ is enabled.
+    pub fn set_preamp_db(&self, preamp_db: f32) {
+        let linear = db_to_linear(clamp_preamp_db(preamp_db));
+        self.coeffs
+            .preamp
+            .store(linear.to_bits(), Ordering::Release);
+    }
+
+    /// The linear preamp factor last set (1.0 = unity).
+    pub fn preamp_linear(&self) -> f32 {
+        f32::from_bits(self.coeffs.preamp.load(Ordering::Acquire))
     }
 
     /// Set all 10 bands at once.
@@ -244,7 +305,7 @@ impl EqController {
                 self.sample_rate,
                 BANDWIDTH_OCTAVES,
             );
-            c.store(&self.coeffs[i]);
+            c.store(&self.coeffs.bands[i]);
         }
     }
 
@@ -285,6 +346,8 @@ pub struct EqFilter {
     channels: std::num::NonZero<u16>,
     /// Current sample index within a frame (for interleaved channel tracking).
     channel_idx: u16,
+    /// Linear preamp gain reached at the end of the previous buffer.
+    preamp_gain: f32,
 }
 
 impl EqFilter {
@@ -304,6 +367,7 @@ impl EqFilter {
             states,
             channels,
             channel_idx: 0,
+            preamp_gain: 1.0,
         }
     }
 
@@ -324,7 +388,9 @@ impl crate::player::engine::filter::AudioFilter for EqFilter {
 
     fn apply(&mut self, buf: &mut [f32]) {
         // Bypass: pass through unchanged.
+        // The preamp is part of the EQ: it does not apply while bypassed.
         if self.bypass.load(Ordering::Relaxed) {
+            self.preamp_gain = 1.0;
             return;
         }
 
@@ -333,14 +399,25 @@ impl crate::player::engine::filter::AudioFilter for EqFilter {
         // 30 atomics per sample bought nothing but overhead in this
         // per-callback hot path.
         let coeffs: [BiquadCoeffs; NUM_BANDS] =
-            std::array::from_fn(|band_idx| BiquadCoeffs::load(&self.coeffs[band_idx]));
+            std::array::from_fn(|band_idx| BiquadCoeffs::load(&self.coeffs.bands[band_idx]));
+
+        // Ramp the preamp linearly across the buffer to avoid zipper noise.
+        let target = f32::from_bits(self.coeffs.preamp.load(Ordering::Relaxed));
+        let mut gain = self.preamp_gain;
+        let step = if buf.is_empty() {
+            0.0
+        } else {
+            (target - gain) / buf.len() as f32
+        };
+        self.preamp_gain = target;
 
         for sample in buf.iter_mut() {
             let ch = self.channel_idx as usize;
             self.channel_idx = (self.channel_idx + 1) % self.channels.get();
 
-            // Cascade through all 10 bands.
-            let mut out = *sample;
+            // Preamp first, then cascade through all 10 bands.
+            gain += step;
+            let mut out = *sample * gain;
             for (band_idx, c) in coeffs.iter().enumerate() {
                 out = self.states[band_idx][ch].process(out, c);
             }
@@ -450,6 +527,57 @@ mod tests {
         for (i, (out, input)) in buf.iter().zip(expected.iter()).enumerate() {
             assert!((out - input).abs() < 1e-5, "sample {i}: {out} != {input}");
         }
+    }
+
+    #[test]
+    fn db_to_linear_matches_known_values() {
+        assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
+        assert!((db_to_linear(-6.0206) - 0.5).abs() < 1e-3);
+        assert!((db_to_linear(20.0) - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clamps_limit_bands_and_preamp() {
+        assert_eq!(clamp_band_db(30.0), 12.0);
+        assert_eq!(clamp_band_db(-30.0), -12.0);
+        assert_eq!(clamp_band_db(f32::NAN), 0.0);
+        assert_eq!(clamp_preamp_db(-50.0), -20.0);
+        assert_eq!(clamp_preamp_db(50.0), 10.0);
+        assert_eq!(clamp_preamp_db(-6.5), -6.5);
+    }
+
+    #[test]
+    fn controller_preamp_is_clamped_and_converted() {
+        let controller = EqController::new(
+            new_shared_coeffs(),
+            Arc::new(AtomicBool::new(false)),
+            44100.0,
+        );
+        assert_eq!(controller.preamp_linear(), 1.0);
+        controller.set_preamp_db(-100.0);
+        assert!((controller.preamp_linear() - db_to_linear(-20.0)).abs() < 1e-7);
+    }
+
+    #[test]
+    fn preamp_scales_signal_when_enabled_and_is_bypassed_when_disabled() {
+        let coeffs = new_shared_coeffs();
+        let bypass = Arc::new(AtomicBool::new(false));
+        let controller = EqController::new(Arc::clone(&coeffs), Arc::clone(&bypass), 44100.0);
+        let channels = std::num::NonZero::new(1u16).unwrap();
+        let mut filter = EqFilter::new(channels, coeffs, Arc::clone(&bypass));
+        controller.set_preamp_db(-6.0206);
+
+        // First buffer ramps; the second one is at the target gain.
+        let mut warmup = vec![1.0_f32; 64];
+        filter.apply(&mut warmup);
+        let mut buf = vec![1.0_f32; 64];
+        filter.apply(&mut buf);
+        assert!(buf.iter().all(|s| (s - 0.5).abs() < 1e-3));
+
+        bypass.store(true, Ordering::Relaxed);
+        let mut buf = vec![1.0_f32; 64];
+        filter.apply(&mut buf);
+        assert!(buf.iter().all(|s| *s == 1.0));
     }
 
     #[test]

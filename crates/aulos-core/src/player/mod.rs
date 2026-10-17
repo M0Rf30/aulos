@@ -687,6 +687,11 @@ impl Player {
         if matches!(source, TrackSource::MpdFile(_)) {
             return;
         }
+        // The backend hands its replay gain to the engine with the queued
+        // track, so it must be the *next* track's, not the current one's.
+        // `play_track` sets it again for whatever plays next explicitly.
+        let gain = self.compute_replay_gain(&next_track);
+        self.local_backend.set_replay_gain_db(gain);
         match self.local_backend.queue_next(source) {
             Ok(()) => {
                 self.next_pre_queued = true;

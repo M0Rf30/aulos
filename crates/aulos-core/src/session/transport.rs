@@ -1038,6 +1038,7 @@ impl Session {
                     gains.copy_from_slice(&self.config.config.equalizer_bands);
                     eq.set_all(&gains);
                 }
+                eq.set_preamp_db(self.config.config.equalizer_preamp);
 
                 // Apply the saved master volume; a fresh `Player` hardcodes
                 // 0.8, so without this a provider switch would reset the

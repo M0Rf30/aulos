@@ -5,6 +5,7 @@ use super::Session;
 use crate::autoeq::{AutoEQManager, AutoEQProfile, AutoEQProfileMetadata};
 use crate::config::Config;
 use crate::player::eq_presets::EqPresetManager;
+use crate::player::eq_source::{clamp_band_db, clamp_preamp_db};
 use crate::player::equalizer::{EqPreset, EqPresetData, PresetSource};
 use crate::task::Effect;
 use std::time::Duration;
@@ -68,7 +69,7 @@ impl EqualizerState {
 impl Session {
     /// Sets one band's gain (clamped to ±12 dB).
     pub fn eq_set_band(&mut self, index: usize, gain_db: f32) {
-        let clamped = gain_db.clamp(-12.0, 12.0);
+        let clamped = clamp_band_db(gain_db);
         if index < self.config.config.equalizer_bands.len() {
             self.config.config.equalizer_bands[index] = clamped;
         }
@@ -101,9 +102,11 @@ impl Session {
 
     /// Sets the preamp (clamped to -20..+10 dB).
     pub fn eq_set_preamp(&mut self, preamp_db: f32) {
-        let clamped = preamp_db.clamp(-20.0, 10.0);
+        let clamped = clamp_preamp_db(preamp_db);
         self.config.config.equalizer_preamp = clamped;
-        // TODO: Apply preamp to audio backend if supported
+        if let Some(player) = &self.playback.player {
+            player.eq_controller().set_preamp_db(clamped);
+        }
         tracing::debug!("Preamp set to {:+.1} dB", clamped);
         self.equalizer.preset = None;
         self.equalizer.dirty = true;
@@ -115,10 +118,14 @@ impl Session {
         let Some(preset) = self.equalizer.all_presets.iter().find(|p| p.name == name) else {
             return;
         };
-        self.config.config.equalizer_bands = preset.bands.to_vec();
-        self.config.config.equalizer_preamp = preset.preamp;
+        let bands = preset.bands.map(clamp_band_db);
+        let preamp = clamp_preamp_db(preset.preamp);
+        self.config.config.equalizer_bands = bands.to_vec();
+        self.config.config.equalizer_preamp = preamp;
         if let Some(player) = &self.playback.player {
-            player.eq_controller().set_all(&preset.bands);
+            let eq = player.eq_controller();
+            eq.set_all(&bands);
+            eq.set_preamp_db(preamp);
         }
         self.equalizer.active_preset_name = Some(name.clone());
         self.config.config.active_eq_preset_name = name;
@@ -203,10 +210,14 @@ impl Session {
     /// Sets bands + preamp from an unnamed source (Flat, an AutoEQ profile):
     /// clears the preset selection (the user can "Save As" to keep it).
     fn eq_apply_bands(&mut self, bands: &[f32; 10], preamp: f32) {
+        let bands = bands.map(clamp_band_db);
+        let preamp = clamp_preamp_db(preamp);
         self.config.config.equalizer_bands = bands.to_vec();
         self.config.config.equalizer_preamp = preamp;
         if let Some(player) = &self.playback.player {
-            player.eq_controller().set_all(bands);
+            let eq = player.eq_controller();
+            eq.set_all(&bands);
+            eq.set_preamp_db(preamp);
         }
         self.equalizer.active_preset_name = None;
         self.config.config.active_eq_preset_name = String::new();
