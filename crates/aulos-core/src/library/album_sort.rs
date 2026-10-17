@@ -202,6 +202,7 @@ mod tests {
             rg_track_gain: None,
             rg_album_gain: None,
             release_type: String::new(),
+            suffix: String::new(),
             added_at,
             favorited_at: 0,
         };

@@ -338,6 +338,7 @@ impl LibraryScanner {
             rg_track_gain: t.rg_track_gain,
             rg_album_gain: t.rg_album_gain,
             release_type: t.release_type,
+            suffix: super::suffix_of(&path.to_string_lossy()),
             added_at: 0,
             favorited_at: 0,
         }
@@ -386,6 +387,7 @@ mod tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: String::new(),
             added_at: 0,
             favorited_at: 0,
         }

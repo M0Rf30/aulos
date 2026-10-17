@@ -110,6 +110,44 @@ fn release_type_tag(album: &opensubsonic::data::AlbumWithSongsId3) -> String {
     types.join("; ")
 }
 
+/// The audio suffix of a Subsonic song (`"flac"`, `"m4a"`), lowercase without
+/// the dot: the server's `suffix`, else the suffix of its file `path`, else
+/// the one a well-known `contentType` implies; empty when none says.
+fn remote_suffix(child: &opensubsonic::data::Child) -> String {
+    let stated = child
+        .suffix
+        .as_deref()
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    stated
+        .or_else(|| {
+            child
+                .path
+                .as_deref()
+                .map(crate::library::suffix_of)
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            let mime = child.content_type.as_deref()?.to_ascii_lowercase();
+            let suffix = match mime.split(';').next()?.trim() {
+                "audio/flac" | "audio/x-flac" => "flac",
+                "audio/mpeg" | "audio/mp3" => "mp3",
+                "audio/mp4" | "audio/x-m4a" | "audio/m4a" => "m4a",
+                "audio/aac" | "audio/aacp" => "aac",
+                "audio/ogg" | "application/ogg" => "ogg",
+                "audio/opus" => "opus",
+                "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+                "audio/aiff" | "audio/x-aiff" => "aiff",
+                "audio/x-ms-wma" => "wma",
+                "audio/x-ape" => "ape",
+                "audio/x-wavpack" => "wv",
+                _ => return None,
+            };
+            Some(suffix.to_owned())
+        })
+        .unwrap_or_default()
+}
+
 /// Unix seconds of a server timestamp (ISO 8601, e.g. `created` and
 /// `starred`); `0` when absent or unparseable.
 fn iso_secs(iso: Option<&str>) -> i64 {
@@ -289,12 +327,9 @@ impl SubsonicProvider {
         let duration = Duration::from_secs(child.duration.unwrap_or(0) as u64);
         let bitrate = child.bit_rate.unwrap_or(0) as u32;
         let sample_rate = child.sampling_rate.unwrap_or(0) as u32;
-        let lossless = super::lossless_from_suffix(child.suffix.as_deref().unwrap_or_default());
-        let bit_depth = if lossless == Some(false) {
-            0
-        } else {
-            child.bit_depth.filter(|b| *b > 0).unwrap_or(0) as u32
-        };
+        let suffix = remote_suffix(child);
+        let bit_depth =
+            super::server_bit_depth(&suffix, child.bit_depth, child.bit_rate).unwrap_or(0);
 
         // Pre-build the authenticated stream URL so the player can use it
         // directly without needing access to the Subsonic client.
@@ -348,6 +383,7 @@ impl SubsonicProvider {
             rg_track_gain,
             rg_album_gain,
             release_type: String::new(),
+            suffix,
             added_at: iso_secs(child.created.as_deref()),
             favorited_at: iso_secs(child.starred.as_deref()),
         }
@@ -1081,15 +1117,12 @@ fn song_to_tech_info(song: &opensubsonic::data::Child) -> crate::library::tech_i
     use crate::library::tech_info::{ReplayGain, TechInfo};
 
     let positive = |v: Option<i32>| v.filter(|v| *v > 0).map(|v| v as u32);
-    let suffix = song.suffix.as_deref().unwrap_or_default();
+    let suffix = remote_suffix(song);
+    let suffix = suffix.as_str();
     let lossless = super::lossless_from_suffix(suffix);
     let bitrate = positive(song.bit_rate);
     let channels = positive(song.channel_count);
-    let bits = if lossless == Some(false) {
-        None
-    } else {
-        positive(song.bit_depth)
-    };
+    let bits = super::server_bit_depth(suffix, song.bit_depth, song.bit_rate);
     let gain = |v: Option<f64>| v.map(|g| format!("{g:.2} dB"));
     let peak = |v: Option<f64>| v.map(|p| format!("{p:.6}"));
     let replay_gain = song
@@ -1156,6 +1189,31 @@ mod release_type_tests {
             )),
             "compilation"
         );
+    }
+}
+
+#[cfg(test)]
+mod suffix_tests {
+    use super::remote_suffix;
+    use opensubsonic::data::Child;
+
+    fn song(extra: &str) -> Child {
+        serde_json::from_str(&format!(r#"{{"id":"1","title":"t"{extra}}}"#)).expect("valid Child")
+    }
+
+    #[test]
+    fn suffix_comes_from_the_server_then_the_path_then_the_content_type() {
+        assert_eq!(remote_suffix(&song(r#","suffix":".FLAC""#)), "flac");
+        assert_eq!(
+            remote_suffix(&song(r#","suffix":"","path":"A/B/c.M4a""#)),
+            "m4a"
+        );
+        assert_eq!(
+            remote_suffix(&song(r#","contentType":"audio/mpeg; charset=x""#)),
+            "mp3"
+        );
+        assert_eq!(remote_suffix(&song(r#","contentType":"video/x""#)), "");
+        assert_eq!(remote_suffix(&song("")), "");
     }
 }
 

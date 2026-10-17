@@ -10,7 +10,6 @@
 //! rate PCM decoders already report. It is a heuristic, not a guarantee.
 
 use super::Track;
-use std::path::Path;
 use std::sync::Arc;
 
 /// A track's audio quality tier, ordered worst → best so
@@ -73,22 +72,8 @@ impl AudioQuality {
     }
 }
 
-/// MPD and Subsonic populate `Track::path` with a relative path or a
-/// streaming URI rather than a real filesystem path, and a streaming URI
-/// may carry a `?query` suffix (auth tokens, transcode params) that would
-/// otherwise get mistaken for part of the extension. Strip it before
-/// asking `Path` for the extension.
-fn extension_of(path: &Path) -> Option<String> {
-    let raw = path.to_string_lossy();
-    let without_query = raw.split('?').next().unwrap_or(&raw);
-    Path::new(without_query)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-}
-
-/// Classify a track's audio quality tier from its file extension, sample
-/// rate and bit depth.
+/// Classify a track's audio quality tier from its file suffix (lowercase,
+/// without the dot, see [`super::Track::suffix`]), sample rate and bit depth.
 ///
 /// `bit_depth` is only ever stored for lossless streams (`0` for lossy or
 /// unknown), which settles `m4a`, the one ambiguous extension: it holds
@@ -98,12 +83,9 @@ fn extension_of(path: &Path) -> Option<String> {
 /// scanned before the depth was read from the ALAC header keeps `0`, and CD-rate
 /// ALAC of that kind stays `Lossy` until it is rescanned).
 #[must_use]
-pub fn classify(path: &Path, sample_rate: u32, bit_depth: u32) -> AudioQuality {
-    let Some(ext) = extension_of(path) else {
-        return AudioQuality::Unknown;
-    };
+pub fn classify(suffix: &str, sample_rate: u32, bit_depth: u32) -> AudioQuality {
     let is_hi_res = sample_rate > 48_000;
-    match ext.as_str() {
+    match suffix {
         "dsf" | "dff" | "dsd" => AudioQuality::Dsd,
         "flac" | "wav" | "aiff" | "aif" | "alac" | "ape" | "wv" | "tta" | "shn" | "caf" => {
             if is_hi_res {
@@ -134,7 +116,7 @@ pub fn classify(path: &Path, sample_rate: u32, bit_depth: u32) -> AudioQuality {
 pub fn album_quality(tracks: &[Arc<Track>]) -> AudioQuality {
     tracks
         .iter()
-        .map(|track| classify(&track.path, track.sample_rate, track.bit_depth))
+        .map(|track| classify(&track.suffix, track.sample_rate, track.bit_depth))
         .max()
         .unwrap_or(AudioQuality::Unknown)
 }
@@ -169,6 +151,7 @@ mod tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: super::super::suffix_of(path),
             added_at: 0,
             favorited_at: 0,
         }
@@ -176,86 +159,47 @@ mod tests {
 
     #[test]
     fn flac_at_cd_rate_is_cd_lossless() {
-        assert_eq!(
-            classify(Path::new("song.flac"), 44_100, 16),
-            AudioQuality::CdLossless
-        );
+        assert_eq!(classify("flac", 44_100, 16), AudioQuality::CdLossless);
     }
 
     #[test]
     fn flac_above_cd_rate_is_hi_res() {
-        assert_eq!(
-            classify(Path::new("song.flac"), 96_000, 24),
-            AudioQuality::HiRes
-        );
+        assert_eq!(classify("flac", 96_000, 24), AudioQuality::HiRes);
     }
 
     #[test]
     fn dsf_is_dsd() {
-        assert_eq!(
-            classify(Path::new("song.dsf"), 2_822_400, 0),
-            AudioQuality::Dsd
-        );
+        assert_eq!(classify("dsf", 2_822_400, 0), AudioQuality::Dsd);
     }
 
     #[test]
     fn mp3_is_lossy() {
-        assert_eq!(
-            classify(Path::new("song.mp3"), 44_100, 0),
-            AudioQuality::Lossy
-        );
+        assert_eq!(classify("mp3", 44_100, 0), AudioQuality::Lossy);
     }
 
     #[test]
     fn m4a_at_cd_rate_is_treated_as_lossy_aac() {
-        assert_eq!(
-            classify(Path::new("song.m4a"), 44_100, 0),
-            AudioQuality::Lossy
-        );
+        assert_eq!(classify("m4a", 44_100, 0), AudioQuality::Lossy);
     }
 
     #[test]
     fn m4a_with_a_bit_depth_is_cd_rate_alac() {
-        assert_eq!(
-            classify(Path::new("song.m4a"), 44_100, 16),
-            AudioQuality::CdLossless
-        );
+        assert_eq!(classify("m4a", 44_100, 16), AudioQuality::CdLossless);
     }
 
     #[test]
     fn m4a_above_cd_rate_is_treated_as_hi_res_alac() {
-        assert_eq!(
-            classify(Path::new("song.m4a"), 96_000, 0),
-            AudioQuality::HiRes
-        );
+        assert_eq!(classify("m4a", 96_000, 0), AudioQuality::HiRes);
     }
 
     #[test]
     fn no_extension_is_unknown() {
-        assert_eq!(
-            classify(Path::new("song"), 44_100, 0),
-            AudioQuality::Unknown
-        );
+        assert_eq!(classify("", 44_100, 0), AudioQuality::Unknown);
     }
 
     #[test]
     fn zero_sample_rate_never_promotes_to_hi_res() {
-        assert_eq!(
-            classify(Path::new("song.flac"), 0, 0),
-            AudioQuality::CdLossless
-        );
-    }
-
-    #[test]
-    fn query_suffix_on_a_streaming_uri_still_classifies() {
-        assert_eq!(
-            classify(
-                Path::new("http://host/stream/song.flac?token=abc123"),
-                48_000,
-                0
-            ),
-            AudioQuality::CdLossless
-        );
+        assert_eq!(classify("flac", 0, 0), AudioQuality::CdLossless);
     }
 
     #[test]

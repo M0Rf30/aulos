@@ -13,17 +13,16 @@
 use super::quality::{AudioQuality, classify};
 use rusqlite::functions::FunctionFlags;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Name of the SQL scalar function [`register_sql_functions`] installs: the
-/// quality tier code of a `(path, sample_rate, bit_depth)` triple.
+/// quality tier code of a `(suffix, sample_rate, bit_depth)` triple.
 const QUALITY_FN: &str = "aulos_quality";
 
 /// Quality tier code of the current `tracks` row; `''` when the format is
 /// not recognised, so `is not` rules still match such tracks.
-const QUALITY_EXPR: &str = "COALESCE(aulos_quality(path, sample_rate, bit_depth), '')";
+const QUALITY_EXPR: &str = "COALESCE(aulos_quality(suffix, sample_rate, bit_depth), '')";
 
 /// Correlated subquery: recorded plays of the current `tracks` row.
 const PLAY_COUNT_EXPR: &str = "(SELECT COUNT(*) FROM play_history WHERE track_id = tracks.id)";
@@ -212,12 +211,12 @@ pub(crate) fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::R
         3,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
-            let path: String = ctx.get(0)?;
+            let suffix: String = ctx.get(0)?;
             let rate: Option<i64> = ctx.get(1)?;
             let rate = rate.and_then(|r| u32::try_from(r).ok()).unwrap_or(0);
             let depth: Option<i64> = ctx.get(2)?;
             let depth = depth.and_then(|d| u32::try_from(d).ok()).unwrap_or(0);
-            Ok(QualityTier::of(classify(Path::new(&path), rate, depth)).map(QualityTier::code))
+            Ok(QualityTier::of(classify(&suffix, rate, depth)).map(QualityTier::code))
         },
     )
 }
@@ -594,7 +593,7 @@ impl SmartPlaylist {
             "SELECT id, path, title, artist, album_artist, album, genre, \
              track_number, disc_number, year, duration_ms, bitrate, sample_rate, \
              provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, \
-             bit_depth, release_type, added_at, favorited_at \
+             bit_depth, release_type, added_at, favorited_at, suffix \
              FROM tracks",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -1165,6 +1164,7 @@ mod tests {
                 rg_album_gain: None,
                 bit_depth: 0,
                 release_type: String::new(),
+                suffix: String::new(),
                 added_at: 0,
                 favorited_at: 0,
             }
@@ -1221,6 +1221,7 @@ mod tests {
                 rg_album_gain: None,
                 bit_depth: 0,
                 release_type: String::new(),
+                suffix: String::new(),
                 added_at: 0,
                 favorited_at: 0,
             }
@@ -1295,9 +1296,10 @@ mod tests {
     fn insert_track(db: &crate::library::LibraryDb, path: &str, sample_rate: u32, year: u32) {
         db.conn
             .execute(
-                "INSERT INTO tracks (path, title, sample_rate, year, provider, provider_track_id)
-                 VALUES (?1, ?1, ?2, ?3, 'local', ?1)",
-                rusqlite::params![path, sample_rate, year],
+                "INSERT INTO tracks (path, title, sample_rate, year, provider, provider_track_id,
+                                     suffix)
+                 VALUES (?1, ?1, ?2, ?3, 'local', ?1, ?4)",
+                rusqlite::params![path, sample_rate, year, crate::library::suffix_of(path)],
             )
             .unwrap();
     }

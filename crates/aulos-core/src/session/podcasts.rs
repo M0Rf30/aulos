@@ -409,6 +409,7 @@ impl PodcastsState {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: crate::library::suffix_of(&episode.downloaded_path),
             added_at: 0,
             favorited_at: 0,
         };

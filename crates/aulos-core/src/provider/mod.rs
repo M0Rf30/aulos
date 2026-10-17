@@ -116,6 +116,34 @@ pub(crate) fn lossless_from_suffix(suffix: &str) -> Option<bool> {
     }
 }
 
+/// The bit depth to trust from a server's `bitDepth` (OpenSubsonic), given
+/// the file suffix and `bitRate`. `None` when the server says nothing, or
+/// the file is lossy, whose "depth" is a decoder detail.
+///
+/// An `m4a` is ambiguous (ALAC or AAC), and the servers' tag reader (TagLib,
+/// in Navidrome) takes an AAC file's depth from the 16-bit sample size in its
+/// MP4 sample entry, so AAC is reported as 16-bit. A bitrate below any
+/// real AAC stream's ceiling therefore marks an `m4a` depth as untrustworthy.
+pub(crate) fn server_bit_depth(
+    suffix: &str,
+    bit_depth: Option<i32>,
+    bitrate_kbps: Option<i32>,
+) -> Option<u32> {
+    /// The highest bitrate AAC is encoded at in practice (iTunes tops out at
+    /// 320 kbps); ALAC at CD quality averages several hundred more.
+    const AAC_CEILING_KBPS: i32 = 512;
+    let bits = u32::try_from(bit_depth?).ok().filter(|&b| b > 0)?;
+    match lossless_from_suffix(suffix) {
+        Some(false) => None,
+        Some(true) => Some(bits),
+        None => {
+            let aac_like = matches!(suffix, "m4a" | "m4b" | "mp4")
+                && bitrate_kbps.is_some_and(|b| b > 0 && b <= AAC_CEILING_KBPS);
+            (!aac_like).then_some(bits)
+        }
+    }
+}
+
 /// Conventional channel-layout name for a channel count.
 pub(crate) fn channel_layout_name(channels: u32) -> Option<String> {
     Some(
@@ -438,5 +466,27 @@ impl ProviderRegistry {
             .values()
             .map(|p| (p.id().to_string(), p.name().to_string(), p.provider_type()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_bit_depth;
+
+    #[test]
+    fn server_bit_depth_trusts_lossless_and_drops_lossy() {
+        assert_eq!(server_bit_depth("flac", Some(24), Some(900)), Some(24));
+        assert_eq!(server_bit_depth("mp3", Some(16), Some(320)), None);
+        assert_eq!(server_bit_depth("flac", None, None), None);
+        assert_eq!(server_bit_depth("flac", Some(0), None), None);
+    }
+
+    #[test]
+    fn an_m4a_depth_at_aac_bitrates_is_the_16_bit_sample_entry_not_a_lossless_depth() {
+        assert_eq!(server_bit_depth("m4a", Some(16), Some(256)), None);
+        assert_eq!(server_bit_depth("m4a", Some(16), Some(980)), Some(16));
+        // No bitrate to tell them apart: keep what the server says.
+        assert_eq!(server_bit_depth("m4a", Some(24), None), Some(24));
+        assert_eq!(server_bit_depth("wv", Some(16), Some(300)), Some(16));
     }
 }

@@ -627,7 +627,7 @@ impl App {
 
     /// The audio-quality tier of `track` for badges (None: unknown).
     pub fn quality_of(track: &Track) -> Option<Quality> {
-        match quality::classify(&track.path, track.sample_rate, track.bit_depth) {
+        match quality::classify(&track.suffix, track.sample_rate, track.bit_depth) {
             AudioQuality::Unknown => None,
             AudioQuality::Lossy => Some(Quality::Lossy),
             AudioQuality::CdLossless => Some(Quality::Cd),

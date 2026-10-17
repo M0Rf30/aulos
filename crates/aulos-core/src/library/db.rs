@@ -6,12 +6,18 @@
 use super::covers::{CachedThumb, CoverThumb, ThumbStamp};
 use super::smart_playlist::SmartPlaylist;
 use super::{Album, Artist, Track};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Version of what the tag and format parsers extract from a file or a
+/// server response (dates, bit depth, release types, suffix, ...). Bump it
+/// whenever a parser change should reach already-stored rows: on the next
+/// open every local file is re-probed and every remote library re-synced.
+const PARSER_VERSION: i64 = 1;
 
 /// Base schema for the tracks table.
 const SCHEMA_BASE: &str = "
@@ -539,6 +545,51 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v15 commit error: {e}"))?;
         }
 
+        if version < 16 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v16 transaction error: {e}"))?;
+            if !self.column_exists("tracks", "suffix")? {
+                tx.execute_batch("ALTER TABLE tracks ADD COLUMN suffix TEXT NOT NULL DEFAULT '';")
+                    .map_err(|e| format!("Migration v16 error (suffix): {e}"))?;
+            }
+            // A local path carries the suffix; a Subsonic track gets it from
+            // the server at its next sync (MPD tracks are not stored).
+            {
+                let rows: Vec<(i64, String)> = {
+                    let mut select = tx
+                        .prepare("SELECT id, path FROM tracks WHERE provider = 'local'")
+                        .map_err(|e| format!("Migration v16 error (select): {e}"))?;
+                    select
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(|e| format!("Migration v16 error (select): {e}"))?
+                        .collect::<Result<_, _>>()
+                        .map_err(|e| format!("Migration v16 error (select): {e}"))?
+                };
+                let mut update = tx
+                    .prepare("UPDATE tracks SET suffix = ?1 WHERE id = ?2")
+                    .map_err(|e| format!("Migration v16 error (update): {e}"))?;
+                for (id, path) in rows {
+                    update
+                        .execute(params![super::suffix_of(&path), id])
+                        .map_err(|e| format!("Migration v16 error (update): {e}"))?;
+                }
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS library_meta (
+                    key   TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
+                PRAGMA user_version=16;",
+            )
+            .map_err(|e| format!("Migration v16 error: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v16 commit error: {e}"))?;
+        }
+
+        self.apply_parser_version()?;
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -553,6 +604,43 @@ impl LibraryDb {
         tx.commit()
             .map_err(|e| format!("Orphan repair commit error: {e}"))?;
         Ok(())
+    }
+
+    /// Re-reads what the tag and format parsers produced under an older
+    /// [`PARSER_VERSION`]: zeroing each local track's stored mtime makes the
+    /// next scan re-probe every file, and dropping the remote sync markers
+    /// makes the next remote sync run in full instead of being skipped for
+    /// an unchanged server.
+    fn apply_parser_version(&self) -> Result<(), String> {
+        let stored: i64 = self
+            .conn
+            .query_row(
+                "SELECT value FROM library_meta WHERE key = 'parser_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Parser version read error: {e}"))?
+            .unwrap_or(0);
+        if stored >= PARSER_VERSION {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Parser version transaction error: {e}"))?;
+        tx.execute("UPDATE tracks SET mtime = 0 WHERE provider = 'local'", [])
+            .map_err(|e| format!("Parser version error (rescan): {e}"))?;
+        tx.execute("DELETE FROM remote_sync_state", [])
+            .map_err(|e| format!("Parser version error (resync): {e}"))?;
+        tx.execute(
+            "INSERT INTO library_meta (key, value) VALUES ('parser_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![PARSER_VERSION],
+        )
+        .map_err(|e| format!("Parser version error (store): {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("Parser version commit error: {e}"))
     }
 
     /// Check if a column exists in a table using PRAGMA table_info.
@@ -594,11 +682,11 @@ impl LibraryDb {
             .execute(
                 "INSERT INTO tracks (path, title, artist, album_artist, album, genre,
                  track_number, disc_number, year, duration_ms, bitrate, sample_rate, mtime,
-                 provider, provider_track_id, bit_depth, release_type, added_at)
+                 provider, provider_track_id, bit_depth, release_type, added_at, suffix)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18)
+                         ?17, ?18, ?19)
                  ON CONFLICT(path) DO UPDATE SET
-                    release_type=excluded.release_type,
+                    release_type=excluded.release_type, suffix=excluded.suffix,
                     added_at=CASE WHEN tracks.added_at = 0 THEN excluded.mtime
                                   ELSE tracks.added_at END,
                     title=excluded.title, artist=excluded.artist,
@@ -632,6 +720,7 @@ impl LibraryDb {
                     } else {
                         crate::unix_now()
                     },
+                    track.suffix,
                 ],
             )
             .map_err(|e| format!("Upsert error: {e}"))?;
@@ -657,9 +746,9 @@ impl LibraryDb {
                     "INSERT INTO tracks (path, title, artist, album_artist, album, genre,
                      track_number, disc_number, year, duration_ms, bitrate, sample_rate, mtime,
                      provider, provider_track_id, bit_depth, release_type, added_at,
-                     is_favorite, rating, rg_track_gain, rg_album_gain, favorited_at)
+                     is_favorite, rating, rg_track_gain, rg_album_gain, favorited_at, suffix)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                      ON CONFLICT(path) DO UPDATE SET
                         title=excluded.title, artist=excluded.artist,
                         album_artist=excluded.album_artist, album=excluded.album,
@@ -671,7 +760,8 @@ impl LibraryDb {
                         bit_depth=excluded.bit_depth, release_type=excluded.release_type,
                         added_at=excluded.added_at, is_favorite=excluded.is_favorite,
                         rating=excluded.rating, rg_track_gain=excluded.rg_track_gain,
-                        rg_album_gain=excluded.rg_album_gain, favorited_at=excluded.favorited_at",
+                        rg_album_gain=excluded.rg_album_gain, favorited_at=excluded.favorited_at,
+                        suffix=excluded.suffix",
                 )
                 .map_err(|e| format!("Upsert error: {e}"))?;
             for track in tracks.iter().map(Borrow::borrow) {
@@ -703,6 +793,7 @@ impl LibraryDb {
                     track.rg_track_gain,
                     track.rg_album_gain,
                     track.favorited_at,
+                    track.suffix,
                 ])
                 .map_err(|e| format!("Upsert error: {e}"))?;
             }
@@ -904,7 +995,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE provider = ?1
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -914,7 +1005,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  ORDER BY album_artist, album, disc_number, track_number"
                     .to_string(),
@@ -1291,7 +1382,7 @@ impl LibraryDb {
             .prepare(
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks WHERE path = ?1",
             )
             .map_err(|e| format!("Query error: {e}"))?;
@@ -1359,7 +1450,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE provider = ?1
                    AND (title LIKE ?2 ESCAPE '\\' OR artist LIKE ?2 ESCAPE '\\'
@@ -1376,7 +1467,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\'
                     OR album LIKE ?1 ESCAPE '\\' OR genre LIKE ?1 ESCAPE '\\'
@@ -1464,7 +1555,7 @@ impl LibraryDb {
             .prepare(
                 "SELECT t.id, t.path, t.title, t.artist, t.album_artist, t.album, t.genre,
                         t.track_number, t.disc_number, t.year, t.duration_ms, t.bitrate, t.sample_rate,
-                        t.provider, t.provider_track_id, t.is_favorite, t.rating, t.rg_track_gain, t.rg_album_gain, t.bit_depth, t.release_type, t.added_at, t.favorited_at
+                        t.provider, t.provider_track_id, t.is_favorite, t.rating, t.rg_track_gain, t.rg_album_gain, t.bit_depth, t.release_type, t.added_at, t.favorited_at, t.suffix
                  FROM playlist_tracks pt
                  JOIN tracks t ON t.id = pt.track_id
                  WHERE pt.playlist_id = ?1
@@ -1719,7 +1810,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE provider = ?1 AND is_favorite = 1
                  ORDER BY title"
@@ -1729,7 +1820,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE is_favorite = 1
                  ORDER BY title"
@@ -1803,7 +1894,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE provider = ?1 AND genre = ?2
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -1813,7 +1904,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE genre = ?1
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -1999,6 +2090,7 @@ impl LibraryDb {
             release_type: row.get::<_, String>(20).unwrap_or_default(),
             added_at: row.get::<_, i64>(21).unwrap_or(0),
             favorited_at: row.get::<_, i64>(22).unwrap_or(0),
+            suffix: row.get::<_, String>(23).unwrap_or_default(),
         })
     }
 }
@@ -2031,6 +2123,60 @@ mod tests {
             )
             .unwrap();
         db.conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn migration_v16_backfills_the_suffix_of_local_tracks() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = insert_local(&db, Path::new("/music/Album/01 Song.FLAC"));
+        db.conn
+            .execute_batch("UPDATE tracks SET suffix = ''; PRAGMA user_version=15;")
+            .unwrap();
+
+        db.run_migration().unwrap();
+
+        let suffix: String = db
+            .conn
+            .query_row("SELECT suffix FROM tracks WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(suffix, "flac");
+    }
+
+    #[test]
+    fn a_new_parser_version_rescans_local_files_and_resyncs_remotes_once() {
+        let db = LibraryDb::open_memory().unwrap();
+        let id = insert_local(&db, Path::new("/tmp/aulos-parser.mp3"));
+        let mtime = |db: &LibraryDb| -> i64 {
+            db.conn
+                .query_row("SELECT mtime FROM tracks WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+
+        // A database last opened by an older parser.
+        db.conn
+            .execute_batch(
+                "UPDATE tracks SET mtime = 1234;
+                 UPDATE library_meta SET value = 0 WHERE key = 'parser_version';",
+            )
+            .unwrap();
+        db.set_sync_marker("subsonic-0", Some(42)).unwrap();
+
+        db.run_migration().unwrap();
+        assert_eq!(mtime(&db), 0, "local file is re-probed");
+        assert_eq!(db.sync_marker("subsonic-0"), None, "remote is re-synced");
+
+        // Opening again at the same version leaves the new state alone.
+        db.conn
+            .execute_batch("UPDATE tracks SET mtime = 1234;")
+            .unwrap();
+        db.set_sync_marker("subsonic-0", Some(42)).unwrap();
+        db.run_migration().unwrap();
+        assert_eq!(mtime(&db), 1234);
+        assert_eq!(db.sync_marker("subsonic-0"), Some(42));
     }
 
     #[test]
@@ -2112,6 +2258,7 @@ mod tests {
         assert!(db.column_exists("podcasts", "author").unwrap());
         assert!(db.column_exists("tracks", "bit_depth").unwrap());
         assert!(db.column_exists("tracks", "release_type").unwrap());
+        assert!(db.column_exists("tracks", "suffix").unwrap());
         assert!(db.column_exists("tracks", "added_at").unwrap());
         assert!(db.column_exists("tracks", "favorited_at").unwrap());
         assert!(db.column_exists("cover_cache", "src_mtime_ns").unwrap());
@@ -2119,7 +2266,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            15
+            16
         );
         assert!(
             db.conn
@@ -2152,7 +2299,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            15
+            16
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();
@@ -2378,6 +2525,7 @@ mod tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: String::new(),
             added_at: 0,
             favorited_at: 0,
         };
@@ -2420,9 +2568,11 @@ mod tests {
         let mut track = db.all_tracks(None).unwrap().remove(0);
         assert_eq!((track.added_at, track.release_type.as_str()), (0, ""));
         track.release_type = "live".into();
+        track.suffix = "flac".into();
         db.upsert_track(&track, 777).unwrap();
         let track = db.all_tracks(None).unwrap().remove(0);
         assert_eq!((track.added_at, track.release_type.as_str()), (777, "live"));
+        assert_eq!(track.suffix, "flac");
 
         // Later rescans keep the date and refresh the tag.
         let mut again = track.clone();
@@ -2471,6 +2621,7 @@ mod tests {
             rg_album_gain: Some(-5.5),
             bit_depth: 0,
             release_type: String::new(),
+            suffix: String::new(),
             added_at: 1,
             favorited_at: 0,
         }
@@ -2485,9 +2636,11 @@ mod tests {
         // last sync: unlike `upsert_track` (local scanner, which must
         // preserve app-only annotations across a retag), a later sync
         // overwrites them, because the provider is their source of truth.
-        db.upsert_remote_tracks(&[remote_track("nav", "song-1", true, Some(4))])
-            .unwrap();
+        let mut synced = remote_track("nav", "song-1", true, Some(4));
+        synced.suffix = "m4a".into();
+        db.upsert_remote_tracks(&[synced]).unwrap();
         let track = db.all_tracks(Some("nav")).unwrap().remove(0);
+        assert_eq!(track.suffix, "m4a");
         assert!(track.is_favorite);
         assert_eq!(track.rating, Some(4));
         assert_eq!(track.rg_track_gain, Some(-6.0));

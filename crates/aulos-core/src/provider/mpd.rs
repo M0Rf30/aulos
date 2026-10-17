@@ -577,6 +577,7 @@ pub fn song_to_track(provider_id: &Arc<str>, song: &responses::Song) -> Track {
         .unwrap_or(0);
     let duration = song.duration.unwrap_or(Duration::ZERO);
     let uri = song.url.clone();
+    let (suffix, sample_rate, bit_depth) = audio_of(&uri, song.format.as_deref());
 
     Track {
         id: 0,
@@ -591,18 +592,34 @@ pub fn song_to_track(provider_id: &Arc<str>, song: &responses::Song) -> Track {
         year,
         duration,
         bitrate: 0,
-        sample_rate: 0,
+        sample_rate,
         provider_id: Arc::clone(provider_id),
         source_uri: uri,
         is_favorite: false,
         rating: None,
         rg_track_gain: None,
         rg_album_gain: None,
-        bit_depth: 0,
+        bit_depth,
         release_type: String::new(),
+        suffix,
         added_at: 0,
         favorited_at: 0,
     }
+}
+
+/// The file suffix, sample rate and bit depth of a song listed by MPD, from
+/// its uri and `Format:` field (`0` for what MPD does not say). MPD reports a
+/// decoded `Format` only for songs it has already played or scanned, and its
+/// bit depth is a decoder output format, so that is kept only for suffixes
+/// that are lossless for certain (not DSD, `m4a`, `wv`, ...).
+fn audio_of(uri: &str, format: Option<&str>) -> (String, u32, u32) {
+    let suffix = crate::library::suffix_of(uri);
+    let format = format.map(parse_mpd_format).unwrap_or_default();
+    let bit_depth = match super::lossless_from_suffix(&suffix) {
+        Some(true) => format.bits.filter(|&b| b > 1).unwrap_or(0),
+        _ => 0,
+    };
+    (suffix, format.sample_rate.unwrap_or(0), bit_depth)
 }
 
 /// Audio format of a song as reported by MPD's `Format:` field
@@ -699,7 +716,29 @@ fn song_to_tech_info(
 
 #[cfg(test)]
 mod tech_info_tests {
-    use super::{MpdFormat, parse_mpd_format};
+    use super::{MpdFormat, audio_of, parse_mpd_format};
+
+    #[test]
+    fn listed_songs_take_suffix_and_trusted_format() {
+        assert_eq!(
+            audio_of("Album/01.FLAC", Some("96000:24:2")),
+            ("flac".to_owned(), 96_000, 24)
+        );
+        // Lossy and ambiguous suffixes keep the rate but not the decoder's depth.
+        assert_eq!(
+            audio_of("a.mp3", Some("44100:f:2")),
+            ("mp3".to_owned(), 44_100, 0)
+        );
+        assert_eq!(
+            audio_of("a.m4a", Some("44100:16:2")),
+            ("m4a".to_owned(), 44_100, 0)
+        );
+        assert_eq!(
+            audio_of("a.dsf", Some("dsd64:2")),
+            ("dsf".to_owned(), 2_822_400, 0)
+        );
+        assert_eq!(audio_of("a.flac", None), ("flac".to_owned(), 0, 0));
+    }
 
     #[test]
     fn parses_integer_formats() {

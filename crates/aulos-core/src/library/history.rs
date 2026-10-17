@@ -307,7 +307,7 @@ impl LibraryDb {
                         t.track_number, t.disc_number, t.year, t.duration_ms, t.bitrate,
                         t.sample_rate, t.provider, t.provider_track_id, t.is_favorite,
                         t.rating, t.rg_track_gain, t.rg_album_gain, t.bit_depth,
-                        t.release_type, t.added_at, t.favorited_at
+                        t.release_type, t.added_at, t.favorited_at, t.suffix
                  FROM tracks t
                  JOIN (SELECT track_id, MAX(played_at) AS lp, MAX(id) AS mid
                        FROM play_history GROUP BY track_id) h ON h.track_id = t.id
@@ -522,7 +522,7 @@ impl LibraryDb {
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
                         provider, provider_track_id, is_favorite, rating, rg_track_gain,
-                        rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                        rg_album_gain, bit_depth, release_type, added_at, favorited_at, suffix
                  FROM tracks
                  WHERE provider = ?1 AND is_favorite = 1 AND favorited_at >= ?2
                  ORDER BY favorited_at DESC, title COLLATE NOCASE
@@ -987,6 +987,7 @@ mod tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: String::new(),
             added_at: 0,
             favorited_at: 0,
         }
@@ -1317,6 +1318,7 @@ mod import_tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: String::new(),
             added_at: 0,
             favorited_at: 0,
         };

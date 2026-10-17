@@ -128,6 +128,30 @@ pub struct Track {
     /// Unix seconds the track was last marked as a favorite; `0` when it
     /// is not one, or was one before favourites were timestamped.
     pub favorited_at: i64,
+    /// File suffix of the audio, lowercase without the dot (`"flac"`,
+    /// `"m4a"`); empty when unknown. Local and MPD tracks take it from
+    /// their path, and a Subsonic track from the server, since `path` holds
+    /// the song id there. Drives the format chip and the quality badge.
+    pub suffix: String,
+}
+
+/// The suffix of a file path or streaming URI, lowercase without the dot,
+/// ignoring any `?query` or `#fragment`; empty when there is none, or it is
+/// too long or odd to be a file suffix.
+#[must_use]
+pub fn suffix_of(path: &str) -> String {
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    let name = path[..end].rsplit(['/', '\\']).next().unwrap_or_default();
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && (1..=5).contains(&ext.len())
+                && ext.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+        {
+            ext.to_ascii_lowercase()
+        }
+        _ => String::new(),
+    }
 }
 
 impl Track {
@@ -171,13 +195,8 @@ impl Track {
     #[must_use]
     pub fn format_chip(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(ext) = self
-            .path
-            .extension()
-            .and_then(|e| e.to_str())
-            .filter(|e| !e.is_empty() && e.len() <= 5)
-        {
-            parts.push(ext.to_uppercase());
+        if !self.suffix.is_empty() {
+            parts.push(self.suffix.to_uppercase());
         }
         parts.extend(self.depth_rate_label());
         if self.bitrate > 0 {
@@ -468,6 +487,7 @@ mod derived_tests {
             rg_album_gain: None,
             bit_depth: 0,
             release_type: String::new(),
+            suffix: suffix_of(path),
             added_at: 0,
             favorited_at: 0,
         }
@@ -481,6 +501,18 @@ mod derived_tests {
         assert_eq!(t.format_chip(), "FLAC \u{00B7} 24/96 \u{00B7} 2,304 kbps");
         t.bit_depth = 0;
         assert_eq!(t.format_chip(), "FLAC \u{00B7} 96 kHz \u{00B7} 2,304 kbps");
+    }
+
+    #[test]
+    fn suffix_of_reads_paths_and_streaming_uris() {
+        assert_eq!(suffix_of("/music/Album/01 Song.FLAC"), "flac");
+        assert_eq!(suffix_of("C:\\Music\\song.m4a"), "m4a");
+        assert_eq!(suffix_of("http://host/stream/song.flac?token=a.b"), "flac");
+        assert_eq!(suffix_of("http://host/rest/stream?id=al-42.x"), "");
+        assert_eq!(suffix_of("dir.d/no-extension"), "");
+        assert_eq!(suffix_of(".hidden"), "");
+        assert_eq!(suffix_of("song.toolongsuffix"), "");
+        assert_eq!(suffix_of(""), "");
     }
 
     #[test]
