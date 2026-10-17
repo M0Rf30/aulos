@@ -53,12 +53,15 @@ pub enum LibraryEvent {
         provider_id: String,
         count: usize,
     },
-    /// An incremental (watcher) scan finished; `count` tracks were updated.
-    /// Unlike [`Self::ScanComplete`] it neither supersedes a running
-    /// scan/reload nor touches the progress state.
+    /// An incremental (watcher) scan finished. Unlike
+    /// [`Self::ScanComplete`] it neither supersedes a running scan/reload
+    /// nor touches the progress state.
     PathsScanned {
         provider_id: String,
-        count: usize,
+        /// Current rows of the tracks added or updated.
+        updated: Vec<Track>,
+        /// Paths of the tracks (or folders) that disappeared.
+        removed: Vec<String>,
     },
     /// A remote provider's cached library is still current (its server
     /// marker is unchanged), so the full resync was skipped; `favorites`
@@ -405,27 +408,39 @@ impl Session {
                 // `LocalProvider` wraps its `LibraryDb` in a mutex; the
                 // incremental scan opens a connection of its own.
                 let db_path = crate::paths::library_db_path();
-                match crate::library::LibraryDb::open(&db_path) {
-                    Ok(db) => LibraryScanner::scan_paths(&db, &paths).unwrap_or_else(|e| {
-                        tracing::error!("scan_paths failed: {e}");
-                        0
-                    }),
+                let db = match crate::library::LibraryDb::open(&db_path) {
+                    Ok(db) => db,
                     Err(e) => {
                         tracing::error!("Failed to open DB for incremental scan: {e}");
-                        0
+                        return (Vec::new(), Vec::new());
+                    }
+                };
+                let changed = LibraryScanner::scan_paths_changed(&db, &paths).unwrap_or_else(|e| {
+                    tracing::error!("scan_paths failed: {e}");
+                    Vec::new()
+                });
+                let (mut updated, mut removed) = (Vec::new(), Vec::new());
+                for path in changed {
+                    let key = path.to_string_lossy().into_owned();
+                    match db.track_by_path(&key) {
+                        Ok(Some(track)) => updated.push(track),
+                        _ => removed.push(key),
                     }
                 }
+                (updated, removed)
             })
             .await
-            .unwrap_or(0)
+            .unwrap_or_default()
         };
         match self.providers.registry.active_shared() {
             Some(p) if p.provider_type() == ProviderType::Local => {
                 let provider_id = self.providers.registry.active_id().to_string();
                 Effect::future(async move {
+                    let (updated, removed) = work.await;
                     LibraryEvent::PathsScanned {
                         provider_id,
-                        count: work.await,
+                        updated,
+                        removed,
                     }
                 })
             }
@@ -522,11 +537,15 @@ impl Session {
                 };
                 LibraryApplied::ScanComplete { reload }
             }
-            LibraryEvent::PathsScanned { provider_id, count } => {
+            LibraryEvent::PathsScanned {
+                provider_id,
+                updated,
+                removed,
+            } => {
                 if provider_id != self.providers.registry.active_id() {
                     return LibraryApplied::Stale;
                 }
-                if count == 0 {
+                if updated.is_empty() && removed.is_empty() {
                     return LibraryApplied::Done;
                 }
                 if self.library.scanning {
@@ -534,6 +553,17 @@ impl Session {
                     // (reloading now would supersede it).
                     self.library.reload_after_scan = true;
                     return LibraryApplied::Done;
+                }
+                // Patch the loaded library in place; only what cannot be
+                // patched (new tracks or albums, folders) reloads it all.
+                if self
+                    .library
+                    .patch_tracks(&updated, &removed, &self.config.config)
+                {
+                    self.refresh_search();
+                    return LibraryApplied::ScanComplete {
+                        reload: Reload::none(),
+                    };
                 }
                 LibraryApplied::ScanComplete {
                     reload: self.reload_library(),

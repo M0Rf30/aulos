@@ -1283,6 +1283,25 @@ impl LibraryDb {
             .map_err(|e| format!("Delete under dir error: {e}"))
     }
 
+    /// The stored track at `path`, if any.
+    pub fn track_by_path(&self, path: &str) -> Result<Option<Track>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain, bit_depth, release_type, added_at, favorited_at
+                 FROM tracks WHERE path = ?1",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+        let mut rows = stmt
+            .query_map(params![path], Self::row_to_track)
+            .map_err(|e| format!("Query error: {e}"))?;
+        rows.next()
+            .transpose()
+            .map_err(|e| format!("Query row error: {e}"))
+    }
+
     /// Get track mtime to determine if rescan is needed.
     pub fn get_track_mtime(&self, path: &str) -> Option<i64> {
         self.conn

@@ -293,6 +293,75 @@ impl LibraryState {
         self.rebuild_artists(config);
     }
 
+    /// Apply an incremental scan's result in place: `updated` replace the
+    /// tracks at the same path, `removed` paths disappear. Returns `false`
+    /// without changing anything when that is not possible (a track that is
+    /// not loaded yet, a retag that moves a track to another album, or an
+    /// album that would become empty); the caller reloads instead.
+    pub fn patch_tracks(&mut self, updated: &[Track], removed: &[String], config: &Config) -> bool {
+        use std::collections::{HashMap, HashSet};
+        let upd: HashMap<&str, &Track> = updated
+            .iter()
+            .filter_map(|t| t.path.to_str().map(|p| (p, t)))
+            .collect();
+        let rem: HashSet<&str> = removed.iter().map(String::as_str).collect();
+        if upd.len() != updated.len() {
+            return false;
+        }
+
+        // Validate before touching anything.
+        let (mut found_upd, mut found_rem) = (0, 0);
+        for album in &self.albums {
+            let mut kept = album.tracks.len();
+            for track in &album.tracks {
+                let Some(path) = track.path.to_str() else {
+                    continue;
+                };
+                if let Some(new) = upd.get(path) {
+                    if new.album != track.album || new.album_artist != track.album_artist {
+                        return false;
+                    }
+                    found_upd += 1;
+                } else if rem.contains(path) {
+                    found_rem += 1;
+                    kept -= 1;
+                }
+            }
+            if kept == 0 {
+                return false;
+            }
+        }
+        if found_upd != upd.len() || found_rem != rem.len() {
+            return false;
+        }
+
+        let patch = |tracks: &mut Vec<Track>| {
+            tracks.retain(|t| t.path.to_str().is_none_or(|p| !rem.contains(p)));
+            for track in tracks.iter_mut() {
+                if let Some(new) = track.path.to_str().and_then(|p| upd.get(p)) {
+                    *track = (*new).clone();
+                }
+            }
+        };
+        for album in &mut self.albums {
+            let touched = album.tracks.iter().any(|t| {
+                t.path
+                    .to_str()
+                    .is_some_and(|p| upd.contains_key(p) || rem.contains(p))
+            });
+            if touched {
+                patch(&mut album.tracks);
+                Track::sort_by_disc_and_track(&mut album.tracks);
+                album.refresh_derived();
+            }
+        }
+        patch(&mut self.tracks);
+        self.rebuild_artists(config);
+        self.sort_browse(config);
+        self.generation += 1;
+        true
+    }
+
     /// Drop the staged refresh of `generation` without swapping it in.
     pub fn cancel_reload(&mut self, generation: u64) {
         if self
@@ -748,6 +817,69 @@ impl LibraryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::test_support::track;
+
+    fn local_track(id: i64, title: &str, album: &str) -> Track {
+        let mut t = track(id);
+        t.provider_id = "local".into();
+        t.path = format!("/m/{album}/{title}.flac").into();
+        t.title = title.into();
+        t.album = album.into();
+        t.album_artist = "Artist".into();
+        t
+    }
+
+    fn lib_with(tracks: Vec<Track>) -> LibraryState {
+        let mut lib = LibraryState::default();
+        let mut by_album: Vec<Album> = Vec::new();
+        for t in &tracks {
+            match by_album.iter_mut().find(|a| a.name == t.album) {
+                Some(a) => a.tracks.push(t.clone()),
+                None => by_album.push(Album::new(
+                    t.album.clone(),
+                    t.album_artist.clone(),
+                    0,
+                    vec![t.clone()],
+                    None,
+                )),
+            }
+        }
+        lib.replace_loaded(tracks, by_album, &Config::default());
+        lib
+    }
+
+    #[test]
+    fn patch_replaces_and_removes_tracks_in_place() {
+        let mut lib = lib_with(vec![
+            local_track(1, "a", "X"),
+            local_track(2, "b", "X"),
+            local_track(3, "c", "Y"),
+        ]);
+        let mut edited = local_track(1, "a2", "X");
+        edited.path = lib.tracks[0].path.clone();
+        let gone = lib.tracks[1].path.to_string_lossy().into_owned();
+        assert!(lib.patch_tracks(&[edited], &[gone], &Config::default()));
+        assert_eq!(lib.tracks.len(), 2);
+        assert!(lib.tracks.iter().any(|t| t.title == "a2"));
+        let x = lib.albums.iter().find(|a| a.name == "X").unwrap();
+        assert_eq!(x.tracks.len(), 1);
+    }
+
+    #[test]
+    fn patch_refuses_what_needs_a_reload() {
+        let mut lib = lib_with(vec![local_track(1, "a", "X"), local_track(2, "c", "Y")]);
+        let cfg = Config::default();
+        // A track that is not loaded yet (new file).
+        assert!(!lib.patch_tracks(&[local_track(9, "new", "X")], &[], &cfg));
+        // A retag that moves the track to another album.
+        let mut moved = local_track(1, "a", "Z");
+        moved.path = lib.tracks[0].path.clone();
+        assert!(!lib.patch_tracks(&[moved], &[], &cfg));
+        // Removing an album's last track.
+        let only = lib.tracks[1].path.to_string_lossy().into_owned();
+        assert!(!lib.patch_tracks(&[], &[only], &cfg));
+        assert_eq!(lib.tracks.len(), 2);
+    }
 
     #[test]
     fn primary_artist_splits_common_credits() {

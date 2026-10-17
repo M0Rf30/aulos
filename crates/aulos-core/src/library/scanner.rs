@@ -204,18 +204,26 @@ impl LibraryScanner {
     /// Returns the number of tracks added, updated, or removed.
     #[tracing::instrument(skip(db), level = "debug")]
     pub fn scan_paths(db: &LibraryDb, paths: &[PathBuf]) -> Result<usize, String> {
-        let mut count = 0;
+        Self::scan_paths_changed(db, paths).map(|changed| changed.len())
+    }
+
+    /// [`Self::scan_paths`], returning the path of every track that was
+    /// added, updated or removed.
+    pub fn scan_paths_changed(db: &LibraryDb, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+        let mut changed: Vec<PathBuf> = Vec::new();
 
         for path in paths {
             if path.is_dir() {
                 // A created or moved-in folder: index the audio beneath it.
                 for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
-                    if entry.file_type().is_file() {
-                        count += Self::scan_file(db, entry.path());
+                    if entry.file_type().is_file() && Self::scan_file(db, entry.path()) > 0 {
+                        changed.push(entry.path().to_path_buf());
                     }
                 }
             } else if path.exists() {
-                count += Self::scan_file(db, path);
+                if Self::scan_file(db, path) > 0 {
+                    changed.push(path.clone());
+                }
             } else if Self::is_audio_file(path) {
                 // File was deleted — remove from database.
                 let path_str = path.to_string_lossy();
@@ -223,19 +231,20 @@ impl LibraryScanner {
                     if let Err(e) = db.remove_track_by_path(&path_str) {
                         tracing::error!("Failed to remove track {}: {e}", path.display());
                     } else {
-                        count += 1;
+                        changed.push(path.clone());
                     }
                 }
             } else {
                 // A deleted or moved-away folder: drop what was beneath it.
                 match db.remove_local_tracks_under(path) {
-                    Ok(n) => count += n,
+                    // The folder itself stands for the tracks beneath it.
+                    Ok(n) => changed.extend((n > 0).then(|| path.clone())),
                     Err(e) => tracing::error!("Failed to remove {}: {e}", path.display()),
                 }
             }
         }
 
-        Ok(count)
+        Ok(changed)
     }
 
     /// Add or update one existing file; returns `1` when the library changed.
