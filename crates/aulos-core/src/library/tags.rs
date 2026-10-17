@@ -345,8 +345,10 @@ fn parse_replay_gain(s: &str) -> Option<f32> {
 /// item). `artist` is the one exception — see [`AudioTags::artist`].
 fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
     let mut artists: Vec<&str> = Vec::new();
-    let mut recording_date: Option<&str> = None;
-    let mut recording_year: Option<u16> = None;
+    // Date and year tags by precedence: recording, then release (APEv2 `Year`
+    // and ID3 `TDRL` map here), then original release.
+    let mut dates: [Option<&str>; 3] = [None; 3];
+    let mut years: [Option<u16>; 3] = [None; 3];
 
     for tag in raw {
         let Some(std) = tag.std.as_ref() else {
@@ -379,11 +381,29 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
                 continue;
             }
             StandardTag::RecordingDate(v) if !v.is_empty() => {
-                recording_date.get_or_insert(v.as_str());
+                dates[0].get_or_insert(v.as_str());
                 continue;
             }
             StandardTag::RecordingYear(y) => {
-                recording_year.get_or_insert(*y);
+                years[0].get_or_insert(*y);
+                continue;
+            }
+            StandardTag::ReleaseDate(v) if !v.is_empty() => {
+                dates[1].get_or_insert(v.as_str());
+                continue;
+            }
+            StandardTag::ReleaseYear(y) => {
+                years[1].get_or_insert(*y);
+                continue;
+            }
+            StandardTag::OriginalReleaseDate(v) | StandardTag::OriginalRecordingDate(v)
+                if !v.is_empty() =>
+            {
+                dates[2].get_or_insert(v.as_str());
+                continue;
+            }
+            StandardTag::OriginalReleaseYear(y) | StandardTag::OriginalRecordingYear(y) => {
+                years[2].get_or_insert(*y);
                 continue;
             }
             StandardTag::MusicBrainzReleaseType(v) => {
@@ -422,18 +442,64 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
         out.artist = Some(artists.join("; "));
     }
 
-    out.date = recording_date
-        .map(str::to_string)
-        .or_else(|| recording_year.map(|y| y.to_string()));
-    out.year = recording_date
-        .and_then(|d| d.get(0..4))
-        .and_then(|y| y.parse::<u32>().ok())
-        .or_else(|| recording_year.map(u32::from));
+    if let Some((date, year)) = dates
+        .into_iter()
+        .zip(years)
+        .find(|(date, year)| date.is_some() || year.is_some())
+    {
+        out.date = date
+            .map(str::to_string)
+            .or_else(|| year.map(|y| y.to_string()));
+        out.year = date
+            .and_then(|d| d.get(0..4))
+            .and_then(|y| y.parse::<u32>().ok())
+            .or_else(|| year.map(u32::from));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn std_tag(std: StandardTag) -> SymTag {
+        SymTag::new_from_parts("k", "v", Some(std))
+    }
+
+    fn applied(tags: &[SymTag]) -> AudioTags {
+        let mut out = AudioTags::default();
+        apply_tags(tags, &mut out);
+        out
+    }
+
+    #[test]
+    fn year_falls_back_from_recording_to_release_to_original() {
+        use std::sync::Arc;
+        let date = |s: &str| Arc::new(s.to_string());
+        // APEv2 `Year` (Musepack, WavPack, TTA, Monkey's) is a release date.
+        let ape = applied(&[std_tag(StandardTag::ReleaseDate(date("1986")))]);
+        assert_eq!((ape.date.as_deref(), ape.year), (Some("1986"), Some(1986)));
+        // Recording beats release beats original, whatever the tag order.
+        let all = applied(&[
+            std_tag(StandardTag::OriginalReleaseDate(date("1970-01-01"))),
+            std_tag(StandardTag::ReleaseDate(date("1999-05-05"))),
+            std_tag(StandardTag::RecordingDate(date("2001-02-03"))),
+        ]);
+        assert_eq!(
+            (all.date.as_deref(), all.year),
+            (Some("2001-02-03"), Some(2001))
+        );
+        let no_recording = applied(&[
+            std_tag(StandardTag::OriginalReleaseYear(1970)),
+            std_tag(StandardTag::ReleaseYear(1999)),
+        ]);
+        assert_eq!(
+            (no_recording.date.as_deref(), no_recording.year),
+            (Some("1999"), Some(1999))
+        );
+        let original = applied(&[std_tag(StandardTag::OriginalReleaseYear(1970))]);
+        assert_eq!(original.year, Some(1970));
+        assert_eq!(applied(&[]).year, None);
+    }
 
     /// A file probed from memory (the browser's way) reads like one probed
     /// from disk, whether it was loaded whole or in two overlapping chunks.
