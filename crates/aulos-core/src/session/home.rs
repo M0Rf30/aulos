@@ -17,6 +17,7 @@ use crate::online::scrobble::Service;
 use crate::online::scrobble::controller::is_connected;
 use crate::online::similar::{self, SimilarShelf, SuggestParams};
 use crate::player::PlaybackState as PlayerState;
+use crate::provider::ProviderType;
 use crate::task::{Effect, channel_stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +65,20 @@ impl Session {
         self.providers.registry.active_id() == LOCAL_PROVIDER
     }
 
+    /// The provider whose library the "Because you listened to …" shelves are
+    /// matched against: the active one when its library is in the library
+    /// database (local files, or a remote server with cached rows). `None`
+    /// for providers without cached rows (MPD).
+    #[must_use]
+    pub fn suggestions_provider(&self) -> Option<&str> {
+        let registry = &self.providers.registry;
+        matches!(
+            registry.active()?.provider_type(),
+            ProviderType::Local | ProviderType::Subsonic
+        )
+        .then(|| registry.active_id())
+    }
+
     /// Whether "Because you listened to …" shelves should be loaded: the
     /// setting is on (default) and a scrobbling service is connected.
     #[must_use]
@@ -83,7 +98,7 @@ impl Session {
 
         if !self.home_uses_database() {
             self.home.data = Some(home_from_albums(&self.library.albums, crate::unix_now()));
-            return Effect::none();
+            return self.load_similar();
         }
 
         let db_path = crate::paths::library_db_path();
@@ -236,13 +251,18 @@ impl Session {
     /// a time as they become available. Cancels a lookup still in flight.
     pub fn load_similar(&mut self) -> Effect<HomeEvent> {
         self.home.similar_cancel.store(true, Ordering::Relaxed);
-        if !self.suggestions_enabled() || !self.home_uses_database() {
+        let Some(provider) = self
+            .suggestions_provider()
+            .filter(|_| self.suggestions_enabled())
+            .map(str::to_owned)
+        else {
             self.home.similar.clear();
             return Effect::none();
-        }
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         self.home.similar_cancel = Arc::clone(&cancel);
         let params = SuggestParams {
+            provider,
             db_path: crate::paths::library_db_path(),
             cache_path: similar::cache_path(),
             lastfm_key: self.config.config.scrobble_lastfm_api_key.clone(),

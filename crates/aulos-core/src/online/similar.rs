@@ -677,11 +677,34 @@ impl SimilarArtists for ListenBrainzSimilar {
 #[derive(Debug, Clone)]
 pub struct SuggestParams {
     pub db_path: PathBuf,
+    /// The active provider whose cached library the shelves are matched
+    /// against ([`LOCAL_PROVIDER`] or a remote provider with cached rows).
+    pub provider: String,
     pub cache_path: PathBuf,
     /// The user's Last.fm API key; empty = ListenBrainz only.
     pub lastfm_key: String,
     /// Unix seconds.
     pub now: i64,
+}
+
+/// The seed artists of `provider`'s Home: its recent and all-time top artists,
+/// then its favorites and random artists. Play history is only recorded for
+/// local files, so a remote provider without any history of its own is seeded
+/// from the local history instead (its library is still what the shelves are
+/// matched against).
+fn seeds_for(db: &LibraryDb, provider: &str, now: i64) -> Result<Vec<String>, String> {
+    let since = now - SEED_WINDOW_SECS;
+    let mut recent = db.most_played_artists(provider, since, 10)?;
+    let mut all_time = db.most_played_artists(provider, 0, 10)?;
+    if provider != LOCAL_PROVIDER && recent.is_empty() && all_time.is_empty() {
+        recent = db.most_played_artists(LOCAL_PROVIDER, since, 10)?;
+        all_time = db.most_played_artists(LOCAL_PROVIDER, 0, 10)?;
+    }
+    let favorites = db.favorite_artists(provider, 10)?;
+    let random = db.random_artists(provider, 10)?;
+    Ok(pick_seeds(
+        &recent, &all_time, &favorites, &random, SEED_COUNT,
+    ))
 }
 
 /// Compute the Home shelves, calling `on_shelf` for each as soon as it is
@@ -693,16 +716,13 @@ pub fn compute_shelves(
     on_shelf: &mut dyn FnMut(SimilarShelf),
 ) -> Result<usize, String> {
     let db = LibraryDb::open(&params.db_path)?;
-    let recent = db.most_played_artists(LOCAL_PROVIDER, params.now - SEED_WINDOW_SECS, 10)?;
-    let all_time = db.most_played_artists(LOCAL_PROVIDER, 0, 10)?;
-    let favorites = db.favorite_artists(LOCAL_PROVIDER, 10)?;
-    let random = db.random_artists(LOCAL_PROVIDER, 10)?;
-    let seeds = pick_seeds(&recent, &all_time, &favorites, &random, SEED_COUNT);
+    let provider = params.provider.as_str();
+    let seeds = seeds_for(&db, provider, params.now)?;
     if seeds.is_empty() {
         return Ok(0);
     }
 
-    let library = LibraryArtists::new(&db.library_artists(LOCAL_PROVIDER)?);
+    let library = LibraryArtists::new(&db.library_artists(provider)?);
     let chain = Chain::online(&params.lastfm_key);
     let mut cache = SimilarCache::load(&params.cache_path);
     let mut profiles: Option<Vec<ArtistProfile>> = None;
@@ -717,7 +737,7 @@ pub fn compute_shelves(
             Ok(_) => {
                 // Nobody online knows the artist: derive it from the library.
                 if profiles.is_none() {
-                    profiles = Some(db.artist_profiles(LOCAL_PROVIDER)?);
+                    profiles = Some(db.artist_profiles(provider)?);
                 }
                 local_similar(seed, profiles.as_deref().unwrap_or(&[]), SHELF_LEN)
             }
@@ -976,6 +996,85 @@ mod tests {
         assert_eq!(shelf.discover[1].url, "https://musicbrainz.org/artist/abc");
         assert_eq!(shelf.discover[1].site, "MusicBrainz");
         assert_eq!(shelf.discover[0].url, "https://www.last.fm/music/Nirvana");
+    }
+
+    #[test]
+    fn library_matching_folds_diacritics_both_ways() {
+        // The library spells it with the slashed o, the services without
+        // (and vice versa); the card shows the library's own spelling.
+        let library = LibraryArtists::new(&["Trentemøller".to_string(), "Apparat".to_string()]);
+        assert_eq!(library.find("Trentemoller"), Some("Trentemøller"));
+        assert_eq!(library.find("Trentemøller"), Some("Trentemøller"));
+        assert_eq!(library.find("TRENTEMØLLER"), Some("Trentemøller"));
+        let plain = LibraryArtists::new(&["Trentemoller".to_string()]);
+        assert_eq!(plain.find("Trentemøller"), Some("Trentemoller"));
+
+        let shelf = build_shelf(
+            "Moderat",
+            &[sim("Apparat"), sim("Trentemoller"), sim("Boards of Canada")],
+            &library,
+            20,
+        );
+        assert_eq!(shelf.in_library, ["Apparat", "Trentemøller"]);
+        let names: Vec<_> = shelf.discover.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Boards of Canada"]);
+    }
+
+    fn track_of(provider: &str, path: &str, artist: &str) -> crate::library::Track {
+        crate::library::Track {
+            id: 0,
+            path: std::path::PathBuf::from(path),
+            title: path.to_string(),
+            artist: artist.to_string(),
+            album_artist: String::new(),
+            album: "Album".to_string(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::ZERO,
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from(provider),
+            source_uri: path.to_string(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            added_at: 1,
+            favorited_at: 0,
+        }
+    }
+
+    #[test]
+    fn remote_provider_is_seeded_from_local_history_and_matched_to_its_own_library() {
+        let db = LibraryDb::open_memory().unwrap();
+        // The listening history lives on local files only.
+        let local = track_of(LOCAL_PROVIDER, "/m/moderat.flac", "Moderat");
+        db.upsert_track(&local, 1).unwrap();
+        let id = db.all_tracks(Some(LOCAL_PROVIDER)).unwrap()[0].id;
+        db.record_play(id, 1_000).unwrap();
+        // The active server's cached library.
+        db.upsert_remote_tracks(&[
+            track_of("subsonic-0", "s1", "Apparat"),
+            track_of("subsonic-0", "s2", "Trentemøller"),
+        ])
+        .unwrap();
+
+        let seeds = seeds_for(&db, "subsonic-0", 2_000).unwrap();
+        assert_eq!(seeds[0], "Moderat", "history seeds come first");
+        assert!(seeds.contains(&"Apparat".to_string()), "{seeds:?}");
+
+        let library = LibraryArtists::new(&db.library_artists("subsonic-0").unwrap());
+        assert_eq!(library.find("Trentemoller"), Some("Trentemøller"));
+        assert_eq!(library.find("Apparat"), Some("Apparat"));
+        // The local library is not the one the remote Home is matched against.
+        assert_eq!(library.find("Moderat"), None);
+
+        // A provider with history of its own keeps to it.
+        assert_eq!(seeds_for(&db, LOCAL_PROVIDER, 2_000).unwrap(), ["Moderat"]);
     }
 
     #[test]
