@@ -1247,9 +1247,11 @@ async fn load_incremental(
             let mut keep_paths: HashSet<String> = HashSet::new();
             let mut keep_keys: HashSet<String> = HashSet::new();
             let mut synced_fully = true;
+            // Pipelined: the next page is fetched while the current one's
+            // covers are downloaded and persisted.
+            let mut page = subsonic.browse_albums_page(offset, page_size).await;
             loop {
-                let (albums, has_more) = match subsonic.browse_albums_page(offset, page_size).await
-                {
+                let (albums, has_more) = match page {
                     Ok(result) => result,
                     Err(e) => {
                         tracing::error!("Subsonic browse_albums_page failed: {e}");
@@ -1261,7 +1263,6 @@ async fn load_incremental(
                     break;
                 }
                 let batch_count = albums.len();
-                let covers = batch_covers(&provider, &albums).await;
                 tracing::debug!("Subsonic batch: offset={offset}, albums={batch_count}");
                 for album in &albums {
                     keep_keys.insert(CoverArt::album_key(&album.artist, &album.name));
@@ -1272,7 +1273,19 @@ async fn load_incremental(
                             .map(|t| t.path.to_string_lossy().into_owned()),
                     );
                 }
-                persist_provider_batch(&provider_id, &albums, &covers).await;
+                offset += page_size;
+                let process = async {
+                    let covers = batch_covers(&provider, &albums).await;
+                    persist_provider_batch(&provider_id, &albums, &covers).await;
+                    covers
+                };
+                let (covers, next) = if has_more {
+                    let (covers, next) =
+                        futures::join!(process, subsonic.browse_albums_page(offset, page_size));
+                    (covers, Some(next))
+                } else {
+                    (process.await, None)
+                };
                 _ = tx
                     .send(LibraryEvent::Batch {
                         generation,
@@ -1281,10 +1294,10 @@ async fn load_incremental(
                         covers,
                     })
                     .await;
-                if !has_more {
-                    break;
+                match next {
+                    Some(next) => page = next,
+                    None => break,
                 }
-                offset += page_size;
             }
             // A failed page leaves the sync incomplete: pruning now would
             // delete tracks that are still on the server but simply were

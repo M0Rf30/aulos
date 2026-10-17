@@ -15,6 +15,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Concurrent `getAlbum` requests per page.
+const ALBUM_FETCH_CONCURRENCY: usize = 8;
+
+/// Request timeout of the Subsonic HTTP clients, so a hung server fails the
+/// sync instead of leaving it running forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What a failed Subsonic request means to the user, in one place for the
 /// provider, the connection test and the browser's stream fetch.
 ///
@@ -63,6 +70,11 @@ pub async fn test_connection(
         .map_err(|e| describe_error(url, "ping", &e))
 }
 
+/// The HTTP client of the API and cover requests, with a request timeout.
+fn http_client() -> reqwest::Client {
+    crate::http::client(REQUEST_TIMEOUT).unwrap_or_else(|_| crate::http::async_client())
+}
+
 /// The API client for a server. `accept_invalid_certs` only exists natively:
 /// a browser decides on certificates itself and the setting cannot apply.
 fn build_client(
@@ -73,7 +85,7 @@ fn build_client(
 ) -> Result<Client, opensubsonic::Error> {
     let client = Client::new(url, Auth::token(username, password))?
         .with_client_name("aulos")
-        .with_http_client(crate::http::async_client());
+        .with_http_client(http_client());
     #[cfg(not(target_arch = "wasm32"))]
     if accept_invalid_certs {
         return client.with_danger_accept_invalid_certs();
@@ -195,7 +207,7 @@ impl SubsonicProvider {
         .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?;
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
-        let http_client = crate::http::async_client();
+        let http_client = http_client();
         Ok(Self {
             config,
             provider_id,
@@ -329,15 +341,27 @@ impl SubsonicProvider {
         let album_list = self.fetch_album_list(page_size, offset).await?;
 
         let count = album_list.len();
+
+        // `buffered` keeps the server's album order while overlapping the
+        // round trips (one serial `getAlbum` per album made a first sync
+        // cost hundreds of RTTs).
+        use futures::StreamExt;
+        let ids: Vec<String> = album_list.iter().map(|a| a.id.clone()).collect();
+        let this = self;
+        let details: Vec<_> = futures::stream::iter(ids)
+            .map(|id| async move {
+                this.client
+                    .get_album(&id)
+                    .await
+                    .map_err(this.err("getAlbum"))
+            })
+            .buffered(ALBUM_FETCH_CONCURRENCY)
+            .collect()
+            .await;
+
         let mut albums = Vec::with_capacity(count);
-
-        for album_id3 in &album_list {
-            let album_detail = self
-                .client
-                .get_album(&album_id3.id)
-                .await
-                .map_err(self.err("getAlbum"))?;
-
+        for album_detail in details {
+            let album_detail = album_detail?;
             let mut tracks: Vec<Track> = album_detail
                 .song
                 .iter()
