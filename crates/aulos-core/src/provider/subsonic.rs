@@ -97,6 +97,19 @@ fn build_client(
     Ok(client)
 }
 
+/// The album's OpenSubsonic release types (`"Album"`, `"EP"`, `"Live"`, ...)
+/// plus `"Compilation"` when the server flags it, in the `; `-separated form
+/// the library's release-type tag uses. Empty when the server reports none.
+fn release_type_tag(album: &opensubsonic::data::AlbumWithSongsId3) -> String {
+    let mut types = album.release_types.clone().unwrap_or_default();
+    if album.is_compilation == Some(true)
+        && !types.iter().any(|t| t.eq_ignore_ascii_case("compilation"))
+    {
+        types.push("Compilation".to_owned());
+    }
+    types.join("; ")
+}
+
 /// Unix seconds of a server timestamp (ISO 8601, e.g. `created` and
 /// `starred`); `0` when absent or unparseable.
 fn iso_secs(iso: Option<&str>) -> i64 {
@@ -257,7 +270,19 @@ impl SubsonicProvider {
             .album
             .clone()
             .unwrap_or_else(|| "Unknown Album".to_string());
-        let genre = child.genre.clone().unwrap_or_default();
+        // Servers that only fill the OpenSubsonic `genres` list leave `genre` unset.
+        let genre = child
+            .genre
+            .clone()
+            .filter(|g| !g.is_empty())
+            .or_else(|| {
+                child
+                    .genres
+                    .as_ref()
+                    .and_then(|g| g.first())
+                    .map(|g| g.name.clone())
+            })
+            .unwrap_or_default();
         let track_number = child.track.unwrap_or(0) as u32;
         let disc_number = child.disc_number.unwrap_or(1) as u32;
         let year = child.year.unwrap_or(0) as u32;
@@ -362,10 +387,15 @@ impl SubsonicProvider {
         let mut albums = Vec::with_capacity(count);
         for album_detail in details {
             let album_detail = album_detail?;
+            let release_type = release_type_tag(&album_detail);
             let mut tracks: Vec<Track> = album_detail
                 .song
                 .iter()
-                .map(|s| self.child_to_track(s))
+                .map(|s| {
+                    let mut track = self.child_to_track(s);
+                    track.release_type.clone_from(&release_type);
+                    track
+                })
                 .collect();
             Track::sort_by_disc_and_track(&mut tracks);
 
@@ -517,10 +547,15 @@ impl MusicProvider for SubsonicProvider {
                         .await
                         .map_err(self.err("getAlbum"))?;
 
+                    let release_type = release_type_tag(&album_detail);
                     let mut tracks: Vec<Track> = album_detail
                         .song
                         .iter()
-                        .map(|s| self.child_to_track(s))
+                        .map(|s| {
+                            let mut track = self.child_to_track(s);
+                            track.release_type.clone_from(&release_type);
+                            track
+                        })
                         .collect();
                     Track::sort_by_disc_and_track(&mut tracks);
 
@@ -1089,6 +1124,38 @@ fn song_to_tech_info(song: &opensubsonic::data::Child) -> crate::library::tech_i
         remote_path: song.path.clone().filter(|p| !p.is_empty()),
         composer: song.display_composer.clone().filter(|c| !c.is_empty()),
         ..TechInfo::default()
+    }
+}
+
+#[cfg(test)]
+mod release_type_tests {
+    use super::release_type_tag;
+    use opensubsonic::data::AlbumWithSongsId3;
+
+    fn album(extra: &str) -> AlbumWithSongsId3 {
+        serde_json::from_str(&format!(
+            r#"{{"id":"a","name":"n","songCount":0,"duration":0,"created":"2020-01-01T00:00:00Z"{extra}}}"#
+        ))
+        .expect("valid album JSON")
+    }
+
+    #[test]
+    fn release_types_and_compilation_flag_become_the_tag() {
+        assert_eq!(release_type_tag(&album("")), "");
+        assert_eq!(
+            release_type_tag(&album(r#","releaseTypes":["Album","Live"]"#)),
+            "Album; Live"
+        );
+        assert_eq!(
+            release_type_tag(&album(r#","releaseTypes":["Album"],"isCompilation":true"#)),
+            "Album; Compilation"
+        );
+        assert_eq!(
+            release_type_tag(&album(
+                r#","releaseTypes":["compilation"],"isCompilation":true"#
+            )),
+            "compilation"
+        );
     }
 }
 
