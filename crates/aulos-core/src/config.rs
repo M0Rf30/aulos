@@ -20,7 +20,7 @@ pub mod writer;
 pub const APP_ID: &str = "io.github.m0rf30.Aulos";
 
 /// Serializable configuration for an MPD server connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MpdConfigEntry {
     /// Unique provider ID (e.g., "mpd-home").
     pub id: String,
@@ -57,7 +57,7 @@ impl Default for MpdConfigEntry {
 }
 
 /// Serializable configuration for an OpenSubsonic/Navidrome server connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubsonicConfigEntry {
     /// Unique provider ID (e.g., "subsonic-home").
     pub id: String,
@@ -67,7 +67,9 @@ pub struct SubsonicConfigEntry {
     pub url: String,
     /// Subsonic username.
     pub username: String,
-    /// Password (stored as plaintext for now; keyring TODO).
+    /// Plaintext password, only present when the system keyring is
+    /// unavailable (the password is stored in the keyring first, and this
+    /// stays `None` once `password_in_keyring` is set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Whether the password is stored in the system keyring.
@@ -97,6 +99,35 @@ impl Default for SubsonicConfigEntry {
             transcoding_max_bitrate: None,
             transcoding_format: None,
         }
+    }
+}
+
+impl std::fmt::Debug for SubsonicConfigEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubsonicConfigEntry")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("password_in_keyring", &self.password_in_keyring)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .field("transcoding_max_bitrate", &self.transcoding_max_bitrate)
+            .field("transcoding_format", &self.transcoding_format)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MpdConfigEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MpdConfigEntry")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("password_in_keyring", &self.password_in_keyring)
+            .finish()
     }
 }
 
@@ -605,6 +636,11 @@ impl Config {
                 if let Err(e) = std::fs::rename(path, &bad) {
                     tracing::warn!("Could not move the invalid settings aside: {e}");
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600));
+                }
                 Config::default()
             }
         }
@@ -650,7 +686,15 @@ impl Config {
         tmp_name.push(".tmp");
         let tmp = dir.join(tmp_name);
         let result = (|| {
-            let mut file = std::fs::File::create(&tmp)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                // The file may hold plaintext passwords (keyring fallback).
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp)?;
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)

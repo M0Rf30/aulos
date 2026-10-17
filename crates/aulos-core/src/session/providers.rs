@@ -235,17 +235,17 @@ impl ProvidersState {
     /// Append an empty MPD server card to the settings form (not persisted
     /// until saved).
     pub fn add_mpd_card(&mut self) {
-        let idx = self.mpd_edit_states.len();
-        self.mpd_edit_states.push(MpdEditState::new_default(idx));
+        let state = MpdEditState::new_default(self.mpd_edit_states.iter().map(|s| s.id.as_str()));
+        self.mpd_edit_states.push(state);
         self.mpd_connection_status.push(None);
     }
 
     /// Append an empty Subsonic server card to the settings form (not
     /// persisted until saved).
     pub fn add_subsonic_card(&mut self) {
-        let idx = self.subsonic_edit_states.len();
-        self.subsonic_edit_states
-            .push(SubsonicEditState::new_default(idx));
+        let state =
+            SubsonicEditState::new_default(self.subsonic_edit_states.iter().map(|s| s.id.as_str()));
+        self.subsonic_edit_states.push(state);
         self.subsonic_connection_status.push(None);
     }
 
@@ -478,7 +478,13 @@ impl Session {
         password: &mut Option<String>,
         in_keyring: &mut bool,
     ) {
-        if let Some(pw) = password.as_deref().filter(|p| !p.is_empty()) {
+        if password.as_deref().is_none_or(str::is_empty) {
+            *password = None;
+            if let Err(e) = crate::credentials::delete_password(id) {
+                tracing::warn!("Failed to delete {kind} password for '{id}': {e}");
+            }
+            *in_keyring = false;
+        } else if let Some(pw) = password.as_deref() {
             match crate::credentials::store_password(id, pw) {
                 Ok(()) => {
                     *in_keyring = true;
@@ -523,10 +529,13 @@ impl Session {
         if i >= self.providers.mpd_edit_states.len() {
             return Reload::none();
         }
-        self.providers.mpd_edit_states.remove(i);
+        let removed = self.providers.mpd_edit_states.remove(i);
         self.providers.mpd_connection_status.remove(i);
         if i < self.config.config.mpd_servers.len() {
             self.config.config.mpd_servers.remove(i);
+        }
+        if let Err(e) = crate::credentials::delete_password(&removed.id) {
+            tracing::warn!("Failed to delete MPD password for '{}': {e}", removed.id);
         }
         tracing::info!("MPD server removed at index {i}");
         self.config.save();
@@ -576,6 +585,9 @@ impl Session {
         tracing::info!("Subsonic server removed at index {i}");
         self.config.save();
         if let Some(id) = removed_id {
+            if let Err(e) = crate::credentials::delete_password(&id) {
+                tracing::warn!("Failed to delete Subsonic password for '{id}': {e}");
+            }
             Self::forget_provider_cache(&id);
         }
         self.reinit_subsonic_providers()
@@ -783,7 +795,7 @@ mod tests {
             ("mpd-a".into(), "Studio".into()),
         ];
         session.providers.active_index = Some(0);
-        session.providers.mpd_edit_states = vec![MpdEditState::new_default(0)];
+        session.providers.mpd_edit_states = vec![MpdEditState::new_default([])];
         session.providers.mpd_edit_states[0].id = "mpd-a".into();
         session.providers.mpd_connection_status = vec![None];
 
@@ -803,7 +815,7 @@ mod tests {
     fn failed_connection_test_marks_the_server_until_a_test_passes() {
         let mut providers = test_session().providers;
         providers.provider_list = vec![("sub-a".into(), "Nimbus".into())];
-        providers.subsonic_edit_states = vec![SubsonicEditState::new_default(0)];
+        providers.subsonic_edit_states = vec![SubsonicEditState::new_default([])];
         providers.subsonic_edit_states[0].id = "sub-a".into();
         providers.subsonic_connection_status = vec![None];
 
@@ -819,7 +831,7 @@ mod tests {
     #[test]
     fn unregistered_server_with_an_error_still_gets_a_status() {
         let mut providers = test_session().providers;
-        providers.subsonic_edit_states = vec![SubsonicEditState::new_default(0)];
+        providers.subsonic_edit_states = vec![SubsonicEditState::new_default([])];
         providers.subsonic_edit_states[0].id = "sub-x".into();
         providers
             .provider_errors

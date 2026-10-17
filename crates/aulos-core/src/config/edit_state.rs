@@ -68,9 +68,9 @@ impl MpdEditState {
     }
 
     /// Create a new empty entry with a generated id.
-    pub fn new_default(index: usize) -> Self {
+    pub fn new_default<'a>(taken: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
-            id: format!("mpd-{index}"),
+            id: unique_id("mpd", taken),
             name: "MPD Server".to_string(),
             host: "localhost".to_string(),
             port: "6600".to_string(),
@@ -147,9 +147,9 @@ impl SubsonicEditState {
     }
 
     /// Create a new empty entry with a generated id.
-    pub fn new_default(index: usize) -> Self {
+    pub fn new_default<'a>(taken: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
-            id: format!("subsonic-{index}"),
+            id: unique_id("subsonic", taken),
             name: "Subsonic Server".to_string(),
             url: "https://".to_string(),
             username: String::new(),
@@ -159,6 +159,15 @@ impl SubsonicEditState {
             transcoding_format: None,
         }
     }
+}
+
+/// First `<prefix>-<n>` id not present in `taken`.
+fn unique_id<'a>(prefix: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
+    let taken: std::collections::HashSet<&str> = taken.into_iter().collect();
+    (0usize..)
+        .map(|n| format!("{prefix}-{n}"))
+        .find(|id| !taken.contains(id.as_str()))
+        .expect("unbounded range")
 }
 
 /// Whether a stored connection-test status string means "connected".
