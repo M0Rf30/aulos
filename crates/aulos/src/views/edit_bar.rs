@@ -57,7 +57,14 @@ pub fn begin(ctx: &Context) {
     }) else {
         return;
     };
-    ctx.memory_mut(|m| m.request_focus(id));
+    // Only when focus was actually lost: `request_focus` interrupts the IME
+    // composition, which egui-winit turns into hide-then-show of the soft
+    // keyboard, so a plain Paste would flash or re-open a dismissed keyboard.
+    ctx.memory_mut(|m| {
+        if m.focused() != Some(id) {
+            m.request_focus(id);
+        }
+    });
     let key = |key| Event::Key {
         key,
         physical_key: Some(key),
