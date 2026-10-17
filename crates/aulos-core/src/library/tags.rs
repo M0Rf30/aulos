@@ -23,8 +23,8 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatId, MediaInfo, Track, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{
-    Metadata, MetadataOptions, MetadataRevision, StandardTag, StandardVisualKey, Tag as SymTag,
-    Visual,
+    Metadata, MetadataOptions, MetadataRevision, RawValue, StandardTag, StandardVisualKey,
+    Tag as SymTag, Visual,
 };
 use symphonia::core::units::Duration as SymDuration;
 
@@ -352,6 +352,20 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
 
     for tag in raw {
         let Some(std) = tag.std.as_ref() else {
+            // RIFF INFO writers (ffmpeg, ...) store the track as `3/12`,
+            // which symphonia's RIFF map rejects as a plain number; the raw
+            // tag survives, so read the track number and total from it.
+            if matches!(tag.raw.key.to_ascii_uppercase().as_str(), "ITRK" | "IPRT")
+                && let RawValue::String(v) = &tag.raw.value
+                && let Some((number, total)) = v.split_once('/')
+            {
+                if let Ok(n) = number.trim().parse::<u32>() {
+                    out.track_number.get_or_insert(n);
+                }
+                if let Ok(t) = total.trim().parse::<u32>() {
+                    out.track_total.get_or_insert(t);
+                }
+            }
             continue;
         };
         match std {
@@ -460,6 +474,51 @@ fn apply_tags(raw: &[SymTag], out: &mut AudioTags) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mono 8 kHz 16-bit WAV with a RIFF `LIST`/`INFO` chunk of `entries`.
+    fn wav_with_info(entries: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        let mut info = b"INFO".to_vec();
+        for (id, value) in entries {
+            let mut text = value.as_bytes().to_vec();
+            text.push(0);
+            if text.len() % 2 == 1 {
+                text.push(0);
+            }
+            info.extend_from_slice(*id);
+            info.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            info.extend_from_slice(&text);
+        }
+        let mut body = b"WAVEfmt ".to_vec();
+        body.extend_from_slice(&16u32.to_le_bytes());
+        for field in [1u16, 1] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(&8000u32.to_le_bytes());
+        body.extend_from_slice(&16000u32.to_le_bytes());
+        for field in [2u16, 16] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&8u32.to_le_bytes());
+        body.extend_from_slice(&[0; 8]);
+        body.extend_from_slice(b"LIST");
+        body.extend_from_slice(&(info.len() as u32).to_le_bytes());
+        body.extend_from_slice(&info);
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&body);
+        wav
+    }
+
+    #[test]
+    fn riff_info_track_of_total_is_split() {
+        let path = std::env::temp_dir().join(format!("aulos-riff-itrk-{}.wav", std::process::id()));
+        fs::write(&path, wav_with_info(&[(b"INAM", "T"), (b"ITRK", "3/12")])).unwrap();
+        let tags = probe(&path, false).expect("probe wav").tags;
+        let _ = fs::remove_file(&path);
+        assert_eq!(tags.title.as_deref(), Some("T"));
+        assert_eq!((tags.track_number, tags.track_total), (Some(3), Some(12)));
+    }
 
     fn std_tag(std: StandardTag) -> SymTag {
         SymTag::new_from_parts("k", "v", Some(std))
