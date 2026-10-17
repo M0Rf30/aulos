@@ -551,6 +551,22 @@ impl LibraryDb {
     }
 
     /// Insert or update a track.
+    /// Open an explicit transaction so a run of [`Self::upsert_track`]
+    /// calls commits once instead of once per row. Pair with
+    /// [`Self::commit_batch`].
+    pub fn begin_batch(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch("BEGIN")
+            .map_err(|e| format!("begin batch: {e}"))
+    }
+
+    /// Commit the transaction opened by [`Self::begin_batch`].
+    pub fn commit_batch(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("commit batch: {e}"))
+    }
+
     #[tracing::instrument(skip(self, track), level = "debug")]
     pub fn upsert_track(&self, track: &Track, mtime: i64) -> Result<(), String> {
         self.conn

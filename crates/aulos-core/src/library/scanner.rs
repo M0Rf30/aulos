@@ -15,6 +15,9 @@ use walkdir::WalkDir;
 /// Scans music directories and populates the library database.
 pub struct LibraryScanner;
 
+/// Upserts per transaction during a full scan.
+const UPSERT_BATCH: usize = 200;
+
 impl LibraryScanner {
     /// Scan the given directories and upsert tracks into the database.
     /// Returns the number of new or updated tracks.
@@ -44,6 +47,8 @@ impl LibraryScanner {
             progress.add_total(found);
         }
 
+        db.begin_batch()?;
+        let mut pending = 0usize;
         for dir in roots {
             progress.set_root(dir);
             let mut complete = true;
@@ -94,6 +99,12 @@ impl LibraryScanner {
                             tracing::error!("Failed to insert track {}: {e}", path.display());
                         } else {
                             count += 1;
+                            pending += 1;
+                            if pending >= UPSERT_BATCH {
+                                db.commit_batch()?;
+                                db.begin_batch()?;
+                                pending = 0;
+                            }
                         }
                     }
                     Err(e) => {
@@ -106,6 +117,7 @@ impl LibraryScanner {
             }
         }
 
+        db.commit_batch()?;
         let removed = db.remove_missing_tracks(&complete_roots)?;
         if removed > 0 {
             tracing::info!("Removed {removed} missing tracks from library");
