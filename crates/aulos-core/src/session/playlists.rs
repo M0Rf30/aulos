@@ -51,6 +51,12 @@ pub enum PlaylistEvent {
     /// Saved smart playlists (with resolved track counts); `Err` when the
     /// query (or the edit before it) failed and the loaded ones stay.
     SmartLoaded(Result<Vec<SmartPlaylist>, String>),
+    /// Saving the edited smart playlist failed; it comes back so the editor
+    /// reopens on the user's edit.
+    SmartSaveFailed {
+        playlist: Box<SmartPlaylist>,
+        reason: String,
+    },
     /// Resolved tracks of the selected smart playlist (detail view), and
     /// how many tracks its rules match before the row limit cuts them.
     SmartTracksLoaded { tracks: Vec<Track>, total: usize },
@@ -205,14 +211,28 @@ impl PlaylistsState {
         let playlist = state.playlist.clone();
         self.smart_playlist_editor = None;
         let db_path = crate::paths::library_db_path();
-        smart_list_effect("Save smart playlist failed", move || {
-            let db = LibraryDb::open(&db_path)?;
-            if playlist.id == 0 {
-                db.create_smart_playlist(&playlist)?;
-            } else {
-                db.update_smart_playlist(&playlist)?;
+        Effect::future(async move {
+            let edited = playlist.clone();
+            let result = crate::task::spawn_blocking(move || {
+                let db = LibraryDb::open(&db_path)?;
+                if playlist.id == 0 {
+                    db.create_smart_playlist(&playlist)?;
+                } else {
+                    db.update_smart_playlist(&playlist)?;
+                }
+                db.list_smart_playlists()
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|result| result)
+            .inspect_err(|e| tracing::warn!("Save smart playlist failed: {e}"));
+            match result {
+                Ok(list) => PlaylistEvent::SmartLoaded(Ok(list)),
+                Err(reason) => PlaylistEvent::SmartSaveFailed {
+                    playlist: Box::new(edited),
+                    reason,
+                },
             }
-            db.list_smart_playlists()
         })
     }
 
@@ -476,6 +496,14 @@ impl Session {
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
             PlaylistEvent::SmartLoaded(Err(reason)) => {
+                PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
+            }
+            PlaylistEvent::SmartSaveFailed { playlist, reason } => {
+                // Reopen on the edit, unless the user already opened another.
+                if self.playlists.smart_playlist_editor.is_none() {
+                    self.playlists.smart_playlist_editor =
+                        Some(EditorState::from_existing(*playlist));
+                }
                 PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
             }
             PlaylistEvent::SmartTracksLoaded { tracks, total } => {

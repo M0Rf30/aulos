@@ -221,6 +221,9 @@ pub struct LibraryState {
     pub covers: CoverStore,
     /// Whether a library scan/reload is in flight.
     pub scanning: bool,
+    /// A local scan's work is still running. Unlike `scanning`, a `Loaded`
+    /// reload does not clear it; only the scan's own completion does.
+    pub scan_running: bool,
     /// A watcher batch changed tracks while a scan was running: reload
     /// when that scan completes.
     pub reload_after_scan: bool,

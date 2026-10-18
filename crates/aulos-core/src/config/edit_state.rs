@@ -20,6 +20,9 @@ pub struct MpdEditState {
     pub host: String,
     pub port: String,
     pub password: String,
+    /// The password lives in the keyring but could not be read; while the
+    /// field is left empty the stored reference is kept on save.
+    pub keyring_unread: bool,
 }
 
 impl MpdEditState {
@@ -28,14 +31,11 @@ impl MpdEditState {
     /// When `password_in_keyring` is set the password is fetched from the
     /// system keyring so the edit form can show (and round-trip) the real value.
     pub fn from_config(entry: &MpdConfigEntry) -> Self {
-        let password = if entry.password_in_keyring {
-            crate::credentials::retrieve_password(&entry.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        } else {
-            entry.password.clone().unwrap_or_default()
-        };
+        let (password, keyring_unread) = load_password(
+            entry.password_in_keyring,
+            entry.password.as_deref(),
+            crate::credentials::retrieve_password(&entry.id),
+        );
 
         Self {
             id: entry.id.clone(),
@@ -43,6 +43,7 @@ impl MpdEditState {
             host: entry.host.clone(),
             port: entry.port.to_string(),
             password,
+            keyring_unread,
         }
     }
 
@@ -61,9 +62,10 @@ impl MpdEditState {
             } else {
                 Some(self.password.clone())
             },
-            // Always reset to false so the startup migration path stores it in
-            // the keyring (or the plaintext fallback is used if unavailable).
-            password_in_keyring: false,
+            // Reset to false so the startup migration path stores a typed
+            // password in the keyring (or the plaintext fallback is used if
+            // unavailable); an unreadable, untouched one keeps its reference.
+            password_in_keyring: self.keyring_unread && self.password.is_empty(),
         }
     }
 
@@ -75,6 +77,7 @@ impl MpdEditState {
             host: "localhost".to_string(),
             port: "6600".to_string(),
             password: String::new(),
+            keyring_unread: false,
         }
     }
 }
@@ -87,6 +90,8 @@ pub struct SubsonicEditState {
     pub url: String,
     pub username: String,
     pub password: String,
+    /// See [`MpdEditState::keyring_unread`].
+    pub keyring_unread: bool,
     pub accept_invalid_certs: bool,
     /// Transcoding max bitrate (None = original quality).
     pub transcoding_max_bitrate: Option<u32>,
@@ -100,14 +105,11 @@ impl SubsonicEditState {
     /// When `password_in_keyring` is set the password is fetched from the
     /// system keyring so the edit form can show (and round-trip) the real value.
     pub fn from_config(entry: &SubsonicConfigEntry) -> Self {
-        let password = if entry.password_in_keyring {
-            crate::credentials::retrieve_password(&entry.id)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        } else {
-            entry.password.clone().unwrap_or_default()
-        };
+        let (password, keyring_unread) = load_password(
+            entry.password_in_keyring,
+            entry.password.as_deref(),
+            crate::credentials::retrieve_password(&entry.id),
+        );
 
         Self {
             id: entry.id.clone(),
@@ -115,6 +117,7 @@ impl SubsonicEditState {
             url: entry.url.clone(),
             username: entry.username.clone(),
             password,
+            keyring_unread,
             accept_invalid_certs: entry.accept_invalid_certs,
             transcoding_max_bitrate: entry.transcoding_max_bitrate,
             transcoding_format: entry.transcoding_format.clone(),
@@ -137,9 +140,10 @@ impl SubsonicEditState {
             } else {
                 Some(self.password.clone())
             },
-            // Always reset to false so the startup migration path stores it in
-            // the keyring (or the plaintext fallback is used if unavailable).
-            password_in_keyring: false,
+            // Reset to false so the startup migration path stores a typed
+            // password in the keyring (or the plaintext fallback is used if
+            // unavailable); an unreadable, untouched one keeps its reference.
+            password_in_keyring: self.keyring_unread && self.password.is_empty(),
             accept_invalid_certs: self.accept_invalid_certs,
             transcoding_max_bitrate: self.transcoding_max_bitrate,
             transcoding_format: self.transcoding_format.clone(),
@@ -154,10 +158,26 @@ impl SubsonicEditState {
             url: "https://".to_string(),
             username: String::new(),
             password: String::new(),
+            keyring_unread: false,
             accept_invalid_certs: false,
             transcoding_max_bitrate: None,
             transcoding_format: None,
         }
+    }
+}
+
+/// The edit-form password and whether it is an unreadable keyring entry.
+fn load_password(
+    in_keyring: bool,
+    plain: Option<&str>,
+    retrieved: Result<Option<String>, impl Sized>,
+) -> (String, bool) {
+    if !in_keyring {
+        return (plain.unwrap_or_default().to_owned(), false);
+    }
+    match retrieved {
+        Ok(Some(password)) => (password, false),
+        _ => (String::new(), true),
     }
 }
 
@@ -168,4 +188,32 @@ fn unique_id<'a>(prefix: &str, taken: impl IntoIterator<Item = &'a str>) -> Stri
         .map(|n| format!("{prefix}-{n}"))
         .find(|id| !taken.contains(id.as_str()))
         .expect("unbounded range")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_keyring_password_keeps_its_reference() {
+        let (password, unread) = load_password(true, None, Err::<Option<String>, _>(()));
+        assert!(password.is_empty() && unread);
+        let mut state = MpdEditState::new_default([]);
+        state.keyring_unread = unread;
+        assert!(state.to_config().password_in_keyring);
+        state.password = "typed".into();
+        assert!(!state.to_config().password_in_keyring);
+    }
+
+    #[test]
+    fn readable_passwords_are_not_flagged() {
+        assert_eq!(
+            load_password(true, None, Ok::<_, ()>(Some("k".into()))),
+            ("k".into(), false)
+        );
+        assert_eq!(
+            load_password(false, Some("p"), Ok::<_, ()>(None)),
+            ("p".into(), false)
+        );
+    }
 }

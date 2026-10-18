@@ -96,7 +96,7 @@ impl RuleField {
             Self::Album => "album",
             Self::Genre => "genre",
             Self::Year => "year",
-            Self::Rating => "rating",
+            Self::Rating => "COALESCE(rating, 0)",
             Self::Favorite => "is_favorite",
             Self::DurationSecs => "(duration_ms / 1000)",
             Self::Bitrate => "bitrate",
@@ -224,7 +224,7 @@ pub(crate) fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::R
 /// A column [`SmartPlaylist::order_by`] can sort resolved tracks on.
 ///
 /// `Random` maps to `ORDER BY RANDOM()`; `RecentlyAdded` maps to the
-/// `mtime` column (there is no `date_added` column to use instead).
+/// `added_at` column (when the track entered the library).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderField {
     Title,
@@ -267,7 +267,7 @@ impl OrderField {
             Self::Rating => "rating",
             Self::DurationSecs => "duration_ms",
             Self::Random => "RANDOM()",
-            Self::RecentlyAdded => "mtime",
+            Self::RecentlyAdded => "added_at",
             Self::PlayCount => PLAY_COUNT_EXPR,
             Self::LastPlayed => LAST_PLAYED_EXPR,
         }

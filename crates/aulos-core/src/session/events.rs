@@ -151,9 +151,12 @@ pub enum SessionNotice {
     /// session already rolled back what it had applied optimistically.
     ProviderActionFailed(String),
     /// A provider (MPD or Subsonic server) could not be connected.
+    /// `unauthorized`: the Subsonic server rejected the credentials, so the
+    /// UI should ask for new ones instead of offering a retry.
     ProviderConnectFailed {
         provider: String,
         reason: String,
+        unauthorized: bool,
     },
     /// Playlist files were imported, one summary per file.
     PlaylistsImported(Vec<ImportSummary>),
@@ -285,14 +288,15 @@ impl From<ProviderReinit> for SessionUpdate {
     fn from(reinit: ProviderReinit) -> Self {
         let ProviderReinit { reload, errors } = reinit;
         let mut update = Self::none();
-        update.notices.extend(
-            errors
-                .into_iter()
-                .map(|(provider, reason)| SessionNotice::ProviderConnectFailed {
+        update
+            .notices
+            .extend(errors.into_iter().map(|(provider, reason)| {
+                SessionNotice::ProviderConnectFailed {
                     provider,
                     reason,
-                }),
-        );
+                    unauthorized: false,
+                }
+            }));
         update.also(reload)
     }
 }
@@ -659,10 +663,16 @@ impl Session {
                 self.apply_properties_event(event);
                 SessionUpdate::none()
             }
-            SessionEvent::Provider(event) => {
-                self.providers.apply_event(event);
-                SessionUpdate::none()
-            }
+            SessionEvent::Provider(event) => match self.providers.apply_event(event) {
+                Some((provider, reason)) => {
+                    SessionUpdate::notice(SessionNotice::ProviderConnectFailed {
+                        provider,
+                        reason,
+                        unauthorized: true,
+                    })
+                }
+                None => SessionUpdate::none(),
+            },
             SessionEvent::Convert(event) => self.convert.apply_event(event).into(),
             SessionEvent::ArtistInfo(outcome) => {
                 let mut update = SessionUpdate::none();
@@ -752,6 +762,7 @@ impl Session {
                         SessionUpdate::notice(SessionNotice::ProviderConnectFailed {
                             provider,
                             reason,
+                            unauthorized: false,
                         })
                     }
                     None => SessionUpdate::none(),

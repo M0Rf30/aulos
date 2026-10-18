@@ -1336,8 +1336,6 @@ settings-reduce-motion-title = Bewegung reduzieren
 settings-reduce-motion-desc = Schaltet Überblendungen, Verschiebungen und andere Oberflächenanimationen aus.
 settings-ui-scale-title = Oberflächengröße
 settings-ui-scale-desc = Skaliert das gesamte Fenster. Strg + = / Strg + − / Strg + 0 ändern sie überall.
-settings-grid-scale-title = Größe der Rasterkarten
-settings-grid-scale-desc = Größe der Karten in den Rastern für Alben, Künstler, Genres, Radio und Podcasts.
 
 # Settings page: startup
 settings-startup-last-visited = Zuletzt besuchte Seite

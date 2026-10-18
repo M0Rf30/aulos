@@ -1338,8 +1338,6 @@ settings-reduce-motion-title = Reduzir movimento
 settings-reduce-motion-desc = Desativa fades, deslizamentos e outras animações da interface.
 settings-ui-scale-title = Tamanho da interface
 settings-ui-scale-desc = Dimensiona a janela inteira. Ctrl + = / Ctrl + − / Ctrl + 0 alteram em qualquer lugar.
-settings-grid-scale-title = Tamanho dos cartões da grade
-settings-grid-scale-desc = Tamanho dos cartões nas grades de álbuns, artistas, gêneros, rádio e podcasts.
 
 # Settings page: startup
 settings-startup-last-visited = Última página visitada

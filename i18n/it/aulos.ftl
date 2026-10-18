@@ -1337,8 +1337,6 @@ settings-reduce-motion-title = Riduci movimento
 settings-reduce-motion-desc = Disattiva dissolvenze, scorrimenti e altre animazioni dell'interfaccia.
 settings-ui-scale-title = Dimensione dell'interfaccia
 settings-ui-scale-desc = Ridimensiona l'intera finestra. Ctrl + = / Ctrl + − / Ctrl + 0 la cambiano ovunque.
-settings-grid-scale-title = Dimensione delle schede nella griglia
-settings-grid-scale-desc = Dimensione delle schede nelle griglie di album, artisti, generi, radio e podcast.
 
 # Settings page: startup
 settings-startup-last-visited = Ultima pagina visitata

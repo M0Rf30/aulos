@@ -326,7 +326,7 @@ impl Session {
                 // A second scan racing the running one would supersede it
                 // and reset its progress; the running scan's completion
                 // already reloads the library.
-                if self.library.scanning {
+                if self.library.scan_running {
                     tracing::debug!("Library scan already running; not starting another");
                     return Reload::none();
                 }
@@ -391,6 +391,11 @@ impl Session {
         &mut self,
         work: impl Future<Output = usize> + Send + 'static,
     ) -> Effect<LibraryEvent> {
+        if self.library.scan_running {
+            // Dropping `work` unpolled: the running scan's completion reloads.
+            return Effect::none();
+        }
+        self.library.scan_running = true;
         self.library.scanning = true;
         self.library.scan_progress.reset();
         let generation = self.library.begin_reload_generation();
@@ -532,6 +537,7 @@ impl Session {
                 provider_id,
                 count,
             } => {
+                self.library.scan_running = false;
                 if self.is_stale_reload(generation, &provider_id) {
                     // A reload superseded the scan while it ran, so what it
                     // loaded may predate the scan's changes: the real

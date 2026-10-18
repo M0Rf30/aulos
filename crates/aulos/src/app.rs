@@ -264,10 +264,6 @@ impl App {
         theme::install_fonts(&cc.egui_ctx);
         // Zoom keys are handled in `shortcuts` so the choice persists.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        if std::env::var_os("AULOS_SMOKE").is_some() {
-            // Smoke shots are compared pixel for pixel with the design: 1 logical px = 1 physical px.
-            // Real runs keep the display's native scale factor; `logic` cancels it here.
-        }
         let (tx, rx) = mpsc::channel();
         let (app_tx, app_rx) = mpsc::channel();
         let (session, init_errors) = Session::bootstrap();
@@ -334,7 +330,7 @@ impl App {
         theme::apply(&app.ctx, &app.pal);
         app.apply_zoom();
         for (name, reason) in &init_errors {
-            views::overlays::on_connect_failed(&mut app, name, reason);
+            views::overlays::on_connect_failed(&mut app, name, reason, false);
         }
         views::settings::notify_folders_needing_access(&mut app);
         app.start_media_session(native_window(cc));
@@ -438,8 +434,12 @@ impl App {
                 "app-toast-action-failed",
                 reason = reason.to_string()
             )),
-            SessionNotice::ProviderConnectFailed { provider, reason } => {
-                views::overlays::on_connect_failed(self, provider, reason);
+            SessionNotice::ProviderConnectFailed {
+                provider,
+                reason,
+                unauthorized,
+            } => {
+                views::overlays::on_connect_failed(self, provider, reason, *unauthorized);
             }
             SessionNotice::PlaylistsImported(files) => self.toast(aulos_core::fl!(
                 "app-toast-playlists-imported",
@@ -1174,7 +1174,8 @@ impl App {
         if fwd && !viz_open {
             self.go_forward();
         }
-        if space {
+        // Space on a focused button presses it; it must not also toggle playback.
+        if space && ctx.memory(|m| m.focused()).is_none() {
             self.toggle_play();
         }
         // The visualizer owns the rest of the keys (and covers every page).
@@ -1257,6 +1258,13 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         self.session.set_window_focused(focused);
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        #[cfg(feature = "visualizer")]
+        if let Some(viz) = &self.viz {
+            viz.set_paused(minimized);
+        }
+        #[cfg(not(feature = "visualizer"))]
+        let _ = minimized;
         self.session.set_seeking(self.seek_preview.is_some());
         while let Ok(event) = self.rx.try_recv() {
             let update = self.session.apply_session_event(event);

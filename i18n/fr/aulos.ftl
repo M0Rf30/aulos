@@ -1337,8 +1337,6 @@ settings-reduce-motion-title = Réduire les animations
 settings-reduce-motion-desc = Désactive les fondus, glissements et autres animations de l’interface.
 settings-ui-scale-title = Taille de l’interface
 settings-ui-scale-desc = Redimensionne toute la fenêtre. Ctrl + = / Ctrl + − / Ctrl + 0 la modifient partout.
-settings-grid-scale-title = Taille des cartes de la grille
-settings-grid-scale-desc = Taille des cartes dans les grilles d’albums, d’artistes, de genres, de radios et de podcasts.
 
 # Settings page: startup
 settings-startup-last-visited = Dernière page visitée

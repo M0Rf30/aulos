@@ -260,7 +260,14 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     std::fs::create_dir_all(&dir).ok()?;
     let file_path = dir.join(format!("{track_id}-{hash:016x}.{ext}"));
     if !file_path.exists() {
-        std::fs::write(&file_path, &bytes).ok()?;
+        // Write then rename so a crash never leaves a truncated cover that
+        // `exists()` would trust.
+        let tmp = file_path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).ok()?;
+        if std::fs::rename(&tmp, &file_path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return None;
+        }
     }
     crate::path_to_file_uri(&file_path)
 }

@@ -47,6 +47,7 @@ fn send_bounded(
     sender: &SyncSender<Vec<i32>>,
     mut payload: Vec<i32>,
     timeout: Duration,
+    stop_flag: Option<&AtomicBool>,
 ) -> SendOutcome {
     let deadline = Instant::now() + timeout;
     loop {
@@ -54,7 +55,9 @@ fn send_bounded(
             Ok(()) => return SendOutcome::Sent,
             Err(TrySendError::Disconnected(_)) => return SendOutcome::Disconnected,
             Err(TrySendError::Full(returned)) => {
-                if Instant::now() >= deadline {
+                if Instant::now() >= deadline
+                    || stop_flag.is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
                     return SendOutcome::TimedOut;
                 }
                 payload = returned;
@@ -207,7 +210,7 @@ impl DopOutput {
         for chunk in primer_samples.chunks(chunk_size) {
             // Bounded wait so a stalled callback can't hang priming forever.
             if !matches!(
-                send_bounded(&tx, chunk.to_vec(), Duration::from_millis(500)),
+                send_bounded(&tx, chunk.to_vec(), Duration::from_millis(500), None),
                 SendOutcome::Sent
             ) {
                 tracing::warn!("DoP primer send stalled; continuing");
@@ -240,7 +243,12 @@ impl DopOutput {
         // to playback rate). If the output callback stalls (device xrun or
         // disconnect), don't block forever — drop this buffer so the playback
         // loop stays responsive to stop/seek and the device can be released.
-        match send_bounded(sender, samples.to_vec(), Duration::from_millis(500)) {
+        match send_bounded(
+            sender,
+            samples.to_vec(),
+            Duration::from_millis(500),
+            self.stop_flag.as_deref(),
+        ) {
             SendOutcome::Sent => Ok(samples.len()),
             SendOutcome::TimedOut => Ok(0),
             SendOutcome::Disconnected => Err(PlayerError("DoP output stream closed".to_owned())),
@@ -304,7 +312,7 @@ impl DopOutput {
             // chunks queued (each consumed within one sample), so wait
             // briefly for room, but never block shutdown if the callback
             // isn't draining.
-            let _ = send_bounded(sender, reset_samples, Duration::from_millis(200));
+            let _ = send_bounded(sender, reset_samples, Duration::from_millis(200), None);
 
             std::thread::sleep(std::time::Duration::from_millis(150));
 
@@ -340,7 +348,7 @@ mod tests {
     #[test]
     fn send_bounded_delivers_when_space_available() {
         let (tx, rx) = sync_channel::<Vec<i32>>(1);
-        let outcome = send_bounded(&tx, vec![1, 2, 3], Duration::from_millis(50));
+        let outcome = send_bounded(&tx, vec![1, 2, 3], Duration::from_millis(50), None);
         assert!(matches!(outcome, SendOutcome::Sent));
         assert_eq!(rx.recv().unwrap(), vec![1, 2, 3]);
     }
@@ -350,15 +358,26 @@ mod tests {
         let (tx, _rx) = sync_channel::<Vec<i32>>(1);
         // Fill the one slot; keep the receiver alive but never drain it.
         tx.try_send(vec![0]).unwrap();
-        let outcome = send_bounded(&tx, vec![1], Duration::from_millis(20));
+        let outcome = send_bounded(&tx, vec![1], Duration::from_millis(20), None);
         assert!(matches!(outcome, SendOutcome::TimedOut));
+    }
+
+    #[test]
+    fn send_bounded_returns_promptly_when_stopping() {
+        let (tx, _rx) = sync_channel::<Vec<i32>>(1);
+        tx.try_send(vec![0]).unwrap();
+        let stop = AtomicBool::new(true);
+        let start = Instant::now();
+        let outcome = send_bounded(&tx, vec![1], Duration::from_secs(5), Some(&stop));
+        assert!(matches!(outcome, SendOutcome::TimedOut));
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
     fn send_bounded_detects_disconnect() {
         let (tx, rx) = sync_channel::<Vec<i32>>(1);
         drop(rx);
-        let outcome = send_bounded(&tx, vec![1], Duration::from_millis(20));
+        let outcome = send_bounded(&tx, vec![1], Duration::from_millis(20), None);
         assert!(matches!(outcome, SendOutcome::Disconnected));
     }
 

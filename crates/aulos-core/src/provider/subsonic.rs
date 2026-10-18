@@ -63,24 +63,56 @@ fn describe_error(url: &str, op: &str, error: &opensubsonic::Error) -> String {
 /// Characters of a response body kept in a parse error shown to the user.
 const PARSE_ERROR_CHARS: usize = 80;
 
+/// Whether the server turned the credentials down: a Subsonic API error 40
+/// (wrong username or password), 41 (token auth unsupported), 42/43 (auth
+/// mechanism) or 44 (invalid API key), or an HTTP 401/403 from a proxy or
+/// the server in front of it.
+fn is_auth_rejection(error: &opensubsonic::Error) -> bool {
+    use opensubsonic::Error;
+    match error {
+        Error::Api(api) => (40..=44).contains(&api.code),
+        Error::Http(e) => e.status().is_some_and(|s| matches!(s.as_u16(), 401 | 403)),
+        _ => false,
+    }
+}
+
+/// The user-facing message of `error` (see [`describe_error`]) as the
+/// typed failure: [`ProviderError::Unauthorized`] for a credential
+/// rejection, `other` of the message for everything else.
+fn classify(
+    url: &str,
+    op: &str,
+    error: &opensubsonic::Error,
+    other: fn(String) -> ProviderError,
+) -> ProviderError {
+    let message = describe_error(url, op, error);
+    if is_auth_rejection(error) {
+        ProviderError::Unauthorized(message)
+    } else {
+        other(message)
+    }
+}
+
 /// Checks that a server answers `ping` with the given credentials: the
-/// settings card's "Test connection". `Err` is a message for the user.
+/// settings card's "Test connection".
 ///
 /// # Errors
-/// The classified failure (see [`describe_error`]).
+/// [`ProviderError::Unauthorized`] when the server rejects the credentials;
+/// otherwise [`ProviderError::Other`] carrying the classified message (see
+/// [`describe_error`]).
 pub async fn test_connection(
     url: &str,
     username: &str,
     password: &str,
     accept_invalid_certs: bool,
-) -> Result<(), String> {
-    crate::http::check_mixed_content(url)?;
+) -> Result<(), ProviderError> {
+    crate::http::check_mixed_content(url).map_err(ProviderError::Other)?;
     let client = build_client(url, username, password, accept_invalid_certs)
-        .map_err(|e| format!("Client: {e}"))?;
+        .map_err(|e| ProviderError::Other(format!("Client: {e}")))?;
     client
         .ping()
         .await
-        .map_err(|e| describe_error(url, "ping", &e))
+        .map_err(|e| classify(url, "ping", &e, ProviderError::Other))
 }
 
 /// The HTTP client of the API and cover requests, with a request timeout.
@@ -287,7 +319,7 @@ impl SubsonicProvider {
     /// Maps a failed request of operation `op` to the error shown to the
     /// user.
     fn err(&self, op: &'static str) -> impl FnOnce(opensubsonic::Error) -> ProviderError + '_ {
-        move |e| ProviderError::Io(describe_error(&self.config.url, op, &e))
+        move |e| classify(&self.config.url, op, &e, ProviderError::Io)
     }
 
     /// Validate connectivity by sending a `ping` request.
@@ -296,7 +328,7 @@ impl SubsonicProvider {
         self.client
             .ping()
             .await
-            .map_err(|e| ProviderError::NotConnected(describe_error(&self.config.url, "ping", &e)))
+            .map_err(|e| classify(&self.config.url, "ping", &e, ProviderError::NotConnected))
     }
 
     /// Convert an opensubsonic `Child` (song) to our `Track` model.
@@ -1300,6 +1332,39 @@ mod tech_info_tests {
     }
 }
 
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use opensubsonic::{Error, SubsonicApiError};
+
+    fn api(code: i32) -> Error {
+        Error::Api(SubsonicApiError {
+            code,
+            message: "nope".into(),
+            help_url: None,
+        })
+    }
+
+    #[test]
+    fn credential_api_codes_map_to_unauthorized() {
+        for code in [40, 41, 42, 43, 44] {
+            let error = classify("http://h", "ping", &api(code), ProviderError::Io);
+            assert!(matches!(error, ProviderError::Unauthorized(_)), "{code}");
+        }
+    }
+
+    #[test]
+    fn other_api_codes_keep_the_callers_error() {
+        for code in [0, 10, 20, 30, 50, 60, 70] {
+            let error = classify("http://h", "ping", &api(code), ProviderError::Io);
+            assert!(matches!(error, ProviderError::Io(_)), "{code}");
+        }
+        let parse = Error::Parse("x".into());
+        let error = classify("http://h", "ping", &parse, ProviderError::NotConnected);
+        assert!(matches!(error, ProviderError::NotConnected(_)));
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod connection_tests {
     use super::*;
@@ -1341,7 +1406,20 @@ mod connection_tests {
         let error = test_connection(&url, "u", "bad", false)
             .await
             .expect_err("rejected");
-        assert!(error.contains("Wrong username or password"), "{error}");
+        assert!(matches!(error, ProviderError::Unauthorized(_)), "{error:?}");
+        assert!(
+            error.to_string().contains("Wrong username or password"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_401_is_a_credential_rejection() {
+        let url = serve(vec![("401 Unauthorized", "")]).await;
+        let error = test_connection(&url, "u", "p", false)
+            .await
+            .expect_err("unauthorized");
+        assert!(matches!(error, ProviderError::Unauthorized(_)), "{error:?}");
     }
 
     #[tokio::test]
@@ -1350,6 +1428,8 @@ mod connection_tests {
         let error = test_connection(&url, "u", "p", false)
             .await
             .expect_err("unavailable");
+        assert!(matches!(error, ProviderError::Other(_)), "{error:?}");
+        let error = error.to_string();
         assert!(error.contains("503"), "{error}");
         assert!(error.contains("127.0.0.1"), "{error}");
     }

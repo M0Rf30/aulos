@@ -85,7 +85,6 @@ pub fn sheet_extent(app: &App, content: egui::Rect, top_gap: f32) -> (f32, f32, 
     }
 }
 
-/// Starts whatever loading the page of `route` needs.
 /// The index a dragged row ends up at when it is dropped into insert `slot`
 /// (the gap before row `slot`; `n` is the gap after the last row), or `None`
 /// when the drop leaves it where it was. Removing the row first shifts every
@@ -95,6 +94,7 @@ pub fn drop_target(from: usize, slot: usize) -> Option<usize> {
     (to != from).then_some(to)
 }
 
+/// Starts whatever loading the page of `route` needs.
 pub fn enter(app: &mut App, route: &Route) {
     match route {
         Route::Home => home::enter(app),

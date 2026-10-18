@@ -105,6 +105,11 @@ pub mod keywords {
             fl!("party-mode"),
             fl!("party-mode-description"),
             fl!("party-genres"),
+        ]
+    }
+
+    pub fn desktop() -> Vec<String> {
+        vec![
             fl!("settings-desktop"),
             fl!("settings-desktop-description"),
             fl!("notify-track-change"),

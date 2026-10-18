@@ -26,7 +26,7 @@ use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use host::Host;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use web_time::Instant;
@@ -104,6 +104,8 @@ struct Shared {
     published: Mutex<Published>,
     /// Wanted render size, `width << 32 | height`.
     want: AtomicU64,
+    /// Set while the window is minimized: the loop renders nothing.
+    paused: AtomicBool,
 }
 
 /// A snapshot for drawing, see [`Viz::poll`].
@@ -148,6 +150,7 @@ impl Viz {
         let shared = Arc::new(Shared {
             published: Mutex::new(Published::default()),
             want: AtomicU64::new(pack(fit(size))),
+            paused: AtomicBool::new(false),
         });
         let (commands, rx) = mpsc::channel();
         let host = Host::start(Inputs {
@@ -172,6 +175,11 @@ impl Viz {
     /// Sends a command to the render loop.
     pub fn send(&self, command: VizCommand) {
         let _ = self.commands.send(command);
+    }
+
+    /// Stops rendering while the window is minimized.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Relaxed);
     }
 
     /// Tells the loop how many physical pixels the view covers.
@@ -586,6 +594,9 @@ impl Loop {
         let _ = self.renderer.device.poll(wgpu::PollType::Poll);
         while let Ok(command) = self.commands.try_recv() {
             self.renderer.command(command);
+        }
+        if self.shared.paused.load(Ordering::Relaxed) {
+            return;
         }
         let want = unpack(self.shared.want.load(Ordering::Relaxed));
         if want != self.wanted_since.0 {

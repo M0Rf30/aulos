@@ -46,10 +46,13 @@ impl fmt::Display for ProviderType {
 }
 
 /// Errors from provider operations.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
     /// The provider is not connected or not available.
     NotConnected(String),
+    /// The server rejected the credentials (a Subsonic API error 40-44, or
+    /// HTTP 401/403): signing in again is the way out, not retrying.
+    Unauthorized(String),
     /// A network or I/O error occurred.
     Io(String),
     /// The operation is not supported by this provider.
@@ -64,6 +67,7 @@ impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotConnected(msg) => write!(f, "not connected: {msg}"),
+            Self::Unauthorized(msg) => write!(f, "{msg}"),
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
             Self::NotSupported(msg) => write!(f, "not supported: {msg}"),
             Self::Database(msg) => write!(f, "database error: {msg}"),

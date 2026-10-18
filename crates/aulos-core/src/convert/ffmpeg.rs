@@ -202,9 +202,25 @@ impl SampleSink for FfmpegSink {
         for &sample in interleaved {
             buf.extend_from_slice(&sample.to_le_bytes());
         }
-        stdin
-            .write_all(&buf)
-            .map_err(|e| ConvertError::Encode(format!("writing PCM to ffmpeg failed: {e}")))?;
+        if let Err(e) = stdin.write_all(&buf) {
+            // ffmpeg most likely died early (broken pipe); its stderr holds
+            // the real reason. Reap it and attach the text.
+            self.stdin = None;
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.finished = true;
+            let detail = self
+                .stderr_thread
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            let detail = detail.trim();
+            return Err(ConvertError::Encode(if detail.is_empty() {
+                format!("writing PCM to ffmpeg failed: {e}")
+            } else {
+                format!("writing PCM to ffmpeg failed: {e}: {detail}")
+            }));
+        }
         Ok(())
     }
 

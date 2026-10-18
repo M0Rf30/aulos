@@ -125,11 +125,9 @@ impl Sec {
             ]
             .concat(),
             Sec::Sources => terms(&aulos_core::fl!("settings-kw-sources")),
-            // `playback_extras()` lists the fade/auto-play/party strings first and the
-            // desktop strings (notifications, suspend, background) from index 9 on.
             Sec::Playback => [
                 keywords::playback(),
-                keywords::playback_extras().into_iter().take(9).collect(),
+                keywords::playback_extras(),
                 terms(&aulos_core::fl!("settings-kw-playback")),
             ]
             .concat(),
@@ -156,7 +154,7 @@ impl Sec {
             ]
             .concat(),
             Sec::Desktop => [
-                keywords::playback_extras().into_iter().skip(9).collect(),
+                keywords::desktop(),
                 terms(&aulos_core::fl!("settings-kw-desktop")),
             ]
             .concat(),
@@ -254,7 +252,12 @@ pub struct State {
     acoustid_input: String,
     eq_name: String,
     eq_search: String,
+    /// Last AutoEQ search: query, index size, and the (name, source, path) of
+    /// the first nine matches (`None` while the query is too short).
+    eq_results: Option<EqResults>,
 }
+
+type EqResults = (String, usize, Option<Vec<(String, String, String)>>);
 
 impl State {
     fn sender(&mut self) -> Sender<Msg> {
@@ -2776,14 +2779,26 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
         260.0,
         false,
     );
-    let query = st.eq_search.clone();
+    let total = app.session.equalizer.autoeq_profiles.len();
+    let stale = !matches!(&st.eq_results, Some((q, n, _)) if *q == st.eq_search && *n == total);
+    if stale {
+        let found = autoeq::search_profiles(&app.session.equalizer.autoeq_profiles, &st.eq_search)
+            .map(|r| {
+                r.iter()
+                    .take(9)
+                    .map(|p| (p.name.clone(), p.source.clone(), p.path.clone()))
+                    .collect()
+            });
+        st.eq_results = Some((st.eq_search.clone(), total, found));
+    }
+    let results = st.eq_results.as_ref().and_then(|(_, _, r)| r.as_deref());
     let mut pick = None;
-    if let Some(results) = autoeq::search_profiles(&app.session.equalizer.autoeq_profiles, &query) {
+    if let Some(results) = results {
         ui.add_space(6.0);
         if results.is_empty() {
             small_text(ui, &aulos_core::fl!("settings-autoeq-no-match"), pal.text_3);
         }
-        for p in results.iter().take(8) {
+        for (p_name, p_source, p_path) in results.iter().take(8) {
             let (r, resp) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
             if resp.hovered() {
@@ -2802,7 +2817,7 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
                 ui.painter(),
                 name,
                 Align::Min,
-                &p.name,
+                p_name,
                 theme::regular(13.0),
                 pal.text_1,
             );
@@ -2810,12 +2825,12 @@ fn autoeq_picker(app: &mut App, ui: &mut Ui) {
                 ui.painter(),
                 source,
                 Align::Max,
-                &p.source,
+                p_source,
                 theme::regular(12.0),
                 pal.text_3,
             );
             if resp.clicked() {
-                pick = Some(p.path.clone());
+                pick = Some(p_path.clone());
             }
         }
         if results.len() > 8 {
@@ -3484,22 +3499,6 @@ fn sec_appearance(app: &mut App, ui: &mut Ui) {
         sel,
     ) {
         app.set_ui_scale(crate::app::UI_SCALE_STEPS[i]);
-    }
-    let scale = app.session.config.config.grid_scale;
-    let label = format!("{:.0}%", scale * 100.0);
-    if let Some(f) = slider_row(
-        ui,
-        &pal,
-        &aulos_core::fl!("settings-grid-scale-title"),
-        &aulos_core::fl!("settings-grid-scale-desc"),
-        (scale - 0.7) / 0.9,
-        &label,
-    ) {
-        let value = (((0.7 + f * 0.9) * 20.0).round() / 20.0).clamp(0.7, 1.6);
-        if (value - scale).abs() > f32::EPSILON {
-            app.session.config.config.grid_scale = value;
-            app.session.config.save();
-        }
     }
 }
 

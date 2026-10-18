@@ -14,7 +14,7 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::mpd_events::{IdleAction, IdleSubsystem, idle_action};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
-use crate::provider::{ProviderRegistry, ProviderType};
+use crate::provider::{ProviderError, ProviderRegistry, ProviderType};
 use crate::task::Effect;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ pub enum ProviderEvent {
     /// Result of testing the connection of MPD card `0`.
     MpdTestResult(usize, Result<(), String>),
     /// Result of testing the connection of Subsonic card `0`.
-    SubsonicTestResult(usize, Result<(), String>),
+    SubsonicTestResult(usize, Result<(), ProviderError>),
 }
 
 /// The outcome of re-registering Subsonic providers: servers that failed to
@@ -372,12 +372,16 @@ impl ProvidersState {
         })
     }
 
-    /// Show a connection-test result on its card.
-    pub fn apply_event(&mut self, event: ProviderEvent) {
-        let status = |result: Result<(), String>| match result {
-            Ok(()) => fl!("connected"),
-            Err(e) => format!("{}: {e}", fl!("connection-failed")),
-        };
+    /// Show a connection-test result on its card. Returns `(name, reason)`
+    /// of a Subsonic server that rejected the credentials, for the UI to
+    /// ask for new ones.
+    pub fn apply_event(&mut self, event: ProviderEvent) -> Option<(String, String)> {
+        fn status<E: std::fmt::Display>(result: Result<(), E>) -> String {
+            match result {
+                Ok(()) => fl!("connected"),
+                Err(e) => format!("{}: {e}", fl!("connection-failed")),
+            }
+        }
         match event {
             ProviderEvent::MpdTestResult(i, result) => {
                 if let Some(id) = self.mpd_edit_states.get(i).map(|s| s.id.clone()) {
@@ -386,23 +390,35 @@ impl ProvidersState {
                 if let Some(s) = self.mpd_connection_status.get_mut(i) {
                     *s = Some(status(result));
                 }
+                None
             }
             ProviderEvent::SubsonicTestResult(i, result) => {
-                if let Some(id) = self.subsonic_edit_states.get(i).map(|s| s.id.clone()) {
-                    self.note_health(id, result.as_ref().err());
+                let server = self
+                    .subsonic_edit_states
+                    .get(i)
+                    .map(|s| (s.id.clone(), s.name.clone()));
+                if let Some((id, _)) = &server {
+                    self.note_health(id.clone(), result.as_ref().err());
                 }
+                let rejected = match (&result, server) {
+                    (Err(ProviderError::Unauthorized(reason)), Some((_, name))) => {
+                        Some((name, reason.clone()))
+                    }
+                    _ => None,
+                };
                 if let Some(s) = self.subsonic_connection_status.get_mut(i) {
                     *s = Some(status(result));
                 }
+                rejected
             }
         }
     }
 
     /// Records (`Some`) or clears (`None`) the failure of provider `id`.
-    fn note_health(&mut self, id: String, error: Option<&String>) {
+    fn note_health(&mut self, id: String, error: Option<impl std::fmt::Display>) {
         match error {
             Some(e) => {
-                self.provider_errors.insert(id, e.clone());
+                self.provider_errors.insert(id, e.to_string());
             }
             None => {
                 self.provider_errors.remove(&id);
@@ -825,13 +841,38 @@ mod tests {
         providers.subsonic_edit_states[0].id = "sub-a".into();
         providers.subsonic_connection_status = vec![None];
 
-        providers.apply_event(ProviderEvent::SubsonicTestResult(
+        let rejected = providers.apply_event(ProviderEvent::SubsonicTestResult(
             0,
-            Err("Ping: 401".into()),
+            Err(ProviderError::Other("Ping: 503".into())),
         ));
-        assert_eq!(providers.statuses()[0].error.as_deref(), Some("Ping: 401"));
-        providers.apply_event(ProviderEvent::SubsonicTestResult(0, Ok(())));
+        assert_eq!(rejected, None);
+        assert_eq!(providers.statuses()[0].error.as_deref(), Some("Ping: 503"));
+        let rejected = providers.apply_event(ProviderEvent::SubsonicTestResult(0, Ok(())));
+        assert_eq!(rejected, None);
         assert_eq!(providers.statuses()[0].error, None);
+    }
+
+    #[test]
+    fn rejected_credentials_in_a_test_are_reported_for_reauth() {
+        let mut providers = test_session().providers;
+        providers.provider_list = vec![("sub-a".into(), "Nimbus".into())];
+        providers.subsonic_edit_states = vec![SubsonicEditState::new_default([])];
+        providers.subsonic_edit_states[0].id = "sub-a".into();
+        providers.subsonic_edit_states[0].name = "Nimbus".into();
+        providers.subsonic_connection_status = vec![None];
+
+        let rejected = providers.apply_event(ProviderEvent::SubsonicTestResult(
+            0,
+            Err(ProviderError::Unauthorized("Wrong credentials".into())),
+        ));
+        assert_eq!(
+            rejected,
+            Some(("Nimbus".to_owned(), "Wrong credentials".to_owned()))
+        );
+        assert_eq!(
+            providers.statuses()[0].error.as_deref(),
+            Some("Wrong credentials")
+        );
     }
 
     #[test]

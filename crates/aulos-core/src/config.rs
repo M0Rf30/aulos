@@ -365,9 +365,6 @@ pub struct Config {
     pub tint_ui_with_cover: bool,
     /// Turn off interface animations.
     pub reduce_motion: bool,
-    /// Size multiplier for cards in grid views (albums, artists, genres,
-    /// folders, radio, podcasts…), 0.7–1.6; 1.0 is the default size.
-    pub grid_scale: f32,
     /// Interface zoom, [`Self::UI_SCALE_MIN`]–[`Self::UI_SCALE_MAX`]; 1.0
     /// follows the display's own scale factor unchanged. Loading clamps it.
     pub ui_scale: f32,
@@ -505,7 +502,6 @@ impl Default for Config {
             theme_mode: ThemeMode::System,
             tint_ui_with_cover: true,
             reduce_motion: false,
-            grid_scale: 1.0,
             ui_scale: 1.0,
             language: String::new(),
             visualizer_locked: false,
@@ -894,7 +890,6 @@ mod persistence_tests {
         let path = dir.join("nested").join(SETTINGS_FILE);
         let config = Config {
             last_view: "genres".into(),
-            grid_scale: 1.25,
             volume: 0.35,
             albums_view_mode: ViewMode::List,
             repeat_mode: RepeatMode::One,
@@ -994,7 +989,6 @@ mod persistence_tests {
         assert_eq!(loaded.volume, 0.25);
         assert!(loaded.shuffle);
         assert_eq!(loaded.startup_page, defaults.startup_page);
-        assert_eq!(loaded.grid_scale, defaults.grid_scale);
         assert_eq!(loaded.music_dirs, defaults.music_dirs);
         let _ = std::fs::remove_dir_all(dir);
     }

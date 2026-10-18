@@ -1336,8 +1336,6 @@ settings-reduce-motion-title = Reduce motion
 settings-reduce-motion-desc = Turns off fades, slides and other interface animations.
 settings-ui-scale-title = Interface size
 settings-ui-scale-desc = Scales the whole window. Ctrl + = / Ctrl + − / Ctrl + 0 change it anywhere.
-settings-grid-scale-title = Grid card size
-settings-grid-scale-desc = Size of the cards in album, artist, genre, radio and podcast grids.
 
 # Settings page: startup
 settings-startup-last-visited = Last visited page

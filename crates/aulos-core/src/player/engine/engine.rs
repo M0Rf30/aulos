@@ -889,10 +889,10 @@ fn playback_thread_main(
         Ok(d) => d,
         Err(e) => {
             tracing::error!("failed to open audio source: {e}");
-            if !ctx.stop_flag.load(Ordering::Acquire) {
-                ctx.status.probing.store(false, Ordering::Release);
-                ctx.status.queue_exhausted.store(true, Ordering::Release);
-            }
+            // Reported like an output failure (the player stops and shows
+            // the notice) instead of silently advancing; Next/Previous or
+            // picking a track still moves on, so the queue is not stalled.
+            ctx.report_failure(format!("failed to open audio source: {e}"));
             return;
         }
     };

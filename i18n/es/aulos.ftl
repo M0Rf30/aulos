@@ -1336,8 +1336,6 @@ settings-reduce-motion-title = Reducir movimiento
 settings-reduce-motion-desc = Desactiva los fundidos, deslizamientos y otras animaciones de la interfaz.
 settings-ui-scale-title = Tamaño de la interfaz
 settings-ui-scale-desc = Escala toda la ventana. Ctrl + = / Ctrl + − / Ctrl + 0 lo cambian en cualquier lugar.
-settings-grid-scale-title = Tamaño de las tarjetas de la cuadrícula
-settings-grid-scale-desc = Tamaño de las tarjetas en las cuadrículas de álbumes, artistas, géneros, radio y pódcast.
 
 # Settings page: startup
 settings-startup-last-visited = Última página visitada

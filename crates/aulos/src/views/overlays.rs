@@ -63,8 +63,8 @@ enum Act {
 
 /// A provider connection failed (`ProviderConnectFailed`). Repeated failures
 /// of the same provider bump its attempt count; a Subsonic rejection of the
-/// credentials opens the re-auth dialog instead.
-pub fn on_connect_failed(app: &mut App, provider: &str, reason: &str) {
+/// credentials (`unauthorized`) opens the re-auth dialog instead.
+pub fn on_connect_failed(app: &mut App, provider: &str, reason: &str, unauthorized: bool) {
     let providers = &app.session.providers;
     let id = providers
         .provider_list
@@ -79,7 +79,7 @@ pub fn on_connect_failed(app: &mut App, provider: &str, reason: &str) {
         .position(|s| s.id == id);
     let state = &mut app.views.overlays;
 
-    if let Some(index) = subsonic.filter(|_| looks_like_auth(reason)) {
+    if let Some(index) = subsonic.filter(|_| unauthorized) {
         let edit = &app.session.providers.subsonic_edit_states[index];
         state.auth = Some(AuthDraft {
             provider: provider.to_owned(),
@@ -106,21 +106,6 @@ pub fn on_connect_failed(app: &mut App, provider: &str, reason: &str) {
             });
         }
     }
-}
-
-/// The OpenSubsonic error text for rejected credentials.
-fn looks_like_auth(reason: &str) -> bool {
-    let lower = reason.to_lowercase();
-    [
-        "wrong username",
-        "password",
-        "unauthorized",
-        "401",
-        "403",
-        "auth",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
 }
 
 /// A single-line text dialog. `on_submit` receives the trimmed, non-empty text.

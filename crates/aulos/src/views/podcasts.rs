@@ -1363,11 +1363,11 @@ fn plain_text(html: &str) -> String {
     }
     let out = out
         .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

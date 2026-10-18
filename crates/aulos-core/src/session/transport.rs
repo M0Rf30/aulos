@@ -529,7 +529,9 @@ impl Session {
             }
             Err(e) => {
                 tracing::error!("{failure}: {e}");
-                PlaybackUpdate::none()
+                let mut update = PlaybackUpdate::none();
+                update.notice = Some(PlaybackNotice::PlayFailed(e));
+                update
             }
         }
     }
