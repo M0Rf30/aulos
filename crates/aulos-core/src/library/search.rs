@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Pre-lowercased search keys and debounce helpers for the library search.
+//! Normalised search keys and debounce helpers for the library search.
 //!
-//! Lowercasing every album/artist/track string on each keystroke allocated
-//! ~3 strings per track. The keys are built once per library generation and
-//! reused until the library changes.
+//! Normalising (case, diacritics, punctuation) every album/artist/track
+//! string on each keystroke allocated ~3 strings per track. The keys are
+//! built once per library generation and reused until the library changes.
+//! A query is split into words ([`query_tokens`]) that must all occur in a
+//! key, in any order and across its fields: `"jackson thriller"` finds the
+//! album Thriller by Michael Jackson, and `"beyonce"` finds Beyoncé.
 
 use super::{Album, Artist, Track};
+use crate::online::scrobble::import::normalize_text;
 use std::sync::Arc;
-
-/// Separator between fields inside a combined key (never typed in a query).
-const SEP: char = '\u{1}';
 
 /// Delay between the last keystroke and the library filter pass.
 pub const SEARCH_DEBOUNCE_MS: u64 = 150;
@@ -43,36 +44,44 @@ impl SearchIndex {
         self.built_gen = Some(generation);
         self.albums = albums
             .iter()
-            .map(|a| format!("{}{SEP}{}", a.name.to_lowercase(), a.artist.to_lowercase()))
+            .map(|a| normalize_text(&format!("{} {}", a.name, a.artist)))
             .collect();
-        self.artists = artists.iter().map(|a| a.name.to_lowercase()).collect();
+        self.artists = artists.iter().map(|a| normalize_text(&a.name)).collect();
         self.tracks = tracks
             .iter()
-            .map(|t| {
-                format!(
-                    "{}{SEP}{}{SEP}{}",
-                    t.title.to_lowercase(),
-                    t.artist.to_lowercase(),
-                    t.album.to_lowercase()
-                )
-            })
+            .map(|t| normalize_text(&format!("{} {} {}", t.title, t.artist, t.album)))
             .collect();
     }
 
     #[must_use]
-    pub fn album_matches(&self, i: usize, query: &str) -> bool {
-        self.albums.get(i).is_some_and(|k| k.contains(query))
+    pub fn album_matches(&self, i: usize, tokens: &[String]) -> bool {
+        self.albums.get(i).is_some_and(|k| contains_all(k, tokens))
     }
 
     #[must_use]
-    pub fn artist_matches(&self, i: usize, query: &str) -> bool {
-        self.artists.get(i).is_some_and(|k| k.contains(query))
+    pub fn artist_matches(&self, i: usize, tokens: &[String]) -> bool {
+        self.artists.get(i).is_some_and(|k| contains_all(k, tokens))
     }
 
     #[must_use]
-    pub fn track_matches(&self, i: usize, query: &str) -> bool {
-        self.tracks.get(i).is_some_and(|k| k.contains(query))
+    pub fn track_matches(&self, i: usize, tokens: &[String]) -> bool {
+        self.tracks.get(i).is_some_and(|k| contains_all(k, tokens))
     }
+}
+
+/// The words of a typed query, normalised like the keys.
+#[must_use]
+pub fn query_tokens(query: &str) -> Vec<String> {
+    normalize_text(query)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether the normalised `text` contains every one of `tokens`.
+#[must_use]
+pub fn contains_all(text: &str, tokens: &[String]) -> bool {
+    tokens.iter().all(|t| text.contains(t.as_str()))
 }
 
 /// Whether a delayed debounce message is still the latest one issued.
@@ -94,9 +103,33 @@ mod tests {
     #[test]
     fn empty_index_matches_nothing() {
         let idx = SearchIndex::default();
-        assert!(!idx.album_matches(0, "a"));
-        assert!(!idx.track_matches(0, "a"));
-        assert!(!idx.artist_matches(0, "a"));
+        let q = query_tokens("a");
+        assert!(!idx.album_matches(0, &q));
+        assert!(!idx.track_matches(0, &q));
+        assert!(!idx.artist_matches(0, &q));
+    }
+
+    #[test]
+    fn words_match_in_any_order_across_fields() {
+        let tokens = |q: &str| query_tokens(q);
+        let key = normalize_text("Thriller Michael Jackson");
+        assert!(contains_all(&key, &tokens("jackson thriller")));
+        assert!(contains_all(&key, &tokens("  mich  thr ")));
+        assert!(!contains_all(&key, &tokens("thriller queen")));
+    }
+
+    #[test]
+    fn case_diacritics_and_punctuation_are_ignored() {
+        let key = normalize_text("Halo Beyoncé");
+        assert!(contains_all(&key, &query_tokens("BEYONCE")));
+        assert!(contains_all(
+            &normalize_text("AC/DC"),
+            &query_tokens("ac/dc")
+        ));
+        assert!(contains_all(
+            &normalize_text("Sigur Rós"),
+            &query_tokens("ros")
+        ));
     }
 
     #[test]

@@ -99,6 +99,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             if resp.changed() {
                 let effect = app.session.set_search_query(app.search.clone());
                 app.run(effect);
+                // Home and Folders show no results; typing there searches
+                // the library, so show the songs (Esc clears, Back returns).
+                if !app.search.trim().is_empty()
+                    && matches!(app.route, Route::Home | Route::Folders)
+                {
+                    app.navigate(Route::Songs);
+                }
             }
 
             if browse && populated && !detail {

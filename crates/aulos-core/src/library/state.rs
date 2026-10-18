@@ -15,10 +15,11 @@ use super::album_sort::{sort_albums, sort_artists, sort_genres};
 use super::compilations::is_various_artists;
 use super::covers::CoverStore;
 use super::scan_progress::ScanProgress;
-use super::search::{SearchIndex, is_latest_generation};
+use super::search::{SearchIndex, contains_all, is_latest_generation, query_tokens};
 use super::top_tracks::ArtistTop;
 use super::{Album, Artist, Playlist, Track};
 use crate::config::Config;
+use crate::online::scrobble::import::normalize_text;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -203,8 +204,8 @@ pub struct LibraryState {
     reload_staging: Option<ReloadStaging>,
     /// Pre-lowercased search keys (rebuilt per `generation`).
     search_index: SearchIndex,
-    /// Current header-search query (case-insensitive substring match
-    /// against the active page's fields); see [`Self::search_query`].
+    /// Current header-search query (every word must occur, ignoring case,
+    /// diacritics and punctuation, in the active page's fields); see [`Self::search_query`].
     search_query: String,
     /// Latest debounce generation for search-query changes.
     search_debounce_gen: u64,
@@ -310,7 +311,8 @@ impl LibraryState {
     /// first-load path) and fold it into the artist index.
     ///
     /// Returns whether the search filter must be refreshed: a query is
-    /// active, or compilations are hidden and the batch brought one.
+    /// active, the visible artists are a filtered copy (which the batch would
+    /// leave stale), or compilations are hidden and the batch brought one.
     pub fn append_batch(&mut self, albums: &[Arc<Album>], config: &Config) -> bool {
         for album in albums {
             self.tracks.extend(album.tracks.iter().cloned());
@@ -318,6 +320,7 @@ impl LibraryState {
         }
         self.merge_artists_from_batch(albums, config);
         !self.search_query.trim().is_empty()
+            || self.filtered.artists_filtered
             || (!config.show_compilations_in_artists
                 && albums.iter().any(|a| is_various_artists(&a.artist)))
     }
@@ -551,11 +554,11 @@ impl LibraryState {
     /// Artists view through the same cache.
     pub fn refresh_search(&mut self, playlists: &[Playlist], hide_compilations: bool) {
         self.filter_generation += 1;
-        let query = self.search_query.trim().to_lowercase();
+        let tokens = query_tokens(&self.search_query);
         let filtered = &mut self.filtered;
         filtered.clear();
 
-        if query.is_empty() {
+        if self.search_query.trim().is_empty() {
             // Only materialise a filtered artist copy when something is
             // actually hidden; otherwise the view reads `artists`.
             filtered.artists_filtered = false;
@@ -577,14 +580,14 @@ impl LibraryState {
             .ensure(self.generation, &self.albums, &self.artists, &self.tracks);
 
         for (i, album) in self.albums.iter().enumerate() {
-            if self.search_index.album_matches(i, &query) {
+            if self.search_index.album_matches(i, &tokens) {
                 filtered.albums.push(Arc::clone(album));
                 filtered.album_map.push(i);
             }
         }
 
         for (i, artist) in self.artists.iter().enumerate() {
-            if self.search_index.artist_matches(i, &query)
+            if self.search_index.artist_matches(i, &tokens)
                 && !(hide_compilations && is_various_artists(&artist.name))
             {
                 filtered.artists.push(artist.clone());
@@ -593,21 +596,21 @@ impl LibraryState {
         }
 
         for (i, track) in self.tracks.iter().enumerate() {
-            if self.search_index.track_matches(i, &query) {
+            if self.search_index.track_matches(i, &tokens) {
                 filtered.tracks.push(Arc::clone(track));
                 filtered.track_map.push(i);
             }
         }
 
         for (i, playlist) in playlists.iter().enumerate() {
-            if playlist.name.to_lowercase().contains(&query) {
+            if contains_all(&normalize_text(&playlist.name), &tokens) {
                 filtered.playlists.push(playlist.clone());
                 filtered.playlist_map.push(i);
             }
         }
 
         for (i, genre) in self.genres.iter().enumerate() {
-            if genre.to_lowercase().contains(&query) {
+            if contains_all(&normalize_text(genre), &tokens) {
                 filtered.genres.push(genre.clone());
                 filtered.genre_map.push(i);
             }
