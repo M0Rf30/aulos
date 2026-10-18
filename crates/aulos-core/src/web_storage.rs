@@ -8,6 +8,10 @@
 /// Key of the settings (the RON text of [`crate::config::Config`]).
 pub const SETTINGS_KEY: &str = "aulos.settings.ron";
 
+/// Where settings text that cannot be parsed is kept, so the defaults that
+/// replace it are never saved over the user's data.
+pub const SETTINGS_BAD_KEY: &str = "aulos.settings.ron.bad";
+
 fn storage() -> Result<web_sys::Storage, String> {
     web_sys::window()
         .ok_or("no window")?

@@ -89,10 +89,7 @@ fn apply(app: &mut App, action: Action) {
         }
         Action::Select(id) => app.views.albums.selected = Some(id),
         Action::Go(route) => app.navigate(route),
-        Action::ClearSearch => {
-            app.search.clear();
-            app.session.clear_search();
-        }
+        Action::ClearSearch => app.clear_search(),
     }
 }
 

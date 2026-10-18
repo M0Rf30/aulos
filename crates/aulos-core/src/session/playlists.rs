@@ -40,15 +40,17 @@ pub struct PlaylistEditing {
 /// Async results of the playlist workflows.
 #[derive(Debug, Clone)]
 pub enum PlaylistEvent {
-    /// The active provider's playlists, tracks included.
-    Loaded(Vec<Playlist>),
+    /// The active provider's playlists, tracks included; `Err` when they
+    /// could not be listed (the loaded ones stay).
+    Loaded(Result<Vec<Playlist>, String>),
     /// Result of a provider playlist mutation (add/create/delete/rename).
     OpDone {
         op: PlaylistOp,
         result: Result<(), String>,
     },
-    /// Saved smart playlists (with resolved track counts).
-    SmartLoaded(Vec<SmartPlaylist>),
+    /// Saved smart playlists (with resolved track counts); `Err` when the
+    /// query (or the edit before it) failed and the loaded ones stay.
+    SmartLoaded(Result<Vec<SmartPlaylist>, String>),
     /// Resolved tracks of the selected smart playlist (detail view), and
     /// how many tracks its rules match before the row limit cuts them.
     SmartTracksLoaded { tracks: Vec<Track>, total: usize },
@@ -300,10 +302,13 @@ impl Session {
             return Effect::none();
         };
         Effect::future(async move {
-            let mut playlists = provider.list_playlists().await.unwrap_or_else(|e| {
-                tracing::warn!("list_playlists failed: {e}");
-                Vec::new()
-            });
+            let mut playlists = match provider.list_playlists().await {
+                Ok(playlists) => playlists,
+                Err(e) => {
+                    tracing::warn!("list_playlists failed: {e}");
+                    return PlaylistEvent::Loaded(Err(e.to_string()));
+                }
+            };
             // `list_playlists` returns summaries only (no tracks) for the
             // local provider; fetch each playlist's tracks so the detail
             // view, "play all" and M3U export have them.
@@ -315,7 +320,7 @@ impl Session {
                     playlist.tracks = full.tracks;
                 }
             }
-            PlaylistEvent::Loaded(playlists)
+            PlaylistEvent::Loaded(Ok(playlists))
         })
     }
 
@@ -434,10 +439,13 @@ impl Session {
     /// smart-playlist tracks start playing.
     pub fn apply_playlist_event(&mut self, event: PlaylistEvent) -> PlaylistUpdate {
         match event {
-            PlaylistEvent::Loaded(playlists) => {
+            PlaylistEvent::Loaded(Ok(playlists)) => {
                 self.playlists.playlists = playlists;
                 self.refresh_search();
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
+            }
+            PlaylistEvent::Loaded(Err(reason)) => {
+                PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
             }
             PlaylistEvent::OpDone { op, result } => match result {
                 Ok(()) => match op {
@@ -463,9 +471,12 @@ impl Session {
                     PlaylistUpdate::new(effect, PlaylistOutcome::Failed(e))
                 }
             },
-            PlaylistEvent::SmartLoaded(playlists) => {
+            PlaylistEvent::SmartLoaded(Ok(playlists)) => {
                 self.playlists.smart_playlists = playlists;
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
+            }
+            PlaylistEvent::SmartLoaded(Err(reason)) => {
+                PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
             }
             PlaylistEvent::SmartTracksLoaded { tracks, total } => {
                 self.playlists.smart_playlist_tracks = tracks;
@@ -518,21 +529,18 @@ fn op_done(op: PlaylistOp, result: Result<(), ProviderError>) -> PlaylistEvent {
 }
 
 /// Runs a smart-playlist list query on the blocking pool; a failure is
-/// logged (prefixed with `what`) and yields an empty list.
+/// logged (prefixed with `what`) and reported, leaving the loaded lists be.
 fn smart_list_effect(
     what: &'static str,
     f: impl FnOnce() -> Result<Vec<SmartPlaylist>, String> + Send + 'static,
 ) -> Effect<PlaylistEvent> {
     Effect::future(async move {
-        let playlists = crate::task::spawn_blocking(move || {
-            f().unwrap_or_else(|e| {
-                tracing::warn!("{what}: {e}");
-                Vec::new()
-            })
-        })
-        .await
-        .unwrap_or_default();
-        PlaylistEvent::SmartLoaded(playlists)
+        let result = crate::task::spawn_blocking(f)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|result| result)
+            .inspect_err(|e| tracing::warn!("{what}: {e}"));
+        PlaylistEvent::SmartLoaded(result)
     })
 }
 
@@ -843,9 +851,28 @@ mod tests {
         };
 
         let loaded = vec![playlist("Road Mix", vec![]), playlist("Other", vec![])];
-        let update = session.apply_playlist_event(PlaylistEvent::Loaded(loaded));
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded(Ok(loaded)));
         assert!(matches!(update.outcome, PlaylistOutcome::None));
         assert_eq!(names(&session), ["Road Mix"]);
+    }
+
+    #[test]
+    fn failed_playlist_load_keeps_the_lists_and_reports() {
+        let mut session = test_session();
+        session.playlists.playlists = vec![playlist("Road Mix", vec![])];
+        session.playlists.smart_playlists = vec![EditorState::new().playlist];
+
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded(Err("disk I/O".into())));
+        assert!(matches!(update.outcome, PlaylistOutcome::Failed(r) if r == "disk I/O"));
+        assert_eq!(session.playlists.playlists.len(), 1);
+
+        let update = session.apply_playlist_event(PlaylistEvent::SmartLoaded(Err("locked".into())));
+        assert!(matches!(update.outcome, PlaylistOutcome::Failed(r) if r == "locked"));
+        assert_eq!(session.playlists.smart_playlists.len(), 1);
+
+        let update = session.apply_playlist_event(PlaylistEvent::SmartLoaded(Ok(Vec::new())));
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
+        assert!(session.playlists.smart_playlists.is_empty());
     }
 
     #[test]

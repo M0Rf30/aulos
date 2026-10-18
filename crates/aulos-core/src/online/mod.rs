@@ -16,16 +16,22 @@ pub mod store;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+/// How long one wait on an episode download may stall: for the response
+/// headers and for each single read of the body.
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Shared blocking HTTP client for episode downloads, which stream to a
 /// file on a worker thread (desktop and Android only). Built once so
-/// requests reuse the connection pool and TLS session cache. Unlike the
-/// blocking default (30 s for the whole request) there is no total timeout,
-/// so a long episode can finish; connecting is bounded, and TCP keepalive
-/// drops a peer that vanished (reqwest's blocking client has no read
-/// timeout). The body size is capped by the download loop.
+/// requests reuse the connection pool and TLS session cache. The blocking
+/// client's timeout is not a total deadline: it bounds the wait for the
+/// response headers and every `Read::read` of the body separately, so a
+/// long episode can finish while a peer that stops sending fails after
+/// [`DOWNLOAD_STALL_TIMEOUT`] instead of blocking the worker (and its
+/// cancel check) forever. Connecting is bounded too, and TCP keepalive drops
+/// a peer that vanished. The body size is capped by the download loop.
 pub static HTTP_CLIENT: LazyLock<crate::http::blocking::Client> = LazyLock::new(|| {
     crate::http::blocking_builder()
-        .timeout(None::<Duration>)
+        .timeout(DOWNLOAD_STALL_TIMEOUT)
         .connect_timeout(Duration::from_secs(10))
         .tcp_keepalive(Duration::from_secs(30))
         .build()

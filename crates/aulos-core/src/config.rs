@@ -574,7 +574,8 @@ impl Config {
 
     /// Loads the settings kept in the browser's `localStorage`: defaults on
     /// the first visit, or when the stored text is not valid settings (which
-    /// is then left in place until the next save replaces it).
+    /// is first copied to `aulos.settings.ron.bad`, so the next save does not
+    /// destroy it).
     #[cfg(target_arch = "wasm32")]
     #[must_use]
     pub fn load() -> Config {
@@ -582,7 +583,15 @@ impl Config {
             return Config::default();
         };
         Self::parse(&text).unwrap_or_else(|e| {
-            tracing::error!("Invalid stored settings ({e}); using defaults");
+            match crate::web_storage::set(crate::web_storage::SETTINGS_BAD_KEY, &text) {
+                Ok(()) => tracing::error!(
+                    "Invalid stored settings ({e}); keeping them as {} and using defaults",
+                    crate::web_storage::SETTINGS_BAD_KEY
+                ),
+                Err(why) => tracing::error!(
+                    "Invalid stored settings ({e}); could not keep a copy ({why}); using defaults"
+                ),
+            }
             Config::default()
         })
     }

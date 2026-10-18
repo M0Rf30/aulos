@@ -72,9 +72,22 @@ pub async fn folder_files(dir: PathBuf) -> TaggerEvent {
     })
 }
 
+/// Largest image file the picture picker reads into memory (30 MiB).
+const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
+
 /// Reads a picked image file as a picture of type `kind`.
 pub async fn read_image(path: PathBuf, kind: u8) -> TaggerEvent {
     let result = blocking(move || {
+        let len = std::fs::metadata(&path)
+            .map_err(|e| format!("Could not read {}: {e}", path.display()))?
+            .len();
+        if len > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "{} is too large to use as a picture (over {} MiB)",
+                path.display(),
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
         let data =
             std::fs::read(&path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
         edit::picture_from_bytes(data, kind)

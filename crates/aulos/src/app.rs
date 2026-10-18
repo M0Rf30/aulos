@@ -575,6 +575,12 @@ impl App {
 
     // -- navigation ---------------------------------------------------------
 
+    /// Empties the header search box and the library query behind it.
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+        self.session.clear_search();
+    }
+
     /// Goes to `route`, pushing it on the history.
     pub fn navigate(&mut self, route: Route) {
         if route == self.route

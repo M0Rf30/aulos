@@ -32,6 +32,7 @@ enum Intent {
     Select(String),
     ShuffleAll,
     Sort(SortField),
+    ClearSearch,
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -128,13 +129,15 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 "songs-no-search-matches-body",
                 query = library.search_query().trim()
             );
-            widgets::empty_state(
+            if widgets::empty_state(
                 ui,
                 regular::MAGNIFYING_GLASS,
                 &aulos_core::fl!("songs-no-search-matches-title"),
                 &body,
-                None,
-            );
+                Some(&aulos_core::fl!("albums-no-match-search-clear")),
+            ) {
+                intents.push(Intent::ClearSearch);
+            }
         }
     } else {
         let cols = Columns::songs(app.class);
@@ -247,6 +250,7 @@ fn apply(app: &mut App, intents: Vec<Intent>) {
                 }
             }
             Intent::Menu(action) => menus::apply(app, *action),
+            Intent::ClearSearch => app.clear_search(),
         }
     }
 }

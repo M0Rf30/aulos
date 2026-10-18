@@ -557,8 +557,12 @@ impl Session {
         let mut update = PlaybackUpdate::none();
         let mut failure = None;
         if let Some(player) = &mut self.playback.player {
-            // Backends that load asynchronously (the browser's) report a
-            // failed load here, after `play` returned.
+            // A failure after `play` returned: a failed load in a backend
+            // that loads asynchronously (the browser's), or the local output
+            // dying (device unplugged, none openable). The player is then
+            // already stopped, so the `is_finished` check below does not see
+            // a finished track and the queue is not skipped through; the
+            // failure is surfaced instead.
             failure = player.take_playback_error();
             if !self.playback.seeking {
                 self.playback.position =

@@ -102,6 +102,7 @@ fn songs_label(count: u32) -> String {
 struct BrowseOut {
     open: Option<String>,
     action: Option<MenuAction>,
+    clear_search: bool,
 }
 
 fn refresh_meta(app: &mut App) {
@@ -185,7 +186,7 @@ fn browse(app: &mut App, ui: &mut Ui) {
                             }
                             skeleton_grid(ui);
                         } else if genres.is_empty() {
-                            empty(ui, a);
+                            empty(ui, a, &mut out);
                         } else if list {
                             list_body(ui, a, genres, &mut out);
                         } else {
@@ -201,9 +202,12 @@ fn browse(app: &mut App, ui: &mut Ui) {
     if let Some(action) = out.action {
         menus::apply(app, action);
     }
+    if out.clear_search {
+        app.clear_search();
+    }
 }
 
-fn empty(ui: &mut Ui, a: &App) {
+fn empty(ui: &mut Ui, a: &App, out: &mut BrowseOut) {
     let query = a.session.library.search_query().trim().to_owned();
     if query.is_empty() {
         empty_state(
@@ -213,14 +217,14 @@ fn empty(ui: &mut Ui, a: &App) {
             &aulos_core::fl!("genres-empty-body"),
             None,
         );
-    } else {
-        empty_state(
-            ui,
-            regular::SHAPES,
-            &aulos_core::fl!("genres-no-matches-title"),
-            &aulos_core::fl!("genres-no-matches-body", query = query.as_str()),
-            None,
-        );
+    } else if empty_state(
+        ui,
+        regular::SHAPES,
+        &aulos_core::fl!("genres-no-matches-title"),
+        &aulos_core::fl!("genres-no-matches-body", query = query.as_str()),
+        Some(&aulos_core::fl!("albums-no-match-search-clear")),
+    ) {
+        out.clear_search = true;
     }
 }
 

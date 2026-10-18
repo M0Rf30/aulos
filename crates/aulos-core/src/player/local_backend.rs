@@ -244,6 +244,17 @@ impl PlaybackBackend for LocalBackend {
         Ok(self.engine.is_finished())
     }
 
+    /// An output failure that ended playback after `play` returned (the
+    /// device was unplugged, or no output could be opened). The engine is
+    /// stopped and the state reads `Stopped`, so the failed track is not
+    /// reported as finished and the queue does not advance.
+    fn take_error(&mut self) -> Option<String> {
+        let message = self.engine.take_failure()?;
+        self.engine.stop();
+        self.state = PlaybackState::Stopped;
+        Some(message)
+    }
+
     fn queue_next(&mut self, source: TrackSource) -> Result<(), PlayerError> {
         match source {
             TrackSource::LocalFile(path) => {

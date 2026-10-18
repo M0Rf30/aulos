@@ -496,11 +496,9 @@ impl Throttle {
 
 /// Last.fm allows ~5 requests/s per key: stay at 4.
 static LASTFM_THROTTLE: Throttle = Throttle::new(Duration::from_millis(250));
-/// MusicBrainz asks for at most one request per second.
-static MUSICBRAINZ_THROTTLE: Throttle = Throttle::new(Duration::from_millis(1100));
 
 fn get_json(url: &str) -> Result<Value, SimilarError> {
-    let resp = crate::online::scrobble::http_client()
+    let resp = crate::online::musicbrainz::http_client()
         .get(url)
         .send()
         .map_err(|e| SimilarError::Network(e.to_string()))?;
@@ -650,8 +648,11 @@ impl SimilarArtists for ListenBrainzSimilar {
     }
 
     fn similar(&self, artist: &str, limit: usize) -> Result<Vec<SimilarArtist>, SimilarError> {
-        MUSICBRAINZ_THROTTLE.wait();
-        let query = format!("artist:\"{}\"", artist.replace('"', " "));
+        crate::online::musicbrainz::throttle();
+        let query = format!(
+            "artist:\"{}\"",
+            crate::online::musicbrainz::escape_lucene(artist)
+        );
         let url = format!(
             "{MUSICBRAINZ_URL}?query={}&fmt=json&limit=5",
             urlencoding::encode(&query)

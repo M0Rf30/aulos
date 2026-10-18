@@ -51,7 +51,7 @@ use super::dop::DopEncoder;
 use super::dop_output::DopOutput;
 use super::fade::{FadeControl, MAX_FADE_SECS};
 use super::filter::{AudioFilter, VolumeFilter};
-use super::output::{AudioFormat as OutputFormat, CpalOutput};
+use super::output::{AudioFormat as OutputFormat, CpalOutput, DEVICE_LOST_MESSAGE};
 use super::resampler::ResamplerQuality;
 use crate::player::backend::PlayerError;
 use crate::player::eq_source::{EqFilter, SharedCoeffs};
@@ -450,10 +450,19 @@ struct SharedStatus {
     /// `is_finished()`, and cleared by `play()`/`stop()`.
     track_finished: AtomicBool,
     /// Set once the playback thread has permanently stopped because the
-    /// whole queue is exhausted (no pending track at the final EOS) or an
-    /// unrecoverable output error occurred. Fallback for `is_finished()`,
-    /// analogous to the old backend's `sink.empty()` check.
+    /// whole queue is exhausted (no pending track at the final EOS).
+    /// Fallback for `is_finished()`, analogous to the old backend's
+    /// `sink.empty()` check. An output failure does NOT set it: see
+    /// [`Self::failed`].
     queue_exhausted: AtomicBool,
+    /// Set when the playback thread stopped because the output failed (the
+    /// device was lost, or no output could be opened). Not end-of-queue:
+    /// `is_finished()` stays `false` so the player does not advance to a
+    /// track that would hit the same dead output. Sticky until
+    /// `play()`/`stop()`; the message is handed out once by
+    /// [`PlaybackEngine::take_failure`].
+    failed: AtomicBool,
+    failure: Mutex<Option<String>>,
 }
 
 impl SharedStatus {
@@ -461,6 +470,7 @@ impl SharedStatus {
         self.probing.store(true, Ordering::Release);
         self.track_finished.store(false, Ordering::Release);
         self.queue_exhausted.store(false, Ordering::Release);
+        self.clear_failure();
         self.position_nanos.store(0, Ordering::Release);
         self.duration_nanos.store(0, Ordering::Release);
     }
@@ -469,8 +479,15 @@ impl SharedStatus {
         self.probing.store(false, Ordering::Release);
         self.track_finished.store(false, Ordering::Release);
         self.queue_exhausted.store(false, Ordering::Release);
+        self.clear_failure();
         self.position_nanos.store(0, Ordering::Release);
         self.duration_nanos.store(0, Ordering::Release);
+    }
+
+    fn clear_failure(&self) {
+        let mut slot = self.failure.lock();
+        *slot = None;
+        self.failed.store(false, Ordering::Release);
     }
 }
 
@@ -496,6 +513,25 @@ struct ThreadContext {
     graceful_stop: Arc<AtomicBool>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Arc<Mutex<Option<Arc<std::sync::Mutex<PcmBuffer>>>>>,
+}
+
+impl ThreadContext {
+    /// Record that this thread is stopping because the output failed. The
+    /// end of the thread then leaves `queue_exhausted` unset, so the player
+    /// reports `message` instead of advancing to the next track. Ignored
+    /// once this thread was told to stop: a write that failed during a
+    /// teardown is not a failure. The flag is checked under the status lock
+    /// that `play()`/`stop()` also take when clearing, so a thread being
+    /// replaced can never leave its failure behind for the next one.
+    fn report_failure(&self, message: impl Into<String>) {
+        let mut slot = self.status.failure.lock();
+        if self.stop_flag.load(Ordering::Acquire) {
+            return;
+        }
+        *slot = Some(message.into());
+        self.status.failed.store(true, Ordering::Release);
+        self.status.probing.store(false, Ordering::Release);
+    }
 }
 
 /// Playback engine: owns the dedicated decode/output thread and the shared
@@ -785,6 +821,15 @@ impl PlaybackEngine {
             || self.status.queue_exhausted.load(Ordering::Acquire)
     }
 
+    /// Why the playback thread stopped on an output failure (device lost,
+    /// no output could be opened), once. Such a stop is deliberately not
+    /// reported by [`Self::is_finished`]: the queue did not run out, and
+    /// advancing would only hit the same dead output on every track. The
+    /// caller reports the message and stops the engine.
+    pub fn take_failure(&self) -> Option<String> {
+        self.status.failure.lock().take()
+    }
+
     /// Set (or clear) the shared PCM buffer the visualizer reads from.
     #[cfg(feature = "visualizer")]
     pub fn set_pcm_buffer(&self, buffer: Option<Arc<std::sync::Mutex<PcmBuffer>>>) {
@@ -910,8 +955,11 @@ fn playback_thread_main(
     }
 
     // A thread that was told to stop must not flag "queue exhausted" for
-    // whatever `play()`/`stop()` set the shared status up for since.
-    if !ctx.stop_flag.load(Ordering::Acquire) {
+    // whatever `play()`/`stop()` set the shared status up for since. One
+    // that died on an output failure did not run out of queue either: it
+    // reports the failure (see `ThreadContext::report_failure`) instead of
+    // letting the player skip on to the next track.
+    if !ctx.stop_flag.load(Ordering::Acquire) && !ctx.status.failed.load(Ordering::Acquire) {
         ctx.status.queue_exhausted.store(true, Ordering::Release);
     }
 }
@@ -1011,6 +1059,13 @@ fn run_dsd(
             return DsdOutcome::Done;
         }
 
+        if output.device_failed() {
+            tracing::error!("{DEVICE_LOST_MESSAGE}; stopping DoP playback");
+            ctx.report_failure(DEVICE_LOST_MESSAGE);
+            let _ = output.stop();
+            return DsdOutcome::Done;
+        }
+
         if let Ok(EngineCommand::Seek(pos)) = command_rx.try_recv() {
             match decoder.seek(pos.as_secs_f64()) {
                 Ok(()) => {
@@ -1058,6 +1113,7 @@ fn run_dsd(
         encoder.encode(&dsd_buf, &mut dop_buf);
         if let Err(e) = output.write(&dop_buf) {
             tracing::warn!("DoP output write failed: {e}");
+            ctx.report_failure(e.to_string());
             let _ = output.stop();
             return DsdOutcome::Done;
         }
@@ -1159,15 +1215,27 @@ impl PcmSink {
 
     /// Apply EQ, volume, and write — for a buffer that already carries its
     /// final gain (e.g. an already-blended crossfade chunk, or a plain
-    /// decode chunk after `process` scales it). `ctx` isn't read here
-    /// anymore (the visualizer tap moved to `CpalOutput`'s callback — see
-    /// the struct docs above) but stays a parameter so every call site
-    /// looks the same regardless.
+    /// decode chunk after `process` scales it). A failed write is recorded
+    /// on `ctx` as an output failure, so every caller that gives up on the
+    /// `Err` ends the thread as failed rather than as an exhausted queue.
     fn finish(&mut self, buf: &mut [f32], ctx: &ThreadContext) -> Result<()> {
         self.eq.apply(buf);
         self.volume.apply(buf);
-        let _ = ctx;
-        self.output.write(buf).map(|_| ())
+        self.output
+            .write(buf)
+            .map(|_| ())
+            .inspect_err(|e| ctx.report_failure(e.to_string()))
+    }
+
+    /// Whether the device reported a fatal error; if so, records the output
+    /// failure so the caller can wind the thread down.
+    fn device_lost(&self, ctx: &ThreadContext) -> bool {
+        if !self.output.device_failed() {
+            return false;
+        }
+        tracing::error!("{DEVICE_LOST_MESSAGE}; stopping playback");
+        ctx.report_failure(DEVICE_LOST_MESSAGE);
+        true
     }
 
     /// Apply ReplayGain, then EQ/volume/tap/write via [`Self::finish`].
@@ -1265,6 +1333,9 @@ fn run_pcm(
         Ok(s) => s,
         Err(e) => {
             tracing::error!("failed to open PCM output: {e}");
+            // Not a finished track: reading it as one would skip every
+            // queued track in turn against the same unopenable output.
+            ctx.report_failure(format!("Cannot open the audio output: {e}"));
             return PcmOutcome::Done;
         }
     };
@@ -1287,6 +1358,11 @@ fn run_pcm(
     let mut crossfade_suppressed = false;
     'buf: loop {
         if ctx.stop_flag.load(Ordering::Acquire) {
+            sink.stop();
+            return PcmOutcome::Done;
+        }
+
+        if sink.device_lost(ctx) {
             sink.stop();
             return PcmOutcome::Done;
         }
@@ -1550,7 +1626,7 @@ fn run_crossfade(
     let mut next_played: u64 = 0;
 
     loop {
-        if ctx.stop_flag.load(Ordering::Acquire) {
+        if ctx.stop_flag.load(Ordering::Acquire) || sink.device_lost(ctx) {
             return CrossfadeOutcome::Stopped;
         }
 
@@ -1705,4 +1781,67 @@ fn units_to_nanos(units: u64, units_per_second: u64) -> u64 {
 fn secs_to_nanos(secs: Option<f64>) -> u64 {
     secs.map(|s| (s.max(0.0) * 1_000_000_000.0) as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::eq_source::new_shared_coeffs;
+
+    fn idle_engine() -> PlaybackEngine {
+        PlaybackEngine::new(new_shared_coeffs(), Arc::new(AtomicBool::new(true)))
+    }
+
+    #[test]
+    fn output_failure_is_reported_and_is_not_a_finished_track() {
+        let engine = idle_engine();
+        engine.status.probing.store(true, Ordering::Release);
+        engine.context().report_failure("device lost");
+
+        assert!(!engine.is_finished(), "a failure must not auto-advance");
+        assert!(!engine.status.queue_exhausted.load(Ordering::Acquire));
+        assert!(
+            !engine.status.probing.load(Ordering::Acquire),
+            "a failed open must not read as still opening"
+        );
+        assert_eq!(engine.take_failure().as_deref(), Some("device lost"));
+        assert_eq!(
+            engine.take_failure(),
+            None,
+            "the message is handed out once"
+        );
+        assert!(
+            engine.status.failed.load(Ordering::Acquire),
+            "the thread end still sees the failure after it was taken"
+        );
+    }
+
+    #[test]
+    fn a_thread_told_to_stop_reports_no_failure() {
+        let engine = idle_engine();
+        let ctx = engine.context();
+        ctx.stop_flag.store(true, Ordering::Release);
+        ctx.report_failure("write failed during teardown");
+
+        assert_eq!(engine.take_failure(), None);
+        assert!(!engine.status.failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn stop_and_play_reset_clear_a_failure() {
+        let mut engine = idle_engine();
+        engine.context().report_failure("device lost");
+        assert!(engine.status.failed.load(Ordering::Acquire));
+        engine.stop();
+        assert_eq!(engine.take_failure(), None);
+        assert!(!engine.status.failed.load(Ordering::Acquire));
+
+        // `stop` raised this thread's stop flag; `play` hands out a fresh one.
+        engine.stop_flag = Arc::new(AtomicBool::new(false));
+        engine.context().report_failure("device lost");
+        assert!(engine.status.failed.load(Ordering::Acquire));
+        engine.status.reset_for_play();
+        assert_eq!(engine.take_failure(), None);
+        assert!(!engine.status.failed.load(Ordering::Acquire));
+    }
 }

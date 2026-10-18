@@ -60,7 +60,7 @@ pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
 /// Blocks until at least [`MIN_REQUEST_GAP`] has passed since the previous
 /// web-service request. The lock is held while sleeping on purpose: that
 /// is what serialises concurrent callers.
-fn throttle() {
+pub(crate) fn throttle() {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(prev) = *last {

@@ -338,15 +338,17 @@ impl OnlineStore {
 
     /// Set (or, passing `""`, clear) an episode's locally downloaded file
     /// path. One method serves both set and clear — there's no separate
-    /// `clear_*` variant.
-    pub fn set_episode_downloaded_path(&self, episode_id: i64, path: &str) -> Result<(), String> {
-        self.conn
+    /// `clear_*` variant. Returns whether an episode row was updated; `false`
+    /// means the episode is gone (its show was unsubscribed meanwhile).
+    pub fn set_episode_downloaded_path(&self, episode_id: i64, path: &str) -> Result<bool, String> {
+        let changed = self
+            .conn
             .execute(
                 "UPDATE podcast_episodes SET downloaded_path = ?1 WHERE id = ?2",
                 params![path, episode_id],
             )
             .map_err(|e| format!("Set episode downloaded path error: {e}"))?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     // ---- Radio stations ----

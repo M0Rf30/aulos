@@ -323,6 +323,13 @@ impl Session {
         };
         match provider.provider_type() {
             ProviderType::Local => {
+                // A second scan racing the running one would supersede it
+                // and reset its progress; the running scan's completion
+                // already reloads the library.
+                if self.library.scanning {
+                    tracing::debug!("Library scan already running; not starting another");
+                    return Reload::none();
+                }
                 let progress = Arc::clone(&self.library.scan_progress);
                 // The browser reads its files asynchronously (see
                 // `library::web_scanner`), so it scans outside the provider.
@@ -526,7 +533,20 @@ impl Session {
                 count,
             } => {
                 if self.is_stale_reload(generation, &provider_id) {
-                    return LibraryApplied::Stale;
+                    // A reload superseded the scan while it ran, so what it
+                    // loaded may predate the scan's changes: the real
+                    // completion still owes a final reload (unless the
+                    // provider was switched away meanwhile).
+                    if provider_id != self.providers.registry.active_id() {
+                        return LibraryApplied::Stale;
+                    }
+                    let pending = std::mem::take(&mut self.library.reload_after_scan);
+                    if count == 0 && !pending {
+                        return LibraryApplied::Stale;
+                    }
+                    return LibraryApplied::ScanComplete {
+                        reload: self.reload_library(),
+                    };
                 }
                 self.library.scanning = false;
                 self.library.scan_progress.reset();
@@ -1335,7 +1355,16 @@ async fn load_incremental(
     match provider.provider_type() {
         #[cfg(not(target_arch = "wasm32"))]
         ProviderType::Mpd => {
-            let Some(mpd) = mpd else { return };
+            let Some(mpd) = mpd else {
+                _ = tx
+                    .send(LibraryEvent::LoadFailed {
+                        generation,
+                        provider_id,
+                        reason: "MPD provider is not available".to_string(),
+                    })
+                    .await;
+                return;
+            };
 
             // Step 1: all album names (a single fast command).
             let album_names = match mpd.list_album_names().await {
@@ -1405,7 +1434,16 @@ async fn load_incremental(
             }
         }
         ProviderType::Subsonic => {
-            let Some(subsonic) = subsonic else { return };
+            let Some(subsonic) = subsonic else {
+                _ = tx
+                    .send(LibraryEvent::LoadFailed {
+                        generation,
+                        provider_id,
+                        reason: "Subsonic provider is not available".to_string(),
+                    })
+                    .await;
+                return;
+            };
             tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
 
             // Paint a cached snapshot from the database immediately, so a
@@ -2196,6 +2234,57 @@ mod tests {
         assert!(matches!(applied, LibraryApplied::ActionFailed(r) if r.contains("disk I/O")));
         assert_eq!(visible_names(&session), ["A"]);
         assert!(session.library.covers.contains("a"));
+    }
+
+    fn scan_complete(session: &mut Session, generation: u64, count: usize) -> LibraryApplied {
+        session.apply_library_event(LibraryEvent::ScanComplete {
+            generation,
+            provider_id: session.providers.registry.active_id().to_string(),
+            count,
+        })
+    }
+
+    #[test]
+    fn scan_superseded_by_a_reload_still_reloads_when_it_finishes() {
+        let mut session = test_session();
+        session.library.scanning = true;
+        let scan = session.library.begin_reload_generation();
+        // A reload (e.g. a settings change) supersedes the running scan.
+        session.library.begin_reload_generation();
+
+        let applied = scan_complete(&mut session, scan, 5);
+        assert!(matches!(applied, LibraryApplied::ScanComplete { .. }));
+    }
+
+    #[test]
+    fn superseded_scan_that_changed_nothing_stays_stale() {
+        let mut session = test_session();
+        let scan = session.library.begin_reload_generation();
+        session.library.begin_reload_generation();
+        assert!(matches!(
+            scan_complete(&mut session, scan, 0),
+            LibraryApplied::Stale
+        ));
+        // ...unless the watcher flagged changes meanwhile.
+        session.library.reload_after_scan = true;
+        assert!(matches!(
+            scan_complete(&mut session, scan, 0),
+            LibraryApplied::ScanComplete { .. }
+        ));
+        assert!(!session.library.reload_after_scan);
+    }
+
+    #[test]
+    fn scan_of_another_provider_stays_stale() {
+        let mut session = test_session();
+        let scan = session.library.begin_reload_generation();
+        session.library.begin_reload_generation();
+        let applied = session.apply_library_event(LibraryEvent::ScanComplete {
+            generation: scan,
+            provider_id: "elsewhere".into(),
+            count: 5,
+        });
+        assert!(matches!(applied, LibraryApplied::Stale));
     }
 
     #[test]

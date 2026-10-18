@@ -421,6 +421,7 @@ struct BrowseOut {
     open: Option<String>,
     action: Option<MenuAction>,
     split: Option<bool>,
+    clear_search: bool,
     toggle_favourites: bool,
     settings: bool,
 }
@@ -587,19 +588,24 @@ fn browse(app: &mut App, ui: &mut Ui) {
     if out.settings {
         app.navigate(Route::Settings);
     }
+    if out.clear_search {
+        app.clear_search();
+    }
 }
 
 /// Empty / no-result state of the artists page.
 fn empty(ui: &mut Ui, a: &App, favourites_only: bool, out: &mut BrowseOut) {
     let query = a.session.library.search_query().trim().to_owned();
     if !query.is_empty() {
-        empty_state(
+        if empty_state(
             ui,
             regular::MICROPHONE,
             &aulos_core::fl!("artists-no-matches-title"),
             &aulos_core::fl!("artists-no-matches-body", query = query.as_str()),
-            None,
-        );
+            Some(&aulos_core::fl!("albums-no-match-search-clear")),
+        ) {
+            out.clear_search = true;
+        }
     } else if favourites_only {
         empty_state(
             ui,

@@ -362,6 +362,21 @@ pub fn seed_release_add(files: &[FileForMatch<'_>]) -> Result<PathBuf, String> {
     write_seed_page(files, &dir)
 }
 
+/// Deletes the `add-release-*.html` pages that earlier calls left in `dir`,
+/// so the cache holds only the page being written.
+fn remove_old_seed_pages(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("add-release-") && name.ends_with(".html") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn write_seed_page(files: &[FileForMatch<'_>], dir: &Path) -> Result<PathBuf, String> {
     if files.is_empty() {
         return Err("No files to seed a release from".to_owned());
@@ -371,6 +386,7 @@ fn write_seed_page(files: &[FileForMatch<'_>], dir: &Path) -> Result<PathBuf, St
         return Err("Files have no album title: set one before adding the release".to_owned());
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    remove_old_seed_pages(dir);
     let stamp = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
@@ -575,8 +591,15 @@ mod tests {
     fn writes_the_page_into_the_given_dir() {
         let dir = std::env::temp_dir().join(format!("aulos-seed-test-{}", std::process::id()));
         let t = tags(&[(keys::ALBUM, &["Written"]), (keys::TITLE, &["t"])]);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("add-release-1.html");
+        let other = dir.join("keep.txt");
+        std::fs::write(&stale, "old").unwrap();
+        std::fs::write(&other, "x").unwrap();
         let path = write_seed_page(&[file(&t, 5.0)], &dir).unwrap();
         assert!(path.starts_with(&dir));
+        assert!(!stale.exists(), "older seed pages are removed");
+        assert!(other.exists(), "other files are left alone");
         let html = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(html.contains("value=\"Written\""));

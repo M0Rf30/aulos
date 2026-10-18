@@ -35,6 +35,36 @@ use std::time::Duration;
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 
+/// What the user is told when the output device disappears or is
+/// invalidated under a running stream (unplugged, reconfigured, server gone).
+pub(crate) const DEVICE_LOST_MESSAGE: &str = "The audio output device was lost or changed";
+
+/// Whether a cpal stream error means the stream can no longer deliver audio.
+/// A reroute to another default device keeps the stream alive, and a
+/// buffer xrun or a refused real-time priority only glitch it; anything
+/// else (device gone, stream invalidated, backend failure) is permanent.
+pub(crate) fn is_fatal_stream_error(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
+/// The cpal stream error callback shared by the PCM and DoP outputs: logs,
+/// and on a fatal error raises `failed` for the playback thread to see
+/// (instead of it noticing seconds later through a stalled write).
+pub(crate) fn stream_error_callback(
+    label: &'static str,
+    failed: Arc<AtomicBool>,
+) -> impl FnMut(cpal::Error) + Send + 'static {
+    move |err| {
+        tracing::error!("{label} error: {err}");
+        if is_fatal_stream_error(err.kind()) {
+            failed.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// The engine's shared visualizer tap slot (`ThreadContext::pcm_buffer`):
 /// the outer lock is shared with the controlling side, and the inner
 /// `Option` is flipped on visualizer activate/deactivate.
@@ -188,6 +218,9 @@ pub struct CpalOutput {
     /// The engine's stop flag (see [`Self::set_stop_flag`]): aborts the
     /// blocking waits in [`Self::write`] and [`Self::stop`].
     stop_flag: Option<Arc<AtomicBool>>,
+    /// Raised by the cpal error callback on a fatal stream error (device
+    /// unplugged or invalidated); see [`Self::device_failed`].
+    device_failed: Arc<AtomicBool>,
     /// Visualizer tap slot, wired via [`Self::set_viz_tap`] before
     /// [`Self::start`]. Doubly-`Option`-wrapped: the outer `Arc<Mutex<_>>`
     /// is `ThreadContext::pcm_buffer` itself, shared with the controlling
@@ -273,10 +306,18 @@ impl CpalOutput {
             channel_depth: 0,
             last_chunk_len: 0,
             stop_flag: None,
+            device_failed: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "visualizer")]
             viz_tap: None,
             fade: None,
         })
+    }
+
+    /// Whether the device reported a fatal stream error. Sticky for this
+    /// output's lifetime: the playback thread polls it so a lost device
+    /// ends playback at once, not after a stalled write times out.
+    pub fn device_failed(&self) -> bool {
+        self.device_failed.load(Ordering::Acquire)
     }
 
     /// Wire the shared visualizer tap slot (`ThreadContext::pcm_buffer`).
@@ -410,9 +451,7 @@ impl CpalOutput {
                             #[cfg(feature = "visualizer")]
                             Self::tap_viz(&viz_tap, data, viz_channels);
                         },
-                        |err| {
-                            tracing::error!("pcm output error: {}", err);
-                        },
+                        stream_error_callback("pcm output", self.device_failed.clone()),
                         None,
                     )
                     .map_err(|e| PlayerError(format!("Failed to build F32 stream: {e}")))?
@@ -453,9 +492,7 @@ impl CpalOutput {
                             #[cfg(feature = "visualizer")]
                             Self::tap_viz(&viz_tap, &viz_scratch[..data.len()], viz_channels);
                         },
-                        |err| {
-                            tracing::error!("pcm output error: {}", err);
-                        },
+                        stream_error_callback("pcm output", self.device_failed.clone()),
                         None,
                     )
                     .map_err(|e| PlayerError(format!("Failed to build I16 stream: {e}")))?
@@ -493,9 +530,7 @@ impl CpalOutput {
                             #[cfg(feature = "visualizer")]
                             Self::tap_viz(&viz_tap, &viz_scratch[..data.len()], viz_channels);
                         },
-                        |err| {
-                            tracing::error!("pcm output error: {}", err);
-                        },
+                        stream_error_callback("pcm output", self.device_failed.clone()),
                         None,
                     )
                     .map_err(|e| PlayerError(format!("Failed to build I32 stream: {e}")))?
@@ -528,6 +563,9 @@ impl CpalOutput {
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<usize> {
+        if self.device_failed() {
+            return Err(PlayerError(DEVICE_LOST_MESSAGE.to_owned()));
+        }
         if self.pause_state.is_paused() {
             return Ok(0);
         }
@@ -616,12 +654,13 @@ impl CpalOutput {
         // played yet — up to the whole ~500 ms channel. At a queue end or a
         // format change that is the last half second of the track, so wait
         // (bounded, abortable) for the channel to drain first. Skipped when
-        // the engine is stopping on purpose, and while paused (a paused
-        // stream never drains).
+        // the engine is stopping on purpose, when the device is gone (nothing
+        // will ever drain), and while paused (a paused stream never drains).
         if let Some(sender) = &self.sample_sender
             && self.stream.is_some()
             && !self.pause_state.is_paused()
             && !self.stop_requested()
+            && !self.device_failed()
         {
             let drain_timeout = Duration::from_millis(u64::from(self.buffer_time_ms) + 100);
             let drained = drain_channel(
@@ -743,5 +782,25 @@ mod tests {
             Some(&stop)
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn device_loss_errors_are_fatal_but_glitches_are_not() {
+        assert!(is_fatal_stream_error(cpal::ErrorKind::DeviceNotAvailable));
+        assert!(is_fatal_stream_error(cpal::ErrorKind::StreamInvalidated));
+        assert!(is_fatal_stream_error(cpal::ErrorKind::BackendError));
+        assert!(!is_fatal_stream_error(cpal::ErrorKind::DeviceChanged));
+        assert!(!is_fatal_stream_error(cpal::ErrorKind::Xrun));
+        assert!(!is_fatal_stream_error(cpal::ErrorKind::RealtimeDenied));
+    }
+
+    #[test]
+    fn error_callback_raises_the_flag_only_for_fatal_errors() {
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut callback = stream_error_callback("test", failed.clone());
+        callback(cpal::Error::new(cpal::ErrorKind::Xrun));
+        assert!(!failed.load(Ordering::Acquire));
+        callback(cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable));
+        assert!(failed.load(Ordering::Acquire));
     }
 }

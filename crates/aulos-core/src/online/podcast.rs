@@ -308,15 +308,40 @@ pub async fn refresh(id: i64, feed_url: &str) -> Result<(), String> {
 }
 
 /// Unsubscribes from a podcast: deletes its downloaded episode files, then
-/// the podcast itself (its episodes cascade away in the store).
+/// the podcast itself (its episodes cascade away in the store). Files in the
+/// download directory are matched by episode id, so a transfer still in
+/// flight (not yet recorded in the store) leaves nothing behind either; one
+/// that finishes after the removal is deleted by [`download_episode`].
 pub fn unsubscribe(id: i64) -> Result<(), String> {
     let store = OnlineStore::open_default()?;
-    for episode in store.list_episodes(id)? {
+    let episodes = store.list_episodes(id)?;
+    for episode in &episodes {
         if !episode.downloaded_path.is_empty() {
             let _ = std::fs::remove_file(&episode.downloaded_path);
         }
     }
-    store.remove_podcast(id)
+    store.remove_podcast(id)?;
+    let ids: Vec<i64> = episodes.iter().map(|e| e.id).collect();
+    remove_download_files(&crate::paths::data_dir().join("podcast_downloads"), &ids);
+    Ok(())
+}
+
+/// Removes every `<episode id>.<ext>` file of `episode_ids` from `dir`.
+fn remove_download_files(dir: &std::path::Path, episode_ids: &[i64]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_episode_file = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .is_some_and(|id| episode_ids.contains(&id));
+        if is_episode_file {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Infers the file extension for a downloaded episode from its MIME type,
@@ -393,10 +418,22 @@ pub fn download_episode(
     }
 
     let path = dest.to_string_lossy().into_owned();
-    OnlineStore::open_default()
-        .and_then(|store| store.set_episode_downloaded_path(episode.id, &path))
-        .map_err(DownloadError::Failed)?;
-    Ok(path)
+    let recorded = OnlineStore::open_default()
+        .and_then(|store| store.set_episode_downloaded_path(episode.id, &path));
+    match recorded {
+        Ok(true) => Ok(path),
+        Ok(false) => {
+            // The show was unsubscribed mid-transfer: nothing refers to the file.
+            let _ = std::fs::remove_file(&dest);
+            Err(DownloadError::Failed(
+                "Download discarded: the episode is no longer subscribed".to_owned(),
+            ))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            Err(DownloadError::Failed(e))
+        }
+    }
 }
 
 /// Copies `reader` to `writer` in chunks, reporting progress and honouring
@@ -417,7 +454,7 @@ fn copy_with_progress(
         }
         let n = reader
             .read(&mut buf)
-            .map_err(|e| DownloadError::Failed(format!("Write download error: {e}")))?;
+            .map_err(|e| DownloadError::Failed(format!("Read download error: {e}")))?;
         if n == 0 {
             break;
         }
@@ -443,7 +480,9 @@ fn copy_with_progress(
 /// recorded path in the online store.
 pub fn delete_download(episode_id: i64, path: &str) -> Result<(), String> {
     let _ = std::fs::remove_file(path);
-    OnlineStore::open_default()?.set_episode_downloaded_path(episode_id, "")
+    OnlineStore::open_default()?
+        .set_episode_downloaded_path(episode_id, "")
+        .map(|_| ())
 }
 
 fn map_itunes_results(results: Vec<ItunesResultRaw>) -> Vec<PodcastSearchResult> {
@@ -902,5 +941,22 @@ mod tests {
             &mut |_, _| {},
         );
         assert_eq!(result, Err(DownloadError::Cancelled));
+    }
+
+    #[test]
+    fn unsubscribe_cleanup_removes_only_the_shows_episode_files() {
+        let dir = std::env::temp_dir().join(format!("aulos-dl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["1.mp3", "2.m4a", "3.mp3", "notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        remove_download_files(&dir, &[1, 2]);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(left, ["3.mp3", "notes.txt"]);
     }
 }

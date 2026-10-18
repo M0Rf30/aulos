@@ -14,7 +14,7 @@
 use crate::player::backend::PlayerError;
 use crate::player::engine::conversion::SampleBuffer;
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
-use crate::player::engine::output::drain_channel;
+use crate::player::engine::output::{DEVICE_LOST_MESSAGE, drain_channel, stream_error_callback};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::Arc;
@@ -82,12 +82,22 @@ pub struct DopOutput {
     /// the buffered tail in [`Self::stop`] when the engine is stopping on
     /// purpose.
     stop_flag: Option<Arc<AtomicBool>>,
+    /// Raised by the cpal error callback on a fatal stream error (device
+    /// unplugged or invalidated); see [`Self::device_failed`].
+    device_failed: Arc<AtomicBool>,
 }
 
 impl DopOutput {
     /// Wire the engine's stop flag.
     pub fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
         self.stop_flag = Some(stop_flag);
+    }
+
+    /// Whether the device reported a fatal stream error. Sticky for this
+    /// output's lifetime: the playback thread polls it so a lost device
+    /// ends playback at once instead of looping on dropped writes.
+    pub fn device_failed(&self) -> bool {
+        self.device_failed.load(Ordering::Acquire)
     }
 
     pub fn new(sample_rate: u32, channels: u8) -> Result<Self> {
@@ -105,6 +115,7 @@ impl DopOutput {
             config: device_config.config,
             is_paused: false,
             stop_flag: None,
+            device_failed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -135,9 +146,7 @@ impl DopOutput {
                                 *sample = buf.next_sample();
                             }
                         },
-                        |err| {
-                            tracing::error!("DoP output error: {}", err);
-                        },
+                        stream_error_callback("DoP output", self.device_failed.clone()),
                         None,
                     )
                     .map_err(|e| PlayerError(format!("Failed to build DoP stream: {e}")))?
@@ -154,9 +163,7 @@ impl DopOutput {
                                 *sample = (val as f32) / 2147483648.0;
                             }
                         },
-                        |err| {
-                            tracing::error!("DoP output error: {}", err);
-                        },
+                        stream_error_callback("DoP output", self.device_failed.clone()),
                         None,
                     )
                     .map_err(|e| PlayerError(format!("Failed to build DoP stream: {e}")))?
@@ -218,6 +225,9 @@ impl DopOutput {
     }
 
     pub fn write(&mut self, samples: &[i32]) -> Result<usize> {
+        if self.device_failed() {
+            return Err(PlayerError(DEVICE_LOST_MESSAGE.to_owned()));
+        }
         if self.is_paused {
             return Ok(0);
         }
@@ -261,10 +271,12 @@ impl DopOutput {
         // Let the device play out what is still buffered before the reset
         // burst and the stream drop discard it (the last ~370 ms of the
         // track otherwise). Skipped when the engine is stopping on purpose,
-        // and while paused (a paused stream never drains).
+        // while paused (a paused stream never drains), and when the device
+        // is gone (nothing will ever drain).
         if let Some(sender) = &self.sample_sender
             && self.stream.is_some()
             && !self.is_paused
+            && !self.device_failed()
             && !self
                 .stop_flag
                 .as_ref()
@@ -279,9 +291,12 @@ impl DopOutput {
             );
         }
 
-        tracing::info!("sending PCM reset sequence to switch DAC back to PCM mode");
+        // A lost device cannot take the reset burst; skip it and its waits.
+        if let Some(sender) = &self.sample_sender
+            && !self.device_failed()
+        {
+            tracing::info!("sending PCM reset sequence to switch DAC back to PCM mode");
 
-        if let Some(sender) = &self.sample_sender {
             let reset_frames = self.config.sample_rate as usize / 10;
             let reset_samples = vec![0i32; reset_frames * self.config.channels as usize];
 

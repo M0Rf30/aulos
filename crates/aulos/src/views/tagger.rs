@@ -182,9 +182,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     decode_thumbs(app);
 }
 
-/// Selects every file from `from` to `to` in display order.
+/// Selects every file from `from` to `to` in display order, skipping the ones
+/// the file-list filter hides.
 fn select_range(app: &mut App, from: FileId, to: FileId) {
-    let order = app.session.tagger.display_order();
+    let order: Vec<FileId> = groups(&app.session.tagger, &app.views.tagger.filter)
+        .iter()
+        .flat_map(|g| g.ids.iter().copied())
+        .collect();
     let (Some(a), Some(b)) = (
         order.iter().position(|id| *id == from),
         order.iter().position(|id| *id == to),

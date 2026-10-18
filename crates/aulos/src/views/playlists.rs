@@ -211,6 +211,7 @@ fn select_with(app: &mut App, st: &mut State, sel: Sel) {
 enum Act {
     Select(Sel),
     BeginCreate,
+    ClearSearch,
     Import,
     /// Play `Sel` (shuffled, or from a track index).
     Play {
@@ -526,9 +527,11 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             let selected = if new_editor { None } else { st.sel.as_ref() };
-            if !playlists.playlists.is_empty() {
+            let query = app.session.library.search_query().trim();
+            let visible = app.session.library.visible_playlists(&playlists.playlists);
+            if !visible.is_empty() {
                 section_label(ui, &aulos_core::fl!("playlists").to_uppercase());
-                for p in &playlists.playlists {
+                for p in visible {
                     let sel = Sel::Plain(p.id.clone());
                     let n = p.tracks.len().max(p.track_count as usize);
                     let secs = plain_secs(p);
@@ -555,12 +558,19 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
                     }
                 }
             }
-            if !playlists.smart_playlists.is_empty() {
+            let smart: Vec<(usize, &SmartPlaylist)> = playlists
+                .smart_playlists
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| name_matches(&p.name, query))
+                .collect();
+            let no_match = !query.is_empty() && visible.is_empty() && smart.is_empty();
+            if !smart.is_empty() {
                 section_label(
                     ui,
                     &aulos_core::fl!("playlists-section-smart").to_uppercase(),
                 );
-                for (i, p) in playlists.smart_playlists.iter().enumerate() {
+                for (i, p) in smart {
                     let sel = Sel::Smart(p.id);
                     let rules = st.smart_meta.get(i).map(|s| s.trim()).unwrap_or("");
                     let meta = if rules.is_empty() {
@@ -586,7 +596,29 @@ fn left_column(app: &App, ui: &mut Ui, st: &State, new_editor: bool, out: &mut O
                     }
                 }
             }
+            if no_match
+                && empty_state(
+                    ui,
+                    regular::MAGNIFYING_GLASS,
+                    &aulos_core::fl!("songs-no-search-matches-title"),
+                    &aulos_core::fl!("songs-no-search-matches-body", query = query),
+                    Some(&aulos_core::fl!("albums-no-match-search-clear")),
+                )
+            {
+                out.acts.push(Act::ClearSearch);
+            }
         });
+}
+
+/// Whether every whitespace-separated word of `query` occurs in `name`,
+/// ignoring case (the plain playlists are filtered by the library with the
+/// same rule; smart playlists are not part of its filtered set).
+fn name_matches(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| name.contains(word))
 }
 
 fn section_label(ui: &mut Ui, text: &str) {
@@ -1920,6 +1952,7 @@ fn apply(app: &mut App, out: Out) {
                 app.views.playlists = st;
             }
             Act::BeginCreate => begin_create(app),
+            Act::ClearSearch => app.clear_search(),
             Act::Import => spawn_import(app),
             Act::Play { sel, shuffle, from } => play(app, &sel, shuffle, from),
             Act::EditRules(id) => {
