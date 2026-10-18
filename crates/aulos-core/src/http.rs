@@ -116,7 +116,9 @@ pub fn is_mixed_content(page_protocol: &str, url: &str) -> bool {
 pub fn mixed_content_message(host: &str) -> String {
     format!(
         "{host} is served over plain http:// but this page is https://, so the browser blocks \
-         the request (mixed content). Use an https:// address for the server."
+         the request (mixed content). Use an https:// address for the server, open Aulos from \
+         an http:// page (for example a local copy of the web build), or use the desktop or \
+         Android app, which have no such restriction."
     )
 }
 
