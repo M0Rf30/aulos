@@ -11,8 +11,10 @@ use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::scan_progress::ScanProgress;
 use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track};
 use opensubsonic::{Auth, Client};
+use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 /// Concurrent `getAlbum` requests per page.
@@ -59,6 +61,15 @@ fn describe_error(url: &str, op: &str, error: &opensubsonic::Error) -> String {
         other => format!("Subsonic {op}: {other}"),
     }
 }
+
+/// Most `getAlbumList2` pages [`MusicProvider::browse_albums`] and
+/// `browse_tracks` read (500 albums each): a server that ignores `offset`
+/// and answers every page in full would otherwise never end the listing.
+const MAX_LIST_PAGES: usize = 400;
+
+/// Largest cover or artist image read from a server: a hostile or broken
+/// server must not be able to fill memory with one body.
+const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Characters of a response body kept in a parse error shown to the user.
 const PARSE_ERROR_CHARS: usize = 80;
@@ -205,7 +216,7 @@ fn iso_secs(iso: Option<&str>) -> i64 {
 }
 
 /// Configuration for connecting to a Subsonic-compatible server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SubsonicConfig {
     /// Unique provider ID (e.g., "subsonic-home").
     pub id: String,
@@ -223,6 +234,21 @@ pub struct SubsonicConfig {
     pub transcoding_max_bitrate: Option<u32>,
     /// Transcoding format (None = original format, e.g., "mp3", "ogg", "opus").
     pub transcoding_format: Option<String>,
+}
+
+impl fmt::Debug for SubsonicConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubsonicConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .field("transcoding_max_bitrate", &self.transcoding_max_bitrate)
+            .field("transcoding_format", &self.transcoding_format)
+            .finish()
+    }
 }
 
 impl Default for SubsonicConfig {
@@ -280,6 +306,46 @@ impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
     }
 }
 
+/// Signs a provider's stream URLs when a track is played. A track holds only
+/// the song id (in `path`): the signed URL carries the user name and a login
+/// token that stays valid as long as the password does, so it is never stored
+/// in a [`Track`], the library database or a queue.
+struct StreamSigner {
+    client: Client,
+    options: opensubsonic::StreamOptions,
+}
+
+/// The live provider's signer by provider id. Weak: a replaced or removed
+/// provider takes its signer (and credentials) with it.
+static SIGNERS: LazyLock<Mutex<HashMap<String, Weak<StreamSigner>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The `source_uri` of a Subsonic track: a stable identity for the song that
+/// holds no credential (the player signs the real URL, see [`stream_url`]).
+fn track_locator(provider_id: &str, song_id: &str) -> String {
+    format!("subsonic://{provider_id}/{song_id}")
+}
+
+/// The authenticated stream URL of a Subsonic `track`, signed now by its
+/// provider. Falls back to the track's own `source_uri` when no such provider
+/// is connected (rows stored by older versions hold the signed URL there).
+#[must_use]
+pub fn stream_url(track: &Track) -> String {
+    let signer = SIGNERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&*track.provider_id)
+        .and_then(Weak::upgrade);
+    signer
+        .and_then(|signer| {
+            signer
+                .client
+                .stream_url(&track.path.to_string_lossy(), &signer.options)
+                .ok()
+        })
+        .map_or_else(|| track.source_uri.clone(), |url| url.to_string())
+}
+
 /// Subsonic music provider backed by the `opensubsonic` crate.
 ///
 /// All API calls are async (via the opensubsonic `Client`), on whatever
@@ -289,6 +355,8 @@ pub struct SubsonicProvider {
     /// Shared provider ID for zero-copy assignment to tracks.
     provider_id: Arc<str>,
     client: Client,
+    /// Registered under the provider id for [`stream_url`].
+    _signer: Arc<StreamSigner>,
     /// Shared HTTP client for cover art fetches (avoids creating a new
     /// connection pool per request).
     http_client: reqwest::Client,
@@ -308,10 +376,28 @@ impl SubsonicProvider {
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
         let http_client = http_client(config.accept_invalid_certs);
+        // Transcoding parameters from the config, applied to every stream.
+        let mut options = opensubsonic::StreamOptions::new();
+        if let Some(b) = config.transcoding_max_bitrate {
+            options = options.max_bit_rate(b as i32);
+        }
+        if let Some(f) = config.transcoding_format.as_deref() {
+            options = options.format(f);
+        }
+        let signer = Arc::new(StreamSigner {
+            client: client.clone(),
+            options,
+        });
+        {
+            let mut signers = SIGNERS.lock().unwrap_or_else(|e| e.into_inner());
+            signers.retain(|_, signer| signer.strong_count() > 0);
+            signers.insert(config.id.clone(), Arc::downgrade(&signer));
+        }
         Ok(Self {
             config,
             provider_id,
             client,
+            _signer: signer,
             http_client,
         })
     }
@@ -333,9 +419,9 @@ impl SubsonicProvider {
 
     /// Convert an opensubsonic `Child` (song) to our `Track` model.
     ///
-    /// The `source_uri` is set to the full authenticated stream URL so that
-    /// `resolve_track_source()` in the player can create an `HttpStream`
-    /// without needing access to the provider/client.
+    /// The song id goes in `path`; `source_uri` is a credential-free locator.
+    /// The player asks [`stream_url`] for the signed URL when it plays the
+    /// track.
     fn child_to_track(&self, child: &opensubsonic::data::Child) -> Track {
         let title = child.title.clone();
         let artist = child
@@ -380,21 +466,7 @@ impl SubsonicProvider {
         let bit_depth =
             super::server_bit_depth(&suffix, child.bit_depth, child.bit_rate).unwrap_or(0);
 
-        // Pre-build the authenticated stream URL so the player can use it
-        // directly without needing access to the Subsonic client.
-        // Pass transcoding parameters from config if configured.
-        let mut stream_opts = opensubsonic::StreamOptions::new();
-        if let Some(b) = self.config.transcoding_max_bitrate {
-            stream_opts = stream_opts.max_bit_rate(b as i32);
-        }
-        if let Some(f) = self.config.transcoding_format.as_deref() {
-            stream_opts = stream_opts.format(f);
-        }
-        let source_uri = self
-            .client
-            .stream_url(&child.id, &stream_opts)
-            .map(|url| url.to_string())
-            .unwrap_or_else(|_| child.id.clone());
+        let source_uri = track_locator(&self.provider_id, &child.id);
 
         let is_favorite = child.starred.is_some();
         let rating = child
@@ -451,27 +523,12 @@ impl SubsonicProvider {
         let album_list = self.fetch_album_list(page_size, offset).await?;
 
         let count = album_list.len();
-
-        // `buffered` keeps the server's album order while overlapping the
-        // round trips (one serial `getAlbum` per album made a first sync
-        // cost hundreds of RTTs).
-        use futures::StreamExt;
-        let ids: Vec<String> = album_list.iter().map(|a| a.id.clone()).collect();
-        let this = self;
-        let details: Vec<_> = futures::stream::iter(ids)
-            .map(|id| async move {
-                this.client
-                    .get_album(&id)
-                    .await
-                    .map_err(this.err("getAlbum"))
-            })
-            .buffered(ALBUM_FETCH_CONCURRENCY)
-            .collect()
-            .await;
+        let details = self
+            .fetch_album_details(album_list.iter().map(|a| a.id.clone()).collect())
+            .await?;
 
         let mut albums = Vec::with_capacity(count);
         for album_detail in details {
-            let album_detail = album_detail?;
             let release_type = release_type_tag(&album_detail);
             let mut tracks: Vec<Track> = album_detail
                 .song
@@ -498,6 +555,29 @@ impl SubsonicProvider {
 
         let has_more = count >= page_size as usize;
         Ok((albums, has_more))
+    }
+
+    /// `getAlbum` (songs included) for each of `ids`, in order. `buffered`
+    /// keeps the server's order while overlapping the round trips (one
+    /// serial request per album made a first sync cost hundreds of RTTs).
+    async fn fetch_album_details(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<Vec<opensubsonic::data::AlbumWithSongsId3>, ProviderError> {
+        use futures::StreamExt;
+        let this = self;
+        futures::stream::iter(ids)
+            .map(|id| async move {
+                this.client
+                    .get_album(&id)
+                    .await
+                    .map_err(this.err("getAlbum"))
+            })
+            .buffered(ALBUM_FETCH_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
     }
 
     /// The server's library-change marker (`getIndexes` `lastModified`,
@@ -586,7 +666,7 @@ impl MusicProvider for SubsonicProvider {
         let mut offset = 0;
         let page_size = 500;
 
-        loop {
+        for _ in 0..MAX_LIST_PAGES {
             let (batch, has_more) = self.browse_albums_page(offset, page_size).await?;
             if batch.is_empty() {
                 break;
@@ -624,14 +704,11 @@ impl MusicProvider for SubsonicProvider {
 
                 let mut artist_albums = Vec::new();
 
-                for album_id3 in &artist_detail.album {
-                    // Fetch full album (with songs).
-                    let album_detail = self
-                        .client
-                        .get_album(&album_id3.id)
-                        .await
-                        .map_err(self.err("getAlbum"))?;
-
+                // Full albums (with songs), fetched concurrently.
+                let details = self
+                    .fetch_album_details(artist_detail.album.iter().map(|a| a.id.clone()).collect())
+                    .await?;
+                for album_detail in details {
                     let release_type = release_type_tag(&album_detail);
                     let mut tracks: Vec<Track> = album_detail
                         .song
@@ -670,7 +747,7 @@ impl MusicProvider for SubsonicProvider {
         let page_size = 500;
         let mut offset = 0;
 
-        loop {
+        for _ in 0..MAX_LIST_PAGES {
             let album_list = self.fetch_album_list(page_size, offset).await?;
 
             let count = album_list.len();
@@ -678,13 +755,10 @@ impl MusicProvider for SubsonicProvider {
                 break;
             }
 
-            for album_id3 in &album_list {
-                let album_detail = self
-                    .client
-                    .get_album(&album_id3.id)
-                    .await
-                    .map_err(self.err("getAlbum"))?;
-
+            let details = self
+                .fetch_album_details(album_list.iter().map(|a| a.id.clone()).collect())
+                .await?;
+            for album_detail in &details {
                 for song in &album_detail.song {
                     all_tracks.push(self.child_to_track(song));
                 }
@@ -736,11 +810,10 @@ impl MusicProvider for SubsonicProvider {
                     .await
                     .and_then(reqwest::Response::error_for_status)
                     .map_err(|e| self.err("cover art fetch")(e.without_url().into()))?;
-                let bytes = resp
-                    .bytes()
+                let bytes = crate::online::read_capped_response(resp, MAX_IMAGE_BYTES)
                     .await
-                    .map_err(|e| self.err("cover art read")(e.without_url().into()))?;
-                Ok(Some(bytes.to_vec()))
+                    .map_err(|e| ProviderError::Io(format!("Subsonic cover art read: {e}")))?;
+                Ok(Some(bytes))
             }
             _ => {
                 // Try to get cover art from the first track's album ID.
@@ -1135,10 +1208,14 @@ impl MusicProvider for SubsonicProvider {
             })
             .or_else(|| detail.artist_image_url.clone());
 
-        let image_bytes = match image_url {
+        // The URL may come from the server's own metadata (`artistImageUrl`):
+        // fetch only http(s), and never more than an image's worth of bytes.
+        let image_bytes = match image_url.filter(|u| crate::online::validate_http_url(u).is_ok()) {
             Some(url) => match self.http_client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    resp.bytes().await.ok().map(|b| b.to_vec())
+                    crate::online::read_capped_response(resp, MAX_IMAGE_BYTES)
+                        .await
+                        .ok()
                 }
                 _ => None,
             },
@@ -1158,7 +1235,7 @@ impl MusicProvider for SubsonicProvider {
         track: &Track,
     ) -> Result<Option<crate::library::tech_info::TechInfo>, ProviderError> {
         // The song ID lives in `track.path` (see `child_to_track`);
-        // `source_uri` is a signed stream URL and is never shown.
+        // `source_uri` is only an identity locator, not the song id.
         let song_id = track.path.to_string_lossy().to_string();
         let song = self
             .client
@@ -1449,5 +1526,65 @@ mod connection_tests {
         );
         assert!(!message.contains("secret"), "{message}");
         assert!(!message.contains("salt"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod stream_url_tests {
+    use super::*;
+    use opensubsonic::data::Child;
+
+    fn provider(id: &str) -> SubsonicProvider {
+        SubsonicProvider::new(SubsonicConfig {
+            id: id.to_owned(),
+            url: "https://music.example.com".to_owned(),
+            username: "alice".to_owned(),
+            password: "hunter2".to_owned(),
+            transcoding_format: Some("mp3".to_owned()),
+            ..SubsonicConfig::default()
+        })
+        .expect("valid config")
+    }
+
+    fn song() -> Child {
+        serde_json::from_str(r#"{"id":"song-7","title":"t"}"#).expect("valid Child")
+    }
+
+    #[test]
+    fn tracks_hold_no_credential_and_the_player_signs_at_playback() {
+        let provider = provider("subsonic-signing-test");
+        let track = provider.child_to_track(&song());
+        assert_eq!(track.path, PathBuf::from("song-7"));
+        assert_eq!(track.source_uri, "subsonic://subsonic-signing-test/song-7");
+        assert!(!track.source_uri.contains("alice"));
+        let url = stream_url(&track);
+        assert!(
+            url.starts_with("https://music.example.com/rest/stream"),
+            "{url}"
+        );
+        assert!(url.contains("id=song-7"), "{url}");
+        assert!(url.contains("u=alice"), "{url}");
+        assert!(url.contains("format=mp3"), "{url}");
+        assert!(!url.contains("hunter2"), "{url}");
+    }
+
+    #[test]
+    fn without_a_live_provider_the_stored_uri_is_used() {
+        let mut track = provider("subsonic-gone-test").child_to_track(&song());
+        track.provider_id = Arc::from("subsonic-never-registered");
+        track.source_uri = "https://old.example.com/rest/stream?id=x".to_owned();
+        assert_eq!(stream_url(&track), track.source_uri);
+    }
+
+    #[test]
+    fn debug_output_hides_the_password() {
+        let text = format!(
+            "{:?}",
+            SubsonicConfig {
+                password: "hunter2".to_owned(),
+                ..SubsonicConfig::default()
+            }
+        );
+        assert!(!text.contains("hunter2"), "{text}");
     }
 }

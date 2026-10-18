@@ -92,6 +92,7 @@ struct Ctx {
     pal: Palette,
     accent: Accent,
     pad: f32,
+    compact: bool,
     /// Live ICY line ("artist — title") of the playing station, if any.
     now: Option<String>,
 }
@@ -105,6 +106,15 @@ pub fn enter(app: &mut App) {
 
 fn recent(since: Option<Instant>) -> bool {
     since.is_some_and(|t| t.elapsed() < LOADING_GRACE)
+}
+
+/// `base`, raised to a finger-sized hit height on touch devices.
+fn btn_h(ui: &Ui, base: f32) -> f32 {
+    if theme::touch(ui.ctx()) {
+        base.max(theme::size::TOUCH)
+    } else {
+        base
+    }
 }
 
 fn padded<R>(ui: &mut Ui, pad: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -132,6 +142,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         pal: t.pal,
         accent: t.accent,
         pad: app.page_pad(),
+        compact: app.compact(),
         now: app
             .session
             .playback
@@ -221,7 +232,7 @@ fn header(ui: &mut Ui, cx: &Ctx, st: &mut State, radio: &RadioState, intents: &m
                     &aulos_core::fl!("radio-add-by-url"),
                     Some(regular::PLUS),
                     PillKind::Secondary,
-                    30.0,
+                    btn_h(ui, 30.0),
                     0.0,
                 )
                 .clicked()
@@ -236,15 +247,26 @@ fn header(ui: &mut Ui, cx: &Ctx, st: &mut State, radio: &RadioState, intents: &m
 
 fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
     padded(ui, cx.pad, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+        let layout = if cx.compact {
+            Layout::top_down(Align::Min)
+        } else {
+            Layout::left_to_right(Align::Center)
+        };
+        ui.with_layout(layout, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            let full = ui.available_width();
+            let (name_w, url_w) = if cx.compact {
+                (full, full)
+            } else {
+                (180.0, 320.0)
+            };
             text_field(
                 ui,
                 &mut st.add_name,
                 &aulos_core::fl!("radio-add-name-placeholder"),
-                180.0,
+                name_w,
             );
-            let resp = text_field(ui, &mut st.add_url, "https://example.com/stream.mp3", 320.0);
+            let resp = text_field(ui, &mut st.add_url, "https://example.com/stream.mp3", url_w);
             if resp.changed() {
                 st.add_error = None;
             }
@@ -254,7 +276,7 @@ fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
                 &aulos_core::fl!("radio-add-station"),
                 None,
                 PillKind::Primary,
-                32.0,
+                btn_h(ui, 32.0),
                 0.0,
             )
             .clicked()
@@ -448,6 +470,7 @@ fn refresh_cache(st: &mut State, radio: &RadioState) {
     for s in &radio.stations {
         s.id.hash(&mut h);
         s.name.hash(&mut h);
+        s.tags.hash(&mut h);
     }
     let key = h.finish();
     if key == st.cache_key {

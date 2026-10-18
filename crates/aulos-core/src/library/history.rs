@@ -319,7 +319,8 @@ impl LibraryDb {
         let rows = stmt
             .query_map(params![provider, limit], Self::row_to_track)
             .map_err(|e| format!("Recent tracks query error: {e}"))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Row decode error: {e}"))
     }
 
     /// Albums ordered by their most recent play.
@@ -532,7 +533,8 @@ impl LibraryDb {
         let rows = stmt
             .query_map(params![provider, since, limit], Self::row_to_track)
             .map_err(|e| format!("Favourite tracks query error: {e}"))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Row decode error: {e}"))
     }
 
     /// Number of favourite tracks of `provider`.
@@ -577,8 +579,8 @@ impl LibraryDb {
         let ids = stmt
             .query_map(params![provider, artist, album], |row| row.get::<_, i64>(0))
             .map_err(|e| format!("Resume query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Resume row error: {e}"))?;
         let Some(position) = ids.iter().position(|&id| id == track_id) else {
             return Ok(None);
         };

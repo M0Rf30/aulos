@@ -1657,3 +1657,12 @@ edit-paste = Incolla
 edit-select-all = Seleziona tutto
 edit-copy = Copia
 edit-cut = Taglia
+
+# Browser folder access (web_fs)
+web-folder-not-granted = L'accesso alla cartella “{ $root }” non è stato concesso: consentilo in Impostazioni › Libreria
+web-folder-not-available = I file di “{ $root }” non sono disponibili: scegli di nuovo la cartella in Impostazioni › Libreria
+web-folder-empty = La cartella non contiene file
+web-file-not-in-root = { $path } non è un file di una cartella musicale
+web-file-not-in-folder = “{ $file }” non è più in “{ $root }”
+web-file-not-read = Impossibile leggere “{ $file }”: { $error }
+web-file-read-failed = Impossibile leggere il file: { $error }

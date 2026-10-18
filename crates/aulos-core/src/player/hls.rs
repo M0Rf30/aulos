@@ -12,8 +12,11 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use url::Url;
+use web_time::Instant;
 
 /// Segments of a live playlist skipped over at start, so playback begins
 /// near the live edge (RFC 8216 asks for three target durations back).
@@ -96,6 +99,7 @@ pub(super) struct HlsReader {
     poll_every: Duration,
     last_poll: Option<Instant>,
     idle_polls: u32,
+    stop: Arc<AtomicBool>,
 }
 
 impl HlsReader {
@@ -105,6 +109,7 @@ impl HlsReader {
     pub(super) fn open(
         client: crate::http::blocking::Client,
         url: &str,
+        stop: Arc<AtomicBool>,
     ) -> Result<(Self, Option<String>), String> {
         let mut playlist = Url::parse(url).map_err(|e| format!("Bad stream URL: {e}"))?;
         let mut reader = loop {
@@ -125,6 +130,7 @@ impl HlsReader {
                         poll_every: Duration::from_secs(3),
                         last_poll: None,
                         idle_polls: 0,
+                        stop,
                     };
                 }
             }
@@ -205,8 +211,19 @@ impl Read for HlsReader {
                 return Ok(0);
             }
             if let Some(at) = self.last_poll {
-                let wait = self.poll_every.saturating_sub(at.elapsed());
-                std::thread::sleep(wait);
+                let deadline = at + self.poll_every;
+                while Instant::now() < deadline {
+                    if self.stop.load(Ordering::Acquire) {
+                        return Ok(0);
+                    }
+                    std::thread::sleep(
+                        Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return Ok(0);
             }
             self.poll().map_err(io_err)?;
         }

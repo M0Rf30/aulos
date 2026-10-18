@@ -52,7 +52,7 @@ pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .expect("MusicBrainz HTTP client config is static and valid")
+            .unwrap_or_else(|_| crate::http::blocking_client())
     });
     &CLIENT
 }
@@ -66,7 +66,7 @@ pub(crate) fn throttle() {
     if let Some(prev) = *last {
         let elapsed = prev.elapsed();
         if elapsed < MIN_REQUEST_GAP {
-            std::thread::sleep(MIN_REQUEST_GAP - elapsed);
+            crate::online::block_for(MIN_REQUEST_GAP - elapsed);
         }
     }
     *last = Some(Instant::now());

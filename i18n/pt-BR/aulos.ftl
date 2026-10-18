@@ -1658,3 +1658,12 @@ edit-paste = Colar
 edit-select-all = Selecionar tudo
 edit-copy = Copiar
 edit-cut = Recortar
+
+# Browser folder access (web_fs)
+web-folder-not-granted = O acesso à pasta “{ $root }” não foi concedido: permita em Configurações › Biblioteca
+web-folder-not-available = Os arquivos de “{ $root }” não estão disponíveis: escolha a pasta novamente em Configurações › Biblioteca
+web-folder-empty = A pasta não tem arquivos
+web-file-not-in-root = { $path } não é um arquivo de uma pasta de música
+web-file-not-in-folder = “{ $file }” não está mais em “{ $root }”
+web-file-not-read = Não foi possível ler “{ $file }”: { $error }
+web-file-read-failed = Não foi possível ler o arquivo: { $error }

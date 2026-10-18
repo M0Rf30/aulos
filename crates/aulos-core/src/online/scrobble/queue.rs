@@ -9,7 +9,6 @@
 
 use super::{ScrobbleTrack, Service};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Hard cap on queued listens; the oldest are dropped beyond it.
@@ -82,22 +81,12 @@ impl Queue {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let data = serde_json::to_vec(&FileFormat {
             version: FILE_VERSION,
             items: self.items.clone(),
         })
         .map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("json.tmp");
-        {
-            // Closed at the end of the block, before the rename.
-            let mut file = std::fs::File::create(&tmp)?;
-            file.write_all(&data)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)
+        crate::fs_atomic::write(path, &data, false)
     }
 
     pub fn push(&mut self, service: Service, track: ScrobbleTrack) {

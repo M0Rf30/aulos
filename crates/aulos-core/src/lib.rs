@@ -15,6 +15,7 @@ pub mod convert;
 pub mod credentials;
 pub mod desktop;
 pub mod format;
+mod fs_atomic;
 pub mod http;
 pub mod i18n;
 pub mod library;

@@ -233,9 +233,14 @@ impl Session {
             .as_ref()
             .and_then(|view| view.albums.as_ref())
             .map(|albums| {
+                // Compilations are grouped in memory only, so the SQL shelf
+                // lists one pseudo-album per track artist; `find_album` falls
+                // back to the name and the dedup keeps each album once.
+                let mut seen = std::collections::HashSet::new();
                 albums
                     .iter()
-                    .filter_map(|a| self.library.find_album_exact(&a.artist, &a.name))
+                    .filter_map(|a| self.library.find_album(&a.artist, &a.name))
+                    .filter(|idx| seen.insert(*idx))
                     .flat_map(|idx| {
                         self.library.albums[idx]
                             .tracks

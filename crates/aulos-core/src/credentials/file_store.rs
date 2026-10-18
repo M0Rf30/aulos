@@ -75,23 +75,9 @@ impl FileCredential {
     }
 
     fn write(&self, secret: &[u8]) -> Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::create_dir_all(&self.dir).map_err(|e| failure("create directory", &e))?;
         // Written beside the target and renamed: a crash never leaves half a
         // password behind.
-        let path = self.path();
-        let tmp = path.with_extension("tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| failure("write", &e))?;
-        file.write_all(secret).map_err(|e| failure("write", &e))?;
-        file.sync_all().map_err(|e| failure("write", &e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| failure("write", &e))
+        crate::fs_atomic::write(&self.path(), secret, true).map_err(|e| failure("write", &e))
     }
 }
 

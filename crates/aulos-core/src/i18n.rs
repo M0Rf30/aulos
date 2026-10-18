@@ -40,7 +40,7 @@ pub fn init_for(language: &str) {
     }
 }
 
-/// Languages that ship translations, as BCP 47 tags, fallback first.
+/// Languages that ship translations, as BCP 47 tags, sorted by tag.
 #[must_use]
 pub fn available_languages() -> Vec<String> {
     let mut tags: Vec<String> = LANGUAGE_LOADER

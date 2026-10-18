@@ -173,13 +173,8 @@ impl SimilarCache {
     /// entries first.
     pub fn save(&mut self, path: &Path, now: i64) -> std::io::Result<()> {
         self.prune(now);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)
+        crate::fs_atomic::write(path, &json, false)
     }
 
     /// The entry for `artist` if it is younger than [`CACHE_TTL_SECS`].
@@ -345,9 +340,19 @@ impl SimilarShelf {
 /// Page of `artist` to open for a "discover" card, and its site label.
 pub fn discover_link(artist: &SimilarArtist) -> (String, &'static str) {
     if let Some(url) = artist.url.as_deref().filter(|u| u.starts_with("https://")) {
-        let site = if url.contains("musicbrainz.org") {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
+        let on = |domain: &str| {
+            host == domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|rest| rest.ends_with('.'))
+        };
+        let site = if on("musicbrainz.org") {
             "MusicBrainz"
-        } else if url.contains("last.fm") {
+        } else if on("last.fm") {
             "Last.fm"
         } else {
             "the web"
@@ -487,7 +492,7 @@ impl Throttle {
         if let Some(t) = *last {
             let since = t.elapsed();
             if since < self.gap {
-                std::thread::sleep(self.gap - since);
+                super::block_for(self.gap - since);
             }
         }
         *last = Some(Instant::now());
@@ -1100,6 +1105,18 @@ mod tests {
         assert_eq!(
             discover_link(&with_url("https://www.last.fm/music/X+Y")),
             ("https://www.last.fm/music/X+Y".to_string(), "Last.fm")
+        );
+        assert_eq!(
+            discover_link(&with_url("https://musicbrainz.org/artist/x")).1,
+            "MusicBrainz"
+        );
+        assert_eq!(
+            discover_link(&with_url("https://evil.example/musicbrainz.org")).1,
+            "the web"
+        );
+        assert_eq!(
+            discover_link(&with_url("https://notlast.fm.evil.example/")).1,
+            "the web"
         );
         let (url, _) = discover_link(&with_url("javascript:alert(1)"));
         assert_eq!(url, "https://www.last.fm/music/X%20Y");

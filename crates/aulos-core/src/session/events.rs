@@ -173,9 +173,6 @@ pub struct SessionChanges {
     /// The whole library was replaced (not just extended): derived views
     /// such as a folder tree are out of date.
     pub library_loaded: bool,
-    /// Library content (or its covers) changed: whatever is derived from
-    /// the current track's album art may need a refresh.
-    pub library_updated: bool,
     /// The current track changed: the track-dependent presentation (cover
     /// backdrop, visualizer metadata) needs a refresh. The session already
     /// did its half (lyrics, scrobble reset, MPRIS, notification).
@@ -200,7 +197,6 @@ impl SessionChanges {
     pub fn absorb(&mut self, later: SessionChanges) {
         self.covers.absorb(later.covers);
         self.library_loaded |= later.library_loaded;
-        self.library_updated |= later.library_updated;
         self.track_changed |= later.track_changed;
         self.cover_bytes_loaded |= later.cover_bytes_loaded;
         if later.artist_photos_cleared {
@@ -724,25 +720,38 @@ impl Session {
                 let mut update = SessionUpdate::from(self.load_home(true));
                 update.changes.covers = covers;
                 update.changes.library_loaded = true;
-                update.changes.library_updated = true;
                 update.also(self.autoplay_on_launch())
             }
             LibraryApplied::Batch { covers, staged } => {
                 let mut update = SessionUpdate::none();
                 if !staged {
                     update.changes.covers = covers;
-                    update.changes.library_updated = true;
                 }
                 update
             }
             LibraryApplied::Completed { covers } => {
                 let mut update = SessionUpdate::from(self.load_home(true));
                 update.changes.covers = covers;
-                update.changes.library_updated = true;
                 update.also(self.autoplay_on_launch())
             }
             LibraryApplied::ActionFailed(reason) => {
                 SessionUpdate::notice(SessionNotice::ProviderActionFailed(reason))
+            }
+            LibraryApplied::Unauthorized {
+                provider_id,
+                reason,
+            } => {
+                let provider = self
+                    .providers
+                    .provider_list
+                    .iter()
+                    .find(|(id, _)| *id == provider_id)
+                    .map_or(provider_id, |(_, name)| name.clone());
+                SessionUpdate::notice(SessionNotice::ProviderConnectFailed {
+                    provider,
+                    reason,
+                    unauthorized: true,
+                })
             }
         }
     }
@@ -866,6 +875,28 @@ mod tests {
         assert!(matches!(
             update.notices.as_slice(),
             [SessionNotice::ProviderActionFailed(reason)] if reason == "denied"
+        ));
+    }
+
+    #[test]
+    fn a_rejected_library_load_becomes_a_reauth_notice() {
+        let mut session = test_session();
+        let provider_id = session.providers.registry.active_id().to_string();
+        session.providers.provider_list = vec![(provider_id.clone(), "Nimbus".into())];
+        let generation = session.library.begin_reload_generation();
+        let update = session.apply_session_event(
+            LibraryEvent::LoadFailed {
+                generation,
+                provider_id,
+                reason: "Wrong username or password".into(),
+                unauthorized: true,
+            }
+            .into(),
+        );
+        assert!(matches!(
+            update.notices.as_slice(),
+            [SessionNotice::ProviderConnectFailed { provider, reason, unauthorized: true }]
+                if provider == "Nimbus" && reason == "Wrong username or password"
         ));
     }
 

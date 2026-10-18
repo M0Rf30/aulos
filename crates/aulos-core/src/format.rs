@@ -109,7 +109,9 @@ pub fn format_size(bytes: u64) -> String {
     }
     let mut value = bytes as f64 / 1024.0;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    // Compare the value as it will print (one decimal): 1048575 B is
+    // "1.0 MiB", not "1024.0 KiB".
+    while (value * 10.0).round() / 10.0 >= 1024.0 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
@@ -268,6 +270,8 @@ mod tests {
         assert_eq!(format_size(812), "812 B");
         assert_eq!(format_size(1024), "1.0 KiB");
         assert_eq!(format_size(12_897_484), "12.3 MiB");
+        assert_eq!(format_size(1_048_575), "1.0 MiB");
+        assert_eq!(format_size(1_048_000), "1023.4 KiB");
         assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 

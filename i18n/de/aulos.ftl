@@ -1656,3 +1656,12 @@ edit-paste = Einfügen
 edit-select-all = Alles auswählen
 edit-copy = Kopieren
 edit-cut = Ausschneiden
+
+# Browser folder access (web_fs)
+web-folder-not-granted = Der Zugriff auf den Ordner „{ $root }“ wurde nicht erteilt – erlaube ihn unter Einstellungen › Mediathek
+web-folder-not-available = Die Dateien von „{ $root }“ sind nicht verfügbar – wähle den Ordner unter Einstellungen › Mediathek erneut aus
+web-folder-empty = Der Ordner enthält keine Dateien
+web-file-not-in-root = { $path } ist keine Datei eines Musikordners
+web-file-not-in-folder = „{ $file }“ ist nicht mehr in „{ $root }“
+web-file-not-read = „{ $file }“ konnte nicht gelesen werden: { $error }
+web-file-read-failed = Die Datei konnte nicht gelesen werden: { $error }

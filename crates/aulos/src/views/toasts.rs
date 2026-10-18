@@ -58,7 +58,19 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 .font(theme::medium(13.0))
                                 .color(fg);
                             ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label(text);
+                            // A long message (an OS error, say) must not push the
+                            // close button off the screen: leave room for it, the
+                            // icon and the action, and truncate the rest.
+                            let action_w = toast.action.as_ref().map_or(0.0, |a| {
+                                text_width(ui, &a.label(), theme::semibold(13.0)) + 36.0
+                            });
+                            let room = (ctx.content_rect().width() - 24.0).min(560.0);
+                            let text_max = (room - 20.0 - 27.0 - 38.0 - action_w).max(80.0);
+                            ui.scope(|ui| {
+                                ui.set_max_width(text_max);
+                                ui.add(egui::Label::new(text).truncate())
+                                    .on_hover_text(&toast.text);
+                            });
                             if let Some(subject) = &toast.subject {
                                 ui.label(RichText::new(subject).font(theme::bold(13.0)).color(fg));
                                 ui.label(

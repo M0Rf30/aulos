@@ -25,6 +25,7 @@ use web_sys::{
 };
 
 use super::idb::{self, describe, error_name};
+use crate::fl;
 use crate::library::LibraryScanner;
 use crate::virtual_path;
 
@@ -74,11 +75,11 @@ fn with_root<T>(name: &str, f: impl FnOnce(&mut Root) -> T) -> Option<T> {
 }
 
 fn not_granted(root: &str) -> String {
-    format!("Folder access for “{root}” was not granted — allow it in Settings › Library")
+    fl!("web-folder-not-granted", root = root)
 }
 
 fn not_available(root: &str) -> String {
-    format!("The files of “{root}” are not available — pick the folder again in Settings › Library")
+    fl!("web-folder-not-available", root = root)
 }
 
 /// What the page can do with the root of `path` (any path under it, or the
@@ -323,7 +324,7 @@ async fn pick_with_input() -> Result<Option<PathBuf>, String> {
         tree.insert(below.to_owned(), file);
     }
     let Some(folder) = folder else {
-        return Err("The folder has no files".to_owned());
+        return Err(fl!("web-folder-empty"));
     };
     let wanted = virtual_path::root_name(&folder);
     // Picking a folder of the same name again re-attaches its files.
@@ -452,13 +453,19 @@ enum Located {
 fn locate(path: &Path) -> Result<Located, String> {
     let (name, parts) = virtual_path::split(path)
         .filter(|(_, parts)| !parts.is_empty())
-        .ok_or_else(|| format!("{} is not a file of a music folder", path.display()))?;
+        .ok_or_else(|| fl!("web-file-not-in-root", path = path.display().to_string()))?;
     let located = with_root(&name, |root| match &root.backing {
         Backing::Files(files) => files
             .get(&parts.join("/"))
             .cloned()
             .map(Located::File)
-            .ok_or_else(|| format!("“{}” is not in “{name}” any more", parts.join("/"))),
+            .ok_or_else(|| {
+                fl!(
+                    "web-file-not-in-folder",
+                    file = parts.join("/"),
+                    root = name.as_str()
+                )
+            }),
         Backing::Handle { granted: false, .. } => Err(not_granted(&name)),
         Backing::Handle { handle, .. } => Ok(Located::Handle {
             root: name.clone(),
@@ -481,8 +488,10 @@ fn handle_error(root: &str, what: &str, error: &JsValue) -> String {
             });
             not_granted(root)
         }
-        "NotFoundError" | "TypeMismatchError" => format!("“{what}” is not in “{root}” any more"),
-        _ => format!("“{what}” could not be read: {}", describe(error)),
+        "NotFoundError" | "TypeMismatchError" => {
+            fl!("web-file-not-in-folder", file = what, root = root)
+        }
+        _ => fl!("web-file-not-read", file = what, error = describe(error)),
     }
 }
 
@@ -533,7 +542,7 @@ pub async fn read_range(file: &File, start: u64, len: u64) -> Result<Vec<u8>, St
         .map_err(|e| describe(&e))?;
     let buffer = JsFuture::from(blob.array_buffer())
         .await
-        .map_err(|e| format!("the file could not be read: {}", describe(&e)))?;
+        .map_err(|e| fl!("web-file-read-failed", error = describe(&e)))?;
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 

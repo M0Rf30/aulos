@@ -99,6 +99,13 @@ pub struct OnlineStore {
     conn: Connection,
 }
 
+/// A decoded row, or `None` (logged) when one row fails to decode, so one bad
+/// row does not hide the rest of the list.
+fn skip_bad_row<T>(row: rusqlite::Result<T>, what: &str) -> Option<T> {
+    row.map_err(|e| tracing::warn!("Skipping unreadable {what}: {e}"))
+        .ok()
+}
+
 impl OnlineStore {
     /// [`Self::open`] at the shared library database
     /// ([`crate::paths::library_db_path`]).
@@ -125,9 +132,9 @@ impl OnlineStore {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB open error: {e}"))?;
         conn.execute_batch(
-            "PRAGMA foreign_keys=ON;
-             PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
+            "PRAGMA busy_timeout=5000;
+             PRAGMA foreign_keys=ON;
+             PRAGMA journal_mode=WAL;",
         )
         .map_err(|e| format!("DB PRAGMA error: {e}"))?;
         Ok(Self { conn })
@@ -195,7 +202,7 @@ impl OnlineStore {
                 })
             })
             .map_err(|e| format!("List podcasts error: {e}"))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| skip_bad_row(r, "podcast row"))
             .collect::<Vec<Podcast>>();
         let mut dates = self
             .conn
@@ -210,7 +217,10 @@ impl OnlineStore {
             .map(|mut podcast| {
                 let pub_dates: Vec<i64> = dates
                     .query_map(params![podcast.id, CADENCE_SAMPLE as i64], |row| row.get(0))
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .map(|rows| {
+                        rows.filter_map(|r| skip_bad_row(r, "cadence row"))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 podcast.cadence = Cadence::from_pub_dates(&pub_dates);
                 podcast
@@ -298,7 +308,7 @@ impl OnlineStore {
         let episodes = stmt
             .query_map(params![podcast_id], Self::row_to_episode)
             .map_err(|e| format!("List episodes error: {e}"))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| skip_bad_row(r, "episode row"))
             .collect();
         Ok(episodes)
     }
@@ -465,7 +475,7 @@ impl OnlineStore {
                 })
             })
             .map_err(|e| format!("List radio stations error: {e}"))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| skip_bad_row(r, "radio station row"))
             .collect();
         Ok(stations)
     }

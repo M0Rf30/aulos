@@ -458,9 +458,14 @@ impl ProviderRegistry {
     /// Remove all providers of a given type.
     pub fn remove_by_type(&mut self, ptype: ProviderType) {
         self.providers.retain(|_, p| p.provider_type() != ptype);
-        // If the active provider was removed, reset to the first remaining
+        // If the active provider was removed, fall back to the local library,
+        // else the first remaining id in sorted order (a `HashMap` has none).
         if !self.providers.contains_key(&self.active_provider_id) {
-            self.active_provider_id = self.providers.keys().next().cloned().unwrap_or_default();
+            self.active_provider_id = if self.providers.contains_key("local") {
+                "local".to_owned()
+            } else {
+                self.providers.keys().min().cloned().unwrap_or_default()
+            };
         }
     }
 

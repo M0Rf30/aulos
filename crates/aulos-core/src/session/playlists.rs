@@ -538,7 +538,7 @@ impl Session {
 
 /// The id a provider's `add_to_playlist` expects for `track`: the database id
 /// for the local library, else `path` (the MPD URI or the Subsonic song id;
-/// `source_uri` is a signed stream URL for Subsonic).
+/// `source_uri` is only an identity locator for Subsonic).
 #[must_use]
 pub fn playlist_track_id(track: &Track) -> String {
     if track.id != 0 {

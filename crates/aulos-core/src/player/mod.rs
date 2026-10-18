@@ -63,8 +63,8 @@ fn resolve_track_source(track: &Track) -> TrackSource {
     if track.provider_id.starts_with("mpd") {
         TrackSource::MpdFile(track.source_uri.clone())
     } else if track.provider_id.starts_with("subsonic") {
-        // source_uri contains the pre-built authenticated stream URL.
-        TrackSource::HttpStream(track.source_uri.clone())
+        // The provider signs the stream URL now: a track holds no credential.
+        TrackSource::HttpStream(crate::provider::subsonic::stream_url(track))
     } else if track.provider_id.starts_with("radio") {
         TrackSource::LiveStream(track.source_uri.clone())
     } else if track.provider_id.starts_with("podcast") {

@@ -77,20 +77,20 @@ pub struct CpalDeviceConfig {
 /// PipeWire/PulseAudio, which is required for bit-perfect DoP/DSD output (any
 /// resampling, mixing, or volume change corrupts it).
 fn resolve_output_device(host: &cpal::Host, configured: Option<&str>) -> Result<Device> {
-    // (device, id string e.g. "hw:CARD=1,DEV=0", human description)
-    let devices: Vec<(Device, String, String)> = host
-        .output_devices()
-        .map(|devs| {
-            devs.map(|d| {
-                let id = d.id().map(|i| i.id().to_owned()).unwrap_or_default();
-                let desc = d.to_string();
-                (d, id, desc)
-            })
-            .collect()
-        })
-        .unwrap_or_default();
-
     if let Some(want) = configured {
+        // (device, id string e.g. "hw:CARD=1,DEV=0", human description)
+        let devices: Vec<(Device, String, String)> = host
+            .output_devices()
+            .map(|devs| {
+                devs.map(|d| {
+                    let id = d.id().map(|i| i.id().to_owned()).unwrap_or_default();
+                    let desc = d.to_string();
+                    (d, id, desc)
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+
         // 1) exact id, 2) exact desc, 3) substring id, 4) substring desc
         let lower = want.to_lowercase();
         let norm = normalize_alsa(want);

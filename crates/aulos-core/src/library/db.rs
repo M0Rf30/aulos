@@ -1024,8 +1024,8 @@ impl LibraryDb {
         let mut tracks: Vec<Track> = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("Query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         super::compilations::group_compilations(&mut tracks);
 
@@ -1362,15 +1362,20 @@ impl LibraryDb {
     /// Remove the local tracks beneath directory `dir` (a deleted or moved
     /// folder); returns how many were removed.
     pub fn remove_local_tracks_under(&self, dir: &Path) -> Result<usize, String> {
-        let mut prefix = dir.to_string_lossy().trim_end_matches('/').to_string();
-        prefix = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let base = dir
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
+        // Case-sensitive prefix match (LIKE is ASCII case-insensitive) on
+        // either separator, with no wildcard interpretation of the path.
+        let unix = format!("{base}/");
+        let win = format!("{base}\\");
+        let len = unix.chars().count() as i64;
         self.conn
             .execute(
-                "DELETE FROM tracks WHERE provider = 'local' AND path LIKE ?1 ESCAPE '\\'",
-                params![format!("{prefix}/%")],
+                "DELETE FROM tracks WHERE provider = 'local'
+                   AND (substr(path, 1, ?1) = ?2 OR substr(path, 1, ?1) = ?3)",
+                params![len, unix, win],
             )
             .map_err(|e| format!("Delete under dir error: {e}"))
     }
@@ -1416,8 +1421,8 @@ impl LibraryDb {
         let mtimes = stmt
             .query_map(params![provider], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
         Ok(mtimes)
     }
 
@@ -1490,8 +1495,8 @@ impl LibraryDb {
         let tracks = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("Search query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(tracks)
     }
@@ -1529,8 +1534,8 @@ impl LibraryDb {
                 })
             })
             .map_err(|e| format!("List playlists error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(playlists)
     }
@@ -1566,8 +1571,8 @@ impl LibraryDb {
         let tracks: Vec<Track> = stmt
             .query_map(params![id], Self::row_to_track)
             .map_err(|e| format!("Get playlist tracks error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         let total_duration = tracks.iter().map(|t| t.duration).sum();
         let track_count = tracks.len() as u32;
@@ -1726,19 +1731,24 @@ impl LibraryDb {
         };
         let before = rows.clone();
         edit(&mut rows)?;
-        for gone in before.iter().filter(|id| !rows.contains(id)) {
-            tx.execute(
-                "DELETE FROM playlist_tracks WHERE rowid = ?1",
-                params![gone],
-            )
-            .map_err(|e| format!("Playlist edit error: {e}"))?;
-        }
-        for (position, rowid) in rows.iter().enumerate() {
-            tx.execute(
-                "UPDATE playlist_tracks SET position = ?1 WHERE rowid = ?2",
-                params![position as i64, rowid],
-            )
-            .map_err(|e| format!("Playlist edit error: {e}"))?;
+        let kept: std::collections::HashSet<i64> = rows.iter().copied().collect();
+        {
+            let mut delete = tx
+                .prepare_cached("DELETE FROM playlist_tracks WHERE rowid = ?1")
+                .map_err(|e| format!("Playlist edit error: {e}"))?;
+            for gone in before.iter().filter(|id| !kept.contains(id)) {
+                delete
+                    .execute(params![gone])
+                    .map_err(|e| format!("Playlist edit error: {e}"))?;
+            }
+            let mut update = tx
+                .prepare_cached("UPDATE playlist_tracks SET position = ?1 WHERE rowid = ?2")
+                .map_err(|e| format!("Playlist edit error: {e}"))?;
+            for (position, rowid) in rows.iter().enumerate() {
+                update
+                    .execute(params![position as i64, rowid])
+                    .map_err(|e| format!("Playlist edit error: {e}"))?;
+            }
         }
         tx.commit()
             .map_err(|e| format!("Playlist edit commit error: {e}"))
@@ -1840,8 +1850,8 @@ impl LibraryDb {
         let tracks = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("List favorites error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(tracks)
     }
@@ -1878,8 +1888,8 @@ impl LibraryDb {
         let genres = stmt
             .query_map(params_ref.as_slice(), |row| row.get(0))
             .map_err(|e| format!("List genres error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(genres)
     }
@@ -1924,8 +1934,8 @@ impl LibraryDb {
         let tracks = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("Tracks by genre error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(tracks)
     }
@@ -1946,8 +1956,8 @@ impl LibraryDb {
                 .map_err(|e| format!("List smart playlists error: {e}"))?;
             stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                 .map_err(|e| format!("List smart playlists error: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect()
+                .collect::<Result<_, rusqlite::Error>>()
+                .map_err(|e| format!("Row decode error: {e}"))?
         };
 
         let mut playlists = Vec::with_capacity(rows.len());
@@ -2043,8 +2053,8 @@ impl LibraryDb {
         let tracks = stmt
             .query_map(params_ref.as_slice(), Self::row_to_track)
             .map_err(|e| format!("Smart playlist query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, rusqlite::Error>>()
+            .map_err(|e| format!("Row decode error: {e}"))?;
 
         Ok(tracks)
     }
@@ -2558,6 +2568,28 @@ mod tests {
             2
         );
         assert_eq!(db.all_tracks(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn removing_a_folder_is_case_sensitive_and_handles_windows_separators() {
+        let db = LibraryDb::open_memory().unwrap();
+        for p in [
+            "/m/Rock/1.flac",
+            "/m/rock/2.flac",
+            "C:\\Music\\Rock\\3.flac",
+        ] {
+            insert_local(&db, Path::new(p));
+        }
+        assert_eq!(
+            db.remove_local_tracks_under(Path::new("/m/Rock")).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.remove_local_tracks_under(Path::new("C:\\Music\\Rock\\"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.all_tracks(None).unwrap().len(), 1);
     }
 
     #[test]

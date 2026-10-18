@@ -20,7 +20,7 @@ use crate::library::search::SEARCH_DEBOUNCE_MS;
 use crate::library::state::SortField;
 use crate::library::top_tracks::{ArtistTop, TOP_TRACKS_LEN, rank_top_tracks};
 use crate::library::{Album, CoverArt, LibraryDb, LibraryScanner, Track};
-use crate::provider::{MusicProvider, ProviderType};
+use crate::provider::{MusicProvider, ProviderError, ProviderType};
 use crate::task::Effect;
 use crate::task::channel_stream;
 use futures::channel::mpsc;
@@ -111,6 +111,9 @@ pub enum LibraryEvent {
         generation: u64,
         provider_id: String,
         reason: String,
+        /// The server rejected the credentials (a typed
+        /// [`ProviderError::Unauthorized`]): the UI asks for new ones.
+        unauthorized: bool,
     },
     /// The play-count ranking of an artist's tracks (see
     /// [`Session::load_artist_top`]).
@@ -184,6 +187,9 @@ pub enum LibraryApplied {
     /// A provider action failed and its optimistic local change was undone,
     /// or a reload failed and the visible library was kept.
     ActionFailed(String),
+    /// A reload failed because the provider's server rejected the
+    /// credentials; the visible library was kept (as for `ActionFailed`).
+    Unauthorized { provider_id: String, reason: String },
 }
 
 impl Session {
@@ -440,7 +446,8 @@ impl Session {
                     let key = path.to_string_lossy().into_owned();
                     match db.track_by_path(&key) {
                         Ok(Some(track)) => updated.push(track),
-                        _ => removed.push(key),
+                        Ok(None) => removed.push(key),
+                        Err(e) => tracing::error!("track_by_path({key}) failed: {e}"),
                     }
                 }
                 (updated, removed)
@@ -705,6 +712,7 @@ impl Session {
                 generation,
                 provider_id,
                 reason,
+                unauthorized,
             } => {
                 if self.is_stale_reload(generation, &provider_id) {
                     return LibraryApplied::Stale;
@@ -723,7 +731,14 @@ impl Session {
                         .complete_reload(generation, &self.config.config);
                     self.refresh_search();
                 }
-                LibraryApplied::ActionFailed(reason)
+                if unauthorized {
+                    LibraryApplied::Unauthorized {
+                        provider_id,
+                        reason,
+                    }
+                } else {
+                    LibraryApplied::ActionFailed(reason)
+                }
             }
             LibraryEvent::SyncSkipped {
                 generation,
@@ -949,6 +964,7 @@ async fn load_local(
                 generation,
                 provider_id,
                 reason: e.to_string(),
+                unauthorized: matches!(e, ProviderError::Unauthorized(_)),
             };
         }
     };
@@ -1367,6 +1383,7 @@ async fn load_incremental(
                         generation,
                         provider_id,
                         reason: "MPD provider is not available".to_string(),
+                        unauthorized: false,
                     })
                     .await;
                 return;
@@ -1382,6 +1399,7 @@ async fn load_incremental(
                             generation,
                             provider_id,
                             reason: e.to_string(),
+                            unauthorized: false,
                         })
                         .await;
                     return;
@@ -1434,6 +1452,7 @@ async fn load_incremental(
                         generation,
                         provider_id,
                         reason: format!("{failed_albums} album(s) could not be loaded from MPD"),
+                        unauthorized: false,
                     })
                     .await;
                 return;
@@ -1446,6 +1465,7 @@ async fn load_incremental(
                         generation,
                         provider_id,
                         reason: "Subsonic provider is not available".to_string(),
+                        unauthorized: false,
                     })
                     .await;
                 return;
@@ -1493,7 +1513,7 @@ async fn load_incremental(
             let page_size = BATCH_SIZE as i32;
             let mut keep_paths: HashSet<String> = HashSet::new();
             let mut keep_keys: HashSet<String> = HashSet::new();
-            let mut failure: Option<String> = None;
+            let mut failure: Option<ProviderError> = None;
             // Pipelined: the next page is fetched while the current one's
             // covers are downloaded and persisted.
             let mut page = subsonic.browse_albums_page(offset, page_size).await;
@@ -1502,7 +1522,7 @@ async fn load_incremental(
                     Ok(result) => result,
                     Err(e) => {
                         tracing::error!("Subsonic browse_albums_page failed: {e}");
-                        failure = Some(e.to_string());
+                        failure = Some(e);
                         break;
                     }
                 };
@@ -1551,12 +1571,13 @@ async fn load_incremental(
             // delete tracks that are still on the server but simply were
             // not reached yet, so only clean up after a full pass. The
             // truncated result must not replace the visible library either.
-            if let Some(reason) = failure {
+            if let Some(error) = failure {
                 _ = tx
                     .send(LibraryEvent::LoadFailed {
                         generation,
                         provider_id,
-                        reason,
+                        unauthorized: matches!(error, ProviderError::Unauthorized(_)),
+                        reason: error.to_string(),
                     })
                     .await;
                 return;
@@ -1584,7 +1605,6 @@ mod tests {
     use super::super::test_support::{test_session, track};
     use super::*;
     use crate::library::Playlist;
-    use crate::provider::ProviderError;
     use bytes::Bytes;
 
     fn album(name: &str, artist: &str, first_track_id: i64) -> Arc<Album> {
@@ -2139,6 +2159,7 @@ mod tests {
             generation,
             provider_id: session.providers.registry.active_id().to_string(),
             reason: "boom".into(),
+            unauthorized: false,
         })
     }
 
@@ -2183,8 +2204,8 @@ mod tests {
         ));
     }
 
-    /// A local provider whose library query always fails.
-    struct FailingProvider;
+    /// A local provider whose library query always fails with the given error.
+    struct FailingProvider(ProviderError);
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -2199,7 +2220,7 @@ mod tests {
             ProviderType::Local
         }
         async fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
-            Err(ProviderError::Database("disk I/O".into()))
+            Err(self.0.clone())
         }
         async fn browse_artists(&self) -> Result<Vec<crate::library::Artist>, ProviderError> {
             Ok(Vec::new())
@@ -2233,11 +2254,50 @@ mod tests {
         loaded(&mut session, vec![album("A", "x", 1)], covers(&[("a", 1)]));
         let generation = session.library.begin_reload_generation();
         let id = session.providers.registry.active_id().to_string();
-        let event = load_local(Arc::new(FailingProvider), generation, id).await;
-        assert!(matches!(event, LibraryEvent::LoadFailed { .. }));
+        let event = load_local(
+            Arc::new(FailingProvider(ProviderError::Database("disk I/O".into()))),
+            generation,
+            id,
+        )
+        .await;
+        assert!(matches!(
+            event,
+            LibraryEvent::LoadFailed {
+                unauthorized: false,
+                ..
+            }
+        ));
 
         let applied = session.apply_library_event(event);
         assert!(matches!(applied, LibraryApplied::ActionFailed(r) if r.contains("disk I/O")));
+        assert_eq!(visible_names(&session), ["A"]);
+        assert!(session.library.covers.contains("a"));
+    }
+
+    #[tokio::test]
+    async fn rejected_credentials_in_a_load_are_reported_as_unauthorized() {
+        let mut session = test_session();
+        loaded(&mut session, vec![album("A", "x", 1)], covers(&[("a", 1)]));
+        let generation = session.library.begin_reload_generation();
+        let id = session.providers.registry.active_id().to_string();
+        let rejected = ProviderError::Unauthorized("Wrong username or password".into());
+        let event = load_local(Arc::new(FailingProvider(rejected)), generation, id.clone()).await;
+        assert!(matches!(
+            event,
+            LibraryEvent::LoadFailed {
+                unauthorized: true,
+                ..
+            }
+        ));
+
+        // The visible library is kept, and the rejection reaches the UI as
+        // a typed outcome rather than a generic failure.
+        let applied = session.apply_library_event(event);
+        assert!(matches!(
+            applied,
+            LibraryApplied::Unauthorized { provider_id, reason }
+                if provider_id == id && reason == "Wrong username or password"
+        ));
         assert_eq!(visible_names(&session), ["A"]);
         assert!(session.library.covers.contains("a"));
     }

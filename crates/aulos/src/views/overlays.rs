@@ -80,6 +80,12 @@ pub fn on_connect_failed(app: &mut App, provider: &str, reason: &str, unauthoriz
     let state = &mut app.views.overlays;
 
     if let Some(index) = subsonic.filter(|_| unauthorized) {
+        // A dialog already open for this server stays as the user left it
+        // (typed text included): reloads that fail the same way while it is
+        // open must not reset or stack it.
+        if state.auth.as_ref().is_some_and(|a| a.provider == provider) {
+            return;
+        }
         let edit = &app.session.providers.subsonic_edit_states[index];
         state.auth = Some(AuthDraft {
             provider: provider.to_owned(),

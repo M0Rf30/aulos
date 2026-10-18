@@ -77,6 +77,7 @@ struct Ctx {
     pal: Palette,
     accent: Accent,
     pad: f32,
+    compact: bool,
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -92,6 +93,15 @@ fn recent(since: Option<Instant>) -> bool {
 }
 
 /// Runs `add` in the page's horizontal padding.
+/// `base`, raised to a finger-sized hit height on touch devices.
+fn btn_h(ui: &Ui, base: f32) -> f32 {
+    if theme::touch(ui.ctx()) {
+        base.max(theme::size::TOUCH)
+    } else {
+        base
+    }
+}
+
 fn padded<R>(ui: &mut Ui, pad: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     let r = ui.available_rect_before_wrap();
     let inner = Rect::from_min_max(
@@ -108,6 +118,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         pal: t.pal,
         accent: t.accent,
         pad: app.page_pad(),
+        compact: app.compact(),
     };
     let mut intents: Vec<Intent> = Vec::new();
     // The page opens on the first show's episodes; Back reaches the list.
@@ -180,7 +191,7 @@ fn header(
             ui.spacing_mut().item_spacing.x = 16.0;
             if detail
                 && IconBtn::new(regular::CARET_LEFT)
-                    .size(30.0)
+                    .size(btn_h(ui, 30.0))
                     .icon_size(17.0)
                     .tip(&aulos_core::fl!("podcasts-all-shows"))
                     .show(ui)
@@ -215,7 +226,7 @@ fn header(
                     &aulos_core::fl!("podcast-add-by-url"),
                     Some(regular::RSS),
                     PillKind::Secondary,
-                    30.0,
+                    btn_h(ui, 30.0),
                     0.0,
                 )
                 .clicked()
@@ -225,7 +236,7 @@ fn header(
                 }
                 if !pod.podcasts.is_empty()
                     && IconBtn::new(regular::ARROW_CLOCKWISE)
-                        .size(30.0)
+                        .size(btn_h(ui, 30.0))
                         .icon_size(16.0)
                         .tip(&aulos_core::fl!("podcasts-refresh-all-feeds"))
                         .show(ui)
@@ -240,9 +251,19 @@ fn header(
 
 fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
     padded(ui, cx.pad, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let resp = text_field(ui, &mut st.add_url, "https://example.com/feed.xml", 380.0);
+        let layout = if cx.compact {
+            Layout::top_down(Align::Min)
+        } else {
+            Layout::left_to_right(Align::Center)
+        };
+        ui.with_layout(layout, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            let url_w = if cx.compact {
+                ui.available_width()
+            } else {
+                380.0
+            };
+            let resp = text_field(ui, &mut st.add_url, "https://example.com/feed.xml", url_w);
             if resp.changed() {
                 st.add_error = None;
             }
@@ -252,7 +273,7 @@ fn add_form(ui: &mut Ui, cx: &Ctx, st: &mut State, intents: &mut Vec<Intent>) {
                 &aulos_core::fl!("subscribe"),
                 None,
                 PillKind::Primary,
-                32.0,
+                btn_h(ui, 32.0),
                 0.0,
             )
             .clicked()
@@ -362,7 +383,7 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
                     });
                     ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
                         if IconBtn::new(regular::X)
-                            .size(30.0)
+                            .size(btn_h(ui, 30.0))
                             .icon_size(14.0)
                             .tip(&aulos_core::fl!("podcasts-dismiss"))
                             .show(ui)
@@ -380,7 +401,7 @@ fn refresh_banner(ui: &mut Ui, cx: &Ctx, pod: &PodcastsState, intents: &mut Vec<
                             &label,
                             Some(regular::ARROW_CLOCKWISE),
                             PillKind::Secondary,
-                            30.0,
+                            btn_h(ui, 30.0),
                             0.0,
                         )
                         .clicked()
@@ -585,8 +606,8 @@ fn show_detail(
     ui.add_space(18.0);
     refresh_cache(st, pod);
     padded(ui, cx.pad, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             let labels = [
                 aulos_core::fl!("podcast-filter-all"),
                 aulos_core::fl!("podcasts-filter-unplayed-count", count = st.cache_unplayed),
@@ -600,14 +621,24 @@ fn show_detail(
                     st.filter = i;
                 }
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if cx.compact {
+                let w = ui.available_width().max(160.0);
                 text_field(
                     ui,
                     &mut st.text,
                     &aulos_core::fl!("podcasts-filter-episodes"),
-                    220.0,
+                    w,
                 );
-            });
+            } else {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    text_field(
+                        ui,
+                        &mut st.text,
+                        &aulos_core::fl!("podcasts-filter-episodes"),
+                        220.0,
+                    );
+                });
+            }
         });
     });
     ui.add_space(10.0);
@@ -756,7 +787,7 @@ fn hero(
                             &label,
                             Some(regular::PLAY),
                             PillKind::Primary,
-                            30.0,
+                            btn_h(ui, 30.0),
                             0.0,
                         )
                         .clicked()
@@ -770,7 +801,7 @@ fn hero(
                             &aulos_core::fl!("podcast-unsubscribe"),
                             Some(regular::TRASH),
                             PillKind::Danger,
-                            30.0,
+                            btn_h(ui, 30.0),
                             0.0,
                         )
                         .on_hover_text(aulos_core::fl!("podcasts-unsubscribe-hover"))
@@ -783,7 +814,7 @@ fn hero(
                             &aulos_core::fl!("podcast-cancel"),
                             None,
                             PillKind::Ghost,
-                            30.0,
+                            btn_h(ui, 30.0),
                             0.0,
                         )
                         .clicked()
@@ -795,7 +826,7 @@ fn hero(
                         &aulos_core::fl!("podcast-subscribed-badge"),
                         Some(regular::CHECK),
                         PillKind::Secondary,
-                        30.0,
+                        btn_h(ui, 30.0),
                         0.0,
                     )
                     .clicked()
@@ -803,7 +834,7 @@ fn hero(
                         st.pending_unsub = Some(show.id);
                     }
                     if IconBtn::new(regular::ARROW_CLOCKWISE)
-                        .size(30.0)
+                        .size(btn_h(ui, 30.0))
                         .icon_size(16.0)
                         .tip(&aulos_core::fl!("podcasts-refresh-this-feed"))
                         .show(ui)

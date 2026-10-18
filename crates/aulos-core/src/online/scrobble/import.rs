@@ -374,7 +374,7 @@ fn sleep_cancellable(d: Duration, cancel: &AtomicBool) -> bool {
             return false;
         }
         let nap = left.min(step);
-        std::thread::sleep(nap);
+        crate::online::block_for(nap);
         left -= nap;
     }
     !cancel.load(Ordering::Relaxed)

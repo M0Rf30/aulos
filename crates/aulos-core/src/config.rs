@@ -4,8 +4,6 @@
 use crate::library::album_sort::AlbumSort;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::Write;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -692,35 +690,8 @@ impl Config {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         let text = self.to_text().map_err(std::io::Error::other)?;
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        let mut tmp_name = path.file_name().unwrap_or_default().to_owned();
-        tmp_name.push(".tmp");
-        let tmp = dir.join(tmp_name);
-        let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                // The file may hold plaintext passwords (keyring fallback).
-                options.mode(0o600);
-            }
-            let mut file = options.open(&tmp)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                // `mode` only applies on creation; a leftover tmp may be looser.
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result
+        // The file may hold plaintext passwords (keyring fallback): private.
+        crate::fs_atomic::write(path, text.as_bytes(), true)
     }
 
     /// See [`startup_provider_preference`].

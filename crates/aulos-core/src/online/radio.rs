@@ -456,7 +456,7 @@ async fn fetch_stations(
     let request = client.get(url);
     // A browser forbids setting `User-Agent` and would drop it anyway.
     #[cfg(not(target_arch = "wasm32"))]
-    let request = request.header("User-Agent", "aulos/0.1");
+    let request = request.header("User-Agent", concat!("aulos/", env!("CARGO_PKG_VERSION")));
     let response = request
         .send()
         .await

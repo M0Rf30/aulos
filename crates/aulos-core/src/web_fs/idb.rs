@@ -67,22 +67,49 @@ fn request_promise(request: &IdbRequest) -> Promise {
     })
 }
 
-/// Resolves when the transaction committed, rejects when it aborted.
-fn transaction_promise(tx: &IdbTransaction) -> Promise {
-    Promise::new(&mut |resolve, reject| {
-        let on_complete = Closure::once_into_js(move |_: Event| {
+/// The event handlers of a transaction, kept alive until the transaction
+/// settled (dropped by the caller after awaiting its promise).
+type TransactionHandlers = Vec<Closure<dyn FnMut(Event)>>;
+
+/// Resolves when the transaction committed, rejects when it failed or
+/// aborted. A failed request fires `error` and then `abort`; the handlers are
+/// reusable closures and settling a promise twice is a no-op, so the second
+/// event is harmless.
+fn transaction_promise(tx: &IdbTransaction) -> (Promise, TransactionHandlers) {
+    let mut handlers = TransactionHandlers::new();
+    let promise = Promise::new(&mut |resolve, reject| {
+        let on_complete = Closure::<dyn FnMut(Event)>::new(move |_| {
             let _ = resolve.call0(&JsValue::NULL);
         });
-        let failed = {
-            let reject = reject.clone();
-            Closure::once_into_js(move |_: Event| {
-                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("IndexedDB write failed"));
-            })
-        };
-        tx.set_oncomplete(Some(on_complete.unchecked_ref()));
-        tx.set_onerror(Some(failed.unchecked_ref()));
-        tx.set_onabort(Some(failed.unchecked_ref()));
-    })
+        let failed_tx = tx.clone();
+        let failed = Closure::<dyn FnMut(Event)>::new(move |_| {
+            let message = failed_tx
+                .error()
+                .map_or_else(|| "IndexedDB write failed".to_owned(), |e| e.message());
+            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&message));
+        });
+        tx.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
+        tx.set_onerror(Some(failed.as_ref().unchecked_ref()));
+        tx.set_onabort(Some(failed.as_ref().unchecked_ref()));
+        handlers.push(on_complete);
+        handlers.push(failed);
+    });
+    (promise, handlers)
+}
+
+/// Forgets the cached connection when the browser closes it or another tab
+/// needs to upgrade the database, so the next call opens a fresh one.
+fn watch_connection(db: &IdbDatabase) {
+    let dropped = {
+        let db = db.clone();
+        Closure::<dyn FnMut(Event)>::new(move |_| {
+            db.close();
+            DB.with(|slot| *slot.borrow_mut() = None);
+        })
+        .into_js_value()
+    };
+    db.set_onversionchange(Some(dropped.unchecked_ref()));
+    db.set_onclose(Some(dropped.unchecked_ref()));
 }
 
 async fn open() -> Result<IdbDatabase, String> {
@@ -111,8 +138,18 @@ async fn open() -> Result<IdbDatabase, String> {
         .map_err(|e| describe(&e))?
         .dyn_into()
         .map_err(|_| "IndexedDB returned no database".to_owned())?;
-    DB.with(|slot| *slot.borrow_mut() = Some(db.clone()));
-    Ok(db)
+    // Another call may have opened the database while this one waited: keep
+    // that connection and close this one, so there is only ever one.
+    Ok(DB.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            db.close();
+            return existing.clone();
+        }
+        watch_connection(&db);
+        *slot = Some(db.clone());
+        db
+    }))
 }
 
 fn store_tx(db: &IdbDatabase, mode: IdbTransactionMode) -> Result<IdbTransaction, String> {
@@ -144,10 +181,17 @@ pub(super) async fn get(key: &str) -> Result<Option<JsValue>, String> {
 pub(super) async fn put(key: &str, value: &JsValue) -> Result<(), String> {
     let db = open().await?;
     let tx = store_tx(&db, IdbTransactionMode::Readwrite)?;
-    let done = transaction_promise(&tx);
-    tx.object_store(STORE)
+    let (done, _handlers) = transaction_promise(&tx);
+    if let Err(e) = tx
+        .object_store(STORE)
         .and_then(|store| store.put_with_key(value, &JsValue::from_str(key)))
-        .map_err(|e| describe(&e))?;
+    {
+        // The handlers drop with this frame; the transaction may still fire.
+        tx.set_oncomplete(None);
+        tx.set_onerror(None);
+        tx.set_onabort(None);
+        return Err(describe(&e));
+    }
     JsFuture::from(done)
         .await
         .map(|_| ())

@@ -165,7 +165,7 @@ pub enum PlaySource {
 impl PlaySource {
     /// Open the decoder for this source. For `Reader`/`LiveStream`, this is
     /// where the (potentially slow) HTTP connect + probe actually happens.
-    fn open_decoder(self) -> Result<SymphoniaDecoder> {
+    fn open_decoder(self, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
         match self {
             PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path),
             PlaySource::Reader {
@@ -192,7 +192,8 @@ impl PlaySource {
                     .is_some_and(|p| p.to_ascii_lowercase().ends_with(".m3u8"))
                 {
                     let (reader, hint) =
-                        crate::player::hls::HlsReader::open(client, &url).map_err(PlayerError)?;
+                        crate::player::hls::HlsReader::open(client, &url, Arc::clone(stop))
+                            .map_err(PlayerError)?;
                     return SymphoniaDecoder::open_stream(reader, hint.as_deref());
                 }
                 let response = client
@@ -295,7 +296,7 @@ fn reconnect_live(retry: &LiveRetry, ctx: &ThreadContext) -> Option<SymphoniaDec
             hint_extension: retry.hint_extension.clone(),
             icy_title: Arc::clone(&retry.icy_title),
         };
-        match source.open_decoder() {
+        match source.open_decoder(&ctx.stop_flag) {
             Ok(decoder) => {
                 tracing::info!("live stream reconnected after a hiccup (attempt {attempt})");
                 return Some(decoder);
@@ -388,7 +389,7 @@ enum PendingSource {
 }
 
 impl PendingSource {
-    fn new(source: PlaySource) -> Self {
+    fn new(source: PlaySource, stop: &Arc<AtomicBool>) -> Self {
         if matches!(source, PlaySource::LocalFile(_)) {
             return Self::Lazy(source);
         }
@@ -397,8 +398,9 @@ impl PendingSource {
             .name("aulos-next-open".into())
             .spawn({
                 let tx = tx.clone();
+                let stop = Arc::clone(stop);
                 move || {
-                    let _ = tx.send(source.open_decoder());
+                    let _ = tx.send(source.open_decoder(&stop));
                 }
             });
         match spawned {
@@ -412,13 +414,25 @@ impl PendingSource {
         }
     }
 
-    fn open(self) -> Result<SymphoniaDecoder> {
+    fn open(self, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
         match self {
-            Self::Lazy(source) => source.open_decoder(),
+            Self::Lazy(source) => source.open_decoder(stop),
             Self::Opened(decoder) => Ok(*decoder),
-            Self::Opening(rx) => rx
-                .recv()
-                .map_err(|_| PlayerError("next-track opener ended without a result".into()))?,
+            Self::Opening(rx) => loop {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if stop.load(Ordering::Acquire) {
+                            break Err(PlayerError("next-track open cancelled".into()));
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break Err(PlayerError(
+                            "next-track opener ended without a result".into(),
+                        ));
+                    }
+                }
+            },
         }
     }
 }
@@ -773,7 +787,7 @@ impl PlaybackEngine {
     /// the current crossfade setting, not by the caller.
     pub fn queue_next(&self, source: PlaySource, replay_gain_db: Option<f32>) {
         *self.next_track.lock() = Some(PendingTrack {
-            source: PendingSource::new(source),
+            source: PendingSource::new(source, &self.stop_flag),
             replay_gain_db,
         });
         // `track_finished` is deliberately left alone: queuing a look-ahead
@@ -871,7 +885,7 @@ fn playback_thread_main(
     // that don't require leaving this function at all.
     let mut live_retry = live_retry_from_start(&start);
 
-    let opened = resolve_start(start);
+    let opened = resolve_start(start, &ctx.stop_flag);
 
     // Wait for the predecessor(s) that are fading out; only after they have
     // closed their stream is it safe to open ours and to reset the shared
@@ -964,19 +978,19 @@ fn playback_thread_main(
     }
 }
 
-fn resolve_start(start: ThreadStart) -> Result<SymphoniaDecoder> {
+fn resolve_start(start: ThreadStart, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
     match start {
         ThreadStart::Ready(decoder) => Ok(decoder),
-        ThreadStart::Pending(source) => source.open_decoder(),
+        ThreadStart::Pending(source) => source.open_decoder(stop),
     }
 }
 
 /// Open a pre-queued track's decoder, computing its linear gain. Logs and
 /// returns `None` on failure (mirrors rmpd's `next_song` handling: a failed
 /// open is treated as "nothing pending", never propagated as a hard error).
-fn open_pending(pending: PendingTrack) -> Option<(SymphoniaDecoder, f32)> {
+fn open_pending(pending: PendingTrack, stop: &Arc<AtomicBool>) -> Option<(SymphoniaDecoder, f32)> {
     let gain = pending.replay_gain_db.map(db_to_linear).unwrap_or(1.0);
-    match pending.source.open() {
+    match pending.source.open(stop) {
         Ok(decoder) => Some((decoder, gain)),
         Err(e) => {
             tracing::warn!("failed to open pre-queued next track: {e}");
@@ -1102,7 +1116,11 @@ fn run_dsd(
 
         if bytes_read == 0 {
             ctx.status.track_finished.store(true, Ordering::Release);
-            let next = ctx.next_track.lock().take().and_then(open_pending);
+            let next = ctx
+                .next_track
+                .lock()
+                .take()
+                .and_then(|p| open_pending(p, &ctx.stop_flag));
             let _ = output.stop();
             return match next {
                 Some((next_decoder, next_gain)) => DsdOutcome::Advance(next_decoder, next_gain),
@@ -1395,7 +1413,7 @@ fn run_pcm(
                 && !crossfade_suppressed
                 && let Some(pending) = ctx.next_track.lock().take()
             {
-                match open_pending(pending) {
+                match open_pending(pending, &ctx.stop_flag) {
                     Some((next_decoder, next_gain))
                         if !next_decoder.is_dsd() && next_decoder.format() == format =>
                     {
@@ -1501,7 +1519,11 @@ fn run_pcm(
             // EOS: claim a pre-fetched next track regardless of format/DSD
             // -ness — unlike rmpd, aulos rebuilds the output on a format
             // change instead of refusing the gapless advance outright.
-            let gapless_next = ctx.next_track.lock().take().and_then(open_pending);
+            let gapless_next = ctx
+                .next_track
+                .lock()
+                .take()
+                .and_then(|p| open_pending(p, &ctx.stop_flag));
 
             match gapless_next {
                 Some((next_decoder, next_gain))

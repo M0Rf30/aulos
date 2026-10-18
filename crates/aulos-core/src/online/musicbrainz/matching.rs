@@ -46,23 +46,12 @@ pub struct TrackMatch {
 }
 
 /// Normalised title for comparison: lowercase letters and digits only,
-/// words separated by single spaces.
+/// diacritics folded, words separated by single spaces. The same
+/// normalisation the scrobble matching and similar-artist lookups use, so a
+/// title compares alike everywhere ("Beyoncé" = "Beyonce", "don't" = "dont").
 #[must_use]
 fn normalize(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut gap = false;
-    for c in s.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            if gap && !out.is_empty() {
-                out.push(' ');
-            }
-            gap = false;
-            out.push(c);
-        } else {
-            gap = true;
-        }
-    }
-    out
+    crate::online::scrobble::import::normalize_text(s)
 }
 
 /// Removes `(...)` / `[...]` groups: "Song (Remastered 2011)" → "Song".
@@ -381,6 +370,8 @@ mod tests {
         assert!(title_similarity("Song (Remastered 2011)", "Song") > 0.99);
         assert!(title_similarity("Bad Kingdom", "Bad  Kingdom!") > 0.99);
         assert!(title_similarity("Bad Kingdom", "Finalise") < 0.4);
+        assert!(title_similarity("Halo (Beyoncé)", "halo beyonce") > 0.99);
+        assert!(title_similarity("Don't Stop", "Dont Stop") > 0.99);
         assert_eq!(title_similarity("", ""), 1.0);
         assert!(title_similarity("日本語の曲", "日本語の曲") > 0.99);
     }

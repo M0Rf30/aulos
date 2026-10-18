@@ -48,6 +48,16 @@ pub fn http() -> &'static reqwest::Client {
     &CLIENT
 }
 
+/// Blocks the calling thread for `d`, for rate limiting before a blocking
+/// request. A browser has no thread to block (`std::thread::sleep` panics
+/// there), and its blocking requests fail immediately, so it does not wait.
+pub(crate) fn block_for(d: Duration) {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::sleep(d);
+    #[cfg(target_arch = "wasm32")]
+    let _ = d;
+}
+
 /// What a failed request to `url` means to the user. Natively the error is
 /// reported as it came, labeled with `what`; in a browser a request that got
 /// no answer is mostly a CORS refusal or a down server, which the page cannot
