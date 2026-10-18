@@ -64,7 +64,8 @@ fi
 unaligned="$apk_name-unaligned.apk"
 rm -f "$unaligned"
 "$tools/aapt" package -f -F "$unaligned" -M AndroidManifest.xml -I "$android_jar" \
-  -S "$root/crates/aulos/android/res" ${compression[@]+"${compression[@]}"}
+  -S "$root/crates/aulos/android/res" -A "$root/crates/aulos-core/assets" \
+  ${compression[@]+"${compression[@]}"}
 # Every lib/<abi>/*.so cargo-apk copied, plus the dex.
 mapfile -t files < <(find lib -type f -name '*.so' | LC_ALL=C sort)
 "$tools/aapt" add ${compression[@]+"${compression[@]}"} "$unaligned" "${files[@]}" classes.dex

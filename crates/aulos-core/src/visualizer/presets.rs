@@ -54,9 +54,14 @@ impl PresetEntry {
 /// Where users put their own presets: `<data dir>/aulos/presets`, i.e.
 /// `~/.local/share/aulos/presets` on Linux,
 /// `%APPDATA%\aulos\presets` on Windows and
-/// `~/Library/Application Support/aulos/presets` on macOS. `None` when the
+/// `~/Library/Application Support/aulos/presets` on macOS. On Android it is
+/// `presets` in the app's data directory ([`crate::paths::data_dir`]), where
+/// the activity unpacks the presets bundled in the APK. `None` when the
 /// platform has no data directory (the web build).
 pub fn user_preset_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    return Some(crate::paths::data_dir().join("presets"));
+    #[cfg(not(target_os = "android"))]
     dirs::data_dir().map(|data| data.join("aulos").join("presets"))
 }
 

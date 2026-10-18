@@ -354,6 +354,46 @@ fn window_insets() -> Option<WindowInsets> {
     value
 }
 
+/// Unpacks the MilkDrop presets bundled in the APK (`assets/presets`, the
+/// files of `aulos-core/assets/presets`) into the user preset folder, where
+/// the visualizer scans. A file is rewritten only when it is missing or its
+/// size differs, so a launch costs a directory listing once everything is in
+/// place, and presets the user added next to them are never touched. Failures
+/// are logged: the visualizer then just has fewer presets.
+#[cfg(feature = "visualizer")]
+fn install_presets(android: &AndroidApp) {
+    let Some(dest) = aulos_core::visualizer::presets::user_preset_dir() else {
+        return;
+    };
+    let assets = android.asset_manager();
+    let Some(names) = assets.open_dir(c"presets") else {
+        tracing::warn!("the APK has no bundled presets");
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dest) {
+        tracing::warn!("preset folder {}: {error}", dest.display());
+        return;
+    }
+    for name in names {
+        let Ok(file) = name.to_str() else { continue };
+        let target = dest.join(file);
+        let Ok(path) = std::ffi::CString::new(format!("presets/{file}")) else {
+            continue;
+        };
+        let Some(mut asset) = assets.open(&path) else {
+            continue;
+        };
+        let Ok(bytes) = asset.buffer() else { continue };
+        let current = std::fs::metadata(&target).map(|m| m.len()).ok();
+        if current == Some(bytes.len() as u64) {
+            continue;
+        }
+        if let Err(error) = std::fs::write(&target, bytes) {
+            tracing::warn!("preset {}: {error}", target.display());
+        }
+    }
+}
+
 /// Starts the app inside the activity: private directories, logcat, a tokio
 /// runtime, then `eframe` on the activity's window.
 #[unsafe(no_mangle)]
@@ -374,9 +414,13 @@ fn android_main(android: AndroidApp) {
         tracing_subscriber::registry()
             .with(tracing_subscriber::EnvFilter::new("info"))
             .with(logcat)
-            .init();
+            .try_init()
+            // A relaunch reuses the process, whose subscriber is already set.
+            .ok();
     }
     ensure_audio_permission(base.as_deref());
+    #[cfg(feature = "visualizer")]
+    install_presets(&android);
     aulos_core::i18n::init_from_system();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

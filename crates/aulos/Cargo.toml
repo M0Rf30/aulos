@@ -95,6 +95,9 @@ raw-window-handle = "0.6"
 package = "io.github.m0rf30.aulos"
 apk_name = "aulos"
 resources = "android/res"
+# The MilkDrop presets of `aulos-core/assets/presets` (the web build compiles
+# the same files in); `android::install_presets` unpacks them on launch.
+assets = "../aulos-core/assets"
 # arm64 phones; x86_64 is the emulator and Chromebooks.
 build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
 
