@@ -1066,6 +1066,8 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &Context) {
         let typing = ctx.egui_wants_keyboard_input();
+        let system_back =
+            ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(SYSTEM_BACK))) == Some(true);
         let (space, slash, esc, back, fwd, digit) = ctx.input(|i| {
             let digit = [
                 egui::Key::Num1,
@@ -1136,6 +1138,8 @@ impl App {
                 self.sheet = None;
             } else if self.expanded {
                 self.expanded = false;
+            } else if system_back && !views::overlays::active(self) {
+                self.go_back();
             }
         }
         #[cfg(feature = "visualizer")]
@@ -1177,6 +1181,9 @@ impl App {
     }
 }
 
+/// Set for a frame by the input hook when the Android back gesture arrived.
+const SYSTEM_BACK: &str = "system_back";
+
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
         // Android draws edge to edge: keep the content clear of the system bars.
@@ -1189,6 +1196,21 @@ impl eframe::App for App {
                 top: top / ppp,
                 bottom: bottom / ppp,
             }));
+        }
+        // The system back gesture/button arrives as BrowserBack. It closes what
+        // Esc closes (visualizer, expanded player, sheets, overlays), so it
+        // becomes an Esc press; `shortcuts` also steps the page history back
+        // when nothing else was open.
+        #[cfg(target_os = "android")]
+        for event in &mut raw_input.events {
+            if let egui::Event::Key { key, pressed, .. } = event
+                && *key == egui::Key::BrowserBack
+            {
+                *key = egui::Key::Escape;
+                if *pressed {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SYSTEM_BACK), true));
+                }
+            }
         }
         // Smoke shots must not show hover tints or tooltips from a stray pointer.
         if self.smoke.is_some() {
@@ -1304,12 +1326,30 @@ impl eframe::App for App {
         if viz_open {
             #[cfg(feature = "visualizer")]
             views::visualizer::show(self, ui);
-        } else if self.mini {
-            views::mini::show(self, ui);
-        } else if self.expanded {
-            views::expanded::show(self, ui);
         } else {
-            views::chrome::show(self, ui);
+            // The expanded player slides up over the main screen and back
+            // down; the visualizer draws a live texture and switches
+            // instantly.
+            let slide = ctx.animate_bool_with_time_and_easing(
+                egui::Id::new("expanded_slide"),
+                self.expanded && !self.mini,
+                0.28,
+                egui::emath::easing::cubic_out,
+            );
+            if self.mini {
+                views::mini::show(self, ui);
+            } else if slide >= 1.0 {
+                views::expanded::show(self, ui);
+            } else {
+                views::chrome::show(self, ui);
+                if slide > 0.0 {
+                    let rect = ui.max_rect();
+                    let moved = rect.translate(egui::vec2(0.0, (1.0 - slide) * rect.height()));
+                    let mut sheet = ui.new_child(egui::UiBuilder::new().max_rect(moved));
+                    sheet.set_clip_rect(rect.intersect(moved));
+                    views::expanded::show(self, &mut sheet);
+                }
+            }
         }
         views::toasts::show(self, &ctx);
         views::overlays::show(self, &ctx);
