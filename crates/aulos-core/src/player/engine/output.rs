@@ -29,7 +29,9 @@ use crate::player::pcm::PcmBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::Arc;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::time::Duration;
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 
@@ -115,6 +117,59 @@ pub trait AudioOutput: Send {
 /// before declaring the device stalled.
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Poll interval while waiting on the sample channel.
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Wait until everything queued on `sender`'s channel has been taken by the
+/// device callback, within `timeout`. Returns `true` when drained, `false`
+/// on timeout, disconnect or when `stop` was raised.
+///
+/// The sender cannot observe the receiver's backlog, so this queues `tail`
+/// (if any) and then `depth` empty chunks: the channel holds at most `depth`
+/// chunks, so once the last empty one is accepted every chunk queued before
+/// it has been consumed. An empty chunk plays back as a single silent
+/// sample, which is harmless at a stream end.
+pub(crate) fn drain_channel<T>(
+    sender: &SyncSender<Vec<T>>,
+    tail: Option<Vec<T>>,
+    depth: usize,
+    timeout: Duration,
+    stop: Option<&AtomicBool>,
+) -> bool {
+    let deadline = web_time::Instant::now() + timeout;
+    let chunks = tail
+        .into_iter()
+        .chain(std::iter::repeat_with(Vec::new).take(depth));
+    for mut chunk in chunks {
+        loop {
+            match sender.try_send(chunk) {
+                Ok(()) => break,
+                Err(TrySendError::Disconnected(_)) => return false,
+                Err(TrySendError::Full(back)) => {
+                    if stop.is_some_and(|flag| flag.load(Ordering::Acquire))
+                        || web_time::Instant::now() >= deadline
+                    {
+                        return false;
+                    }
+                    chunk = back;
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Sleep for `duration` in short steps, returning early once `stop` is raised.
+pub(crate) fn sleep_unless_stopped(duration: Duration, stop: Option<&AtomicBool>) {
+    let deadline = web_time::Instant::now() + duration;
+    while web_time::Instant::now() < deadline
+        && !stop.is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 pub struct CpalOutput {
     device: Device,
     stream: Option<Stream>,
@@ -124,6 +179,15 @@ pub struct CpalOutput {
     resampler: Option<StreamResampler>,
     /// Output buffer time in milliseconds; sizes the sync-channel depth.
     buffer_time_ms: u32,
+    /// Depth of the live sample channel (set by [`Self::start`]); [`Self::stop`]
+    /// needs it to wait for the channel to drain.
+    channel_depth: usize,
+    /// Length (samples, device rate) of the last chunk sent: the device
+    /// callback may still be playing it when the channel reads as empty.
+    last_chunk_len: usize,
+    /// The engine's stop flag (see [`Self::set_stop_flag`]): aborts the
+    /// blocking waits in [`Self::write`] and [`Self::stop`].
+    stop_flag: Option<Arc<AtomicBool>>,
     /// Visualizer tap slot, wired via [`Self::set_viz_tap`] before
     /// [`Self::start`]. Doubly-`Option`-wrapped: the outer `Arc<Mutex<_>>`
     /// is `ThreadContext::pcm_buffer` itself, shared with the controlling
@@ -206,6 +270,9 @@ impl CpalOutput {
             pause_state: PauseState::new(),
             resampler,
             buffer_time_ms,
+            channel_depth: 0,
+            last_chunk_len: 0,
+            stop_flag: None,
             #[cfg(feature = "visualizer")]
             viz_tap: None,
             fade: None,
@@ -231,6 +298,19 @@ impl CpalOutput {
     /// channel between the decode thread and the device).
     pub fn set_fade(&mut self, fade: Arc<FadeControl>) {
         self.fade = Some(fade);
+    }
+
+    /// Wire the engine's stop flag. While it is set, [`Self::write`] stops
+    /// waiting for channel space and [`Self::stop`] skips draining the
+    /// buffered tail (the stream is being torn down on purpose).
+    pub fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
+        self.stop_flag = Some(stop_flag);
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
 
     /// Build the per-stream fade ramp for the callback closures. With no
@@ -433,6 +513,8 @@ impl CpalOutput {
 
         self.stream = Some(stream);
         self.sample_sender = Some(tx);
+        self.channel_depth = channel_depth;
+        self.last_chunk_len = 0;
         self.pause_state.set_paused(false);
 
         tracing::info!(
@@ -462,8 +544,9 @@ impl CpalOutput {
                 if n > 0 {
                     // A blocking `send` would hang forever if the device
                     // stops draining (unplug, xrun) and then freeze every
-                    // caller that joins this thread; give up after a bound.
-                    use std::sync::mpsc::TrySendError;
+                    // caller that joins this thread; give up after a bound,
+                    // and as soon as the engine asks this thread to stop
+                    // (the caller is about to join it).
                     let deadline = web_time::Instant::now() + SEND_TIMEOUT;
                     let mut payload = out;
                     loop {
@@ -475,6 +558,11 @@ impl CpalOutput {
                                 ));
                             }
                             Err(TrySendError::Full(back)) => {
+                                if self.stop_requested() {
+                                    // Dropping this buffer is fine: the
+                                    // playback loop sees the flag next.
+                                    return Ok(0);
+                                }
                                 if web_time::Instant::now() >= deadline {
                                     return Err(PlayerError(
                                         "Audio device stopped consuming samples".to_owned(),
@@ -485,6 +573,7 @@ impl CpalOutput {
                             }
                         }
                     }
+                    self.last_chunk_len = n;
                 }
                 Ok(n)
             }
@@ -516,13 +605,40 @@ impl CpalOutput {
         // Drain any tail still buffered inside the resampler (a short final
         // chunk, plus its own filter delay) before the stream closes, so the
         // last fraction of a resampled track isn't silently dropped.
-        if let Some(rs) = &mut self.resampler {
-            let tail = rs.flush();
-            if !tail.is_empty()
-                && let Some(sender) = &self.sample_sender
-            {
-                // Best-effort: never block shutdown if the callback isn't draining.
-                let _ = sender.try_send(tail);
+        let tail = self
+            .resampler
+            .as_mut()
+            .map(StreamResampler::flush)
+            .filter(|tail| !tail.is_empty());
+        let tail_len = tail.as_ref().map_or(0, Vec::len);
+
+        // Dropping the stream discards whatever the device callback has not
+        // played yet — up to the whole ~500 ms channel. At a queue end or a
+        // format change that is the last half second of the track, so wait
+        // (bounded, abortable) for the channel to drain first. Skipped when
+        // the engine is stopping on purpose, and while paused (a paused
+        // stream never drains).
+        if let Some(sender) = &self.sample_sender
+            && self.stream.is_some()
+            && !self.pause_state.is_paused()
+            && !self.stop_requested()
+        {
+            let drain_timeout = Duration::from_millis(u64::from(self.buffer_time_ms) + 100);
+            let drained = drain_channel(
+                sender,
+                tail,
+                self.channel_depth,
+                drain_timeout,
+                self.stop_flag.as_deref(),
+            );
+            if drained {
+                // The callback may still be playing the last chunk it took
+                // off the channel (the channel reads empty once it did).
+                let last = self.last_chunk_len.max(tail_len);
+                let per_second =
+                    u64::from(self.config.sample_rate) * u64::from(self.config.channels).max(1);
+                let tail_ms = (last as u64 * 1000 / per_second.max(1)).min(250);
+                sleep_unless_stopped(Duration::from_millis(tail_ms), self.stop_flag.as_deref());
             }
         }
         if let Some(stream) = self.stream.take() {
@@ -568,5 +684,64 @@ impl AudioOutput for CpalOutput {
     }
     fn is_paused(&self) -> bool {
         CpalOutput::is_paused(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drain_channel_returns_once_consumer_took_everything() {
+        let (tx, rx) = sync_channel::<Vec<f32>>(4);
+        tx.send(vec![1.0; 8]).unwrap();
+        tx.send(vec![2.0; 8]).unwrap();
+        let consumer = std::thread::spawn(move || {
+            let mut taken = 0;
+            while let Ok(chunk) = rx.recv() {
+                taken += chunk.len();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            taken
+        });
+        assert!(drain_channel(
+            &tx,
+            Some(vec![3.0; 4]),
+            4,
+            Duration::from_secs(2),
+            None
+        ));
+        drop(tx);
+        assert_eq!(consumer.join().unwrap(), 20);
+    }
+
+    #[test]
+    fn drain_channel_times_out_on_stalled_consumer() {
+        let (tx, _rx) = sync_channel::<Vec<f32>>(2);
+        tx.send(vec![0.0]).unwrap();
+        tx.send(vec![0.0]).unwrap();
+        assert!(!drain_channel(
+            &tx,
+            None,
+            2,
+            Duration::from_millis(20),
+            None
+        ));
+    }
+
+    #[test]
+    fn drain_channel_aborts_on_stop_flag() {
+        let (tx, _rx) = sync_channel::<Vec<f32>>(1);
+        tx.send(vec![0.0]).unwrap();
+        let stop = AtomicBool::new(true);
+        let started = web_time::Instant::now();
+        assert!(!drain_channel(
+            &tx,
+            None,
+            1,
+            Duration::from_secs(5),
+            Some(&stop)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

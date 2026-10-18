@@ -4,8 +4,9 @@
 //! Secure credential storage using the system keyring.
 //!
 //! Passwords for MPD and Subsonic providers are stored in the platform's
-//! native credential store via the `keyring-core` crate: the kernel keyutils
-//! or the D-Bus secret service (GNOME Keyring, KDE Wallet) on Linux, the
+//! native credential store via the `keyring-core` crate: the D-Bus secret
+//! service (GNOME Keyring, KDE Wallet) on Linux, falling back to the kernel
+//! keyutils (cleared at reboot) when none is reachable, the
 //! Credential Manager on Windows, the Keychain on macOS. The web build has no
 //! keyring: its store keeps passwords **unencrypted** in the browser's
 //! `localStorage` (see [`web_store`]); Android's keeps them in unencrypted
@@ -41,15 +42,15 @@ static INIT: Once = Once::new();
 /// The platform's credential store, `None` when it cannot be reached.
 ///
 /// On Linux the `keyring` facade only wires up the D-Bus secret service, so
-/// the stack is built here: the kernel keyutils store first, the secret
-/// service when keyutils is unavailable (the old keyring v3 default).
+/// the stack is built here: the secret service first (passwords persist on
+/// disk), the kernel keyutils store only when no secret service is reachable
+/// (keyutils reports `UntilReboot`: its passwords vanish at reboot).
 #[cfg(target_os = "linux")]
 fn platform_store() -> Option<Arc<CredentialStore>> {
-    linux_keyutils_keyring_store::Store::new()
+    zbus_secret_service_keyring_store::Store::new()
         .map(|store| store as Arc<CredentialStore>)
         .or_else(|_| {
-            zbus_secret_service_keyring_store::Store::new()
-                .map(|store| store as Arc<CredentialStore>)
+            linux_keyutils_keyring_store::Store::new().map(|store| store as Arc<CredentialStore>)
         })
         .ok()
 }

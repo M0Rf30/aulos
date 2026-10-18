@@ -30,8 +30,8 @@ pub struct State {
     expand_version: u64,
     rows: Vec<TreeRow>,
     rows_key: Option<(u64, PathBuf, u64)>,
-    /// Id of the selected (single-clicked) track.
-    selected: Option<i64>,
+    /// `Track::key` of the selected (single-clicked) track.
+    selected: Option<String>,
 }
 
 /// One visible row of the folder tree.
@@ -55,7 +55,7 @@ enum Intent {
     QueueFolder,
     /// Play track `index` (into the library) from the open folder's own tracks.
     PlayTrack(usize),
-    Select(i64),
+    Select(String),
     Favorite(usize),
     Rate(usize, u8),
     Menu(Box<MenuAction>),
@@ -504,7 +504,8 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
     };
     widgets::track_header(ui, cols, &aulos_core::fl!("songs-column-number"));
     let total = dirs.len() + direct.len();
-    let playing = app.session.playback.current_track.as_ref().map(|t| t.id);
+    let playing = app.session.playback.current_track.as_ref().map(|t| t.key());
+    let playing = playing.as_deref();
     ui.spacing_mut().item_spacing.y = 0.0;
     ScrollArea::vertical()
         .id_salt("folders-list")
@@ -566,11 +567,10 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                     let number = (n + 1).to_string();
                     let out = widgets::track_row(
                         ui,
-                        app,
                         track,
                         &number,
-                        playing == Some(track.id),
-                        state.selected == Some(track.id),
+                        playing.is_some_and(|k| track.has_key(k)),
+                        state.selected.as_deref().is_some_and(|k| track.has_key(k)),
                         cols,
                     );
                     if out.response.clicked()
@@ -578,7 +578,7 @@ fn listing(ui: &mut Ui, app: &App, state: &State, current: &Path, intents: &mut 
                         && out.set_rating.is_none()
                         && !out.more.clicked()
                     {
-                        intents.push(Intent::Select(track.id));
+                        intents.push(Intent::Select(track.key()));
                         intents.push(Intent::PlayTrack(real));
                     }
                     if out.toggle_favorite {

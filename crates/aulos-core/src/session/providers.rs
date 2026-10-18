@@ -29,6 +29,11 @@ pub struct ProvidersState {
     /// Shared references to MPD providers for idle event subscriptions.
     #[cfg(not(target_arch = "wasm32"))]
     pub mpd_providers: Vec<Arc<MpdProvider>>,
+    /// Bumped each time the MPD providers are rebuilt (`reinit_mpd`).
+    /// Part of the MPD background-stream keys, so streams holding the
+    /// previous providers are replaced instead of kept running on them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub mpd_generation: u64,
     /// Shared references to Subsonic providers for scrobbling.
     pub subsonic_providers: Vec<Arc<SubsonicProvider>>,
     /// Ordered list of (provider_id, display_name) for the selector dropdown.
@@ -132,6 +137,8 @@ impl ProvidersState {
             registry,
             #[cfg(not(target_arch = "wasm32"))]
             mpd_providers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            mpd_generation: 0,
             subsonic_providers: Vec::new(),
             provider_list: Vec::new(),
             active_index: None,
@@ -277,7 +284,10 @@ impl ProvidersState {
     fn reinit_mpd(&mut self, config: &Config) {
         self.registry.remove_by_type(ProviderType::Mpd);
         #[cfg(not(target_arch = "wasm32"))]
-        self.mpd_providers.clear();
+        {
+            self.mpd_providers.clear();
+            self.mpd_generation += 1;
+        }
         self.register_mpd(config);
         self.rebuild_list();
         self.rebuild_mpd_edit_states(config);
@@ -328,19 +338,15 @@ impl ProvidersState {
         let Some(state) = self.mpd_edit_states.get(i) else {
             return Effect::none();
         };
-        let addr = format!("{}:{}", state.host, state.port.parse().unwrap_or(6600u16));
+        let host = state.host.clone();
+        let port = state.port.parse().unwrap_or(6600u16);
         let password = Some(state.password.clone()).filter(|p| !p.is_empty());
         Effect::future(async move {
-            let result = async {
-                let stream = tokio::net::TcpStream::connect(&addr)
+            let result =
+                crate::provider::mpd::MpdProvider::connect_to(&host, port, password.as_deref())
                     .await
-                    .map_err(|e| format!("TCP: {e}"))?;
-                mpd_client::Client::connect_with_password_opt(stream, password.as_deref())
-                    .await
-                    .map_err(|e| format!("MPD: {e}"))?;
-                Ok(())
-            }
-            .await;
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
             ProviderEvent::MpdTestResult(i, result)
         })
     }

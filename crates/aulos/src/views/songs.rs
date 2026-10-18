@@ -12,8 +12,8 @@ use egui_phosphor::regular;
 
 #[derive(Default)]
 pub struct State {
-    /// Id of the selected (single-clicked) track.
-    selected: Option<i64>,
+    /// `Track::key` of the selected (single-clicked) track.
+    selected: Option<String>,
     /// `(visible_epoch, total seconds)` of the list the title row shows.
     totals: Option<(u64, u64)>,
     /// Active sort column (`None` = the library's initial title order).
@@ -29,7 +29,7 @@ enum Intent {
     Favorite(usize),
     Rate(usize, u8),
     Menu(Box<MenuAction>),
-    Select(i64),
+    Select(String),
     ShuffleAll,
     Sort(SortField),
 }
@@ -150,7 +150,8 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                 intents.push(Intent::Sort(field));
             }
         });
-        let current = app.session.playback.current_track.as_ref().map(|t| t.id);
+        let current = app.session.playback.current_track.as_ref().map(|t| t.key());
+        let current = current.as_deref();
         ui.spacing_mut().item_spacing.y = 0.0;
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -161,11 +162,10 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                         let number = (i + 1).to_string();
                         let out = widgets::track_row(
                             ui,
-                            app,
                             track,
                             &number,
-                            current == Some(track.id),
-                            state.selected == Some(track.id),
+                            current.is_some_and(|k| track.has_key(k)),
+                            state.selected.as_deref().is_some_and(|k| track.has_key(k)),
                             cols,
                         );
                         let real = library.track_index(i);
@@ -174,7 +174,7 @@ fn draw(app: &App, ui: &mut Ui, state: &mut State) -> Vec<Intent> {
                             && out.set_rating.is_none()
                             && !out.more.clicked()
                         {
-                            intents.push(Intent::Select(track.id));
+                            intents.push(Intent::Select(track.key()));
                             intents.push(Intent::Play(real));
                         }
                         if out.toggle_favorite {

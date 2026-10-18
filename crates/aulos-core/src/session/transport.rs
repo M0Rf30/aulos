@@ -98,7 +98,7 @@ impl Session {
 
     /// Like [`Self::start_track`] for a player result: a started track
     /// becomes current, `None` changes nothing, an error is logged as
-    /// `failure`.
+    /// `failure` and surfaced as [`PlaybackNotice::PlayFailed`].
     fn start_or_log(
         &mut self,
         result: Result<Option<Track>, String>,
@@ -109,7 +109,9 @@ impl Session {
             Ok(None) => PlaybackUpdate::none(),
             Err(e) => {
                 tracing::error!("{failure}: {e}");
-                PlaybackUpdate::none()
+                let mut update = PlaybackUpdate::none();
+                update.notice = Some(PlaybackNotice::PlayFailed(e));
+                update
             }
         }
     }

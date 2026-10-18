@@ -41,8 +41,8 @@ pub struct State {
     detail: String,
     /// Derived data of the artist shown in the detail route.
     top: Option<TopTracks>,
-    /// Selected top-track row (track id).
-    selected: Option<i64>,
+    /// Selected top-track row (`Track::key`).
+    selected: Option<String>,
 }
 
 /// The cached header summary of the open artist. The ranked "Top tracks"
@@ -877,8 +877,8 @@ fn list_body(
 struct DetailOut {
     play: bool,
     shuffle: bool,
-    play_track: Option<i64>,
-    select: Option<i64>,
+    play_track: Option<String>,
+    select: Option<String>,
     toggle_bio: bool,
     open_album: Option<String>,
     play_album: Option<usize>,
@@ -1057,9 +1057,9 @@ fn detail(app: &mut App, ui: &mut Ui, name: &str) {
             app.run(update);
         }
     }
-    if let Some(id) = out.play_track {
+    if let Some(key) = out.play_track {
         let tracks = artist_tracks(app, idx);
-        let start = tracks.iter().position(|t| t.id == id).unwrap_or(0);
+        let start = tracks.iter().position(|t| t.has_key(&key)).unwrap_or(0);
         let update = app.session.play_tracks(tracks, start);
         app.run(update);
     }
@@ -1218,7 +1218,7 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
         a.pal.text,
     );
     ui.add_space(10.0);
-    let current = a.session.playback.current_track.as_ref().map(|t| t.id);
+    let current = a.session.playback.current_track.as_ref().map(|t| t.key());
     for (i, track) in ranked.iter().enumerate() {
         let (rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), COVER_ROW_HEIGHT), Sense::hover());
@@ -1232,13 +1232,19 @@ fn top_tracks(ui: &mut Ui, a: &App, out: &mut DetailOut) {
                 number: &number,
                 subtitle: &track.album,
                 album_col: false,
-                current: current == Some(track.id),
-                selected: a.views.artists.selected == Some(track.id),
+                current: current.as_deref().is_some_and(|k| track.has_key(k)),
+                selected: a
+                    .views
+                    .artists
+                    .selected
+                    .as_deref()
+                    .is_some_and(|k| track.has_key(k)),
             },
         );
         if resp.clicked() {
-            out.select = Some(track.id);
-            out.play_track = Some(track.id);
+            let key = track.key();
+            out.select = Some(key.clone());
+            out.play_track = Some(key);
         }
         if let Some(action) = action {
             out.action = Some(action);

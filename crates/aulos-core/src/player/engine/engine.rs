@@ -381,6 +381,10 @@ enum PendingSource {
     /// helper's `send` fail once its open returns, which drops the decoder
     /// and with it the connection; nothing waits on the helper.
     Opening(std::sync::mpsc::Receiver<Result<SymphoniaDecoder>>),
+    /// Already open and rewound to the start: a look-ahead that a
+    /// crossfade claimed and then abandoned, handed back so the gapless
+    /// advance at end-of-stream still finds it.
+    Opened(Box<SymphoniaDecoder>),
 }
 
 impl PendingSource {
@@ -411,6 +415,7 @@ impl PendingSource {
     fn open(self) -> Result<SymphoniaDecoder> {
         match self {
             Self::Lazy(source) => source.open_decoder(),
+            Self::Opened(decoder) => Ok(*decoder),
             Self::Opening(rx) => rx
                 .recv()
                 .map_err(|_| PlayerError("next-track opener ended without a result".into()))?,
@@ -441,8 +446,8 @@ struct SharedStatus {
     probing: AtomicBool,
     /// Set by the playback thread whenever it crosses a track boundary
     /// (gapless/crossfade-advanced, or truly exhausted) — mirrors the old
-    /// `TrackBoundarySource`'s shared flag. Cleared by `play()`/
-    /// `queue_next()` on the calling side.
+    /// `TrackBoundarySource`'s shared flag. A pulse: consumed by
+    /// `is_finished()`, and cleared by `play()`/`stop()`.
     track_finished: AtomicBool,
     /// Set once the playback thread has permanently stopped because the
     /// whole queue is exhausted (no pending track at the final EOS) or an
@@ -647,6 +652,11 @@ impl PlaybackEngine {
                 Err(e) => {
                     // Keep tracking the threads that are still fading out.
                     self.retiring = prev;
+                    // Undo `reset_for_play`: no playback thread exists for
+                    // this call, so `probing` would otherwise stay `true`
+                    // forever (position pinned to zero, `is_finished` false).
+                    self.run_state.store(RUN_STOPPED, Ordering::Release);
+                    self.status.reset_for_stop();
                     return Err(e);
                 }
             },
@@ -730,10 +740,11 @@ impl PlaybackEngine {
             source: PendingSource::new(source),
             replay_gain_db,
         });
-        // Matches the old `TrackBoundarySource`'s eager reset: queuing a next
-        // track immediately un-signals "finished" for the currently playing
-        // one, exactly as constructing a new wrapped source used to.
-        self.status.track_finished.store(false, Ordering::Release);
+        // `track_finished` is deliberately left alone: queuing a look-ahead
+        // does not invalidate a boundary the playback thread just crossed,
+        // and clearing it here would swallow that advance (the caller
+        // queues the next look-ahead precisely while handling it). The flag
+        // is consumed by [`Self::is_finished`] instead.
     }
 
     /// Clear the look-ahead slot without affecting current playback.
@@ -760,13 +771,17 @@ impl PlaybackEngine {
     }
 
     /// Whether the current track has finished — a boundary was crossed
-    /// (gapless/crossfade-advanced or truly ended) since the last `play()`/
-    /// `queue_next()`. Always `false` while still probing.
+    /// (gapless/crossfade-advanced or truly ended) since the last `play()`.
+    /// Always `false` while still probing.
+    ///
+    /// A gapless/crossfade boundary is a pulse: reading it clears it, so the
+    /// caller advances once per boundary. A truly exhausted queue stays
+    /// reported until the next `play()`/`stop()`.
     pub fn is_finished(&self) -> bool {
         if self.status.probing.load(Ordering::Acquire) {
             return false;
         }
-        self.status.track_finished.load(Ordering::Acquire)
+        self.status.track_finished.swap(false, Ordering::AcqRel)
             || self.status.queue_exhausted.load(Ordering::Acquire)
     }
 
@@ -975,6 +990,7 @@ fn run_dsd(
     // DoP can't be gain-scaled: swallow any pending fade-in request so a
     // later PCM stream doesn't inherit it.
     let _ = ctx.fade.take_fade_in_pending();
+    output.set_stop_flag(ctx.stop_flag.clone());
     let dsd_sample_rate = decoder.sample_rate();
     let channels = decoder.channels();
     let bytes_per_second = (dsd_sample_rate / 8) as u64 * channels.max(1) as u64;
@@ -1124,6 +1140,7 @@ impl PcmSink {
         let fade_in = ctx.fade.take_fade_in_pending();
         ctx.fade.arm_stream_start(fade_in);
         output.set_fade(ctx.fade.clone());
+        output.set_stop_flag(ctx.stop_flag.clone());
         output.start()?;
 
         let channels =
@@ -1265,6 +1282,9 @@ fn run_pcm(
     // track within this same call, so a later hiccup on THAT track never
     // mistakenly retries the original live stream's URL instead.
     let mut live_retry: Option<LiveRetry> = live_retry.cloned();
+    // Set once a crossfade was abandoned because the look-ahead is shorter
+    // than the blend window; cleared when the current track changes.
+    let mut crossfade_suppressed = false;
     'buf: loop {
         if ctx.stop_flag.load(Ordering::Acquire) {
             sink.stop();
@@ -1296,6 +1316,7 @@ fn run_pcm(
             let cf_start =
                 ((duration - crossfade_secs as f64) * samples_per_second as f64).max(0.0) as u64;
             if total_samples >= cf_start
+                && !crossfade_suppressed
                 && let Some(pending) = ctx.next_track.lock().take()
             {
                 match open_pending(pending) {
@@ -1316,6 +1337,8 @@ fn run_pcm(
                             &mut buffer,
                             &mut sink,
                             command_rx,
+                            &mut total_samples,
+                            samples_per_second,
                             ctx,
                         ) {
                             CrossfadeOutcome::Transitioned {
@@ -1325,6 +1348,7 @@ fn run_pcm(
                             } => {
                                 ctx.status.track_finished.store(true, Ordering::Release);
                                 live_retry = None;
+                                crossfade_suppressed = false;
                                 decoder = nd;
                                 gain = ng;
                                 total_samples = samples_played;
@@ -1338,7 +1362,13 @@ fn run_pcm(
                                 );
                                 continue 'buf;
                             }
-                            CrossfadeOutcome::Abandoned => continue 'buf,
+                            CrossfadeOutcome::Abandoned { next_too_short } => {
+                                // A look-ahead shorter than the window would
+                                // be claimed and abandoned again on every
+                                // pass; leave it for the gapless advance.
+                                crossfade_suppressed = next_too_short;
+                                continue 'buf;
+                            }
                             CrossfadeOutcome::Stopped => {
                                 sink.stop();
                                 return PcmOutcome::Done;
@@ -1403,6 +1433,7 @@ fn run_pcm(
                 {
                     ctx.status.track_finished.store(true, Ordering::Release);
                     live_retry = None;
+                    crossfade_suppressed = false;
                     decoder = next_decoder;
                     gain = next_gain;
                     total_samples = 0;
@@ -1482,9 +1513,14 @@ enum CrossfadeOutcome {
         samples_played: u64,
     },
     /// A seek (or the incoming track being shorter than the window)
-    /// aborted the blend; `next_decoder` is dropped and the caller
-    /// continues with the current decoder untouched.
-    Abandoned,
+    /// aborted the blend; the incoming decoder was handed back to the
+    /// look-ahead slot (rewound; dropped if it cannot be rewound) and the
+    /// caller continues with the current decoder.
+    Abandoned {
+        /// The incoming track ran out inside the window, so a retry would
+        /// abandon again.
+        next_too_short: bool,
+    },
     /// The output disconnected; caller should stop entirely.
     Stopped,
 }
@@ -1505,6 +1541,8 @@ fn run_crossfade(
     cur_buf: &mut [f32],
     sink: &mut PcmSink,
     command_rx: &Receiver<EngineCommand>,
+    total_samples: &mut u64,
+    samples_per_second: u64,
     ctx: &ThreadContext,
 ) -> CrossfadeOutcome {
     let mut next_buf = vec![0f32; cur_buf.len()];
@@ -1517,18 +1555,14 @@ fn run_crossfade(
         }
 
         if let Ok(EngineCommand::Seek(pos)) = command_rx.try_recv() {
-            if let Err(e) = decoder.seek(pos.as_secs_f64()) {
-                tracing::error!("seek failed during crossfade: {e}");
-            } else {
-                ctx.status
-                    .position_nanos
-                    .store(pos.as_nanos() as u64, Ordering::Release);
-            }
+            // Also moves the caller's `total_samples`, which it keeps using
+            // after the blend is abandoned.
+            apply_seek(decoder, pos, samples_per_second, total_samples, ctx);
             sink.eq.reset_states();
-            // next_decoder is dropped here; the caller's next_track slot is
-            // already empty so a subsequent crossfade window needs a fresh
-            // `queue_next()` from the controlling side.
-            return CrossfadeOutcome::Abandoned;
+            requeue_next(next_decoder, next_gain, ctx);
+            return CrossfadeOutcome::Abandoned {
+                next_too_short: false,
+            };
         }
 
         if sink.poll_pause(ctx) {
@@ -1573,7 +1607,11 @@ fn run_crossfade(
             if sink.process(tail, gain, ctx).is_err() {
                 return CrossfadeOutcome::Stopped;
             }
-            return CrossfadeOutcome::Abandoned;
+            advance_position(total_samples, n_cur, samples_per_second, ctx);
+            requeue_next(next_decoder, next_gain, ctx);
+            return CrossfadeOutcome::Abandoned {
+                next_too_short: true,
+            };
         }
 
         let n_mix = n_next;
@@ -1595,6 +1633,41 @@ fn run_crossfade(
         // Position keeps tracking the OUTGOING track's sample count during
         // the blend — the UI's "current track" identity only switches once
         // `Transitioned` is returned, matching where `track_finished` flips.
+        // The outgoing decoder consumed `n_cur` samples this pass.
+        advance_position(total_samples, n_cur, samples_per_second, ctx);
+    }
+}
+
+/// Count `samples` more played samples of the current track and publish the
+/// position.
+fn advance_position(
+    total_samples: &mut u64,
+    samples: usize,
+    samples_per_second: u64,
+    ctx: &ThreadContext,
+) {
+    *total_samples += samples as u64;
+    ctx.status.position_nanos.store(
+        units_to_nanos(*total_samples, samples_per_second),
+        Ordering::Release,
+    );
+}
+
+/// Hand an incoming crossfade decoder back to the look-ahead slot after the
+/// blend was abandoned, rewound to its start, so the gapless advance at
+/// end-of-stream still finds it. Skipped when the decoder cannot be rewound
+/// or the controlling side already queued something else.
+fn requeue_next(mut next_decoder: SymphoniaDecoder, next_gain: f32, ctx: &ThreadContext) {
+    if let Err(e) = next_decoder.seek(0.0) {
+        tracing::warn!("cannot rewind abandoned crossfade track; dropping it: {e}");
+        return;
+    }
+    let mut slot = ctx.next_track.lock();
+    if slot.is_none() {
+        *slot = Some(PendingTrack {
+            source: PendingSource::Opened(Box::new(next_decoder)),
+            replay_gain_db: Some(20.0 * next_gain.max(f32::MIN_POSITIVE).log10()),
+        });
     }
 }
 

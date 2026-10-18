@@ -304,7 +304,6 @@ pub struct RowOutput {
 /// number); `current` marks the playing track; `selected` the selection.
 pub fn track_row(
     ui: &mut Ui,
-    app: &App,
     track: &Track,
     number: &str,
     current: bool,
@@ -404,11 +403,7 @@ pub fn track_row(
     }
 
     // Heart.
-    let fav = app
-        .session
-        .library
-        .favorite_state(None, &track.key())
-        .unwrap_or(track.is_favorite);
+    let favorite = track.is_favorite;
     let heart_hit = Rect::from_center_size(
         l.heart.center(),
         vec2(
@@ -417,7 +412,7 @@ pub fn track_row(
         ),
     );
     let heart = ui.interact(heart_hit, response.id.with("heart"), Sense::click());
-    let (glyph, filled, color) = if fav {
+    let (glyph, filled, color) = if favorite {
         (
             fill::HEART,
             true,

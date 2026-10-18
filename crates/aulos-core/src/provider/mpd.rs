@@ -29,6 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 
+/// Upper bound for the whole connect sequence (TCP, greeting, password).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Filter-expression construction. `mpd_client::filter::Filter` escaped
 /// values incorrectly before elomatreb/mpd_client#27 (`"` broke the command,
 /// `\` was dropped); this module predates that fix and is kept because it
@@ -288,16 +291,42 @@ impl MpdProvider {
 
     /// Helper: open a fresh TCP+MPD connection, returning `(Client, ConnectionEvents)`.
     async fn open_connection(&self) -> Result<(Client, ConnectionEvents), ProviderError> {
-        let addr = format!("{}:{}", self.config.host, self.config.port);
-        let stream = crate::task::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| {
-                ProviderError::NotConnected(format!("TCP connect to {addr}: timed out after 10 s"))
-            })?
-            .map_err(|e| ProviderError::NotConnected(format!("TCP connect to {addr}: {e}")))?;
+        Self::connect_to(
+            &self.config.host,
+            self.config.port,
+            self.config.password.as_deref(),
+        )
+        .await
+    }
 
-        let (client, events) =
-            Client::connect_with_password_opt(stream, self.config.password.as_deref())
+    /// Open a TCP+MPD connection to `host:port`: connect, greeting and
+    /// password, all under one [`CONNECT_TIMEOUT`] so a server that accepts the
+    /// socket but never answers cannot hang the caller. Shared by the provider
+    /// and the settings "Test connection" button.
+    ///
+    /// `host` may be a name, an IPv4 address or an IPv6 literal (bracketed or
+    /// not): the socket address is passed as a `(host, port)` pair rather
+    /// than a `"host:port"` string, which is ambiguous for IPv6.
+    pub async fn connect_to(
+        host: &str,
+        port: u16,
+        password: Option<&str>,
+    ) -> Result<(Client, ConnectionEvents), ProviderError> {
+        let bare_host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        let addr = if bare_host.contains(':') {
+            format!("[{bare_host}]:{port}")
+        } else {
+            format!("{bare_host}:{port}")
+        };
+
+        let (client, events) = crate::task::timeout(CONNECT_TIMEOUT, async {
+            let stream = TcpStream::connect((bare_host, port))
+                .await
+                .map_err(|e| ProviderError::NotConnected(format!("TCP connect to {addr}: {e}")))?;
+            Client::connect_with_password_opt(stream, password)
                 .await
                 .map_err(|e| match e {
                     ConnectWithPasswordError::IncorrectPassword => {
@@ -306,7 +335,15 @@ impl MpdProvider {
                     ConnectWithPasswordError::ProtocolError(pe) => {
                         ProviderError::NotConnected(format!("MPD protocol error: {pe}"))
                     }
-                })?;
+                })
+        })
+        .await
+        .map_err(|_| {
+            ProviderError::NotConnected(format!(
+                "connect to {addr}: timed out after {} s",
+                CONNECT_TIMEOUT.as_secs()
+            ))
+        })??;
 
         tracing::info!(
             "Connected to MPD at {} (protocol {})",
@@ -421,13 +458,26 @@ impl MpdProvider {
     ) -> Result<Vec<Album>, ProviderError> {
         let client = self.get_client()?;
         let mut albums = Vec::with_capacity(album_names.len());
+        let mut failed = 0usize;
+        let mut last_error = None;
 
         for album_name in album_names {
             let expr = filter_expr::eq("Album", album_name);
             let songs = match client.command(FilterQuery::find(expr)).await {
                 Ok(songs) => songs,
+                // The link itself is gone: every remaining album would fail
+                // the same way, and returning `Ok` with what was gathered so
+                // far would present a truncated library as complete.
+                Err(
+                    e @ (mpd_client::client::CommandError::ConnectionClosed
+                    | mpd_client::client::CommandError::Protocol(_)),
+                ) => return Err(mpd_err("find album")(e)),
+                // Per-item failure (e.g. the server rejects this one name):
+                // skip the album, keep the rest.
                 Err(e) => {
                     tracing::warn!("MPD find failed for album {album_name:?}: {e}");
+                    failed += 1;
+                    last_error = Some(e);
                     continue;
                 }
             };
@@ -456,6 +506,14 @@ impl MpdProvider {
                     .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
                 albums.push(Album::from_tracks(album_name.clone(), tracks, cover_source));
             }
+        }
+
+        // Partial results are fine when only some names failed; if every
+        // lookup failed the batch carries no information, so report it.
+        if let Some(e) = last_error
+            && failed == album_names.len()
+        {
+            return Err(mpd_err("find album")(e));
         }
 
         Ok(albums)

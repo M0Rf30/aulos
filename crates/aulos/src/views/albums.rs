@@ -33,8 +33,8 @@ pub struct State {
     cache: AlbumFilterCache,
     /// Cached `(cover_key, index in library.albums)` of the open album.
     detail: Option<(String, usize)>,
-    /// Selected track id in the album detail.
-    selected: Option<i64>,
+    /// `Track::key` of the selected track in the album detail.
+    selected: Option<String>,
 }
 
 /// Called when the route is entered: start loading what the page needs.
@@ -50,7 +50,7 @@ enum Action {
     Menu(MenuAction),
     Favorite(aulos_core::library::Track),
     Rate { id: String, stars: u8 },
-    Select(i64),
+    Select(String),
     Go(Route),
     ClearSearch,
 }
@@ -1063,8 +1063,9 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
     let Some(album) = lib.albums.get(idx) else {
         return;
     };
-    let current_id = app.session.playback.current_track.as_ref().map(|t| t.id);
-    let selected = app.views.albums.selected;
+    let current_key = app.session.playback.current_track.as_ref().map(|t| t.key());
+    let current_key = current_key.as_deref();
+    let selected = app.views.albums.selected.as_deref();
     let playlists = &app.session.playlists.playlists;
 
     egui::ScrollArea::vertical()
@@ -1108,14 +1109,13 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                     } else {
                         (i + 1).to_string()
                     };
-                    let current = current_id == Some(track.id);
+                    let current = current_key.is_some_and(|k| track.has_key(k));
                     let out = track_row(
                         ui,
-                        app,
                         track,
                         &number,
                         current,
-                        selected == Some(track.id),
+                        selected.is_some_and(|k| track.has_key(k)),
                         cols,
                     );
                     // One click or tap plays; the heart, stars and "more" button
@@ -1125,7 +1125,7 @@ fn detail(app: &mut App, ui: &mut Ui, key: &str, actions: &mut Vec<Action>) {
                         && out.set_rating.is_none()
                         && !out.more.clicked()
                     {
-                        actions.push(Action::Select(track.id));
+                        actions.push(Action::Select(track.key()));
                         actions.push(Action::PlayAlbum {
                             album: idx,
                             start: i,

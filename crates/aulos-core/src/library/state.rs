@@ -193,6 +193,9 @@ pub struct LibraryState {
     /// Bumped whenever `tracks`/`albums`/`artists` change (load, batch,
     /// sort, artist rebuild); invalidates derived caches.
     generation: u64,
+    /// Counts in-place track edits (favourite toggles); see
+    /// [`Self::favorites_epoch`].
+    track_edits: u64,
     /// Monotonically increasing counter for library reloads/scans. Bumped
     /// before every new reload/scan so in-flight async results tagged with
     /// an older generation (or a different provider id) can be detected
@@ -640,11 +643,21 @@ impl LibraryState {
     }
 
     /// Changes whenever the lists the `visible_*` accessors return may have
-    /// changed (library data or search results); a cache key for views
-    /// memoising something derived from them.
+    /// changed (library data, search results or in-place track edits such as
+    /// a favourite toggle); a cache key for views memoising something derived
+    /// from them. Both low counters only grow, so their sum is unique per state.
     #[must_use]
     pub fn visible_epoch(&self) -> u64 {
-        (self.generation << 32) | (self.filter_generation & 0xffff_ffff)
+        let low = self.filter_generation.wrapping_add(self.track_edits);
+        (self.generation << 32) | (low & 0xffff_ffff)
+    }
+
+    /// Bumped by every in-place track edit ([`Self::for_each_track`], e.g. a
+    /// favourite toggle), which leaves [`Self::generation`] alone; already
+    /// folded into [`Self::visible_epoch`].
+    #[must_use]
+    pub fn favorites_epoch(&self) -> u64 {
+        self.track_edits
     }
 
     /// The albums to show: the search results, or all of them.
@@ -811,6 +824,7 @@ impl LibraryState {
     /// The holders share one allocation per track and album, so each is
     /// copied on write once and the copy is shared again by every holder.
     pub fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
+        self.track_edits += 1;
         let mut memo = SharedEdits::default();
         for album in self.albums.iter_mut().chain(&mut self.filtered.albums) {
             memo.edit_album(album, track_id, &mut f);
@@ -905,6 +919,17 @@ mod tests {
         assert!(lib.tracks.iter().any(|t| t.title == "a2"));
         let x = lib.albums.iter().find(|a| a.name == "X").unwrap();
         assert_eq!(x.tracks.len(), 1);
+    }
+
+    #[test]
+    fn toggling_a_favourite_changes_the_cache_key() {
+        let mut lib = lib_with(vec![local_track(1, "a", "X")]);
+        let key = lib.tracks[0].key();
+        let before = (lib.visible_epoch(), lib.favorites_epoch());
+        lib.for_each_track(&key, |t| t.is_favorite = true);
+        assert_ne!(before, (lib.visible_epoch(), lib.favorites_epoch()));
+        assert!(lib.tracks[0].is_favorite);
+        assert!(lib.albums[0].tracks[0].is_favorite);
     }
 
     #[test]

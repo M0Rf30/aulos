@@ -61,7 +61,7 @@ The browser build is a preview. Pick a music folder (Chromium keeps it across re
 - **Local library**: your music folder (`~/Music` by default) is scanned into an SQLite database at startup. A file watcher then keeps it up to date as files are added, changed or removed.
 - **MPD**: Aulos works as a remote control. Playback happens on the MPD server, and shuffle, repeat, crossfade and ReplayGain settings are sent to it.
 - **Subsonic**: streams over HTTP with seeking. It also works with self-signed certificates, which you have to allow explicitly.
-- **Passwords** for MPD and Subsonic are kept in the system keyring: on Linux the kernel keyutils first, falling back to the Secret Service (GNOME Keyring, KWallet); on Windows the Credential Manager; on macOS the Keychain.
+- **Passwords** for MPD and Subsonic are kept in the system keyring: on Linux the Secret Service (GNOME Keyring, KWallet) first, falling back to the kernel keyutils, which is cleared at reboot; on Windows the Credential Manager; on macOS the Keychain.
 
 ### Playback engine
 
@@ -145,7 +145,7 @@ Aulos runs on Linux, Windows 10+ and macOS 11+ and needs a GPU with Vulkan, Dire
 | File dialogs | XDG desktop portal | Native | Native |
 | Notifications | D-Bus | Native | Native |
 | Sleep inhibit | Portal / systemd-logind | Native | Native |
-| Password storage | keyutils / Secret Service | Credential Manager | Keychain |
+| Password storage | Secret Service / keyutils | Credential Manager | Keychain |
 | Visualizer for MPD audio | ✓ (PipeWire) | Not available | Not available |
 | Visualizer for local playback | ✓ | ✓ | ✓ |
 | `just install`, desktop entry, AppStream metainfo | ✓ | n/a | n/a |

@@ -350,11 +350,13 @@ pub enum BackgroundKey {
     ExtrasSync,
     /// 500 ms progress ticker while conversion jobs run.
     ConvertTick,
-    /// Status poll of the MPD server with this provider id.
-    MpdStatus(Arc<str>),
+    /// Status poll of the MPD server with this provider id, under this
+    /// `ProvidersState::mpd_generation`: rebuilding the providers makes a
+    /// new key, so the poll is restarted on the new ones.
+    MpdStatus(Arc<str>, u64),
     /// Idle/connection events of the MPD provider at this position of the
-    /// provider list.
-    MpdIdle(usize),
+    /// provider list, under this `ProvidersState::mpd_generation`.
+    MpdIdle(usize, u64),
     /// PipeWire capture of the local MPD server's audio, feeding the
     /// visualizer.
     #[cfg(feature = "visualizer")]
@@ -487,7 +489,7 @@ impl Session {
         {
             let provider_id = provider.provider_id_arc();
             streams.push((
-                BackgroundKey::MpdStatus(Arc::clone(&provider_id)),
+                BackgroundKey::MpdStatus(Arc::clone(&provider_id), self.providers.mpd_generation),
                 status_stream(mpd.client(), provider_id)
                     .map(|status| SessionEvent::MpdStatus(Box::new(status)))
                     .boxed(),
@@ -524,11 +526,13 @@ impl Session {
         // MPD idle events, one source per configured MPD provider. Each
         // opens TWO TCP connections to its server (an idle one and the
         // command one stored in the provider), see `idle_stream`. Identified
-        // by list position, so editing a server keeps its running source.
+        // by list position and provider generation: rebuilding the providers
+        // (any MPD server edit) restarts every source on the new ones, the
+        // old sources hold providers that no longer exist.
         #[cfg(not(target_arch = "wasm32"))]
         for (idx, provider) in self.providers.mpd_providers.iter().enumerate() {
             streams.push((
-                BackgroundKey::MpdIdle(idx),
+                BackgroundKey::MpdIdle(idx, self.providers.mpd_generation),
                 idle_stream(Arc::clone(provider))
                     .map(SessionEvent::Mpd)
                     .boxed(),
@@ -994,17 +998,18 @@ mod tests {
         let keys: HashSet<_> = [
             BackgroundKey::PlaybackTick,
             BackgroundKey::PlaybackTick,
-            BackgroundKey::MpdIdle(0),
-            BackgroundKey::MpdIdle(0),
-            BackgroundKey::MpdIdle(1),
-            BackgroundKey::MpdStatus(Arc::from("a")),
-            BackgroundKey::MpdStatus(Arc::from("a")),
+            BackgroundKey::MpdIdle(0, 0),
+            BackgroundKey::MpdIdle(0, 0),
+            BackgroundKey::MpdIdle(1, 0),
+            BackgroundKey::MpdIdle(0, 1),
+            BackgroundKey::MpdStatus(Arc::from("a"), 0),
+            BackgroundKey::MpdStatus(Arc::from("a"), 0),
             BackgroundKey::FsWatcher(vec![PathBuf::from("/m")]),
             BackgroundKey::FsWatcher(vec![PathBuf::from("/m")]),
         ]
         .into_iter()
         .collect();
-        assert_eq!(keys.len(), 5);
+        assert_eq!(keys.len(), 6);
     }
 
     #[test]

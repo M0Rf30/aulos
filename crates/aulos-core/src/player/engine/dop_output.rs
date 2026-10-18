@@ -14,13 +14,23 @@
 use crate::player::backend::PlayerError;
 use crate::player::engine::conversion::SampleBuffer;
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
+use crate::player::engine::output::drain_channel;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::Duration;
 use web_time::Instant;
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
+
+/// Depth of the sample channel between the decode thread and the device.
+const CHANNEL_DEPTH: usize = 32;
+
+/// Upper bound on how long [`DopOutput::stop`] waits for the channel to
+/// drain (~the buffered audio, 32 chunks of a few ms each, plus slack).
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(600);
 
 /// Outcome of a bounded send on the DoP sample channel.
 enum SendOutcome {
@@ -68,9 +78,18 @@ pub struct DopOutput {
     sample_sender: Option<SyncSender<Vec<i32>>>,
     config: StreamConfig,
     is_paused: bool,
+    /// The engine's stop flag (see [`Self::set_stop_flag`]): skips draining
+    /// the buffered tail in [`Self::stop`] when the engine is stopping on
+    /// purpose.
+    stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl DopOutput {
+    /// Wire the engine's stop flag.
+    pub fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
+        self.stop_flag = Some(stop_flag);
+    }
+
     pub fn new(sample_rate: u32, channels: u8) -> Result<Self> {
         let device_config = CpalDeviceConfig::new_dop(sample_rate, channels as u16)?;
 
@@ -85,6 +104,7 @@ impl DopOutput {
             sample_sender: None,
             config: device_config.config,
             is_paused: false,
+            stop_flag: None,
         })
     }
 
@@ -102,7 +122,7 @@ impl DopOutput {
         tracing::info!("requested sample rate: {:?} Hz", self.config.sample_rate);
         tracing::info!("requested channels: {}", self.config.channels);
 
-        let (tx, rx) = sync_channel::<Vec<i32>>(32);
+        let (tx, rx) = sync_channel::<Vec<i32>>(CHANNEL_DEPTH);
 
         let stream = match sample_format {
             SampleFormat::I32 | SampleFormat::I24 => {
@@ -238,14 +258,38 @@ impl DopOutput {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        // Let the device play out what is still buffered before the reset
+        // burst and the stream drop discard it (the last ~370 ms of the
+        // track otherwise). Skipped when the engine is stopping on purpose,
+        // and while paused (a paused stream never drains).
+        if let Some(sender) = &self.sample_sender
+            && self.stream.is_some()
+            && !self.is_paused
+            && !self
+                .stop_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            drain_channel(
+                sender,
+                None,
+                CHANNEL_DEPTH,
+                DRAIN_TIMEOUT,
+                self.stop_flag.as_deref(),
+            );
+        }
+
         tracing::info!("sending PCM reset sequence to switch DAC back to PCM mode");
 
         if let Some(sender) = &self.sample_sender {
             let reset_frames = self.config.sample_rate as usize / 10;
             let reset_samples = vec![0i32; reset_frames * self.config.channels as usize];
 
-            // Best-effort: never block shutdown if the callback isn't draining.
-            let _ = sender.try_send(reset_samples);
+            // Best-effort: the drain above leaves up to `CHANNEL_DEPTH` empty
+            // chunks queued (each consumed within one sample), so wait
+            // briefly for room, but never block shutdown if the callback
+            // isn't draining.
+            let _ = send_bounded(sender, reset_samples, Duration::from_millis(200));
 
             std::thread::sleep(std::time::Duration::from_millis(150));
 

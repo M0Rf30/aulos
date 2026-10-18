@@ -39,8 +39,8 @@ pub struct State {
     stats: Option<GenreStats>,
     /// Genre the detail state belongs to.
     detail: String,
-    /// Selected track row (track id).
-    selected: Option<i64>,
+    /// Selected track row (`Track::key`).
+    selected: Option<String>,
 }
 
 /// Per-genre song counts and a few album covers, built from the library.
@@ -422,7 +422,7 @@ fn list_body(ui: &mut Ui, a: &App, genres: &[String], out: &mut BrowseOut) {
 struct DetailOut {
     shuffle: bool,
     play: Option<usize>,
-    select: Option<i64>,
+    select: Option<String>,
     open_artist: Option<String>,
     action: Option<MenuAction>,
 }
@@ -729,8 +729,9 @@ fn track_list(ui: &mut Ui, a: &App, tracks: &[aulos_core::library::Track], out: 
     let n = tracks.len();
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, n as f32 * COVER_ROW_HEIGHT), Sense::hover());
-    let current = a.session.playback.current_track.as_ref().map(|t| t.id);
-    let selected = a.views.genres.selected;
+    let current = a.session.playback.current_track.as_ref().map(|t| t.key());
+    let current = current.as_deref();
+    let selected = a.views.genres.selected.as_deref();
     for i in visible_rows(ui, rect.top(), COVER_ROW_HEIGHT, n) {
         let track = &tracks[i];
         let row = Rect::from_min_size(
@@ -747,12 +748,12 @@ fn track_list(ui: &mut Ui, a: &App, tracks: &[aulos_core::library::Track], out: 
                 number: &number,
                 subtitle: &track.artist,
                 album_col: true,
-                current: current == Some(track.id),
-                selected: selected == Some(track.id),
+                current: current.is_some_and(|k| track.has_key(k)),
+                selected: selected.is_some_and(|k| track.has_key(k)),
             },
         );
         if resp.clicked() {
-            out.select = Some(track.id);
+            out.select = Some(track.key());
             out.play = Some(i);
         }
         if let Some(action) = action {
