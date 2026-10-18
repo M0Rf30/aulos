@@ -2940,11 +2940,9 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
     let importing = sc.import_progress(service).is_some();
     let any_import = sc.is_importing();
     let queued = sc.queued(service);
-    let status_msg = sc.status(service).map(str::to_owned);
-    let failed = sc.error(service).is_some()
-        || status_msg
-            .as_deref()
-            .is_some_and(|s| s.starts_with("Error"));
+    let status = sc.status(service);
+    let status_msg = status.map(|(text, _)| text.to_owned());
+    let failed = sc.error(service).is_some() || status.is_some_and(|(_, failed)| failed);
     let (status, status_color) = match (&status_msg, connected) {
         (Some(s), _) => (s.clone(), if failed { pal.danger } else { pal.text_2 }),
         (None, true) => {

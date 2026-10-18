@@ -21,7 +21,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use aulos_core::mpris::{MprisCommand, MprisSnapshot, MprisStatus, changed_beyond_ticking};
 use aulos_core::session::Session;
@@ -54,8 +54,9 @@ const CMD_SEEK: jint = 6;
 
 /// Commands the system sent, waiting for the next frame.
 static COMMANDS: Mutex<VecDeque<MprisCommand>> = Mutex::new(VecDeque::new());
-/// Wakes the UI when a command arrives.
-static REPAINT: OnceLock<egui::Context> = OnceLock::new();
+/// Wakes the UI when a command arrives; refreshed by [`sync`], so a relaunch
+/// in the same process does not wake the previous launch's context.
+static REPAINT: Mutex<Option<egui::Context>> = Mutex::new(None);
 static STATE: Mutex<State> = Mutex::new(State::new());
 
 /// `MediaService.nativeCommand`, called on the Android main thread by the
@@ -75,7 +76,11 @@ extern "system" fn native_command(_env: JNIEnv, _class: JClass, command: jint, a
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push_back(command);
-    if let Some(ctx) = REPAINT.get() {
+    if let Some(ctx) = REPAINT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
         ctx.request_repaint();
     }
 }
@@ -83,7 +88,13 @@ extern "system" fn native_command(_env: JNIEnv, _class: JClass, command: jint, a
 /// Publishes the session's playback state to Android and returns the
 /// commands the system controls sent since the last call.
 pub fn sync(ctx: &egui::Context, session: &mut Session) -> Vec<MprisCommand> {
-    REPAINT.get_or_init(|| ctx.clone());
+    {
+        // `egui::Context` is a shared handle: clone only when it changed.
+        let mut repaint = REPAINT.lock().unwrap_or_else(PoisonError::into_inner);
+        if repaint.as_ref() != Some(ctx) {
+            *repaint = Some(ctx.clone());
+        }
+    }
     STATE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -99,8 +110,12 @@ pub fn sync(ctx: &egui::Context, session: &mut Session) -> Vec<MprisCommand> {
 /// releases the wake lock. Called once the app has left its event loop.
 pub fn shutdown() {
     let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
-    let Backend::Ready(handles) = std::mem::replace(&mut state.backend, Backend::Unavailable)
-    else {
+    // A relaunch in this process starts from scratch: whether the layer was
+    // off, a stale snapshot or the service flag must not carry over.
+    let backend = std::mem::replace(&mut state.backend, Backend::Untried);
+    state.last = None;
+    state.service_up = false;
+    let Backend::Ready(handles) = backend else {
         return;
     };
     let Some((vm, activity)) = super::host() else {

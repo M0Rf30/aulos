@@ -797,7 +797,10 @@ impl App {
             return;
         }
         let Some(bytes) = self.session.cover_bytes.get(&key) else {
-            // Not cached: load it; `CoverBytes` marks art dirty again.
+            // Not cached: without bytes there is no art for now. Clear the
+            // previous track's, then load the bytes if they can be; the
+            // arrival of `CoverBytes` marks art dirty again, so only a
+            // known-absent cover is final (`art_done`).
             if self.session.cover_bytes.should_load(&key)
                 && let Some(hint) = self
                     .session
@@ -806,13 +809,12 @@ impl App {
             {
                 let effect = self.session.load_cover_bytes(key.clone(), hint);
                 effect.spawn(&self.handle, self.sink());
-            } else if !self.session.cover_bytes.should_load(&key) {
-                // Known absent (or in flight): without bytes there is no art.
-                self.retarget_accent(None);
-                self.backdrop = None;
-                self.cover_large = None;
+            } else if self.session.cover_bytes.is_missing(&key) {
                 self.art_done = Some(key);
             }
+            self.retarget_accent(None);
+            self.backdrop = None;
+            self.cover_large = None;
             return;
         };
         self.art_pending = Some(key.clone());
@@ -1099,6 +1101,8 @@ impl App {
                 digit,
             )
         });
+        // A dialog takes Esc itself (`overlays::show`), not the sheets below it.
+        let esc = esc && !views::overlays::active(self);
         let zoom = ctx.input_mut(|i| {
             let m = egui::Modifiers::COMMAND;
             if i.consume_key(m, egui::Key::Num0) {
@@ -1151,6 +1155,9 @@ impl App {
                 self.go_back();
             }
         }
+        if typing {
+            return;
+        }
         #[cfg(feature = "visualizer")]
         let viz_open = self.viz_open();
         #[cfg(not(feature = "visualizer"))]
@@ -1160,9 +1167,6 @@ impl App {
         }
         if fwd && !viz_open {
             self.go_forward();
-        }
-        if typing {
-            return;
         }
         if space {
             self.toggle_play();

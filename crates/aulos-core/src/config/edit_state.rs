@@ -169,12 +169,3 @@ fn unique_id<'a>(prefix: &str, taken: impl IntoIterator<Item = &'a str>) -> Stri
         .find(|id| !taken.contains(id.as_str()))
         .expect("unbounded range")
 }
-
-/// Whether a stored connection-test status string means "connected".
-///
-/// Statuses are kept as the localised label, so the check compares against
-/// the same translation the test result was written with.
-#[must_use]
-pub fn is_connected_status(status: &str) -> bool {
-    status == crate::fl!("connected")
-}

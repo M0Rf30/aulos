@@ -1,25 +1,13 @@
-app-title = Aulos
-app-motto = Aulos: it really pipes the satyr's ass.
 about = À propos
-repository = Dépôt
 file = Fichier
-view = Affichage
-switch-to-grid = Vue en grille
-switch-to-list = Vue en liste
 albums = Albums
 artists = Artistes
 songs = Titres
 equalizer = Égaliseur
 lyrics = Paroles
 queue = File d'attente
-quit = Quitter
 add-music-folder = Ajouter un dossier de musique
-scan-library = Analyser la bibliothèque
-scanning-library = Analyse de la bibliothèque...
-no-albums = Aucun album trouvé
 unknown-album = Album inconnu
-no-artists = Aucun artiste trouvé
-no-songs = Aucun titre trouvé
 play = Lecture
 pause = Pause
 next = Suivant
@@ -29,246 +17,91 @@ repeat = Répéter
 volume = Volume
 search = Rechercher
 settings = Réglages
-providers = Fournisseurs
-add-mpd-server = Ajouter un serveur MPD
-mpd-name = Nom
-mpd-host = Hôte
-mpd-port = Port
-mpd-password = Mot de passe
 save = Enregistrer
 remove = Supprimer
-test-connection = Tester la connexion
 connected = Connecté
 connection-failed = Échec de la connexion
-add-subsonic-server = Ajouter un serveur Subsonic
-subsonic-name = Nom
-subsonic-url = URL du serveur
-subsonic-username = Nom d'utilisateur
-subsonic-password = Mot de passe
-subsonic-accept-invalid-certs = Accepter les certificats TLS non valides
-no-music-dirs = Aucun dossier de musique configuré
-no-providers = Aucun fournisseur distant configuré
 playlists = Listes de lecture
 genres = Genres
-no-playlists = Aucune liste de lecture
-no-genres = Aucun genre trouvé
-playlist-tracks = { $count } titres
-playlist-empty = Cette liste de lecture est vide
-create-playlist = Créer une liste de lecture
 delete-playlist = Supprimer
 rename-playlist = Renommer
 play-all = Tout lire
 crossfade = Fondu enchaîné
 crossfade-duration = Durée du fondu enchaîné
-crossfade-seconds = { $secs } s
-crossfade-disabled = Désactivé
 replay-gain = Replay Gain
 replay-gain-off = Désactivé
 replay-gain-track = Titre
 replay-gain-album = Album
 replay-gain-auto = Auto
-transcoding = Transcodage
-transcoding-bitrate = Débit max.
-transcoding-format = Format
-transcoding-original = Original
-transcoding-bandwidth-estimate = Économie de bande passante estimée : ~{ $percent } %
 
 # SettingsView
 settings-library = Bibliothèque
 settings-playback = Lecture
-settings-shortcuts = Raccourcis
 settings-about = À propos
 settings-startup = Démarrage
 startup-page = Page de démarrage
 startup-page-description = La section affichée à l'ouverture d'Aulos
-startup-last-used = Dernière utilisée
 startup-provider = Fournisseur au démarrage
 startup-provider-description = La source musicale sélectionnée à l'ouverture d'Aulos
-startup-provider-local = Bibliothèque locale
 
 # RowFoundation
 favorite-add = Ajouter aux favoris
 favorite-remove = Retirer des favoris
 
-# CompactBar
-no-track-playing = Aucun titre en lecture
-show-now-playing = Afficher la lecture en cours
-
-# EqualizerView
-equalizer-enabled = Égaliseur activé
 equalizer-section-preset = Préréglage
-equalizer-save-preset-as = Enregistrer sous
-equalizer-preset-name-placeholder = Nom du préréglage...
-equalizer-delete-preset = Supprimer
-equalizer-reset-preset = Réinitialiser
-equalizer-section-autoeq = AutoEQ
-equalizer-autoeq-search-placeholder = Rechercher un casque...
-equalizer-autoeq-no-matches = Aucun résultat
-equalizer-autoeq-too-many-matches = Plus de 50 résultats — affinez la recherche
-equalizer-autoeq-match-count = { $count } résultats
-equalizer-autoeq-profile-count = { $count } profils
-equalizer-autoeq-search-hint = Saisir 2 caractères ou plus pour rechercher
-equalizer-autoeq-profiles-loaded = { $count } profils chargés
-equalizer-autoeq-loading = Chargement...
-equalizer-autoeq-load-profiles = Charger les profils AutoEQ
 equalizer-section-preamp = Préampli
-equalizer-preamp-label = Préampli :
 equalizer-preamp-value = { $db } dB
-equalizer-section-bands = Bandes
 
-# LyricsView
-lyrics-loading = Chargement des paroles...
-lyrics-unavailable = Aucune parole disponible
-lyrics-search-online = Rechercher en ligne
-
-# AlbumsView
-albums-empty-hint = Ajoutez des dossiers de musique dans les réglages pour commencer
 play-album = Lire l'album
-album-tooltip = { $title } — { $artist }
 back-to-albums = Retour aux albums
 
-# ExpandedView
-expanded-collapse = Retour à la bibliothèque
-expanded-empty-hint = Choisissez un titre dans votre bibliothèque pour commencer l'écoute
-
-# SmallViews
-artists-empty-hint = Les artistes apparaîtront ici une fois la bibliothèque analysée
-back-to-artists = Retour aux artistes
 artist-album-count-one = { $count } album
 artist-album-count-other = { $count } albums
 artist-track-count-one = { $count } titre
 artist-track-count-other = { $count } titres
-genres-empty-hint = Les genres apparaîtront une fois la bibliothèque analysée.
-no-tracks-found = Aucun titre trouvé
-genre-empty-hint = Aucun titre trouvé pour ce genre.
 genre-track-count-one = { $count } titre
 genre-track-count-other = { $count } titres
 genre-label = Genre
-back-to-genres = Retour aux genres
-new-playlist-placeholder = Nom de la nouvelle liste de lecture...
-playlist-name-placeholder = Nom de la liste de lecture...
-playlists-empty-hint = Créez une liste de lecture pour organiser votre musique
-delete-playlist-tooltip = Supprimer la liste de lecture
-back-to-playlists = Retour aux listes de lecture
-remove-from-playlist = Retirer de la liste de lecture
-playlist-empty-hint = Ajoutez des titres depuis la vue Titres.
 playlist-track-count-one = { $count } titre
 playlist-track-count-other = { $count } titres
 
-# AppShell
-search-library = Rechercher dans la bibliothèque
-toast-provider-connect-failed = Échec de la connexion à { $provider } : { $reason }
-toast-open-files-failed = Aucun fichier audio lisible trouvé
-
 # SongsTable
 songs-column-number = #
-songs-column-title = Titre
-songs-column-artist = Artiste
-songs-column-album = Album
-songs-column-duration = Durée
-songs-add-to-playlist = Ajouter à « { $playlist } »
-songs-favorites-filter = Favoris
-songs-empty-hint = Analysez votre bibliothèque via Fichier > Réanalyser
-songs-no-matches = Aucun titre correspondant
-songs-no-matches-hint = Essayez de désactiver le filtre des favoris ou du genre
-songs-column-genre = Genre
-songs-column-rating = Note
-songs-clear-genre-filter = Effacer le filtre de genre
 songs-track-count-one = { $count } titre
 songs-track-count-other = { $count } titres
 
 # PodcastsView
 podcasts = Podcasts
-podcast-search-placeholder = Rechercher dans l'annuaire de podcasts...
-searching = Recherche...
 subscribe = S'abonner
-podcast-url-placeholder = URL du flux du podcast...
-refresh-all = Tout actualiser
 subscriptions = Abonnements
-no-podcasts = Aucun podcast abonné
-podcasts-empty-hint = Recherchez dans l'annuaire ou collez l'URL d'un flux pour vous abonner
-refresh-podcast-tooltip = Actualiser le flux
-unsubscribe-tooltip = Se désabonner
-back-to-podcasts = Retour aux podcasts
-resume-at = Reprendre à { $position }
-mark-played-tooltip = Marquer comme lu / non lu
-download-episode-tooltip = Télécharger pour une lecture hors ligne
-delete-download-tooltip = Supprimer le téléchargement
-no-episodes = Aucun épisode trouvé
-no-episodes-hint = Le flux de ce podcast ne contient pas encore d'épisodes
-toast-podcast-search-failed = Échec de la recherche de podcasts : { $reason }
-toast-podcast-subscribe-failed = Échec de l'abonnement : { $reason }
-toast-podcast-refresh-failed = Échec de l'actualisation du podcast : { $reason }
-toast-episode-download-failed = Échec du téléchargement de l'épisode : { $reason }
 
 # ConvertView
 convert = Convertir
 
-# Visualizer
-viz-toggle-presets = Parcourir les préréglages
-viz-presets = Préréglages
-viz-preset-search = Rechercher des préréglages...
-viz-preset-empty = Aucun préréglage ne correspond à votre recherche
-viz-preset-none-found = Aucun préréglage trouvé
-viz-preset-scanning = Analyse des préréglages...
-viz-close-presets = Fermer
-viz-lock = Verrouiller le préréglage
 viz-beat-sensitivity = Sensibilité au rythme
-viz-init-failed = Visualiseur indisponible : { $reason }
 
 # --- folders ---
 folders = Dossiers
-no-folders = Aucune musique trouvée
-folders-empty-hint = Ajoutez des dossiers de musique dans les réglages pour commencer
 folders-root = Bibliothèque
-folders-up = Dossier parent
 folder-empty = Dossier vide
 folder-empty-hint = Ce dossier ne contient ni titres ni sous-dossiers.
 play-folder = Lire le dossier
-queue-folder-tooltip = Ajouter le dossier à la file d'attente
 folder-track-count-one = { $count } titre
 folder-track-count-other = { $count } titres
 folder-subfolder-count-one = { $count } dossier
 folder-subfolder-count-other = { $count } dossiers
-folder-section-tracks = Titres
-queued-tracks = { $count } titres ajoutés à la file d'attente
 
 # --- artist tags ---
 split-artist-tags = Séparer les tags multi-artistes
 split-artist-tags-description = Sépare les tags du type « Artiste A feat. B » en artistes individuels, afin que chacun ait sa propre entrée et que les collaborations soient trouvées sous n'importe quel contributeur.
 artist-tag-delimiters = Délimiteurs
 artist-tag-delimiters-description = Séparateurs utilisés pour découper les tags d'artistes, essayés du plus long au plus court. Modifiez-les sous forme de liste séparée par « | ».
-artist-tag-delimiters-placeholder = ; | feat. | & | / | ...
-reset-to-defaults = Rétablir les valeurs par défaut
 
-# --- smart playlists ---
-smart-playlists = Listes de lecture intelligentes
 new-smart-playlist = Nouvelle liste de lecture intelligente
-edit-smart-playlist = Modifier la liste de lecture intelligente
-no-smart-playlists = Aucune liste de lecture intelligente
-smart-playlists-empty-hint = Créez une liste de lecture basée sur des règles, mise à jour automatiquement selon l'évolution de votre bibliothèque
-play-smart-playlist-tooltip = Lecture
-edit-smart-playlist-tooltip = Modifier les règles
-delete-smart-playlist-tooltip = Supprimer la liste de lecture intelligente
-back-to-smart-playlists = Retour aux listes de lecture intelligentes
-smart-playlist-track-count-one = { $count } titre
-smart-playlist-track-count-other = { $count } titres
-smart-playlist-empty = Aucun titre ne correspond à ces règles
-smart-playlist-empty-hint = Assouplissez une règle ou ajoutez des titres à votre bibliothèque
-smart-playlist-name-placeholder = Nom de la liste de lecture intelligente...
-smart-playlist-match = Correspondre à
-smart-playlist-match-all = Toutes les règles
-smart-playlist-match-any = Une règle quelconque
-smart-playlist-rules-heading = Règles
 add-rule = Ajouter une règle
 remove-rule-tooltip = Supprimer la règle
 smart-playlist-value-placeholder = Valeur...
-smart-playlist-value2-placeholder = et...
-smart-playlist-order-by = Trier par
-smart-playlist-order-desc = Décroissant
 smart-playlist-limit = Limiter à
-smart-playlist-limit-placeholder = titres
-smart-playlist-cancel-edit = Annuler
 smart-playlist-field-title = Titre
 smart-playlist-field-artist = Artiste
 smart-playlist-field-album-artist = Artiste de l'album
@@ -309,27 +142,15 @@ smart-playlist-order-last-played = Dernière lecture
 ## Converter
 convert-add-files = Ajouter des fichiers
 convert-output-section = Sortie
-convert-output-dir = Dossier de destination
 convert-dir-change = Modifier…
-convert-dir-open = Ouvrir le dossier
 convert-format = Format
 convert-sample-rate = Fréquence d'échantillonnage
 convert-rate-source = Fréquence source
 convert-rate-hz = { $hz } Hz
-convert-settings-hint = S'applique aux tâches encore en file d'attente lorsque vous appuyez sur Démarrer — les tâches en cours ou terminées conservent les réglages avec lesquels elles ont démarré.
-convert-dir-error = Impossible d'utiliser ce dossier de sortie : { $reason }
-convert-summary-queued = { $count } en attente
-convert-summary-running = { $count } en cours
-convert-summary-done = { $count } terminées
-convert-summary-failed = { $count } en échec
-convert-start = Démarrer
 convert-cancel-all = Tout annuler
 convert-clear-finished = Effacer les terminées
-no-convert-jobs = Aucune tâche de conversion
-convert-empty-hint = Ajoutez des fichiers audio ou vidéo, ou une feuille .cue, pour les convertir ou les extraire
 convert-kind-convert = Convertir
 convert-kind-cuesplit = Découper CUE
-convert-job-caption = { $kind } · { $format } · { $rate } · → { $dest }
 convert-format-flac = FLAC
 convert-format-wav16 = WAV (16 bits)
 convert-format-wav24 = WAV (24 bits)
@@ -337,28 +158,18 @@ convert-format-wav32float = WAV (32 bits flottant)
 convert-state-queued = En attente
 convert-state-running = Conversion…
 convert-state-done = Terminé
-convert-state-failed = Échec : { $error }
 convert-state-failed-chip = Échec
 convert-state-cancelled = Annulé
 convert-cancel-tooltip = Annuler
 convert-retry-tooltip = Réessayer
-convert-remove-tooltip = Supprimer
-convert-open-folder-tooltip = Ouvrir le dossier contenant
-toast-convert-queue-done = { $done } fichier(s) converti(s)
-toast-convert-queue-done-with-failures = { $done } fichier(s) converti(s), { $failed } en échec
 
 ## Player UI
 stop = Arrêter
 now-playing-live = EN DIRECT
-queue-empty = La file d'attente est vide
 queue-now-playing-label = En cours de lecture
 queue-up-next-one = À suivre · { $count } titre · { $duration }
 queue-up-next-other = À suivre · { $count } titres · { $duration }
 queue-clear = Vider
-queue-move-up = Monter
-queue-move-down = Descendre
-queue-remove = Retirer de la file d'attente
-queue-more-hidden = …et { $count } de plus
 queue-play-next = Lire ensuite
 queue-add = Ajouter à la file d'attente
 
@@ -375,55 +186,21 @@ menu-scan-acoustid = Analyser avec AcoustID
 ## Radio
 radio = Radio
 radio-add-station = Ajouter une station
-radio-cancel = Annuler
-radio-tab-my-stations = Mes stations
 radio-tab-discover = Découvrir
-radio-idle-title = Aucune lecture en cours
-radio-idle-hint = Choisissez une station ci-dessous pour commencer l'écoute
-radio-search-placeholder = Rechercher des stations de radio...
-radio-filter-placeholder = Filtrer vos stations...
-station-name-placeholder = Nom de la station...
-station-url-placeholder = URL du flux...
 radio-add-url-required = Saisissez une URL de flux
 radio-add-url-invalid = L'URL doit commencer par http:// ou https://
-play-station-tooltip = Lire la station
-radio-rename-tooltip = Renommer la station
-no-stations = Aucune station enregistrée
-stations-empty-hint = Parcourez l'annuaire dans Découvrir ou collez une URL de flux pour en ajouter une
-radio-go-discover = Aller à Découvrir
 radio-add-by-url = Ajouter par URL
 radio-no-filter-matches = Aucune station correspondante
 radio-no-filter-matches-hint = Essayez un autre terme de recherche ou effacez le filtre
-radio-only-country = { $code } uniquement
 radio-preset-popular = Populaires
 radio-preset-top-voted = Les mieux notées
-radio-searching-hint = Recherche de stations…
 radio-retry = Réessayer
 radio-no-results = Aucune station trouvée
 radio-no-results-hint = Essayez une autre recherche, un autre tag ou un autre pays
-radio-unknown-country = Inconnu
-radio-now-playing-badge = En cours de lecture
-radio-saved = Enregistrée
 radio-sort-most-played = Les plus écoutées
 radio-sort-most-voted = Les plus votées
 radio-sort-name = Nom
 radio-sort-bitrate = Débit
-toast-radio-saved = « { $name } » enregistrée
-toast-radio-already-saved = « { $name } » est déjà enregistrée
-toast-radio-save-failed = Échec de l'enregistrement de la station : { $reason }
-toast-radio-play-failed = Échec de la lecture de la station : { $reason }
-toast-radio-removed = « { $name } » supprimée
-radio-undo = Annuler
-radio-paused = En pause
-radio-subtitle = La radio Internet du monde entier
-radio-station-count-one = 1 station enregistrée
-radio-station-count-other = { $count } stations enregistrées
-radio-add-title = Ajouter une station
-radio-add-hint = Collez une URL de flux directe (MP3, AAC, Ogg) ou une playlist .pls / .m3u.
-radio-name-label = Nom
-radio-url-label = URL du flux
-radio-search-failed = Impossible de joindre l'annuaire des stations
-radio-results-count = { $count } stations trouvées
 
 ## Converter
 settings-experimental = Expérimental
@@ -437,7 +214,6 @@ convert-format-opus = Opus
 convert-format-vorbis = Ogg Vorbis
 convert-format-alac = ALAC (M4A)
 convert-format-needs-ffmpeg = { $format } (nécessite ffmpeg)
-convert-flac-compression = Niveau de compression
 convert-flac-bitdepth = Profondeur de bits
 convert-flac-bitdepth-auto = Auto
 convert-flac-bitdepth-16 = 16 bits
@@ -448,13 +224,6 @@ convert-mp3-cbr = CBR { $kbps } kbit/s
 convert-bitrate = Débit
 convert-rate-hz-kbps = { $kbps } kbit/s
 convert-vorbis-quality = Qualité
-convert-requires-ffmpeg = Ce format nécessite l'outil en ligne de commande ffmpeg, introuvable sur votre système.
-convert-subtitle = Convertissez, transcodez ou extrayez des fichiers audio, vidéo et des feuilles CUE
-convert-destination-section = Destination
-convert-queue-title = File d'attente
-convert-ffmpeg-missing-title = ffmpeg est nécessaire pour ce format
-convert-ffmpeg-missing-hint = Installez ffmpeg depuis votre gestionnaire de paquets, ou choisissez FLAC, WAV ou AIFF, qui fonctionnent sans.
-convert-dropzone-formats = Fichiers audio · Conteneurs vidéo · Feuilles CUE
 
 ## Podcasts
 podcast-tab-discover = Découvrir
@@ -465,45 +234,19 @@ podcast-add-url-invalid = L'URL doit commencer par http:// ou https://
 podcast-unplayed-badge = { $count } non lus
 podcast-updated-at = Mis à jour { $when }
 podcast-never-updated = Jamais mis à jour
-podcast-confirm-unsubscribe = Se désabonner de « { $name } » ? Cela supprime ses épisodes téléchargés.
-podcast-confirm-unsubscribe-yes = Se désabonner
-toast-podcast-unsubscribe-failed = Échec du désabonnement : { $reason }
-toast-podcast-subscribed = Abonné à « { $name } »
-podcast-searching-hint = Recherche d'émissions…
 podcast-retry = Réessayer
 podcast-no-results = Aucune émission trouvée
-podcast-no-results-hint = Essayez un autre terme de recherche
 podcast-subscribed-badge = Abonné
-podcast-description-more = Afficher plus
-podcast-description-less = Afficher moins
 podcast-refresh = Actualiser
 podcast-unsubscribe = Se désabonner
 podcast-filter-all = Tous
-podcast-filter-unplayed = Non lus
-podcast-filter-downloaded = Téléchargés
-podcast-episode-filter-placeholder = Filtrer les épisodes...
-podcast-no-filter-matches = Aucun épisode correspondant
-podcast-no-filter-matches-hint = Essayez un autre terme de recherche ou effacez le filtre
-podcast-play-tooltip = Lire l'épisode
-podcast-resume-tooltip = Reprendre l'épisode
-podcast-now-playing-badge = En cours de lecture
-podcast-discover-title = Découvrir de nouvelles émissions
-podcast-discover-hint = Recherchez dans l'annuaire par nom, sujet ou animateur
 podcast-refreshing = Actualisation…
-podcast-play-latest = Lire le dernier
-podcast-continue = Continuer l'écoute
-podcast-episodes = Épisodes
 podcast-episode-count =
     { $count ->
         [one] { $count } épisode
        *[other] { $count } épisodes
     }
 podcast-time-left = { $time } restantes
-podcast-downloading-tooltip = Téléchargement…
-podcast-loading-episodes = Chargement des épisodes…
-podcast-loading-episodes-hint = Récupération du dernier flux
-podcast-about = À propos
-podcast-open-show-tooltip = Ouvrir l'émission
 
 ## Artists
 settings-artist-info = Infos sur l'artiste
@@ -528,31 +271,10 @@ home-subtitle =
         [one] { $count } album dans votre bibliothèque
        *[other] { $count } albums dans votre bibliothèque
     }
-home-refresh = Actualiser les suggestions
 home-welcome-title = Bienvenue dans Aulos
-home-welcome-intro = Lançons votre musique — cela ne prend qu'une minute.
-home-guide-title = Premiers pas
-home-step-folder-title = Ajoutez votre dossier de musique
-home-step-folder-body = Aulos l'analyse automatiquement et surveille les changements. Prend en charge FLAC, MP3, Ogg, Opus, AAC, ALAC, WAV et DSD.
-home-step-server-title = Ou connectez un serveur
-home-step-server-body = Écoutez en streaming depuis un serveur MPD ou une bibliothèque Subsonic / Navidrome — aucun fichier local nécessaire.
-home-step-customize-title = Personnalisez-le
-home-step-customize-body = Réglez l'égaliseur, ReplayGain, le fondu enchaîné et la taille des cartes, et gérez votre bibliothèque dans les réglages.
-home-step-wait-title = En attendant
-home-step-wait-body = La radio Internet et les podcasts fonctionnent sans bibliothèque — commencez à écouter tout de suite.
 home-open-settings = Ouvrir les réglages
-home-tips-title = Astuces
-home-tip-search = Recherchez dans toute votre bibliothèque
-home-tip-mini-player = Passez au mini-lecteur
-home-tip-links = Cliquez sur un nom d'artiste ou d'album pour y accéder
-home-connect-server = Connecter un serveur
 home-browse-radio = Parcourir la radio
-home-discover-podcasts = Découvrir des podcasts
-home-scanning-title = Analyse de votre bibliothèque…
-home-scanning-hint = Les suggestions apparaîtront dès que votre musique sera indexée
-home-loading = Chargement des suggestions…
 home-no-history-hint = Commencez à écouter et cette page se remplira avec vos écoutes récentes, vos favoris du mois et des albums à redécouvrir.
-home-continue-listening = Continuer l'écoute
 home-most-played-month = Les plus écoutés ce mois-ci
 home-top-artists-month = Top artistes du mois
 home-recently-added = Ajoutés récemment
@@ -560,13 +282,11 @@ home-rediscover = Redécouvrir
 home-rediscover-hint = Des albums que vous n'avez pas écoutés depuis un moment
 home-random-picks = Sélection aléatoire
 home-shuffle-picks = Mélanger la sélection
-home-browse-decades = Parcourir par décennie
 home-plays =
     { $count ->
         [one] { $count } lecture
        *[other] { $count } lectures
     }
-home-play-artist = Lire l'artiste
 home-decade-title = Les années { $decade }
 home-decade-albums =
     { $count ->
@@ -577,13 +297,10 @@ home-decade-play = Lecture aléatoire
 home-decade-empty-hint = Aucun album de cette décennie dans votre bibliothèque
 home-back = Retour
 
-# Header chrome
-zoom-grid-tooltip = Taille des cartes
 viz-toggle = Visualiseur
 
 ## Drawers (settings, providers, equalizer, lyrics, queue)
 settings-library-description = Dossiers analysés par Aulos pour trouver de la musique.
-no-music-dirs-hint = Ajoutez un dossier pour constituer votre bibliothèque.
 settings-artist-tags = Tags d'artistes
 settings-artist-tags-description = Comment les tags multi-artistes sont lus depuis vos fichiers.
 settings-playback-description = Transitions et volume sonore.
@@ -593,121 +310,44 @@ settings-appearance = Apparence
 settings-appearance-description = L'aspect de la bibliothèque.
 grid-size = Taille de la grille
 grid-size-description = Taille des cartes d'albums, d'artistes et autres.
-settings-equalizer-description = Façonnez le son avec un égaliseur à 10 bandes
-settings-providers-description = Connectez des serveurs MPD et Subsonic
 settings-about-description = Version, licence et liens
-providers-description = Écoutez en streaming depuis un serveur MPD ou Subsonic/Navidrome distant, en plus de votre bibliothèque locale.
-providers-empty-hint = Ajoutez un serveur ci-dessous pour parcourir et lire sa musique.
-provider-not-tested = Non testé
-subsonic-accept-invalid-certs-hint = À activer uniquement pour les serveurs à certificat auto-signé de confiance.
-transcoding-description = Réduit la bande passante en diffusant une version de moindre qualité.
-equalizer-enabled-description = Ajustez le son avec les bandes ci-dessous.
-equalizer-disabled-hint = Désactivé — les modifications s'appliqueront une fois l'égaliseur activé.
-equalizer-unavailable-mpd = Indisponible avec MPD
-equalizer-unavailable-mpd-description = MPD lit lui-même l'audio, l'égaliseur d'Aulos ne peut donc pas le modifier. Configurez plutôt l'égalisation sur le serveur MPD (par ex. sa sortie PipeWire/ALSA).
-equalizer-unsaved-changes = Modifications non enregistrées
-equalizer-autoeq-description = Appliquez un profil de correction adapté à votre casque.
-equalizer-autoeq-refresh = Actualiser les profils
-lyrics-unavailable-hint = Recherchez les paroles de ce titre dans des sources en ligne.
 queue-history-label = Lus récemment
 
 ## Scrobbling
 scrobbling = Scrobbling
-scrobbling-description = Envoie ce que vous écoutez à ListenBrainz, Last.fm et Libre.fm. Les titres sont mis en file d'attente lorsque vous êtes hors ligne.
-scrobble-streams = Scrobbler la radio et les podcasts
-scrobble-streams-description = Désactivé par défaut. Un flux compte comme une écoute après une minute de lecture.
-scrobble-enabled = Scrobbler vers { $service }
-scrobble-connected-as = Connecté en tant que { $user }
-scrobble-queued = { $count } écoutes en attente d'envoi
-scrobble-not-connected = Non connecté
 scrobble-connect = Connecter
-scrobble-complete = Terminer la connexion
 scrobble-disconnect = Déconnecter
-scrobble-working = En cours…
-scrobble-retry-now = Réessayer maintenant
-scrobble-save = Enregistrer
-scrobble-lb-token-hint = Copiez votre jeton utilisateur depuis listenbrainz.org/settings et collez-le ci-dessous.
-scrobble-lb-token-placeholder = Jeton utilisateur ListenBrainz
-scrobble-lastfm-keys-hint = Last.fm exige votre propre compte API : créez-en un sur last.fm/api/account/create, puis saisissez sa clé et son secret partagé. Le secret est stocké dans le trousseau du système.
-scrobble-lastfm-key-placeholder = Clé API Last.fm
-scrobble-lastfm-secret-placeholder = Secret API Last.fm
 scrobble-auth-hint = Autorisez Aulos dans la fenêtre du navigateur qui vient de s'ouvrir, puis revenez et appuyez sur « Terminer la connexion ».
-scrobble-love-sync = Synchroniser les favoris avec Last.fm
-scrobble-love-sync-description = Aimer ou ne plus aimer un titre dans Aulos fait de même sur Last.fm.
-scrobble-sync-loved = Synchroniser les titres aimés maintenant
-scrobble-sync-done = Synchronisé : { $added } nouveaux favoris dans Aulos, { $pushed } envoyés à Last.fm
 scrobble-error = Erreur : { $message }
 scrobble-error-no-keys = Saisissez d'abord votre clé et votre secret API Last.fm.
 scrobble-error-no-token = Appuyez d'abord sur « Connecter ».
-scrobble-import = Importer l'historique d'écoute
-scrobble-import-description = Copie vos écoutes passées depuis { $service } dans Aulos afin que l'accueil reflète ce que vous écoutez vraiment. Seuls les titres présents dans votre bibliothèque sont importés, et une nouvelle exécution ne crée jamais de doublons.
 scrobble-import-cancel = Annuler l'import
-scrobble-import-progress = Import… { $fetched } écoutes lues, { $matched } associées
-scrobble-import-progress-total = Import… { $fetched } écoutes lues sur { $total }, { $matched } associées
 scrobble-import-done = { $imported } lectures importées : { $matched } écoutes sur { $fetched } correspondent à votre bibliothèque ({ $skipped } déjà présentes)
 scrobble-import-cancelled = Import annulé après { $fetched } écoutes : { $imported } lectures ajoutées
 scrobble-import-failed = Import interrompu : { $message } ({ $imported } lectures ajoutées jusqu'ici)
-scrobble-import-on-connect = Importer l'historique d'écoute après la connexion
-scrobble-import-on-connect-description = Lorsque vous connectez un service, copie automatiquement son historique d'écoute dans Aulos.
-online-suggestions = Suggestions en ligne sur l'accueil
-online-suggestions-description = Affiche des étagères « Parce que vous avez écouté… » avec des artistes similaires de Last.fm ou ListenBrainz. Nécessite un service de scrobbling connecté.
-toast-import-done = { $imported } lectures importées depuis { $service }
-toast-import-cancelled = Import depuis { $service } annulé
-toast-import-failed = Échec de l'import depuis { $service } : { $message }
 home-because-you-listened = Parce que vous avez écouté { $artist }
-home-because-hint = Des artistes qui pourraient vous plaire
-home-discover-artist = Pas dans votre bibliothèque
 home-in-library = Dans votre bibliothèque
-home-discover-open = Ouvrir { $artist } sur { $site }
 settings-search-placeholder = Rechercher dans les réglages
-settings-search-empty = Aucun réglage ne correspond à « { $query } ».
 
 ## Playlist import / export (M3U)
-import-m3u = Importer une liste de lecture
-export-m3u = Exporter en M3U
-export-m3u-tooltip = Exporter en liste de lecture M3U
-export-playlist-dialog-title = Exporter la liste de lecture
-import-playlist-dialog-title = Importer des listes de lecture
 settings-playlists = Listes de lecture
 settings-playlists-description = Comment les listes de lecture sont exportées vers des fichiers M3U.
 m3u-relative-paths = Utiliser des chemins relatifs dans les listes exportées
 m3u-relative-paths-description = Écrit les chemins des titres relativement au fichier de la liste, afin qu'elle continue de fonctionner si vous déplacez le dossier. Désactivez pour écrire des chemins absolus.
-toast-playlist-export-empty = Cette liste de lecture ne contient aucun titre à exporter
-toast-playlist-exported =
-    { $count ->
-        [one] { $count } titre exporté vers { $file }
-       *[other] { $count } titres exportés vers { $file }
-    }
-toast-playlist-exported-partial = { $count } titres exportés vers { $file } ({ $skipped } titres non locaux ignorés)
-toast-playlist-export-failed = Impossible d'exporter la liste de lecture : { $reason }
-toast-playlist-import-failed = Impossible d'importer la liste de lecture : { $reason }
-toast-provider-action-failed = Le serveur n'a pas pu traiter la requête : { $reason }
-toast-playlist-imported =
-    { $count ->
-        [one] « { $name } » importée avec { $count } titre
-       *[other] « { $name } » importée avec { $count } titres
-    }
-toast-playlist-imported-partial = « { $name } » importée avec { $count } titres ; { $missing } introuvables dans votre bibliothèque
-toast-playlists-imported = { $playlists } listes de lecture importées avec { $count } titres
-toast-playlists-imported-partial = { $playlists } listes de lecture importées avec { $count } titres ; { $missing } introuvables dans votre bibliothèque
 
 ## Mini player
 mini-player = Mini-lecteur
-mini-player-exit = Quitter le mini-lecteur
 
 ## Compilations and album filters
 settings-compilations = Compilations
 settings-compilations-description = Les albums de plusieurs artistes sont regroupés sous « Artistes divers ».
 show-compilations-in-artists = Afficher les compilations dans la vue Artistes
 show-compilations-in-artists-description = Affiche « Artistes divers » dans la page Artistes. Les compilations restent toujours disponibles depuis la page Albums.
-filter-all = Tous
 filter-albums = Albums
 filter-compilations = Compilations
-filter-decade = Années { $decade }
 filter-eps = EP
 filter-singles = Singles
 filter-live = Live
-filter-genre = Genre
 filter-favourites = Favoris
 release-kind-album = Album
 release-kind-ep = EP
@@ -745,25 +385,17 @@ sort-title = Titre
 sort-artist = Artiste
 sort-year = Année
 scan-progress-title = Analyse de { $root }
-scan-progress-counting = Comptage des fichiers…
-no-albums-match-filter = Aucun album ne correspond à ces filtres
-no-albums-match-filter-hint = Choisissez « Tous » pour revoir tous les albums
 
 ## Playback extras: stop after track, fades, party mode, auto-play, desktop integration
-stop-after-track = Arrêter après ce titre
 party-mode = Mode soirée
 party-mode-description = Lecture aléatoire sans fin parmi les genres ci-dessous (toute la bibliothèque si aucun n'est sélectionné).
 party-genres = Genres de la soirée
-party-genres-none = Aucun genre dans la bibliothèque pour l'instant
 auto-play = Lecture automatique
 auto-play-description = Que lire lorsque la file d'attente est terminée.
 auto-play-off = Désactivée
 auto-play-random = Aléatoire
 auto-play-similar = Similaire
-auto-play-menu = Lecture automatique
 fade-duration = Fondu d'entrée et de sortie
-fade-disabled = Désactivé
-fade-seconds = { $secs } s
 fade-description = Applique un fondu progressif au son lors de la lecture, de la pause, de l'arrêt ou du changement de titre.
 settings-playback-extras = Fondus et lecture continue
 settings-playback-extras-description = Fondus de transition et lecture à la fin de la file d'attente.
@@ -777,99 +409,45 @@ background-playback = Continuer la lecture à la fermeture de la fenêtre
 background-playback-description = Fermer la fenêtre réduit Aulos au lieu de quitter tant que de la musique est en lecture.
 
 ## Properties drawer
-track-properties = Propriétés du titre
 album-properties = Propriétés de l'album
-props-section-overview = Aperçu
-props-section-technical = Technique
-props-section-loudness = Volume sonore
-props-section-file = Fichier
-props-section-summary = Résumé
-props-loading = Lecture des propriétés…
-props-error = Impossible de lire les détails techniques : { $error }
-props-no-track = Aucun titre sélectionné
 props-provider-unavailable = Le serveur de ce titre n'est pas connecté.
 props-not-applicable = n/d
-props-title = Titre
 props-artist = Artiste
-props-album-artist = Artiste de l'album
 props-album = Album
-props-composer = Compositeur
-props-genre = Genre
 props-year = Année
 props-date = Date
-props-original-date = Date d'origine
-props-track-number = Numéro de piste
-props-disc-number = Numéro de disque
 props-source = Source
 props-source-local = Bibliothèque locale
 props-source-radio = Radio Internet
 props-source-podcast = Podcast
-props-format = Format
 props-codec = Codec
 props-bitrate = Débit
 props-sample-rate = Fréquence d'échantillonnage
 props-bit-depth = Profondeur de bits
 props-channels = Canaux
 props-duration = Durée
-props-file-size = Taille du fichier
 props-encoder = Encodeur
 props-tag-formats = Tags
-props-md5 = MD5 audio
-props-mime-type = Type MIME
 props-mode-cbr = constant (CBR)
 props-mode-vbr = variable (VBR)
 props-mode-abr = moyen (ABR)
 props-mode-lossless = sans perte
 props-nominal = nominal { $value }
 props-audio-data = { $size } d'audio
-props-rg-track-gain = Gain du titre
-props-rg-track-peak = Crête du titre
-props-rg-album-gain = Gain de l'album
-props-rg-album-peak = Crête de l'album
-props-path = Chemin
-props-url = URL
-props-server-path = Chemin sur le serveur
-props-open-folder = Ouvrir le dossier contenant
 props-tracks = Titres
-props-total-duration = Durée totale
 props-formats = Formats
 props-sample-rates = Fréquences d'échantillonnage
 props-bit-depths = Profondeurs de bits
-props-bitrate-range = Plage de débit
-props-bitrate-average = Débit moyen
-props-total-size = Taille totale
-props-unprobed =
-    { $count ->
-        [one] { $count } titre n'a pas pu être analysé et est exclu de ces chiffres.
-       *[other] { $count } titres n'ont pas pu être analysés et sont exclus de ces chiffres.
-    }
 
 ## Tag editor settings
 settings-tagger = Éditeur de tags
 settings-tagger-description = Recherches en ligne et empreintes audio pour l'éditeur de tags intégré.
 settings-tagger-app-key = Clé d'application AcoustID
-settings-tagger-app-key-description = Nécessaire pour les recherches et soumissions d'empreintes.
-settings-tagger-app-key-placeholder = Clé API de l'application
-settings-tagger-app-key-get = Obtenir une clé d'application
 settings-tagger-user-key = Votre clé API AcoustID
-settings-tagger-user-key-description = Nécessaire uniquement pour soumettre des empreintes. Stockée dans le trousseau du système, jamais dans le fichier de réglages.
-settings-tagger-user-key-placeholder = Clé API utilisateur
-settings-tagger-user-key-save = Enregistrer
-settings-tagger-user-key-find = Trouver votre clé API
-settings-tagger-user-key-checking = Vérification du trousseau…
-settings-tagger-user-key-saved = Clé enregistrée
-settings-tagger-user-key-none = Aucune clé
 settings-tagger-caa-cover = Utiliser la pochette avant du Cover Art Archive
-settings-tagger-caa-cover-description = Lors de l'application d'une sortie, récupère aussi sa pochette avant depuis le Cover Art Archive.
 
 ## Tag editor
 tagger-title = Éditeur de tags
-tagger-subtitle = Modifiez les tags, associez les fichiers à des sorties MusicBrainz et identifiez-les avec AcoustID.
-tagger-unsaved-chip =
-    { $count ->
-        [one] { $count } fichier avec des modifications non enregistrées
-       *[other] { $count } fichiers avec des modifications non enregistrées
-    }
 tagger-loading =
     { $count ->
         [one] Lecture de { $count } fichier…
@@ -879,37 +457,21 @@ tagger-loading =
 ## Tag editor: toolbar
 tagger-add-files = Ajouter des fichiers…
 tagger-add-folder = Ajouter un dossier…
-tagger-lookup = Rechercher sur MusicBrainz
-tagger-scan = Analyser avec AcoustID
 tagger-submit = Soumettre les AcoustID
 tagger-submit-count = Soumettre les AcoustID ({ $count })
 tagger-save = Enregistrer
-tagger-save-count = Enregistrer ({ $count })
 tagger-saving = Enregistrement de { $done } sur { $total }…
 tagger-revert = Annuler les modifications
 tagger-revert-all = Tout annuler
 tagger-remove = Retirer
 tagger-clear = Vider
-tagger-add-as-release = Ajouter comme sortie…
 tagger-add-as-release-tooltip = Ajouter ces fichiers comme nouvelle sortie sur MusicBrainz
 
 ## Tag editor: banners
 tagger-dismiss = Ignorer
-tagger-confirm-title = Abandonner les modifications non enregistrées ?
-tagger-confirm-body =
-    { $count ->
-        [one] Un de ces fichiers a des modifications non enregistrées. Elles seront perdues.
-       *[other] { $count } de ces fichiers ont des modifications non enregistrées. Elles seront perdues.
-    }
 tagger-discard = Abandonner
 tagger-cancel = Annuler
-tagger-key-missing-title = AcoustID nécessite une clé d'application
-tagger-key-missing-body = L'analyse et la soumission d'empreintes nécessitent une clé d'application AcoustID gratuite. Ajoutez-la dans les réglages.
-tagger-user-key-missing-title = La soumission nécessite votre clé API AcoustID
-tagger-user-key-missing-body = Ajoutez votre clé API AcoustID personnelle dans les réglages pour soumettre des empreintes.
 tagger-open-settings = Ouvrir les réglages
-tagger-scan-running = Analyse avec AcoustID : { $done } fichiers sur { $total }
-tagger-scan-resolving = AcoustID a identifié { $identified } fichiers. Chargement de la sortie correspondante…
 tagger-scan-no-match = AcoustID n'a trouvé aucune sortie pour ces fichiers ({ $identified } identifiés sur { $total }).
 tagger-scan-failures =
     { $count ->
@@ -927,7 +489,6 @@ tagger-files-count =
     }
 tagger-selected-count = { $count } sélectionnés
 tagger-select-all = Tout sélectionner
-tagger-clear-selection = Effacer la sélection
 tagger-unclustered = Fichiers sans album
 tagger-various-artists = Artistes divers
 tagger-unknown-artist = Artiste inconnu
@@ -941,10 +502,8 @@ tagger-status-modified = Modifications non enregistrées
 tagger-status-saving = Enregistrement…
 tagger-status-saved = Enregistré
 tagger-status-error = Enregistrement impossible : { $error }
-tagger-readonly = Lecture seule
 tagger-assignment = → { $number } { $title } { $score }%
 tagger-unmatched = Aucun titre correspondant dans la sortie
-tagger-acoustid-link = AcoustID
 tagger-acoustid-open = Ouvrir cet AcoustID sur acoustid.org
 tagger-recording-open = Ouvrir l'enregistrement sur MusicBrainz
 tagger-submission-pending = Soumission…
@@ -964,15 +523,11 @@ tagger-metadata-selection =
 tagger-metadata-empty-title = Aucune sélection
 tagger-metadata-empty-hint = Sélectionnez un ou plusieurs fichiers pour voir et modifier leurs tags.
 tagger-metadata-readonly = Les fichiers sélectionnés ne sont pas modifiables ; leurs tags sont donc affichés en lecture seule.
-tagger-col-field = Champ
-tagger-col-original = Original
-tagger-col-new = Nouveau
 tagger-different-values = (valeurs différentes)
 tagger-multiline-tooltip = Cette valeur s'étend sur plusieurs lignes et ne peut pas être modifiée ici.
 tagger-multi-hint = Valeurs multiples : séparez-les par « ; ». Seuls les champs de type liste, comme le genre ou les artistes, sont séparés.
 tagger-revert-field = Rétablir ce champ tel qu'il est sur le disque
 tagger-delete-field = Supprimer ce champ
-tagger-add-field-title = Ajouter un champ
 tagger-add-field-custom = Nom de champ personnalisé
 tagger-add-field-value = Valeur
 tagger-add-field = Ajouter
@@ -983,15 +538,9 @@ tagger-add-field-error-invalid-key = Un nom de champ ne peut contenir que des ca
 tagger-add-field-error-no-value = Saisissez une valeur pour le champ.
 
 ## Tag editor: cover art
-tagger-cover-title = Pochette
 tagger-cover-empty = Aucune image intégrée.
-tagger-cover-add = Ajouter une image…
-tagger-cover-add-as = comme
 tagger-cover-revert = Rétablir les images
-tagger-cover-fetch = Récupérer depuis le Cover Art Archive
-tagger-cover-fetch-hint = Recherchez d'abord une sortie pour récupérer sa pochette avant.
 tagger-cover-remove = Supprimer cette image
-tagger-cover-changed = Modifiée
 tagger-cover-in-files = dans { $count } fichiers sur { $total }
 tagger-cover-placeholder = Décodage…
 tagger-cover-details = { $mime } · { $size }
@@ -1007,7 +556,6 @@ tagger-size-mb = { $value } Mo
 
 ## Tag editor: MusicBrainz lookup
 tagger-lookup-title = Recherche MusicBrainz
-tagger-lookup-title-acoustid = Résultat AcoustID
 tagger-lookup-files =
     { $count ->
         [one] { $count } fichier
@@ -1043,7 +591,6 @@ tagger-lookup-cover-loading = Récupération de la pochette avant…
 tagger-lookup-cover-none = Le Cover Art Archive n'a pas de pochette avant pour cette sortie.
 tagger-lookup-cover-failed = Impossible de récupérer la pochette avant : { $error }
 tagger-lookup-cover-found = Pochette avant trouvée sur le Cover Art Archive.
-tagger-lookup-cover-off = La pochette avant n'est pas récupérée automatiquement (voir les réglages). Utilisez « Récupérer depuis le Cover Art Archive » ci-dessous.
 
 ## Tag editor: field names
 tagger-field-title = Titre
@@ -1113,33 +660,9 @@ tagger-field-replaygain-album-gain = Gain de l'album ReplayGain
 tagger-field-replaygain-album-peak = Crête de l'album ReplayGain
 
 ## Tag editor page (navigation and notices)
-tagger-nav = Éditeur de tags
-tagger-notice-pick-failed = Impossible d’ajouter les fichiers : { $error }
 tagger-notice-no-audio = Aucun fichier audio trouvé dans ce dossier.
-tagger-notice-image-failed = Impossible d’ajouter l’image : { $error }
-tagger-notice-open-failed = Impossible d’ouvrir la page : { $error }
-tagger-notice-seed-failed = Impossible d’ouvrir MusicBrainz : { $error }
-tagger-notice-nothing-to-look-up = Aucun fichier à rechercher.
-tagger-notice-nothing-to-add = Aucun fichier à ajouter comme sortie.
-tagger-notice-nothing-to-scan = Aucun fichier à analyser.
-tagger-notice-nothing-to-save = Aucune modification à enregistrer.
-tagger-notice-nothing-to-submit = Aucun de ces fichiers n’a d’ID d’enregistrement MusicBrainz à soumettre.
-tagger-notice-no-acoustid-key = Définissez une clé d’application AcoustID dans les Réglages pour identifier les fichiers à partir de leur audio.
 tagger-notice-no-user-key = Enregistrez votre clé API AcoustID dans les Réglages pour soumettre des empreintes.
 tagger-notice-keyring-failed = Impossible de lire votre clé AcoustID dans le trousseau : { $error }
-tagger-notice-scan-no-match = AcoustID n’a pas reconnu assez de ces fichiers pour choisir une sortie.
-tagger-notice-saved =
-    { $count ->
-        [one] 1 fichier enregistré.
-       *[other] { $count } fichiers enregistrés.
-    }
-tagger-notice-save-partial = { $saved } enregistré(s), { $failed } en échec.
-tagger-notice-submitted =
-    { $count ->
-        [one] 1 empreinte soumise.
-       *[other] { $count } empreintes soumises.
-    }
-tagger-notice-submit-partial = { $ok } soumise(s), { $failed } en échec.
 
 language = Langue
 language-desc = Langue de l’interface. Les changements s’appliquent immédiatement.

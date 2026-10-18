@@ -161,16 +161,6 @@ pub mod keywords {
         ]
     }
 
-    pub fn shortcuts() -> Vec<String> {
-        vec![
-            fl!("settings-shortcuts"),
-            fl!("equalizer"),
-            fl!("settings-equalizer-description"),
-            fl!("providers"),
-            fl!("settings-providers-description"),
-        ]
-    }
-
     pub fn about() -> Vec<String> {
         vec![
             fl!("settings-about"),

@@ -8,16 +8,19 @@ pub mod media;
 
 use android_activity::AndroidApp;
 
-/// The JavaVM and the activity object of this process, set once by
-/// [`android_main`] (raw pointers kept as integers so they are `Sync`).
-static HOST: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+/// The JavaVM and the activity object of this process, overwritten by every
+/// [`android_main`] (a relaunch in the same process gets a new activity; raw
+/// pointers kept as integers so they are `Sync`).
+static HOST: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
 
 /// The app's private files directory, set once by [`android_main`].
 static BASE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// The attached-thread JNI handles of [`HOST`].
 fn host() -> Option<(jni::JavaVM, jni::objects::JObject<'static>)> {
-    let (vm, activity) = *HOST.get()?;
+    let (vm, activity) = (*HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))?;
     // SAFETY: both pointers come from `android-activity`, which keeps the VM
     // and the activity alive for the whole process.
     unsafe {
@@ -331,7 +334,9 @@ fn window_insets() -> Option<WindowInsets> {
     }
     let (vm, activity) = host()?;
     let mut env = vm.attach_current_thread().ok()?;
-    let read = (|| -> jni::errors::Result<Option<WindowInsets>> {
+    // This runs on the permanent UI thread: the frame frees the local
+    // references of every poll.
+    let read = env.with_local_frame(16, |env| -> jni::errors::Result<Option<WindowInsets>> {
         let window = env
             .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
             .l()?;
@@ -379,7 +384,7 @@ fn window_insets() -> Option<WindowInsets> {
             (system[3] - stable_bottom).max(0.0)
         };
         Ok(Some(WindowInsets { system, ime_bottom }))
-    })();
+    });
     let value = match read {
         Ok(value) => value,
         Err(error) => {
@@ -439,7 +444,9 @@ fn android_main(android: AndroidApp) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let _ = HOST.set((
+    *HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
         android.vm_as_ptr() as usize,
         android.activity_as_ptr() as usize,
     ));
@@ -467,22 +474,30 @@ fn android_main(android: AndroidApp) {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let _guard = runtime.enter();
-    let spawner = aulos_core::task::Spawner::new(runtime.handle().clone());
+    {
+        let _guard = runtime.enter();
+        let spawner = aulos_core::task::Spawner::new(runtime.handle().clone());
 
-    let options = eframe::NativeOptions {
-        android_app: Some(android),
-        wgpu_options: crate::low_memory_wgpu(None),
-        ..Default::default()
-    };
-    if let Err(error) = eframe::run_native(
-        "Aulos",
-        options,
-        Box::new(|cc| Ok(Box::new(crate::app::App::new(cc, spawner)))),
-    ) {
-        tracing::error!("Aulos failed to start: {error}");
+        let options = eframe::NativeOptions {
+            android_app: Some(android),
+            wgpu_options: crate::low_memory_wgpu(None),
+            ..Default::default()
+        };
+        if let Err(error) = eframe::run_native(
+            "Aulos",
+            options,
+            Box::new(|cc| Ok(Box::new(crate::app::App::new(cc, spawner)))),
+        ) {
+            tracing::error!("Aulos failed to start: {error}");
+        }
     }
     // The activity is gone: the notification and the foreground service must
     // not outlive it (nothing would be left to drive playback).
     media::shutdown();
+    // Dropping the runtime would wait for running scan/convert/tag jobs.
+    runtime.shutdown_timeout(crate::RUNTIME_SHUTDOWN);
+    // The activity pointer is dead from here on.
+    *HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }

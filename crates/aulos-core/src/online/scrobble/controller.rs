@@ -78,7 +78,8 @@ pub struct ScrobbleController {
     /// Request tokens waiting for browser authorisation.
     pending: HashMap<Service, String>,
     busy: HashSet<Service>,
-    status: HashMap<Service, String>,
+    /// Last settings-card message per service; `true` when it reports a failure.
+    status: HashMap<Service, (String, bool)>,
     /// Track ids whose next favorite toggle must not be echoed to Last.fm
     /// (they were changed *by* the loved-track sync).
     suppress_love: HashSet<String>,
@@ -141,8 +142,11 @@ impl ScrobbleController {
         self.handle.error(service)
     }
 
-    pub fn status(&self, service: Service) -> Option<&str> {
-        self.status.get(&service).map(String::as_str)
+    /// The settings-card message of `service` and whether it reports a failure.
+    pub fn status(&self, service: Service) -> Option<(&str, bool)> {
+        self.status
+            .get(&service)
+            .map(|(text, failed)| (text.as_str(), *failed))
     }
 
     pub fn is_pending(&self, service: Service) -> bool {
@@ -259,13 +263,13 @@ impl ScrobbleController {
     }
 
     pub fn set_status(&mut self, service: Service, text: String) {
-        self.status.insert(service, text);
+        self.status.insert(service, (text, false));
     }
 
     /// Mark the loved-track sync finished and show `text`.
     pub fn finish_sync(&mut self, text: String) {
         self.busy.remove(&Service::LastFm);
-        self.status.insert(Service::LastFm, text);
+        self.status.insert(Service::LastFm, (text, false));
     }
 
     /// Handle a settings-UI message. Returns the follow-up task and whether
@@ -333,8 +337,10 @@ impl ScrobbleController {
                         auto_import = config.scrobble_import_on_connect;
                     }
                     Err(e) => {
-                        self.status
-                            .insert(Service::ListenBrainz, fl!("scrobble-error", message = e));
+                        self.status.insert(
+                            Service::ListenBrainz,
+                            (fl!("scrobble-error", message = e), true),
+                        );
                     }
                 }
                 if auto_import {
@@ -372,7 +378,7 @@ impl ScrobbleController {
                     }
                     Err(e) => {
                         self.status
-                            .insert(Service::LastFm, fl!("scrobble-error", message = e));
+                            .insert(Service::LastFm, (fl!("scrobble-error", message = e), true));
                     }
                 }
                 Effect::none()
@@ -394,11 +400,12 @@ impl ScrobbleController {
                             }
                         }
                         self.pending.insert(service, token);
-                        self.status.insert(service, fl!("scrobble-auth-hint"));
+                        self.status
+                            .insert(service, (fl!("scrobble-auth-hint"), false));
                     }
                     Err(e) => {
                         self.status
-                            .insert(service, fl!("scrobble-error", message = e));
+                            .insert(service, (fl!("scrobble-error", message = e), true));
                     }
                 }
                 Effect::none()
@@ -417,7 +424,7 @@ impl ScrobbleController {
                     }
                     Err(e) => {
                         self.status
-                            .insert(service, fl!("scrobble-error", message = e));
+                            .insert(service, (fl!("scrobble-error", message = e), true));
                     }
                 }
                 if auto_import {
@@ -474,7 +481,7 @@ impl ScrobbleController {
                 self.busy.remove(&Service::LastFm);
                 if let Err(e) = res {
                     self.status
-                        .insert(Service::LastFm, fl!("scrobble-error", message = e));
+                        .insert(Service::LastFm, (fl!("scrobble-error", message = e), true));
                 }
                 Effect::none()
             }
@@ -494,8 +501,8 @@ impl ScrobbleController {
             ScrobbleMessage::ImportDone(service, res) => {
                 self.imports.remove(&service);
                 let text = match res {
-                    Ok(out) => import_summary(&out),
-                    Err(e) => fl!("scrobble-error", message = e),
+                    Ok(out) => (import_summary(&out), false),
+                    Err(e) => (fl!("scrobble-error", message = e), true),
                 };
                 self.status.insert(service, text);
                 Effect::none()
@@ -527,7 +534,8 @@ impl ScrobbleController {
             return Effect::none();
         }
         if service == Service::LastFm && config.scrobble_lastfm_api_key.is_empty() {
-            self.status.insert(service, fl!("scrobble-error-no-keys"));
+            self.status
+                .insert(service, (fl!("scrobble-error-no-keys"), true));
             return Effect::none();
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -554,7 +562,8 @@ impl ScrobbleController {
         };
         let api_key = config.scrobble_lastfm_api_key.clone();
         if service == Service::LastFm && api_key.is_empty() {
-            self.status.insert(service, fl!("scrobble-error-no-keys"));
+            self.status
+                .insert(service, (fl!("scrobble-error-no-keys"), true));
             return Effect::none();
         }
         self.busy.insert(service);
@@ -573,7 +582,8 @@ impl ScrobbleController {
 
     fn complete_auth(&mut self, service: Service, config: &Config) -> Effect<ScrobbleMessage> {
         let Some(token) = self.pending.get(&service).cloned() else {
-            self.status.insert(service, fl!("scrobble-error-no-token"));
+            self.status
+                .insert(service, (fl!("scrobble-error-no-token"), true));
             return Effect::none();
         };
         let Some(endpoint) = Endpoint::for_service(service) else {

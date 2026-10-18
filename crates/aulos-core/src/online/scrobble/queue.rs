@@ -91,10 +91,12 @@ impl Queue {
         })
         .map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&data)?;
-        file.sync_all()?;
-        drop(file);
+        {
+            // Closed at the end of the block, before the rename.
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, path)
     }
 

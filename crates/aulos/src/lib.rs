@@ -67,6 +67,24 @@ pub fn run() -> eframe::Result {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    let result = run_window(&runtime, open_paths);
+    // Dropping the runtime would wait for running scan/convert/tag jobs, so
+    // closing the window would leave the process hanging.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    result
+}
+
+/// How long closing the app waits for blocking jobs before abandoning them.
+#[cfg(not(target_arch = "wasm32"))]
+const RUNTIME_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Opens the window on the calling thread (with `runtime` entered) and runs
+/// until it closes.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn run_window(
+    runtime: &tokio::runtime::Runtime,
+    open_paths: Vec<std::path::PathBuf>,
+) -> eframe::Result {
     let _guard = runtime.enter();
     let handle = aulos_core::task::Spawner::new(runtime.handle().clone());
 

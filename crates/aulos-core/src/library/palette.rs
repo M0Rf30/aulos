@@ -165,6 +165,11 @@ impl CoverByteCache {
         true
     }
 
+    /// Whether a finished load found no art for `key`.
+    pub fn is_missing(&self, key: &str) -> bool {
+        self.missing.contains(key)
+    }
+
     /// Non-mutating pre-check for [`Self::begin_load`]: `true` when `key`
     /// is neither cached, in flight, nor known to have no art.
     pub fn should_load(&self, key: &str) -> bool {

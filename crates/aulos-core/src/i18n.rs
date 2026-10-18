@@ -174,4 +174,40 @@ mod tests {
             assert_eq!(tr.len(), en.len(), "{tag} has extra messages");
         }
     }
+
+    /// Message ids that are not written as a quoted literal in any `.rs`
+    /// file because the code builds them at run time. Each needs a reason.
+    const DYNAMIC_IDS: &[&str] = &[];
+
+    fn rust_sources(dir: &std::path::Path, out: &mut String) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !matches!(name, "target" | "dist" | ".git") {
+                    rust_sources(&path, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push_str(&std::fs::read_to_string(&path).unwrap());
+                out.push('\n');
+            }
+        }
+    }
+
+    /// A message nothing references is dead translation work in six files.
+    #[test]
+    fn every_english_message_is_referenced_from_rust() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut src = String::new();
+        rust_sources(&crates, &mut src);
+        let unused: Vec<String> = messages("en")
+            .into_keys()
+            .filter(|id| !DYNAMIC_IDS.contains(&id.as_str()) && !src.contains(&format!("\"{id}\"")))
+            .collect();
+        assert!(unused.is_empty(), "unreferenced ftl ids: {unused:?}");
+    }
 }
