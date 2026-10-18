@@ -10,9 +10,33 @@
 /// # Errors
 /// A message for the user when no browser could be started or the tab was
 /// blocked.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn open_in_browser(url: &str) -> Result<(), String> {
     open::that_detached(url).map_err(|e| format!("Could not open the browser: {e}"))
+}
+
+/// What the app registers on Android: there is no `xdg-open`, a page is
+/// opened with an `ACTION_VIEW` intent that only the host app can start.
+#[cfg(target_os = "android")]
+static URL_OPENER: std::sync::OnceLock<UrlOpener> = std::sync::OnceLock::new();
+
+/// Starts the system browser on a URL.
+#[cfg(target_os = "android")]
+pub type UrlOpener = fn(&str) -> Result<(), String>;
+
+/// Registers how Android opens a URL (called once at startup).
+#[cfg(target_os = "android")]
+pub fn set_url_opener(opener: UrlOpener) {
+    let _ = URL_OPENER.set(opener);
+}
+
+/// See the native version.
+#[cfg(target_os = "android")]
+pub fn open_in_browser(url: &str) -> Result<(), String> {
+    match URL_OPENER.get() {
+        Some(open) => open(url),
+        None => Err("Could not open the browser: no opener registered".into()),
+    }
 }
 
 /// See the native version.

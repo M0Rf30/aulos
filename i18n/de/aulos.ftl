@@ -1847,6 +1847,8 @@ settings-converter-desc = Zeigt die Konverter-Seite: lokale Dateien transkodiere
 settings-version = Version { $version }
 settings-about-blurb = Ein Musikplayer für deine eigene Mediathek. Lizenziert unter GPL-3.0-only.
 settings-project-page = Projektseite
+settings-author = Autor: Gianluca Boiano
+settings-author-page = Autor auf GitHub
 
 # Settings page: extra search terms (separate terms with |)
 settings-kw-library = Auf Änderungen achten | automatisch neu scannen | Dateiüberwachung

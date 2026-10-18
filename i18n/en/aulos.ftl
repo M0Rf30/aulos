@@ -1847,6 +1847,8 @@ settings-converter-desc = Shows the Converter page: transcode and rip local file
 settings-version = Version { $version }
 settings-about-blurb = A music player for your own library. Licensed under GPL-3.0-only.
 settings-project-page = Project page
+settings-author = Author: Gianluca Boiano
+settings-author-page = Author on GitHub
 
 # Settings page: extra search terms (separate terms with |)
 settings-kw-library = Watch for changes | auto rescan | file watcher

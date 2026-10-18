@@ -1848,6 +1848,8 @@ settings-converter-desc = Mostra la pagina Convertitore: transcodifica e rip dei
 settings-version = Versione { $version }
 settings-about-blurb = Un lettore musicale per la tua libreria. Con licenza GPL-3.0-only.
 settings-project-page = Pagina del progetto
+settings-author = Autore: Gianluca Boiano
+settings-author-page = Autore su GitHub
 
 # Settings page: extra search terms (separate terms with |)
 settings-kw-library = Controlla modifiche | analisi automatica | file watcher

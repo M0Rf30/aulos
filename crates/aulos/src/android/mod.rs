@@ -253,6 +253,44 @@ pub fn set_clipboard_text(text: &str) {
     }
 }
 
+/// Opens `url` in the user's browser with an `ACTION_VIEW` intent.
+pub fn open_url(url: &str) -> Result<(), String> {
+    use jni::objects::JValue;
+
+    let (vm, activity) = host().ok_or("Could not open the browser: no activity")?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("Could not open the browser: {e}"))?;
+    let result = env.with_local_frame(16, |env| -> jni::errors::Result<()> {
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let uri_text = env.new_string(url)?;
+        let uri = env
+            .call_static_method(
+                "android/net/Uri",
+                "parse",
+                "(Ljava/lang/String;)Landroid/net/Uri;",
+                &[JValue::Object(&uri_text)],
+            )?
+            .l()?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Ljava/lang/String;Landroid/net/Uri;)V",
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        env.call_method(
+            &activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )?;
+        Ok(())
+    });
+    result.map_err(|e| {
+        let _ = env.exception_clear();
+        format!("Could not open the browser: {e}")
+    })
+}
+
 /// The system bars and display cutout, in pixels: `[left, top, right, bottom]`.
 /// The activity draws edge to edge, so the app keeps its content out of them.
 /// `None` until the window has insets. See [`window_insets`].
@@ -419,6 +457,7 @@ fn android_main(android: AndroidApp) {
             .ok();
     }
     ensure_audio_permission(base.as_deref());
+    aulos_core::desktop::browser::set_url_opener(open_url);
     #[cfg(feature = "visualizer")]
     install_presets(&android);
     aulos_core::i18n::init_from_system();

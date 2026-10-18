@@ -166,8 +166,10 @@ fn apply(app: &mut App, out: Out) {
         }
         Act::Goto(route) => app.navigate(route),
         Act::OpenUrl(url) => {
-            if url.starts_with("https://") {
-                app.ctx.open_url(egui::OpenUrl::new_tab(url));
+            if url.starts_with("https://")
+                && let Err(error) = aulos_core::desktop::browser::open_in_browser(&url)
+            {
+                app.toast_error(error);
             }
         }
     }

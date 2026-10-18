@@ -758,13 +758,24 @@ fn slider_row(
     label: &str,
 ) -> Option<f32> {
     let mut out = None;
+    // Same test as `row`: a phone drops the control under the text, where it
+    // gets the full width, with the value at the right end.
+    let stacked = ui.available_width() - 230.0 - 16.0 < 140.0;
     row(ui, pal, title, desc, false, 230.0, |ui| {
         // As wide as the value ("+10.5 dB"), or paint_text cuts it with "...".
         let font = theme::mono(12.0);
         let w = crate::widgets::text_width(ui, label, font.clone()).ceil() + 2.0;
-        let (r, _) = ui.allocate_exact_size(vec2(w.max(44.0), 16.0), Sense::hover());
-        paint_text(ui.painter(), r, Align::Max, label, font, pal.text);
-        out = value_slider(ui, pal, frac, 150.0);
+        let w = w.max(44.0);
+        if stacked {
+            let rail = (ui.available_width() - w - ui.spacing().item_spacing.x - 14.0).max(60.0);
+            out = value_slider(ui, pal, frac, rail);
+            let (r, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+            paint_text(ui.painter(), r, Align::Max, label, font, pal.text);
+        } else {
+            let (r, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+            paint_text(ui.painter(), r, Align::Max, label, font, pal.text);
+            out = value_slider(ui, pal, frac, 150.0);
+        }
     });
     out
 }
@@ -3707,6 +3718,29 @@ fn sec_about(app: &mut App, ui: &mut Ui) {
         )
         .clicked()
     {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(repository));
+        open_page(app, repository);
+    }
+    // The author, with the profile page.
+    ui.add_space(10.0);
+    small_text(ui, &aulos_core::fl!("settings-author"), pal.text_2);
+    ui.add_space(6.0);
+    if pill_button(
+        ui,
+        &aulos_core::fl!("settings-author-page"),
+        Some(ph::USER),
+        PillKind::Secondary,
+        28.0,
+        0.0,
+    )
+    .clicked()
+    {
+        open_page(app, "https://github.com/M0Rf30");
+    }
+}
+
+/// Opens a web page in the system browser (an intent on Android).
+fn open_page(app: &mut App, url: &str) {
+    if let Err(error) = aulos_core::desktop::browser::open_in_browser(url) {
+        app.toast_error(error);
     }
 }
