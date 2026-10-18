@@ -63,13 +63,17 @@ fn resolve_track_source(track: &Track) -> TrackSource {
     if track.provider_id.starts_with("mpd") {
         TrackSource::MpdFile(track.source_uri.clone())
     } else if track.provider_id.starts_with("subsonic") {
-        // The provider signs the stream URL now: a track holds no credential.
-        TrackSource::HttpStream(crate::provider::subsonic::stream_url(track))
+        // The provider signs the stream URL now (a track holds no credential)
+        // and says whether its server's certificate checks are off.
+        crate::provider::subsonic::stream_source(track)
     } else if track.provider_id.starts_with("radio") {
         TrackSource::LiveStream(track.source_uri.clone())
     } else if track.provider_id.starts_with("podcast") {
         if track.path.as_os_str().is_empty() {
-            TrackSource::HttpStream(track.source_uri.clone())
+            TrackSource::HttpStream {
+                url: track.source_uri.clone(),
+                accept_invalid_certs: false,
+            }
         } else {
             // A downloaded episode — play the local file instead of
             // streaming, but keep `source_uri` (checked elsewhere) intact.
@@ -216,7 +220,9 @@ impl Player {
         self.set_stop_after_flag(false);
         // Select the appropriate backend based on the track source.
         match &source {
-            TrackSource::LocalFile(_) | TrackSource::HttpStream(_) | TrackSource::LiveStream(_) => {
+            TrackSource::LocalFile(_)
+            | TrackSource::HttpStream { .. }
+            | TrackSource::LiveStream(_) => {
                 self.active_backend = ActiveBackend::Local;
                 // Apply replay gain to the local backend before playing.
                 let gain = self.compute_replay_gain(track);

@@ -101,6 +101,9 @@ impl RadioUpdate {
 /// Saved stations, directory search and the identity of the playing station.
 pub struct RadioState {
     pub stations: Vec<RadioStation>,
+    /// Bumped on every mutation of [`Self::stations`], so views can key
+    /// derived caches on it instead of hashing the list each frame.
+    pub stations_generation: u64,
     pub search_results: Vec<StationSearchResult>,
     pub search_loading: bool,
     /// Error from the last search/preset fetch, shown in the results slot
@@ -126,6 +129,7 @@ impl RadioState {
     pub(super) fn new() -> Self {
         Self {
             stations: Vec::new(),
+            stations_generation: 0,
             search_results: Vec::new(),
             search_loading: false,
             search_error: None,
@@ -262,6 +266,7 @@ impl RadioState {
     pub fn remove(&mut self, id: i64) -> Option<(RadioStation, Effect<RadioEvent>)> {
         let station = self.stations.iter().find(|s| s.id == id).cloned()?;
         self.stations.retain(|s| s.id != id);
+        self.stations_generation += 1;
         let effect = Effect::future(async move {
             let stations = crate::task::spawn_blocking(move || radio::remove_saved(id))
                 .await
@@ -329,6 +334,7 @@ impl RadioState {
             RadioEvent::StationsLoaded(stations) => {
                 let icon_urls = non_empty(stations.iter().map(|s| &s.favicon_url));
                 self.stations = stations;
+                self.stations_generation += 1;
                 RadioUpdate {
                     icon_urls,
                     ..RadioUpdate::none()
@@ -536,5 +542,16 @@ mod tests {
         assert_eq!(state.stations[0].codec, "AAC");
         let _ = state.apply_event(RadioEvent::FormatLearned(Ok(None)));
         assert_eq!(state.stations[0].bitrate_kbps, 64);
+    }
+
+    #[test]
+    fn station_list_changes_bump_the_generation() {
+        let mut state = RadioState::new();
+        let before = state.stations_generation;
+        let _ = state.apply_event(RadioEvent::StationsLoaded(vec![saved("http://x/a", "", 0)]));
+        assert_ne!(state.stations_generation, before);
+        let loaded = state.stations_generation;
+        let _ = state.apply_event(RadioEvent::FormatLearned(Ok(None)));
+        assert_eq!(state.stations_generation, loaded);
     }
 }

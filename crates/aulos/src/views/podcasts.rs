@@ -693,11 +693,7 @@ fn refresh_cache(st: &mut State, pod: &PodcastsState) {
     pod.selected.hash(&mut h);
     st.filter.hash(&mut h);
     st.text.hash(&mut h);
-    for e in &pod.episodes {
-        e.id.hash(&mut h);
-        e.played.hash(&mut h);
-        e.downloaded_path.is_empty().hash(&mut h);
-    }
+    pod.episodes_generation.hash(&mut h);
     let key = h.finish();
     if key == st.cache_key {
         return;

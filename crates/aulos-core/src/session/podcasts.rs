@@ -173,6 +173,9 @@ pub struct PodcastsState {
     pub selected: Option<i64>,
     /// Episodes of the show open in the detail view.
     pub episodes: Vec<Episode>,
+    /// Bumped on every mutation of [`Self::episodes`], so views can key
+    /// derived caches on it instead of hashing the list each frame.
+    pub episodes_generation: u64,
     /// Podcast ids currently being refreshed.
     pub refreshing: HashSet<i64>,
     /// Why each subscription's last refresh failed, by podcast id; cleared
@@ -249,6 +252,7 @@ impl PodcastsState {
     pub fn select(&mut self, id: i64) -> Effect<PodcastEvent> {
         self.selected = Some(id);
         self.episodes.clear();
+        self.episodes_generation += 1;
         Self::load_episodes(id)
     }
 
@@ -256,6 +260,7 @@ impl PodcastsState {
     pub fn close_show(&mut self) {
         self.selected = None;
         self.episodes.clear();
+        self.episodes_generation += 1;
     }
 
     /// Shared by add-by-URL and Subscribe-from-Discover: validates the feed
@@ -437,6 +442,7 @@ impl PodcastsState {
         };
         episode.played = !episode.played;
         let (played, position_ms) = (episode.played, episode.position_ms);
+        self.episodes_generation += 1;
         self.save_position(episode_id, position_ms, played)
     }
 
@@ -532,6 +538,7 @@ impl PodcastsState {
             } => {
                 if selected == Some(podcast_id) {
                     self.episodes = episodes;
+                    self.episodes_generation += 1;
                 }
                 PodcastUpdate::none()
             }
@@ -614,6 +621,7 @@ impl PodcastsState {
                     Ok(path) => {
                         if let Some(ep) = self.episodes.iter_mut().find(|e| e.id == episode_id) {
                             ep.downloaded_path = path;
+                            self.episodes_generation += 1;
                         }
                         PodcastUpdate::none()
                     }
@@ -625,6 +633,7 @@ impl PodcastsState {
                     Ok(()) => {
                         if let Some(ep) = self.episodes.iter_mut().find(|e| e.id == episode_id) {
                             ep.downloaded_path = String::new();
+                            self.episodes_generation += 1;
                         }
                     }
                     Err(e) => tracing::error!("Failed to clear episode download: {e}"),
@@ -821,5 +830,32 @@ mod tests {
         assert_eq!(resume, Some(Duration::from_millis(5_000)));
         state.start_episode(11, resume);
         assert_eq!(state.last_saved_position_secs, 5);
+    }
+
+    #[test]
+    fn episode_mutations_bump_the_generation() {
+        let mut state = PodcastsState {
+            selected: Some(1),
+            episodes: vec![episode(10, 0, false)],
+            ..PodcastsState::default()
+        };
+        let _ = state.apply_event(PodcastEvent::Downloaded {
+            episode_id: 10,
+            result: Ok("/tmp/ep.mp3".into()),
+        });
+        assert_eq!(state.episodes_generation, 1);
+        let _ = state.apply_event(PodcastEvent::DownloadDeleted {
+            episode_id: 10,
+            result: Ok(()),
+        });
+        assert_eq!(state.episodes_generation, 2);
+        // An unknown episode changes nothing.
+        let _ = state.apply_event(PodcastEvent::DownloadDeleted {
+            episode_id: 99,
+            result: Ok(()),
+        });
+        assert_eq!(state.episodes_generation, 2);
+        state.close_show();
+        assert_eq!(state.episodes_generation, 3);
     }
 }

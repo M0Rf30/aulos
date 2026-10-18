@@ -467,11 +467,7 @@ struct RowData<'a> {
 fn refresh_cache(st: &mut State, radio: &RadioState) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     st.filter.hash(&mut h);
-    for s in &radio.stations {
-        s.id.hash(&mut h);
-        s.name.hash(&mut h);
-        s.tags.hash(&mut h);
-    }
+    radio.stations_generation.hash(&mut h);
     let key = h.finish();
     if key == st.cache_key {
         return;

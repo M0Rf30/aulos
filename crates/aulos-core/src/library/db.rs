@@ -588,6 +588,30 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v16 commit error: {e}"))?;
         }
 
+        if version < 17 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v17 transaction error: {e}"))?;
+            // A Subsonic track's `provider_track_id` (the `Track::source_uri`)
+            // used to be its signed stream URL, whose query string carries the
+            // account's user name and login token. It is now the credential-free
+            // locator `subsonic://<provider-id>/<song-id>` (the song id is the
+            // track's `path`) and the player signs the URL at playback, so
+            // rewrite the rows an older version stored.
+            tx.execute_batch(
+                "UPDATE tracks
+                    SET provider_track_id = 'subsonic://' || provider || '/' || path
+                  WHERE substr(provider, 1, 8) = 'subsonic'
+                    AND (provider_track_id LIKE 'http://%'
+                         OR provider_track_id LIKE 'https://%');
+                 PRAGMA user_version=17;",
+            )
+            .map_err(|e| format!("Migration v17 error: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v17 commit error: {e}"))?;
+        }
+
         self.apply_parser_version()?;
 
         let tx = self
@@ -2155,6 +2179,53 @@ mod tests {
     }
 
     #[test]
+    fn migration_v17_drops_signed_urls_from_subsonic_rows() {
+        let db = LibraryDb::open_memory().unwrap();
+        insert_local(&db, Path::new("/music/a.flac"));
+        let insert = |provider: &str, path: &str, stored: &str| {
+            db.conn
+                .execute(
+                    "INSERT INTO tracks (path, provider, provider_track_id) VALUES (?1, ?2, ?3)",
+                    params![path, provider, stored],
+                )
+                .unwrap();
+        };
+        insert(
+            "subsonic-home",
+            "song-1",
+            "https://music.example.com/rest/stream?u=alice&t=tok&s=salt&id=song-1",
+        );
+        insert(
+            "subsonic-lan",
+            "song-2",
+            "http://192.168.1.2/rest/stream?u=bob&t=x",
+        );
+        insert("subsonic-new", "song-3", "subsonic://subsonic-new/song-3");
+        // Not Subsonic: a podcast row keeps its stored URL.
+        insert("podcast", "ep-1", "https://feed.example.com/ep1.mp3");
+        db.conn.execute_batch("PRAGMA user_version=16;").unwrap();
+
+        db.run_migration().unwrap();
+
+        let stored = |path: &str| -> String {
+            db.conn
+                .query_row(
+                    "SELECT provider_track_id FROM tracks WHERE path = ?1",
+                    [path],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(stored("song-1"), "subsonic://subsonic-home/song-1");
+        assert_eq!(stored("song-2"), "subsonic://subsonic-lan/song-2");
+        assert_eq!(stored("song-3"), "subsonic://subsonic-new/song-3");
+        assert_eq!(stored("ep-1"), "https://feed.example.com/ep1.mp3");
+        assert_eq!(stored("/music/a.flac"), "/music/a.flac");
+        let tracks = db.all_tracks(Some("subsonic-home")).unwrap();
+        assert_eq!(tracks[0].source_uri, "subsonic://subsonic-home/song-1");
+    }
+
+    #[test]
     fn a_new_parser_version_rescans_local_files_and_resyncs_remotes_once() {
         let db = LibraryDb::open_memory().unwrap();
         let id = insert_local(&db, Path::new("/tmp/aulos-parser.mp3"));
@@ -2276,7 +2347,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            16
+            17
         );
         assert!(
             db.conn
@@ -2309,7 +2380,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            16
+            17
         );
         assert_eq!(db.track_count(None), 1);
         db.record_play(track_id, 1_700_000_000).unwrap();

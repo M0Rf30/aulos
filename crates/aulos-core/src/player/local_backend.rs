@@ -23,6 +23,23 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+/// How long opening a connection to a stream's server may take. The engine's
+/// playback thread connects with a blocking `GET` (see
+/// `PlaySource::open_decoder`), so a server that never answers must not hold
+/// it up for the OS's TCP timeout. Once connected, the blocking client's
+/// default 30 s timeout bounds the response and each read.
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The blocking client of stream playback; with `accept_invalid_certs` it
+/// trusts any certificate (a self-signed server).
+fn stream_client(accept_invalid_certs: bool) -> crate::http::blocking::Client {
+    crate::http::blocking_builder()
+        .connect_timeout(STREAM_CONNECT_TIMEOUT)
+        .danger_accept_invalid_certs(accept_invalid_certs)
+        .build()
+        .unwrap_or_else(|_| crate::http::blocking_client())
+}
+
 /// Local audio playback backend, driven by a dedicated [`PlaybackEngine`].
 pub struct LocalBackend {
     engine: PlaybackEngine,
@@ -30,6 +47,10 @@ pub struct LocalBackend {
     volume: f32,
     /// Shared blocking HTTP client for HTTP stream / live radio playback.
     http_client: crate::http::blocking::Client,
+    /// The same client with certificate checks off, for a provider with the
+    /// "accept invalid certificates" option (a self-signed server). Built on
+    /// the first such stream.
+    insecure_http_client: Option<crate::http::blocking::Client>,
     /// UI-side EQ controller (shares its coefficients/bypass flag with the
     /// engine's per-track `EqFilter`).
     eq_controller: EqController,
@@ -62,7 +83,8 @@ impl LocalBackend {
             engine,
             state: PlaybackState::Stopped,
             volume,
-            http_client: crate::http::blocking_client(),
+            http_client: stream_client(false),
+            insecure_http_client: None,
             eq_controller,
             replay_gain_db: None,
             icy_title: Arc::new(Mutex::new(None)),
@@ -123,6 +145,18 @@ impl LocalBackend {
     #[cfg(feature = "visualizer")]
     pub fn set_pcm_capture(&mut self, _wanted: bool) {}
 
+    /// The HTTP client for a stream whose provider has (or has not) the
+    /// "accept invalid certificates" option.
+    fn client_for(&mut self, accept_invalid_certs: bool) -> crate::http::blocking::Client {
+        if accept_invalid_certs {
+            self.insecure_http_client
+                .get_or_insert_with(|| stream_client(true))
+                .clone()
+        } else {
+            self.http_client.clone()
+        }
+    }
+
     /// Internal: play a local file.
     fn play_local_file(&mut self, path: PathBuf) -> Result<(), PlayerError> {
         self.engine
@@ -140,11 +174,15 @@ impl LocalBackend {
     /// exactly like the old manual background-thread dance was written to
     /// avoid; letting the engine's own thread do it gets the same effect
     /// for free.
-    fn play_http_stream(&mut self, url: String) -> Result<(), PlayerError> {
+    fn play_http_stream(
+        &mut self,
+        url: String,
+        accept_invalid_certs: bool,
+    ) -> Result<(), PlayerError> {
         let hint_extension = extension_hint(&url);
         let source = PlaySource::Reader {
             url,
-            client: self.http_client.clone(),
+            client: self.client_for(accept_invalid_certs),
             hint_extension,
         };
         self.engine.play(source, self.replay_gain_db)?;
@@ -177,7 +215,10 @@ impl PlaybackBackend for LocalBackend {
         *self.icy_title.lock() = None;
         match source {
             TrackSource::LocalFile(path) => self.play_local_file(path),
-            TrackSource::HttpStream(url) => self.play_http_stream(url),
+            TrackSource::HttpStream {
+                url,
+                accept_invalid_certs,
+            } => self.play_http_stream(url, accept_invalid_certs),
             TrackSource::LiveStream(url) => self.play_live_stream(url),
             TrackSource::MpdFile(_) => Err(PlayerError(
                 "MPD files should use MpdBackend, not LocalBackend".to_string(),
@@ -262,7 +303,10 @@ impl PlaybackBackend for LocalBackend {
                     .queue_next(PlaySource::LocalFile(path), self.replay_gain_db);
                 Ok(())
             }
-            TrackSource::HttpStream(url) => {
+            TrackSource::HttpStream {
+                url,
+                accept_invalid_certs,
+            } => {
                 // Unlike the old backend (which could only gapless-pre-queue
                 // local files, since the HTTP connect needed a background
                 // thread), the engine's look-ahead slot opens *any* source
@@ -271,10 +315,11 @@ impl PlaybackBackend for LocalBackend {
                 // worse, a stuck "pre-queued" flag with nothing actually
                 // queued) whenever a queue mixed local and remote tracks.
                 let hint_extension = extension_hint(&url);
+                let client = self.client_for(accept_invalid_certs);
                 self.engine.queue_next(
                     PlaySource::Reader {
                         url,
-                        client: self.http_client.clone(),
+                        client,
                         hint_extension,
                     },
                     self.replay_gain_db,

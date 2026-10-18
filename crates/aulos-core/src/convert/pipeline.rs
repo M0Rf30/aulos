@@ -69,8 +69,10 @@ fn settings(job: &ConvertJob) -> &JobSettings {
 /// bytes of the files it produced. Checks `job.cancel` between packets.
 /// Encoding happens on a scratch file next to the real output; on
 /// cancellation, a decode error, or an encode error the scratch file is
-/// deleted and the real output path is never touched, so nothing partial is
-/// ever left behind at the name the caller asked for.
+/// deleted, so nothing partial is ever left behind at the output name. The
+/// output name itself is reserved up front as an empty placeholder (so
+/// parallel jobs can't pick the same one) and removed again on failure; the
+/// finished scratch file atomically replaces it.
 pub fn run(job: &ConvertJob) -> Result<u64, ConvertError> {
     std::fs::create_dir_all(&settings(job).out_dir)?;
     match job.kind {
@@ -97,7 +99,11 @@ fn convert_file(job: &ConvertJob, source: &Path) -> Result<u64, ConvertError> {
     let mut tags = read_source_tags(source);
     let fields = NameFields::from_tags(tags.as_ref(), stem);
     let out_path = output_path(settings(job), &fields)?;
+    // The reserved (empty) output file goes away again unless the encode
+    // completes and replaces it.
+    let mut reserved = TempFileGuard::new(out_path.clone());
     transcode(job, source, &out_path, None, None, 0, 1000)?;
+    reserved.disarm();
     if settings(job).copy_tags
         && let Some(tags) = tags.as_mut()
     {
@@ -112,9 +118,11 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
-/// The not-yet-existing output path for a file with `fields`: the job's
-/// pattern expanded under the output folder (its folders created), made
-/// unique, with the format's extension.
+/// The output path for a file with `fields`: the job's pattern expanded
+/// under the output folder (its folders created), made unique, with the
+/// format's extension. The path is *reserved* — an empty placeholder file
+/// already exists there (see [`unique_out_path`]) — so the caller must
+/// delete it if the encode doesn't complete, and the final rename replaces it.
 fn output_path(settings: &JobSettings, fields: &NameFields) -> Result<PathBuf, ConvertError> {
     let mut segments = naming::expand(&settings.name_pattern, fields);
     let stem = segments
@@ -124,7 +132,7 @@ fn output_path(settings: &JobSettings, fields: &NameFields) -> Result<PathBuf, C
         .iter()
         .fold(settings.out_dir.clone(), |dir, segment| dir.join(segment));
     std::fs::create_dir_all(&dir)?;
-    Ok(unique_out_path(&dir, &stem, settings.format.extension()))
+    Ok(unique_out_path(&dir, &stem, settings.format.extension())?)
 }
 
 /// Splits the audio file referenced by a `.cue` sheet (`job.source`) into
@@ -174,6 +182,7 @@ fn cue_split(job: &ConvertJob) -> Result<u64, ConvertError> {
             fields.title = format!("Track {:02}", track.number);
         }
         let out_path = output_path(settings(job), &fields)?;
+        let mut reserved = TempFileGuard::new(out_path.clone());
 
         let start = track.start.as_secs_f64();
         let end = track.end.map(|d| d.as_secs_f64());
@@ -187,6 +196,7 @@ fn cue_split(job: &ConvertJob) -> Result<u64, ConvertError> {
             progress_base,
             progress_span,
         )?;
+        reserved.disarm();
 
         write_output_tags(
             &out_path,
@@ -472,20 +482,40 @@ fn write_output_tags(path: &Path, tags: &TagSet) {
     }
 }
 
-/// Builds `dir/stem.ext`, appending ` (N)` before the extension if that
-/// path already exists, so repeated conversions never clobber each other.
-fn unique_out_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
-    let candidate = dir.join(format!("{stem}.{ext}"));
-    if !candidate.exists() {
-        return candidate;
+/// Picks and reserves `dir/stem.ext`, appending ` (N)` before the extension
+/// if that name is taken, so repeated conversions never clobber each other.
+///
+/// The pick is atomic: the name is claimed by creating an empty placeholder
+/// with `create_new` (`O_EXCL`), so two jobs running in parallel for the same
+/// name can never be handed the same path — a plain `exists()` check would
+/// leave a window between choosing and the later rename. The encode's final
+/// rename replaces the placeholder; whoever abandons the path must delete it.
+fn unique_out_path(dir: &Path, stem: &str, ext: &str) -> io::Result<PathBuf> {
+    /// How many ` (N)` suffixes to try before giving up.
+    const MAX_ATTEMPTS: u32 = 1000;
+
+    let reserve = |candidate: PathBuf| match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&candidate)
+    {
+        Ok(_) => Ok(Some(candidate)),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    };
+
+    if let Some(path) = reserve(dir.join(format!("{stem}.{ext}")))? {
+        return Ok(path);
     }
-    for n in 1..1000 {
-        let candidate = dir.join(format!("{stem} ({n}).{ext}"));
-        if !candidate.exists() {
-            return candidate;
+    for n in 1..MAX_ATTEMPTS {
+        if let Some(path) = reserve(dir.join(format!("{stem} ({n}).{ext}")))? {
+            return Ok(path);
         }
     }
-    dir.join(format!("{stem}.{ext}"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("no free output name for {stem}.{ext}"),
+    ))
 }
 
 /// Wraps a `File` so decode progress can be tracked by bytes consumed, for
@@ -1062,6 +1092,90 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn unique_out_path_reserves_the_name_it_returns() {
+        let dir = temp_dir("reserve");
+        let first = unique_out_path(&dir, "song", "flac").unwrap();
+        let second = unique_out_path(&dir, "song", "flac").unwrap();
+        assert_eq!(first, dir.join("song.flac"));
+        assert_eq!(second, dir.join("song (1).flac"));
+        // Both names are claimed on disk before any encode wrote to them.
+        assert_eq!(file_names(&dir), ["song (1).flac", "song.flac"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_out_path_never_hands_the_same_name_to_parallel_pickers() {
+        let dir = temp_dir("reserve-race");
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let pickers: Vec<_> = (0..16)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    unique_out_path(&dir, "song", "flac").unwrap()
+                })
+            })
+            .collect();
+        let mut paths: Vec<PathBuf> = pickers.into_iter().map(|t| t.join().unwrap()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 16, "every picker must get its own path");
+        assert_eq!(file_names(&dir).len(), 16);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_out_path_skips_names_already_on_disk() {
+        let dir = temp_dir("reserve-existing");
+        std::fs::write(dir.join("song.flac"), b"x").unwrap();
+        assert_eq!(
+            unique_out_path(&dir, "song", "flac").unwrap(),
+            dir.join("song (1).flac")
+        );
+        assert_eq!(std::fs::read(dir.join("song.flac")).unwrap(), b"x");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parallel_jobs_for_the_same_name_keep_separate_outputs() {
+        let dir = temp_dir("parallel-same-name");
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+        let out_dir = dir.join("out");
+
+        let workers: Vec<_> = (0..4)
+            .map(|id| {
+                let mut job = ConvertJob::new(id, source.clone(), JobKind::Convert);
+                job.start(JobSettings::for_test(
+                    encoder::OutputFormat::Wav16,
+                    None,
+                    out_dir.clone(),
+                ));
+                std::thread::spawn(move || run(&job))
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap().expect("conversion should succeed");
+        }
+
+        let names = file_names(&out_dir);
+        assert_eq!(
+            names,
+            [
+                "source (1).wav",
+                "source (2).wav",
+                "source (3).wav",
+                "source.wav"
+            ]
+        );
+        for name in names {
+            let reader = hound::WavReader::open(out_dir.join(&name)).unwrap();
+            assert_eq!(reader.duration(), 44_100, "{name} is a complete encode");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

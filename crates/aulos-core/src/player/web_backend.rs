@@ -306,7 +306,7 @@ impl PlaybackBackend for LocalBackend {
 /// Sources the browser can play.
 fn check_source(source: &TrackSource) -> Result<(), PlayerError> {
     match source {
-        TrackSource::LocalFile(_) | TrackSource::HttpStream(_) => Ok(()),
+        TrackSource::LocalFile(_) | TrackSource::HttpStream { .. } => Ok(()),
         TrackSource::LiveStream(_) => Err(PlayerError(
             "Live internet radio cannot be played in the browser yet".to_string(),
         )),
@@ -347,7 +347,8 @@ async fn load(source: &TrackSource, rg_db: Option<f32>) -> Result<TrackData, Str
             let hint = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
             (crate::web_fs::read_file(path).await?, hint)
         }
-        TrackSource::HttpStream(url) => (fetch_bytes(url).await?, extension_hint(url)),
+        // A browser decides on certificates itself: the option cannot apply.
+        TrackSource::HttpStream { url, .. } => (fetch_bytes(url).await?, extension_hint(url)),
         TrackSource::LiveStream(_) | TrackSource::MpdFile(_) => {
             return Err("This source cannot be played in the browser".to_string());
         }

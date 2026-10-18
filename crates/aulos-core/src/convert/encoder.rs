@@ -27,7 +27,7 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::ConvertError;
 
@@ -253,14 +253,13 @@ pub fn create_sink(
     }
 
     match format {
-        OutputFormat::Flac => Ok(Box::new(FlacSink {
-            samples: Vec::new(),
+        OutputFormat::Flac => Ok(Box::new(FlacSink::create(
+            path,
             channels,
-            bits_per_sample: flac_options.bit_depth.resolve(source_bits_hint),
-            compression_level: flac_options.compression_level,
             sample_rate,
-            path: path.to_owned(),
-        })),
+            flac_options.bit_depth.resolve(source_bits_hint),
+            flac_options.compression_level,
+        )?)),
         OutputFormat::Wav16 | OutputFormat::Wav24 | OutputFormat::Wav32Float => {
             let depth = match format {
                 OutputFormat::Wav16 => WavDepth::I16,
@@ -339,27 +338,42 @@ impl SampleSink for WavSink {
     }
 }
 
+/// Streaming FLAC writer: PCM is buffered only up to one block, each full
+/// block is encoded and written to the output file immediately, and the
+/// header (`fLaC` + STREAMINFO, whose totals / MD5 / frame sizes are unknown
+/// until the last block) is a placeholder that [`SampleSink::finish`] seeks
+/// back and overwrites. Memory stays at one block of samples regardless of
+/// track length — a multi-hour hi-res file would otherwise need gigabytes
+/// to hold every sample (and the whole encoded stream) at once.
 struct FlacSink {
-    samples: Vec<i32>,
-    channels: u16,
+    writer: BufWriter<File>,
+    config: flacenc::error::Verified<flacenc::config::Encoder>,
+    /// Header-only stream; accumulates STREAMINFO totals via `update_frame_info`.
+    stream: flacenc::component::Stream,
+    /// The block being encoded and the running MD5 / frame counter.
+    block: (flacenc::source::FrameBuf, flacenc::source::Context),
+    /// Interleaved samples not yet forming a whole block.
+    pending: Vec<i32>,
+    scratch: flacenc::bitsink::ByteSink,
+    block_size: usize,
+    channels: usize,
     bits_per_sample: u32,
-    compression_level: u8,
-    sample_rate: u32,
-    path: PathBuf,
+    /// Byte length of the placeholder header written at the file's start.
+    header_len: usize,
 }
 
-impl SampleSink for FlacSink {
-    fn write(&mut self, interleaved: &[f32]) -> Result<(), ConvertError> {
-        let bits = self.bits_per_sample;
-        self.samples
-            .extend(interleaved.iter().map(|&s| f32_to_int(s, bits)));
-        Ok(())
-    }
-
-    fn finish(self: Box<Self>) -> Result<(), ConvertError> {
-        use flacenc::component::BitRepr;
+impl FlacSink {
+    fn create(
+        path: &Path,
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u32,
+        compression_level: u8,
+    ) -> Result<Self, ConvertError> {
         use flacenc::error::Verify;
 
+        let enc_err =
+            |what: &str, e: &dyn std::fmt::Display| ConvertError::Encode(format!("{what}: {e}"));
         // `multithread` defaults to on (the `par` feature): its worker
         // split appears to mis-number frames on some inputs (the reference
         // `flac` decoder tolerates it with a warning, but symphonia's
@@ -368,19 +382,102 @@ impl SampleSink for FlacSink {
         // encoding costs nothing here and sidesteps the bug entirely.
         let mut encoder_config = flacenc::config::Encoder::default();
         encoder_config.multithread = false;
-        apply_compression_level(&mut encoder_config, self.compression_level);
+        apply_compression_level(&mut encoder_config, compression_level);
         let config = encoder_config
             .into_verified()
-            .map_err(|(_, e)| ConvertError::Encode(format!("invalid FLAC encoder config: {e}")))?;
-        let source = flacenc::source::MemSource::from_samples(
-            &self.samples,
-            self.channels as usize,
-            self.bits_per_sample as usize,
-            self.sample_rate as usize,
-        );
+            .map_err(|(_, e)| enc_err("invalid FLAC encoder config", &e))?;
         let block_size = config.block_size;
-        let mut stream = flacenc::encode_with_fixed_block_size(&config, source, block_size)
-            .map_err(|e| ConvertError::Encode(format!("FLAC encode failed: {e}")))?;
+        let channels = usize::from(channels);
+        let bits = bits_per_sample as usize;
+
+        let stream = flacenc::component::Stream::new(sample_rate as usize, channels, bits)
+            .map_err(|e| enc_err("invalid FLAC stream parameters", &e))?;
+        let block = (
+            flacenc::source::FrameBuf::with_size(channels, block_size)
+                .map_err(|e| enc_err("invalid FLAC block parameters", &e))?,
+            flacenc::source::Context::new(bits, channels),
+        );
+        let mut sink = Self {
+            writer: BufWriter::new(File::create(path)?),
+            config,
+            stream,
+            block,
+            pending: Vec::with_capacity(block_size * channels),
+            scratch: flacenc::bitsink::ByteSink::new(),
+            block_size,
+            channels,
+            bits_per_sample,
+            header_len: 0,
+        };
+        sink.header_len = sink.write_header()?;
+        Ok(sink)
+    }
+
+    /// Writes `fLaC` + the current STREAMINFO at the writer's position and
+    /// returns its length in bytes (constant for any STREAMINFO values).
+    fn write_header(&mut self) -> Result<usize, ConvertError> {
+        use flacenc::component::BitRepr;
+
+        self.scratch.clear();
+        self.stream
+            .write(&mut self.scratch)
+            .map_err(|e| ConvertError::Encode(format!("FLAC header write failed: {e}")))?;
+        self.writer.write_all(self.scratch.as_slice())?;
+        Ok(self.scratch.as_slice().len())
+    }
+
+    /// Encodes the first `samples` interleaved values of `pending` as one
+    /// (possibly short, for the last) block and writes it out.
+    fn encode_block(&mut self, samples: usize) -> Result<(), ConvertError> {
+        use flacenc::component::BitRepr;
+        use flacenc::source::Fill;
+
+        self.block
+            .fill_interleaved(&self.pending[..samples])
+            .map_err(|e| ConvertError::Encode(format!("FLAC source failed: {e}")))?;
+        let frame_number = self.block.1.current_frame_number().unwrap_or(0);
+        let frame = flacenc::encode_fixed_size_frame(
+            &self.config,
+            &self.block.0,
+            frame_number,
+            self.stream.stream_info(),
+        )
+        .map_err(|e| ConvertError::Encode(format!("FLAC encode failed: {e}")))?;
+        self.stream.stream_info_mut().update_frame_info(&frame);
+        self.scratch.clear();
+        frame
+            .write(&mut self.scratch)
+            .map_err(|e| ConvertError::Encode(format!("FLAC bitstream write failed: {e}")))?;
+        self.writer.write_all(self.scratch.as_slice())?;
+        Ok(())
+    }
+}
+
+impl SampleSink for FlacSink {
+    fn write(&mut self, interleaved: &[f32]) -> Result<(), ConvertError> {
+        let bits = self.bits_per_sample;
+        let block_len = self.block_size * self.channels;
+        let mut converted = interleaved.iter().map(|&s| f32_to_int(s, bits));
+        loop {
+            let room = block_len - self.pending.len();
+            self.pending.extend(converted.by_ref().take(room));
+            if self.pending.len() < block_len {
+                // Input exhausted before the block filled; keep for later.
+                return Ok(());
+            }
+            self.encode_block(block_len)?;
+            self.pending.clear();
+        }
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<(), ConvertError> {
+        use std::io::{Seek, SeekFrom};
+
+        // A trailing partial block (whole frames only) is a short last frame.
+        let tail = self.pending.len() - self.pending.len() % self.channels;
+        if tail > 0 {
+            self.encode_block(tail)?;
+        }
 
         // `Stream::add_frame` lets a shorter last block lower
         // `StreamInfo::min_block_size` below `block_size`. The reference
@@ -393,16 +490,18 @@ impl SampleSink for FlacSink {
         // frame decodable everywhere; per-frame headers already encode
         // each frame's true size independently, so this touches only
         // informational metadata, never the audio data.
-        stream
-            .stream_info_mut()
-            .set_block_sizes(block_size, block_size)
-            .ok();
+        let digest = self.block.1.md5_digest();
+        let total = self.block.1.total_samples();
+        let block_size = self.block_size;
+        let info = self.stream.stream_info_mut();
+        info.set_block_sizes(block_size, block_size).ok();
+        info.set_md5_digest(&digest);
+        info.set_total_samples(total);
 
-        let mut sink = flacenc::bitsink::ByteSink::new();
-        stream
-            .write(&mut sink)
-            .map_err(|e| ConvertError::Encode(format!("FLAC bitstream write failed: {e}")))?;
-        std::fs::write(&self.path, sink.as_slice())?;
+        self.writer.seek(SeekFrom::Start(0))?;
+        let written = self.write_header()?;
+        debug_assert_eq!(written, self.header_len);
+        self.writer.flush()?;
         Ok(())
     }
 }
@@ -692,6 +791,46 @@ mod tests {
             samples.len()
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn flac_output_is_independent_of_write_chunking() {
+        // The sink encodes block by block as samples arrive; chunk sizes
+        // that straddle block boundaries (and a short final block) must
+        // produce exactly the bytes a single write does.
+        let dir = std::env::temp_dir().join(format!(
+            "aulos-convert-flacchunk-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let samples: Vec<f32> = sine_1s().into_iter().chain(sine_1s()).collect();
+
+        let encode = |name: &str, chunk: usize| {
+            let path = dir.join(name);
+            let mut sink = create_sink(
+                OutputFormat::Flac,
+                &path,
+                2,
+                44_100,
+                Some(16),
+                flac_opts(FlacBitDepth::Auto),
+                LossyOptions::default(),
+            )
+            .unwrap();
+            for piece in samples.chunks(chunk) {
+                sink.write(piece).unwrap();
+            }
+            sink.finish().unwrap();
+            path
+        };
+        let whole = encode("whole.flac", samples.len());
+        let chunked = encode("chunked.flac", 1234); // even: whole stereo frames
+        assert_eq!(
+            std::fs::read(&whole).unwrap(),
+            std::fs::read(&chunked).unwrap()
+        );
+        assert_eq!(probe_frame_count(&chunked), samples.len() as u64 / 2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

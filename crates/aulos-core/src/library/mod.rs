@@ -65,7 +65,12 @@ pub enum TrackSource {
     /// A local file on the filesystem.
     LocalFile(PathBuf),
     /// An HTTP streaming URL (e.g., Subsonic `stream` endpoint).
-    HttpStream(String),
+    /// `accept_invalid_certs` is the provider's "accept invalid certificates"
+    /// option (a self-signed server); the browser ignores it.
+    HttpStream {
+        url: String,
+        accept_invalid_certs: bool,
+    },
     /// An internet radio / Shoutcast/Icecast live stream URL. Unlike
     /// `HttpStream`, the byte length is never known up front and seeking is
     /// never supported — see `player::engine::decoder::SymphoniaDecoder::open_stream`.

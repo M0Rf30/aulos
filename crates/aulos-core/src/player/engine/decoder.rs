@@ -1017,8 +1017,8 @@ mod tests {
         eprintln!("connecting to {url}");
 
         // Mirrors `PlaySource::LiveStream::open_decoder` exactly, including
-        // the client (no explicit timeout — same as `LocalBackend`'s
-        // `crate::http::blocking_client()`).
+        // the client (the default one; `LocalBackend`'s only adds a connect
+        // timeout).
         let client = crate::http::blocking_client();
         let response = client
             .get(&url)

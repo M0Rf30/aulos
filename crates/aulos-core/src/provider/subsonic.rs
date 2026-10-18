@@ -9,7 +9,7 @@
 
 use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::scan_progress::ScanProgress;
-use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track};
+use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track, TrackSource};
 use opensubsonic::{Auth, Client};
 use std::collections::HashMap;
 use std::fmt;
@@ -313,6 +313,9 @@ impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
 struct StreamSigner {
     client: Client,
     options: opensubsonic::StreamOptions,
+    /// The provider's "accept invalid certificates" option, which the player
+    /// needs to open the stream of a self-signed server.
+    accept_invalid_certs: bool,
 }
 
 /// The live provider's signer by provider id. Weak: a replaced or removed
@@ -326,24 +329,31 @@ fn track_locator(provider_id: &str, song_id: &str) -> String {
     format!("subsonic://{provider_id}/{song_id}")
 }
 
-/// The authenticated stream URL of a Subsonic `track`, signed now by its
-/// provider. Falls back to the track's own `source_uri` when no such provider
-/// is connected (rows stored by older versions hold the signed URL there).
+/// What the player streams for a Subsonic `track`: the authenticated URL,
+/// signed now by its provider, with the provider's certificate option. With
+/// no such provider connected it is the track's own `source_uri` and the
+/// default certificate checks.
 #[must_use]
-pub fn stream_url(track: &Track) -> String {
+pub fn stream_source(track: &Track) -> TrackSource {
     let signer = SIGNERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&*track.provider_id)
         .and_then(Weak::upgrade);
-    signer
-        .and_then(|signer| {
-            signer
-                .client
-                .stream_url(&track.path.to_string_lossy(), &signer.options)
-                .ok()
-        })
-        .map_or_else(|| track.source_uri.clone(), |url| url.to_string())
+    let Some(signer) = signer else {
+        return TrackSource::HttpStream {
+            url: track.source_uri.clone(),
+            accept_invalid_certs: false,
+        };
+    };
+    let url = signer
+        .client
+        .stream_url(&track.path.to_string_lossy(), &signer.options)
+        .map_or_else(|_| track.source_uri.clone(), |url| url.to_string());
+    TrackSource::HttpStream {
+        url,
+        accept_invalid_certs: signer.accept_invalid_certs,
+    }
 }
 
 /// Subsonic music provider backed by the `opensubsonic` crate.
@@ -387,6 +397,7 @@ impl SubsonicProvider {
         let signer = Arc::new(StreamSigner {
             client: client.clone(),
             options,
+            accept_invalid_certs: config.accept_invalid_certs,
         });
         {
             let mut signers = SIGNERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1550,6 +1561,16 @@ mod stream_url_tests {
         serde_json::from_str(r#"{"id":"song-7","title":"t"}"#).expect("valid Child")
     }
 
+    fn http_stream(track: &Track) -> (String, bool) {
+        match stream_source(track) {
+            TrackSource::HttpStream {
+                url,
+                accept_invalid_certs,
+            } => (url, accept_invalid_certs),
+            other => panic!("not an HTTP stream: {other:?}"),
+        }
+    }
+
     #[test]
     fn tracks_hold_no_credential_and_the_player_signs_at_playback() {
         let provider = provider("subsonic-signing-test");
@@ -1557,7 +1578,8 @@ mod stream_url_tests {
         assert_eq!(track.path, PathBuf::from("song-7"));
         assert_eq!(track.source_uri, "subsonic://subsonic-signing-test/song-7");
         assert!(!track.source_uri.contains("alice"));
-        let url = stream_url(&track);
+        let (url, accept_invalid_certs) = http_stream(&track);
+        assert!(!accept_invalid_certs);
         assert!(
             url.starts_with("https://music.example.com/rest/stream"),
             "{url}"
@@ -1573,7 +1595,23 @@ mod stream_url_tests {
         let mut track = provider("subsonic-gone-test").child_to_track(&song());
         track.provider_id = Arc::from("subsonic-never-registered");
         track.source_uri = "https://old.example.com/rest/stream?id=x".to_owned();
-        assert_eq!(stream_url(&track), track.source_uri);
+        assert_eq!(http_stream(&track), (track.source_uri.clone(), false));
+    }
+
+    #[test]
+    fn the_stream_carries_the_providers_certificate_option() {
+        let provider = SubsonicProvider::new(SubsonicConfig {
+            id: "subsonic-self-signed-test".to_owned(),
+            username: "alice".to_owned(),
+            password: "hunter2".to_owned(),
+            accept_invalid_certs: true,
+            ..SubsonicConfig::default()
+        })
+        .expect("valid config");
+        let track = provider.child_to_track(&song());
+        let (url, accept_invalid_certs) = http_stream(&track);
+        assert!(url.contains("id=song-7"), "{url}");
+        assert!(accept_invalid_certs);
     }
 
     #[test]
