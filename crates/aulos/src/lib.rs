@@ -43,6 +43,8 @@ fn tune_allocator() {
 pub fn run() -> eframe::Result {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     tune_allocator();
+    // Single-threaded here; the mixers then show "Aulos" and its icon.
+    aulos_core::desktop::stream_identity::apply();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
