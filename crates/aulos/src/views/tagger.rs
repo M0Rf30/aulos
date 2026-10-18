@@ -1047,6 +1047,7 @@ fn text_box(
         .vertical_align(Align::Center)
         .interactive(tb.enabled);
     let resp = ui.put(edit_rect, edit);
+    crate::widgets::reveal_focused(ui, &resp);
     let focused = resp.has_focus();
     if focused {
         ui.painter().rect_stroke(

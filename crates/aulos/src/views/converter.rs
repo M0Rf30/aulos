@@ -1285,6 +1285,7 @@ fn pattern_section(ui: &mut Ui, pal: &Palette, pattern: &str, out: &mut Vec<Inte
             .font(theme::mono(11.5))
             .background_color(pal.bg),
     );
+    crate::widgets::reveal_focused(ui, &resp);
     ui.painter().rect_stroke(
         resp.rect,
         CornerRadius::same(theme::radius::SM),

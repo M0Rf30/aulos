@@ -759,16 +759,12 @@ fn slider_row(
 ) -> Option<f32> {
     let mut out = None;
     row(ui, pal, title, desc, false, 230.0, |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(44.0, 16.0), Sense::hover());
-        paint_text(
-            ui.painter(),
-            r,
-            Align::Max,
-            label,
-            theme::mono(12.0),
-            pal.text,
-        );
-        out = value_slider(ui, pal, frac, 160.0);
+        // As wide as the value ("+10.5 dB"), or paint_text cuts it with "...".
+        let font = theme::mono(12.0);
+        let w = crate::widgets::text_width(ui, label, font.clone()).ceil() + 2.0;
+        let (r, _) = ui.allocate_exact_size(vec2(w.max(44.0), 16.0), Sense::hover());
+        paint_text(ui.painter(), r, Align::Max, label, font, pal.text);
+        out = value_slider(ui, pal, frac, 150.0);
     });
     out
 }
@@ -3081,14 +3077,14 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
     match service {
         Service::ListenBrainz => {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 input(
                     ui,
                     &pal,
                     &mut app.session.playback.scrobble.lb_token_input,
                     &aulos_core::fl!("settings-lb-token-hint"),
-                    320.0,
+                    ui.available_width().min(320.0),
                     true,
                 );
                 let token_set = !app
@@ -3127,14 +3123,14 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                 pal.text_3,
             );
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 input(
                     ui,
                     &pal,
                     &mut app.session.playback.scrobble.lastfm_key_input,
                     &aulos_core::fl!("settings-api-key"),
-                    240.0,
+                    ui.available_width().min(240.0),
                     false,
                 );
                 input(
@@ -3142,7 +3138,7 @@ fn service_card(app: &mut App, ui: &mut Ui, service: Service, msgs: &mut Vec<Scr
                     &pal,
                     &mut app.session.playback.scrobble.lastfm_secret_input,
                     &aulos_core::fl!("settings-shared-secret"),
-                    240.0,
+                    ui.available_width().min(240.0),
                     true,
                 );
                 if pill_button(
