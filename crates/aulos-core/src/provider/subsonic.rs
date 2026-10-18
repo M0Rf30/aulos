@@ -44,11 +44,24 @@ fn describe_error(url: &str, op: &str, error: &opensubsonic::Error) -> String {
             None if cfg!(target_arch = "wasm32") && !e.is_decode() && !e.is_body() => {
                 crate::http::no_answer_message(url)
             }
-            None => format!("Subsonic {op}: {e}"),
+            // reqwest's Display appends the request URL (u, t, s).
+            None => {
+                let text = e.to_string();
+                let text = text.split(" for url (").next().unwrap_or(&text);
+                format!("Subsonic {op}: {text}")
+            }
         },
+        Error::Parse(body) => {
+            let head: String = body.chars().take(PARSE_ERROR_CHARS).collect();
+            let ellipsis = if head.len() < body.len() { "…" } else { "" };
+            format!("Subsonic {op}: Parse error: {head}{ellipsis}")
+        }
         other => format!("Subsonic {op}: {other}"),
     }
 }
+
+/// Characters of a response body kept in a parse error shown to the user.
+const PARSE_ERROR_CHARS: usize = 80;
 
 /// Checks that a server answers `ping` with the given credentials: the
 /// settings card's "Test connection". `Err` is a message for the user.
@@ -71,30 +84,34 @@ pub async fn test_connection(
 }
 
 /// The HTTP client of the API and cover requests, with a request timeout.
-fn http_client() -> reqwest::Client {
+/// `accept_invalid_certs` only exists natively: a browser decides on
+/// certificates itself and the setting cannot apply.
+fn http_client(accept_invalid_certs: bool) -> reqwest::Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    if accept_invalid_certs {
+        return crate::http::async_builder()
+            .timeout(REQUEST_TIMEOUT)
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_else(|_| crate::http::async_client());
+    }
+    #[cfg(target_arch = "wasm32")]
+    if accept_invalid_certs {
+        tracing::warn!("accept_invalid_certs has no effect in the browser");
+    }
     crate::http::client(REQUEST_TIMEOUT).unwrap_or_else(|_| crate::http::async_client())
 }
 
-/// The API client for a server. `accept_invalid_certs` only exists natively:
-/// a browser decides on certificates itself and the setting cannot apply.
+/// The API client for a server.
 fn build_client(
     url: &str,
     username: &str,
     password: &str,
     accept_invalid_certs: bool,
 ) -> Result<Client, opensubsonic::Error> {
-    let client = Client::new(url, Auth::token(username, password))?
+    Ok(Client::new(url, Auth::token(username, password))?
         .with_client_name("aulos")
-        .with_http_client(http_client());
-    #[cfg(not(target_arch = "wasm32"))]
-    if accept_invalid_certs {
-        return client.with_danger_accept_invalid_certs();
-    }
-    #[cfg(target_arch = "wasm32")]
-    if accept_invalid_certs {
-        tracing::warn!("accept_invalid_certs has no effect in the browser");
-    }
-    Ok(client)
+        .with_http_client(http_client(accept_invalid_certs)))
 }
 
 /// The album's OpenSubsonic release types (`"Album"`, `"EP"`, `"Live"`, ...)
@@ -258,7 +275,7 @@ impl SubsonicProvider {
         .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?;
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
-        let http_client = http_client();
+        let http_client = http_client(config.accept_invalid_certs);
         Ok(Self {
             config,
             provider_id,
@@ -686,25 +703,29 @@ impl MusicProvider for SubsonicProvider {
                     .send()
                     .await
                     .and_then(reqwest::Response::error_for_status)
-                    .map_err(|e| self.err("cover art fetch")(e.into()))?;
+                    .map_err(|e| self.err("cover art fetch")(e.without_url().into()))?;
                 let bytes = resp
                     .bytes()
                     .await
-                    .map_err(|e| self.err("cover art read")(e.into()))?;
+                    .map_err(|e| self.err("cover art read")(e.without_url().into()))?;
                 Ok(Some(bytes.to_vec()))
             }
             _ => {
                 // Try to get cover art from the first track's album ID.
                 if let Some(first_track) = album.tracks.first() {
-                    // The source_uri is the song ID; we can try using it as the cover art ID.
+                    // A Subsonic song id is stored in `path`; it doubles as a cover art id.
                     match self
                         .client
-                        .get_cover_art(&first_track.source_uri, Some(300))
+                        .get_cover_art(&first_track.path.to_string_lossy(), Some(300))
                         .await
                     {
                         Ok(bytes) => Ok(Some(bytes.to_vec())),
                         Err(e) => {
-                            tracing::warn!("Subsonic cover art for '{}': {e}", album.name);
+                            tracing::warn!(
+                                "Subsonic cover art for '{}': {}",
+                                album.name,
+                                describe_error(&self.config.url, "getCoverArt", &e)
+                            );
                             Ok(None)
                         }
                     }
@@ -752,7 +773,10 @@ impl MusicProvider for SubsonicProvider {
                 }
             }
             Err(e) => {
-                tracing::debug!("getLyricsBySongId not available: {e}");
+                tracing::debug!(
+                    "getLyricsBySongId not available: {}",
+                    describe_error(&self.config.url, "getLyricsBySongId", &e)
+                );
             }
         }
 
@@ -770,7 +794,10 @@ impl MusicProvider for SubsonicProvider {
                 }
             }
             Err(e) => {
-                tracing::debug!("getLyrics not available: {e}");
+                tracing::debug!(
+                    "getLyrics not available: {}",
+                    describe_error(&self.config.url, "getLyrics", &e)
+                );
             }
         }
 
@@ -784,7 +811,10 @@ impl MusicProvider for SubsonicProvider {
         // data is fetched on demand via browse_*() methods.
         match self.client.start_scan().await {
             Ok(_) => tracing::info!("Triggered Subsonic library scan"),
-            Err(e) => tracing::warn!("Subsonic startScan: {e}"),
+            Err(e) => tracing::warn!(
+                "Subsonic startScan: {}",
+                describe_error(&self.config.url, "startScan", &e)
+            ),
         }
         Ok(0)
     }
@@ -1322,5 +1352,22 @@ mod connection_tests {
             .expect_err("unavailable");
         assert!(error.contains("503"), "{error}");
         assert!(error.contains("127.0.0.1"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_leak_the_request_credentials() {
+        // A scheme reqwest rejects fails the request without any network.
+        let failure = reqwest::Client::new()
+            .get("ftp://127.0.0.1/rest/ping?u=alice&t=secret&s=salt")
+            .send()
+            .await
+            .expect_err("unsupported scheme");
+        let message = describe_error(
+            "http://127.0.0.1",
+            "ping",
+            &opensubsonic::Error::Http(failure),
+        );
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!message.contains("salt"), "{message}");
     }
 }

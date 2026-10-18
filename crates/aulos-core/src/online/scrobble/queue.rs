@@ -9,6 +9,7 @@
 
 use super::{ScrobbleTrack, Service};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Hard cap on queued listens; the oldest are dropped beyond it.
@@ -47,15 +48,29 @@ impl Queue {
         Self::default()
     }
 
-    /// Load the queue from `path`. A missing or corrupt file yields an
-    /// empty queue (a corrupt one is left in place until the next save).
+    /// Load the queue from `path`. A missing file yields an empty queue; a
+    /// corrupt or unknown-version one is moved aside to `<path>.bad` (so the
+    /// next save does not destroy it) and an empty queue is used.
     pub fn load(path: &Path) -> Self {
-        let items = std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<FileFormat>(&bytes).ok())
-            .filter(|f| f.version == FILE_VERSION)
-            .map(|f| f.items)
-            .unwrap_or_default();
+        let items = match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice::<FileFormat>(&bytes) {
+                Ok(f) if f.version == FILE_VERSION => f.items,
+                _ => {
+                    let mut bad = path.as_os_str().to_owned();
+                    bad.push(".bad");
+                    tracing::error!(
+                        "Unusable scrobble queue {}; keeping it as {}",
+                        path.display(),
+                        Path::new(&bad).display()
+                    );
+                    if let Err(e) = std::fs::rename(path, &bad) {
+                        tracing::warn!("Could not move the scrobble queue aside: {e}");
+                    }
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         Self {
             path: Some(path.to_path_buf()),
             items,
@@ -76,7 +91,10 @@ impl Queue {
         })
         .map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, data)?;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     }
 
@@ -175,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_yields_empty_queue() {
+    fn corrupt_file_is_kept_as_bad_and_yields_empty_queue() {
         let dir = temp_path("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("queue.json");
@@ -185,6 +203,10 @@ mod tests {
         q.push(Service::LibreFm, track("x", 1));
         q.save().unwrap();
         assert_eq!(Queue::load(&path).len(), 1);
+        assert_eq!(
+            std::fs::read(dir.join("queue.json.bad")).unwrap(),
+            b"{not json"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

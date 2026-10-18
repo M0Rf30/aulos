@@ -127,7 +127,7 @@ fn track_menu_with(
         Spec {
             click,
             playlists: Some(playlists),
-            uris: &|| vec![track.source_uri.clone()],
+            uris: &|| vec![aulos_core::session::playlist_track_id(track)],
             play: &|play: Play| match play {
                 Play::Now => MenuAction::PlayTracks(vec![track.clone()]),
                 Play::Next => MenuAction::QueueTracks {
@@ -232,7 +232,13 @@ fn album_menu_with(
         Spec {
             click,
             playlists: Some(playlists),
-            uris: &|| album.tracks.iter().map(|t| t.source_uri.clone()).collect(),
+            uris: &|| {
+                album
+                    .tracks
+                    .iter()
+                    .map(|t| aulos_core::session::playlist_track_id(t))
+                    .collect()
+            },
             play: &|play: Play| match play {
                 Play::Now => MenuAction::PlayAlbum {
                     artist: album.artist.clone(),

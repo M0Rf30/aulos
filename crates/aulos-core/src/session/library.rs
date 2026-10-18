@@ -105,6 +105,13 @@ pub enum LibraryEvent {
         generation: u64,
         provider_id: String,
     },
+    /// A (re)load failed or only got part of the library. What is already
+    /// visible is kept: a staged refresh is dropped instead of swapped in.
+    LoadFailed {
+        generation: u64,
+        provider_id: String,
+        reason: String,
+    },
     /// The play-count ranking of an artist's tracks (see
     /// [`Session::load_artist_top`]).
     TopTracksLoaded {
@@ -174,7 +181,8 @@ pub enum LibraryApplied {
     /// The reload finished and the final sort ran; `covers` is the swap of
     /// a staged refresh into the visible covers (empty without one).
     Completed { covers: CoverDelta },
-    /// A provider action failed and its optimistic local change was undone.
+    /// A provider action failed and its optimistic local change was undone,
+    /// or a reload failed and the visible library was kept.
     ActionFailed(String),
 }
 
@@ -392,12 +400,8 @@ impl Session {
     /// The filesystem watcher saw `paths` change: incrementally scan them
     /// when the local library is active.
     pub fn files_changed(&mut self, paths: Vec<PathBuf>) -> Effect<LibraryEvent> {
-        // Cheap, stat-free prefilter: audio files and extension-less paths
-        // (folders); `scan_paths` decides what each one is off the UI thread.
-        let paths: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|p| LibraryScanner::is_audio_file(p) || p.extension().is_none())
-            .collect();
+        // No stat-based prefilter here (a folder may be named `Dr. Dre`):
+        // `scan_paths` decides what each path is off the UI thread.
         if paths.is_empty() {
             return Effect::none();
         }
@@ -671,6 +675,30 @@ impl Session {
                 self.refresh_search();
                 LibraryApplied::Completed { covers }
             }
+            LibraryEvent::LoadFailed {
+                generation,
+                provider_id,
+                reason,
+            } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return LibraryApplied::Stale;
+                }
+                self.library.scanning = false;
+                // Never swap in an empty or truncated staging buffer: the
+                // library on screen (a cache seed or the previous load)
+                // stays as it is.
+                let staged = self.library.is_staging(generation);
+                self.library.cancel_reload(generation);
+                self.library.covers.complete_staged(false);
+                if !staged && !self.library.tracks.is_empty() {
+                    // Batches of a first load were already appended: keep
+                    // them, with the final sort.
+                    self.library
+                        .complete_reload(generation, &self.config.config);
+                    self.refresh_search();
+                }
+                LibraryApplied::ActionFailed(reason)
+            }
             LibraryEvent::SyncSkipped {
                 generation,
                 provider_id,
@@ -885,16 +913,19 @@ async fn load_local(
 ) -> LibraryEvent {
     // One query: the flat track list is the albums' tracks (a second
     // `browse_tracks` would re-read and re-group the whole table).
-    let albums: Vec<Arc<Album>> = provider
-        .browse_albums()
-        .await
-        .unwrap_or_else(|e| {
+    // A failed query must not read as an empty library: that would blank the
+    // view and prune the cover cache down to nothing.
+    let albums: Vec<Arc<Album>> = match provider.browse_albums().await {
+        Ok(albums) => albums.into_iter().map(Arc::new).collect(),
+        Err(e) => {
             tracing::error!("browse_albums failed: {e}");
-            Vec::new()
-        })
-        .into_iter()
-        .map(Arc::new)
-        .collect();
+            return LibraryEvent::LoadFailed {
+                generation,
+                provider_id,
+                reason: e.to_string(),
+            };
+        }
+    };
     let tracks: Vec<Arc<Track>> = albums
         .iter()
         .flat_map(|a| a.tracks.iter().cloned())
@@ -1312,9 +1343,10 @@ async fn load_incremental(
                 Err(e) => {
                     tracing::error!("MPD list_album_names failed: {e}");
                     _ = tx
-                        .send(LibraryEvent::LoadComplete {
+                        .send(LibraryEvent::LoadFailed {
                             generation,
                             provider_id,
+                            reason: e.to_string(),
                         })
                         .await;
                     return;
@@ -1361,6 +1393,15 @@ async fn load_incremental(
                     "MPD incremental load: skipped {failed_chunks} chunk(s) \
                      ({failed_albums} album(s)) due to browse_albums_batch errors"
                 );
+                // A partial result must not replace a full library.
+                _ = tx
+                    .send(LibraryEvent::LoadFailed {
+                        generation,
+                        provider_id,
+                        reason: format!("{failed_albums} album(s) could not be loaded from MPD"),
+                    })
+                    .await;
+                return;
             }
         }
         ProviderType::Subsonic => {
@@ -1408,7 +1449,7 @@ async fn load_incremental(
             let page_size = BATCH_SIZE as i32;
             let mut keep_paths: HashSet<String> = HashSet::new();
             let mut keep_keys: HashSet<String> = HashSet::new();
-            let mut synced_fully = true;
+            let mut failure: Option<String> = None;
             // Pipelined: the next page is fetched while the current one's
             // covers are downloaded and persisted.
             let mut page = subsonic.browse_albums_page(offset, page_size).await;
@@ -1417,7 +1458,7 @@ async fn load_incremental(
                     Ok(result) => result,
                     Err(e) => {
                         tracing::error!("Subsonic browse_albums_page failed: {e}");
-                        synced_fully = false;
+                        failure = Some(e.to_string());
                         break;
                     }
                 };
@@ -1464,11 +1505,20 @@ async fn load_incremental(
             }
             // A failed page leaves the sync incomplete: pruning now would
             // delete tracks that are still on the server but simply were
-            // not reached yet, so only clean up after a full pass.
-            if synced_fully {
-                prune_provider_cache(&provider_id, &keep_paths, &keep_keys).await;
-                store_sync_marker(&provider_id, server_marker).await;
+            // not reached yet, so only clean up after a full pass. The
+            // truncated result must not replace the visible library either.
+            if let Some(reason) = failure {
+                _ = tx
+                    .send(LibraryEvent::LoadFailed {
+                        generation,
+                        provider_id,
+                        reason,
+                    })
+                    .await;
+                return;
             }
+            prune_provider_cache(&provider_id, &keep_paths, &keep_keys).await;
+            store_sync_marker(&provider_id, server_marker).await;
         }
         // Database-backed providers load in one piece (`load_local`); the
         // browser has no MPD provider.
@@ -1490,6 +1540,7 @@ mod tests {
     use super::super::test_support::{test_session, track};
     use super::*;
     use crate::library::Playlist;
+    use crate::provider::ProviderError;
     use bytes::Bytes;
 
     fn album(name: &str, artist: &str, first_track_id: i64) -> Arc<Album> {
@@ -2037,6 +2088,114 @@ mod tests {
             panic!("expected Completed");
         };
         assert_eq!(visible_names(&session), ["Thriller"]);
+    }
+
+    fn load_failed(session: &mut Session, generation: u64) -> LibraryApplied {
+        session.apply_library_event(LibraryEvent::LoadFailed {
+            generation,
+            provider_id: session.providers.registry.active_id().to_string(),
+            reason: "boom".into(),
+        })
+    }
+
+    #[test]
+    fn failed_reload_keeps_the_visible_library_and_covers() {
+        let mut session = test_session();
+        loaded(
+            &mut session,
+            vec![album("A", "x", 1), album("B", "x", 2)],
+            covers(&[("a", 1), ("b", 2)]),
+        );
+        let generation = session.library.begin_reload_generation();
+        session.library.scanning = true;
+        assert!(session.library.begin_incremental_reload(generation));
+        session.library.covers.begin_staging();
+        // Only part of the library arrived before the failure.
+        batch(
+            &mut session,
+            generation,
+            vec![album("C", "x", 3)],
+            covers(&[("c", 3)]),
+        );
+
+        let applied = load_failed(&mut session, generation);
+        assert!(matches!(applied, LibraryApplied::ActionFailed(r) if r == "boom"));
+        assert!(!session.library.scanning);
+        assert_eq!(visible_names(&session), ["A", "B"]);
+        assert!(session.library.covers.contains("a") && session.library.covers.contains("b"));
+        assert!(!session.library.covers.contains("c"));
+        // The dropped staging cannot be swapped in by a late completion.
+        assert!(!session.library.is_staging(generation));
+    }
+
+    #[test]
+    fn failed_reload_is_ignored_once_superseded() {
+        let mut session = test_session();
+        let generation = session.library.begin_reload_generation();
+        session.library.begin_reload_generation();
+        assert!(matches!(
+            load_failed(&mut session, generation),
+            LibraryApplied::Stale
+        ));
+    }
+
+    /// A local provider whose library query always fails.
+    struct FailingProvider;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl MusicProvider for FailingProvider {
+        fn id(&self) -> &str {
+            "local"
+        }
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Local
+        }
+        async fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
+            Err(ProviderError::Database("disk I/O".into()))
+        }
+        async fn browse_artists(&self) -> Result<Vec<crate::library::Artist>, ProviderError> {
+            Ok(Vec::new())
+        }
+        async fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
+            Ok(Vec::new())
+        }
+        async fn search(&self, _query: &str) -> Result<Vec<Track>, ProviderError> {
+            Ok(Vec::new())
+        }
+        async fn get_cover_art(&self, _album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
+            Ok(None)
+        }
+        async fn get_lyrics(
+            &self,
+            _track: &Track,
+        ) -> Result<Option<crate::library::Lyrics>, ProviderError> {
+            Ok(None)
+        }
+        async fn sync_library(
+            &self,
+            _progress: Arc<crate::library::scan_progress::ScanProgress>,
+        ) -> Result<usize, ProviderError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn local_database_error_keeps_the_library() {
+        let mut session = test_session();
+        loaded(&mut session, vec![album("A", "x", 1)], covers(&[("a", 1)]));
+        let generation = session.library.begin_reload_generation();
+        let id = session.providers.registry.active_id().to_string();
+        let event = load_local(Arc::new(FailingProvider), generation, id).await;
+        assert!(matches!(event, LibraryEvent::LoadFailed { .. }));
+
+        let applied = session.apply_library_event(event);
+        assert!(matches!(applied, LibraryApplied::ActionFailed(r) if r.contains("disk I/O")));
+        assert_eq!(visible_names(&session), ["A"]);
+        assert!(session.library.covers.contains("a"));
     }
 
     #[test]

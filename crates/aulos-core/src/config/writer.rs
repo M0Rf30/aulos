@@ -104,13 +104,16 @@ fn write(path: &Path, written: &mut Config, config: Config) {
     }
     let start = web_time::Instant::now();
     match config.save_to(path) {
-        Ok(()) => tracing::debug!(
-            "config saved in {:.1} ms",
-            start.elapsed().as_secs_f64() * 1000.0
-        ),
+        Ok(()) => {
+            tracing::debug!(
+                "config saved in {:.1} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            *written = config;
+        }
+        // Keep the old baseline so the next save of this config retries.
         Err(e) => tracing::error!("Failed to save config: {e}"),
     }
-    *written = config;
 }
 
 #[cfg(test)]
@@ -161,6 +164,23 @@ mod tests {
         writer.save(&Config::default());
         writer.flush();
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_failed_write_is_retried_on_the_next_save() {
+        let path = path("retry");
+        // A directory squatting on the target makes the rename fail.
+        std::fs::create_dir_all(path.join("blocker")).unwrap();
+        let writer = ConfigWriter::spawn(path.clone(), Config::default()).unwrap();
+        writer.save(&with_volume(0.5));
+        writer.flush();
+        assert!(path.is_dir());
+        std::fs::remove_dir_all(&path).unwrap();
+        // The identical config must be written now, not skipped as unchanged.
+        writer.save(&with_volume(0.5));
+        writer.flush();
+        assert_eq!(Config::load_from(&path), with_volume(0.5));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

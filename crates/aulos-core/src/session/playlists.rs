@@ -364,19 +364,13 @@ impl Session {
         })
     }
 
-    /// Appends a track (by source URI) to the playlist `playlist_id`.
-    pub fn add_to_playlist(
-        &self,
-        playlist_id: String,
-        track_source_uri: String,
-    ) -> Effect<PlaylistEvent> {
+    /// Appends a track (by [`playlist_track_id`]) to the playlist `playlist_id`.
+    pub fn add_to_playlist(&self, playlist_id: String, track_id: String) -> Effect<PlaylistEvent> {
         let Some(provider) = self.playlist_provider() else {
             return Effect::none();
         };
         Effect::future(async move {
-            let result = provider
-                .add_to_playlist(&playlist_id, &[track_source_uri])
-                .await;
+            let result = provider.add_to_playlist(&playlist_id, &[track_id]).await;
             op_done(PlaylistOp::AddTrack, result)
         })
     }
@@ -503,8 +497,18 @@ impl Session {
     }
 }
 
-/// Runs a smart-playlist list query on the blocking pool; a failure is
-/// logged (prefixed with `what`) and yields an empty list.
+/// The id a provider's `add_to_playlist` expects for `track`: the database id
+/// for the local library, else `path` (the MPD URI or the Subsonic song id;
+/// `source_uri` is a signed stream URL for Subsonic).
+#[must_use]
+pub fn playlist_track_id(track: &Track) -> String {
+    if track.id != 0 {
+        track.id.to_string()
+    } else {
+        track.path.to_string_lossy().into_owned()
+    }
+}
+
 /// The event of a finished playlist mutation.
 fn op_done(op: PlaylistOp, result: Result<(), ProviderError>) -> PlaylistEvent {
     PlaylistEvent::OpDone {
@@ -513,6 +517,8 @@ fn op_done(op: PlaylistOp, result: Result<(), ProviderError>) -> PlaylistEvent {
     }
 }
 
+/// Runs a smart-playlist list query on the blocking pool; a failure is
+/// logged (prefixed with `what`) and yields an empty list.
 fn smart_list_effect(
     what: &'static str,
     f: impl FnOnce() -> Result<Vec<SmartPlaylist>, String> + Send + 'static,

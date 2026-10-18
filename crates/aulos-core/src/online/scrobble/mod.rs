@@ -162,7 +162,8 @@ pub(crate) fn http_client() -> &'static crate::http::blocking::Client {
 
 /// Map a transport-level failure to a [`ScrobbleError`].
 pub(crate) fn net_error(e: crate::http::Error) -> ScrobbleError {
-    ScrobbleError::Transient(format!("network error: {e}"))
+    // reqwest's Display appends the request URL, which carries api_key/user.
+    ScrobbleError::Transient(format!("network error: {}", e.without_url()))
 }
 
 /// Whether `provider_id` identifies a stream source (radio / podcast) that

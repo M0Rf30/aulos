@@ -53,6 +53,7 @@ impl LibraryScanner {
         for dir in roots {
             progress.set_root(dir);
             let mut complete = true;
+            let mut found_audio = false;
             // Files that are new or changed, probed in parallel below.
             let mut todo: Vec<(PathBuf, i64)> = Vec::new();
             for entry in WalkDir::new(dir).follow_links(true) {
@@ -71,6 +72,7 @@ impl LibraryScanner {
                 if !Self::is_audio_file(path) {
                     continue;
                 }
+                found_audio = true;
 
                 let metadata = match std::fs::metadata(path) {
                     Ok(metadata) => metadata,
@@ -120,7 +122,15 @@ impl LibraryScanner {
                 }
                 db.commit_batch()?;
             }
-            if complete {
+            // An existing root with no audio at all is most likely an
+            // unmounted drive or share: pruning would cascade-delete
+            // playlists, history and favourites, so leave it alone.
+            if complete && !found_audio {
+                tracing::warn!(
+                    "Music root {} has no audio files; keeping its tracks",
+                    dir.display()
+                );
+            } else if complete {
                 complete_roots.push(dir.clone());
             }
         }
@@ -414,13 +424,24 @@ mod tests {
         let root = temp_root("deleted-track");
         db.upsert_track(&local_track(root.join("gone.mp3")), 0)
             .unwrap();
+        // Another audio file (unreadable, so never indexed) shows the root
+        // is really mounted.
+        fs::write(root.join("kept.mp3"), b"not audio").unwrap();
 
-        assert_eq!(
-            LibraryScanner::scan(&db, std::slice::from_ref(&root), &ScanProgress::default())
-                .unwrap(),
-            0
-        );
+        LibraryScanner::scan(&db, std::slice::from_ref(&root), &ScanProgress::default()).unwrap();
         assert!(db.all_tracks(None).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_root_preserves_existing_tracks() {
+        let db = LibraryDb::open_memory().unwrap();
+        let root = temp_root("empty-root");
+        db.upsert_track(&local_track(root.join("gone.mp3")), 0)
+            .unwrap();
+
+        LibraryScanner::scan(&db, std::slice::from_ref(&root), &ScanProgress::default()).unwrap();
+        assert_eq!(db.all_tracks(None).unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 }

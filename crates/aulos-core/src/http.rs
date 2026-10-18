@@ -256,6 +256,11 @@ mod web {
             false
         }
 
+        #[must_use]
+        pub fn without_url(self) -> Self {
+            self
+        }
+
         pub fn status(&self) -> Option<reqwest::StatusCode> {
             None
         }

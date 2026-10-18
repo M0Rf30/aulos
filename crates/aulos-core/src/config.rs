@@ -618,7 +618,7 @@ impl Config {
             Ok(text) => text,
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::error!("Cannot read settings {}: {e}", path.display());
+                    Self::set_aside(path, &format!("unreadable: {e}"));
                 }
                 return Config::default();
             }
@@ -626,23 +626,30 @@ impl Config {
         match Self::parse(&text) {
             Ok(config) => config,
             Err(e) => {
-                let mut bad = path.as_os_str().to_owned();
-                bad.push(".bad");
-                tracing::error!(
-                    "Invalid settings {} ({e}); keeping it as {} and using defaults",
-                    path.display(),
-                    Path::new(&bad).display()
-                );
-                if let Err(e) = std::fs::rename(path, &bad) {
-                    tracing::warn!("Could not move the invalid settings aside: {e}");
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600));
-                }
+                Self::set_aside(path, &format!("invalid: {e}"));
                 Config::default()
             }
+        }
+    }
+
+    /// Moves a settings file that cannot be used to `<path>.bad`, so the
+    /// defaults that replace it are never written over the user's data.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_aside(path: &Path, why: &str) {
+        let mut bad = path.as_os_str().to_owned();
+        bad.push(".bad");
+        tracing::error!(
+            "Settings {} {why}; keeping it as {} and using defaults",
+            path.display(),
+            Path::new(&bad).display()
+        );
+        if let Err(e) = std::fs::rename(path, &bad) {
+            tracing::warn!("Could not move the unusable settings aside: {e}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600));
         }
     }
 
@@ -695,6 +702,12 @@ impl Config {
                 options.mode(0o600);
             }
             let mut file = options.open(&tmp)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // `mode` only applies on creation; a leftover tmp may be looser.
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)
@@ -1003,6 +1016,21 @@ mod persistence_tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.ron.bad")).unwrap(),
             "(volume: not-a-number"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_non_utf8_file_is_kept_aside_and_defaults_are_used() {
+        let dir = scratch("non-utf8");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x28]).unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(dir.join("settings.ron.bad")).unwrap(),
+            [0xff, 0xfe, 0x00, 0x28]
         );
         let _ = std::fs::remove_dir_all(dir);
     }
