@@ -96,6 +96,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let surface = ui.allocate_rect(rect, Sense::click());
 
     // -- input ----------------------------------------------------------------
+    let compact = app.compact();
     let st = &mut app.views.visualizer;
     let active = ctx.input(|i| {
         i.events.iter().any(|e| {
@@ -154,11 +155,24 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     if alpha > 0.0 {
         let t = Theme::get(&ctx);
-        top_bar(&ctx, rect, alpha, st, &app.viz_settings, &mut intents);
+        let hud_bottom = top_bar(
+            &ctx,
+            rect,
+            alpha,
+            compact,
+            st,
+            &app.viz_settings,
+            &mut intents,
+        );
         let track = app.session.playback.current_track.as_ref();
         now_playing(&ctx, rect, alpha, &app.covers, track, &frame);
         if st.browser {
-            browser(&ctx, rect, alpha, &t, st, &frame, &mut intents);
+            let top = hud_bottom + 12.0;
+            let sheet = Sheet {
+                compact,
+                settings: &app.viz_settings,
+            };
+            browser(&ctx, rect, top, alpha, &t, st, &frame, sheet, &mut intents);
         }
     }
     if let Some(failure) = &frame.failure {
@@ -232,17 +246,24 @@ fn hud_button<'a>(glyph: &'a str, tip: impl Into<std::borrow::Cow<'a, str>>) -> 
         .tip(tip)
 }
 
+/// The HUD's top controls; returns where they end. A phone gets the minimum
+/// over the picture: close, and one chip with previous / random / next preset
+/// and the browser. The lock and the beat slider live in the browser sheet
+/// there, and there is no fullscreen toggle (the view already fills the
+/// screen).
 fn top_bar(
     ctx: &Context,
     rect: Rect,
     alpha: f32,
+    compact: bool,
     st: &State,
     settings: &crate::viz::Settings,
     out: &mut Vec<Intent>,
-) {
-    Area::new(Id::new("viz_close"))
+) -> f32 {
+    let top = rect.top() + 14.0;
+    let close = Area::new(Id::new("viz_close"))
         .order(Order::Foreground)
-        .fixed_pos(pos2(rect.left() + 16.0, rect.top() + 14.0))
+        .fixed_pos(pos2(rect.left() + 16.0, top))
         .show(ctx, |ui| {
             ui.set_opacity(alpha);
             chip(ui, |ui| {
@@ -253,109 +274,179 @@ fn top_bar(
                     out.push(Intent::Close);
                 }
             });
-        });
+        })
+        .response
+        .rect;
 
-    Area::new(Id::new("viz_controls"))
-        .order(Order::Foreground)
-        .pivot(Align2::RIGHT_TOP)
-        .fixed_pos(pos2(rect.right() - 16.0, rect.top() + 14.0))
-        .show(ctx, |ui| {
-            ui.set_opacity(alpha);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.horizontal(|ui| {
-                chip(ui, |ui| {
-                    let (glyph, tip, filled) = if settings.locked {
-                        (fill::LOCK, aulos_core::fl!("viz-preset-locked-tip"), true)
-                    } else {
-                        (
-                            regular::LOCK_OPEN,
-                            aulos_core::fl!("viz-lock-preset-tip"),
-                            false,
-                        )
-                    };
-                    let mut button = hud_button(glyph, tip).filled(filled);
-                    if settings.locked {
-                        button = button.active(true);
-                    }
-                    if button.show(ui).clicked() {
-                        out.push(Intent::ToggleLock);
-                    }
-                    if settings.locked {
-                        ui.label(
-                            egui::RichText::new(aulos_core::fl!("viz-preset-locked"))
-                                .font(theme::regular(12.5))
-                                .color(Color32::WHITE),
-                        );
-                        ui.add_space(8.0);
-                    }
-                });
-                chip(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(aulos_core::fl!("viz-beat"))
-                            .font(theme::regular(12.5))
-                            .color(Color32::WHITE),
-                    );
-                    let (resp, new) = slider_bar(
-                        ui,
-                        settings.sensitivity / 2.0,
-                        vec2(60.0, 20.0),
-                        Color32::WHITE,
-                    );
-                    resp.on_hover_text(aulos_core::fl!("viz-beat-sensitivity"));
-                    if let Some(v) = new {
-                        out.push(Intent::Sensitivity(v * 2.0));
-                    }
-                    ui.add_space(6.0);
-                });
-                chip(ui, |ui| {
-                    if hud_button(regular::SKIP_BACK, aulos_core::fl!("viz-previous-preset"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        out.push(Intent::Step(-1));
-                    }
-                    if hud_button(regular::SHUFFLE, aulos_core::fl!("viz-random-preset"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        out.push(Intent::Random);
-                    }
-                    if hud_button(regular::SKIP_FORWARD, aulos_core::fl!("viz-next-preset"))
-                        .show(ui)
-                        .clicked()
-                    {
-                        out.push(Intent::Step(1));
-                    }
-                });
-                chip(ui, |ui| {
-                    if hud_button(
-                        regular::LIST_MAGNIFYING_GLASS,
-                        aulos_core::fl!("viz-preset-browser"),
-                    )
-                    .active(st.browser)
-                    .show(ui)
-                    .clicked()
-                    {
-                        out.push(Intent::ToggleBrowser);
-                    }
-                    let (glyph, tip) = if st.fullscreen {
-                        (
-                            regular::ARROWS_IN_SIMPLE,
-                            aulos_core::fl!("viz-leave-fullscreen"),
-                        )
-                    } else {
-                        (
-                            regular::ARROWS_OUT_SIMPLE,
-                            aulos_core::fl!("viz-fullscreen"),
-                        )
-                    };
-                    if hud_button(glyph, tip).show(ui).clicked() {
-                        out.push(Intent::ToggleFullscreen);
-                    }
-                });
-            });
+    let row = |id: &str, pos: egui::Pos2, pivot: Align2, add: &mut dyn FnMut(&mut Ui)| {
+        Area::new(Id::new(id))
+            .order(Order::Foreground)
+            .pivot(pivot)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.horizontal(|ui| add(ui));
+            })
+            .response
+            .rect
+    };
+    let right = pos2(rect.right() - 16.0, top);
+    if compact {
+        row("viz_controls", right, Align2::RIGHT_TOP, &mut |ui| {
+            phone_chip(ui, st, out);
         });
+        close.bottom()
+    } else {
+        let controls = row("viz_controls", right, Align2::RIGHT_TOP, &mut |ui| {
+            lock_chip(ui, settings, true, out);
+            beat_chip(ui, settings, out);
+            preset_chip(ui, out);
+            view_chip(ui, st, out);
+        });
+        controls.bottom().max(close.bottom())
+    }
+}
+
+/// The preset lock; `label` adds the "locked" caption while it is on.
+fn lock_chip(ui: &mut Ui, settings: &crate::viz::Settings, label: bool, out: &mut Vec<Intent>) {
+    chip(ui, |ui| {
+        let (glyph, tip, filled) = if settings.locked {
+            (fill::LOCK, aulos_core::fl!("viz-preset-locked-tip"), true)
+        } else {
+            (
+                regular::LOCK_OPEN,
+                aulos_core::fl!("viz-lock-preset-tip"),
+                false,
+            )
+        };
+        let mut button = hud_button(glyph, tip).filled(filled);
+        if settings.locked {
+            button = button.active(true);
+        }
+        if button.show(ui).clicked() {
+            out.push(Intent::ToggleLock);
+        }
+        if settings.locked && label {
+            ui.label(
+                egui::RichText::new(aulos_core::fl!("viz-preset-locked"))
+                    .font(theme::regular(12.5))
+                    .color(Color32::WHITE),
+            );
+            ui.add_space(8.0);
+        }
+    });
+}
+
+/// Beat sensitivity slider.
+fn beat_chip(ui: &mut Ui, settings: &crate::viz::Settings, out: &mut Vec<Intent>) {
+    chip(ui, |ui| {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(aulos_core::fl!("viz-beat"))
+                .font(theme::regular(12.5))
+                .color(Color32::WHITE),
+        );
+        let (resp, new) = slider_bar(
+            ui,
+            settings.sensitivity / 2.0,
+            vec2(60.0, 20.0),
+            Color32::WHITE,
+        );
+        resp.on_hover_text(aulos_core::fl!("viz-beat-sensitivity"));
+        if let Some(v) = new {
+            out.push(Intent::Sensitivity(v * 2.0));
+        }
+        ui.add_space(6.0);
+    });
+}
+
+/// Previous / random / next preset.
+fn preset_chip(ui: &mut Ui, out: &mut Vec<Intent>) {
+    chip(ui, |ui| {
+        if hud_button(regular::SKIP_BACK, aulos_core::fl!("viz-previous-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Step(-1));
+        }
+        if hud_button(regular::SHUFFLE, aulos_core::fl!("viz-random-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Random);
+        }
+        if hud_button(regular::SKIP_FORWARD, aulos_core::fl!("viz-next-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Step(1));
+        }
+    });
+}
+
+/// A phone's one control chip: previous / random / next preset, browser.
+fn phone_chip(ui: &mut Ui, st: &State, out: &mut Vec<Intent>) {
+    chip(ui, |ui| {
+        if hud_button(regular::SKIP_BACK, aulos_core::fl!("viz-previous-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Step(-1));
+        }
+        if hud_button(regular::SHUFFLE, aulos_core::fl!("viz-random-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Random);
+        }
+        if hud_button(regular::SKIP_FORWARD, aulos_core::fl!("viz-next-preset"))
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::Step(1));
+        }
+        if hud_button(
+            regular::LIST_MAGNIFYING_GLASS,
+            aulos_core::fl!("viz-preset-browser"),
+        )
+        .active(st.browser)
+        .show(ui)
+        .clicked()
+        {
+            out.push(Intent::ToggleBrowser);
+        }
+    });
+}
+
+/// Preset browser and fullscreen toggles.
+fn view_chip(ui: &mut Ui, st: &State, out: &mut Vec<Intent>) {
+    chip(ui, |ui| {
+        if hud_button(
+            regular::LIST_MAGNIFYING_GLASS,
+            aulos_core::fl!("viz-preset-browser"),
+        )
+        .active(st.browser)
+        .show(ui)
+        .clicked()
+        {
+            out.push(Intent::ToggleBrowser);
+        }
+        let (glyph, tip) = if st.fullscreen {
+            (
+                regular::ARROWS_IN_SIMPLE,
+                aulos_core::fl!("viz-leave-fullscreen"),
+            )
+        } else {
+            (
+                regular::ARROWS_OUT_SIMPLE,
+                aulos_core::fl!("viz-fullscreen"),
+            )
+        };
+        if hud_button(glyph, tip).show(ui).clicked() {
+            out.push(Intent::ToggleFullscreen);
+        }
+    });
 }
 
 fn now_playing(
@@ -426,13 +517,23 @@ fn now_playing(
         });
 }
 
+/// What the browser sheet needs besides the presets.
+struct Sheet<'a> {
+    /// Phone: the sheet also holds the lock and the beat slider.
+    compact: bool,
+    settings: &'a crate::viz::Settings,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn browser(
     ctx: &Context,
     rect: Rect,
+    top: f32,
     alpha: f32,
     t: &Theme,
     st: &mut State,
     frame: &VizFrame,
+    sheet: Sheet,
     out: &mut Vec<Intent>,
 ) {
     let entries: Arc<Vec<PresetEntry>> = frame.entries.clone().unwrap_or_default();
@@ -443,7 +544,6 @@ fn browser(
         st.rows_for = Some(stamp);
     }
     let current = current_row(&st.rows, &entries, frame.preset.as_deref());
-    let top = rect.top() + 56.0;
     let height = (rect.bottom() - 16.0 - top).max(120.0);
     let search_id = Id::new("viz_browser_search");
 
@@ -460,6 +560,14 @@ fn browser(
                     ui.set_width(BROWSER_W - 20.0);
                     ui.set_height(height - 20.0);
                     ui.spacing_mut().item_spacing.y = 4.0;
+                    if sheet.compact {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            lock_chip(ui, sheet.settings, false, out);
+                            beat_chip(ui, sheet.settings, out);
+                        });
+                        ui.add_space(4.0);
+                    }
                     let hint = aulos_core::fl!("viz-search-presets", count = entries.len());
                     let before = st.query.clone();
                     search_field(ui, &mut st.query, &hint, BROWSER_W - 20.0, search_id);

@@ -73,6 +73,7 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         .background_color(t.pal.surface_2);
     let resp = ui.add(edit);
     let focused = resp.has_focus();
+    reveal_focused(ui, &resp);
     ui.painter().rect_stroke(
         resp.rect,
         CornerRadius::same(8),
@@ -80,6 +81,21 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         StrokeKind::Inside,
     );
     resp
+}
+
+/// Keeps a focused field on screen: scrolls the enclosing scroll area when the
+/// field is (partly) outside its viewport. The soft keyboard shrinks the
+/// window after the tap that focused the field, which can push a field in the
+/// lower half of a page under the keyboard; this follows the shrinking window
+/// until the field shows. No-op outside a scroll area.
+pub fn reveal_focused(ui: &Ui, resp: &Response) {
+    if !resp.has_focus() {
+        return;
+    }
+    let view = ui.clip_rect();
+    if resp.rect.top() < view.top() || resp.rect.bottom() > view.bottom() {
+        resp.scroll_to_me(None);
+    }
 }
 
 /// Records that the text field `id` is a password field. egui keeps no such

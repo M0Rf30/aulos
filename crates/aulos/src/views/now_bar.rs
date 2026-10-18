@@ -193,16 +193,27 @@ fn track_info(app: &mut App, ui: &mut Ui) {
             t.pal.text_4,
             false,
         );
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(aulos_core::fl!("nowbar-nothing-playing"))
-                    .font(theme::semibold(13.5))
-                    .color(t.pal.text_2),
+        // Same box as a playing track's title block, so the two lines centre
+        // on the cover slot instead of hugging the top of the bar.
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 52.0), Layout::top_down(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add_space(8.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(aulos_core::fl!("nowbar-nothing-playing"))
+                        .font(theme::semibold(13.5))
+                        .color(t.pal.text_2),
+                )
+                .truncate(),
             );
-            ui.label(
-                egui::RichText::new(aulos_core::fl!("nowbar-pick-something"))
-                    .font(theme::regular(12.5))
-                    .color(t.pal.text_3),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(aulos_core::fl!("nowbar-pick-something"))
+                        .font(theme::regular(12.5))
+                        .color(t.pal.text_3),
+                )
+                .truncate(),
             );
         });
         return;

@@ -122,14 +122,22 @@ impl<'a> IconBtn<'a> {
         } else {
             self.size
         };
-        let (rect, mut resp) = ui.allocate_exact_size(
-            Vec2::splat(size),
-            if self.enabled {
-                Sense::click()
-            } else {
-                Sense::hover()
-            },
-        );
+        let sense = if self.enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        // A caller that pinned the button to a slot of its drawn size gets the
+        // bigger box grown around the slot's centre, not from its corner, so
+        // the glyph stays where the caller placed (and painted around) it.
+        let slot = ui.max_rect();
+        let pinned = size > self.size && slot.width() <= self.size && slot.height() <= self.size;
+        let (rect, mut resp) = if pinned {
+            let rect = Rect::from_center_size(slot.center(), Vec2::splat(size));
+            (rect, ui.allocate_rect(rect, sense))
+        } else {
+            ui.allocate_exact_size(Vec2::splat(size), sense)
+        };
         let radius = if self.round {
             CornerRadius::same(255)
         } else {

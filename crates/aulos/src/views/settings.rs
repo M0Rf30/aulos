@@ -911,6 +911,7 @@ fn input(
     if password {
         crate::widgets::mark_password(ui.ctx(), resp.id);
     }
+    crate::widgets::reveal_focused(ui, &resp);
     ui.painter().rect_stroke(
         resp.rect,
         CornerRadius::same(6),
@@ -1689,8 +1690,8 @@ fn sec_sources(app: &mut App, ui: &mut Ui) {
     }
 
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         if pill_button(
             ui,
             &aulos_core::fl!("settings-add-mpd"),
@@ -2054,8 +2055,10 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
             small_text(ui, s, if failed { pal.danger } else { pal.ok });
             ui.add_space(8.0);
         }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+        // Wraps: four buttons are wider than a phone, and a plain row would
+        // widen the whole card past the screen and overlap its buttons.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             out.save = pill_button(
                 ui,
                 &aulos_core::fl!("save"),
@@ -2084,17 +2087,15 @@ fn server_editor(app: &mut App, ui: &mut Ui, at: CardRef) {
                 0.0,
             )
             .clicked();
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                out.remove = pill_button(
-                    ui,
-                    &aulos_core::fl!("remove"),
-                    Some(ph::TRASH),
-                    PillKind::Danger,
-                    30.0,
-                    0.0,
-                )
-                .clicked();
-            });
+            out.remove = pill_button(
+                ui,
+                &aulos_core::fl!("remove"),
+                Some(ph::TRASH),
+                PillKind::Danger,
+                30.0,
+                0.0,
+            )
+            .clicked();
         });
     });
 

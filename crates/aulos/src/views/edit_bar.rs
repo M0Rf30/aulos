@@ -5,9 +5,10 @@
 //! system clipboard nor an input connection, so the soft keyboard cannot
 //! paste and a text field has no selection menu. This module bridges the
 //! gap: the system clipboard (`android::clipboard_text`) feeds egui's paste
-//! events and receives its copies, and a small bar above the focused text
-//! field offers Paste, Select all, Copy and Cut (the last two not on password
-//! fields, where egui ignores them), kept above the soft keyboard.
+//! events and receives its copies, and a long press in a text field opens a
+//! small bar above it with Paste, Select all, Copy and Cut (the last two not
+//! on password fields, where egui ignores them), kept above the soft
+//! keyboard. As on Android, focusing a field only shows the keyboard.
 //!
 //! A bar button cannot act in the frame it is tapped (the field was drawn
 //! earlier in that frame), so it records a [`Command`] that [`begin`]
@@ -98,6 +99,7 @@ pub fn show(ctx: &Context) {
     if let Some(text) = copied {
         android::set_clipboard_text(&text);
     }
+    record_long_press(ctx);
     let Some(id) = ctx.memory(|m| m.focused()) else {
         return;
     };
@@ -110,6 +112,25 @@ pub fn show(ctx: &Context) {
     let Some(field) = ctx.read_response(id).map(|r| r.rect) else {
         return;
     };
+    let bar_rect: Option<egui::Rect> = ctx.data(|d| d.get_temp(Id::new(BAR_RECT)));
+    let pressed_at = ctx.input(|i| {
+        i.pointer
+            .any_pressed()
+            .then(|| i.pointer.interact_pos())
+            .flatten()
+    });
+    // A tap away from field and bar drops the focus (and the keyboard).
+    if pressed_at
+        .is_some_and(|p| !field.expand(4.0).contains(p) && !bar_rect.is_some_and(|b| b.contains(p)))
+    {
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        close_menu(ctx);
+        return;
+    }
+    if !menu_open(ctx, id, field, bar_rect, pressed_at) {
+        ctx.data_mut(|d| d.remove::<egui::Rect>(Id::new(BAR_RECT)));
+        return;
+    }
     let selected = state.cursor.char_range().is_some_and(|r| !r.is_empty());
     // egui ignores Copy and Cut on a password field: do not offer them.
     let copyable = !crate::widgets::is_password(ctx, id);
@@ -174,18 +195,86 @@ pub fn show(ctx: &Context) {
         })
         .response
         .rect;
+    ctx.data_mut(|d| d.insert_temp(Id::new(BAR_RECT), bar));
     if let Some(command) = chosen {
         ctx.data_mut(|d| d.insert_temp(Id::new(PENDING), (id, command)));
+        close_menu(ctx);
         ctx.request_repaint();
-        return;
     }
-    let pressed_away = ctx.input(|i| {
-        i.pointer.any_pressed()
+}
+
+/// Where the bar was drawn last frame (a tap on it is not "away").
+const BAR_RECT: &str = "edit_bar_rect";
+/// The field whose menu is open.
+const MENU: &str = "edit_bar_menu";
+/// Where and when the last long press was held.
+const LONG_PRESS: &str = "edit_bar_long_press";
+/// How long a finger stays down for a long press.
+const LONG_PRESS_SECS: f64 = 0.5;
+
+/// Remembers where a finger has been held still for [`LONG_PRESS_SECS`].
+/// Runs every frame, also while no field has focus yet.
+fn record_long_press(ctx: &Context) {
+    let now = ctx.input(|i| i.time);
+    let (down, held, pos) = ctx.input(|i| {
+        let down = i.pointer.primary_down();
+        let held = down
             && i.pointer
-                .interact_pos()
-                .is_some_and(|p| !field.expand(4.0).contains(p) && !bar.contains(p))
+                .press_start_time()
+                .is_some_and(|t| now - t >= LONG_PRESS_SECS)
+            && !i.pointer.is_decidedly_dragging();
+        (down, held, i.pointer.interact_pos())
     });
-    if pressed_away {
-        ctx.memory_mut(|m| m.surrender_focus(id));
+    if down && !held {
+        // Keep frames coming until the hold is long enough.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
+    if held && let Some(pos) = pos {
+        ctx.data_mut(|d| d.insert_temp(Id::new(LONG_PRESS), (pos, now)));
+    }
+}
+
+fn close_menu(ctx: &Context) {
+    ctx.data_mut(|d| {
+        d.remove::<Id>(Id::new(MENU));
+        d.remove::<(egui::Pos2, f64)>(Id::new(LONG_PRESS));
+    });
+}
+
+/// Android's rule: the Paste / Select all menu appears on a long press in a
+/// field, not when it gets focus, and goes away on typing, on a tap in the
+/// field or away from it, and once an entry is chosen. A press held still for
+/// [`LONG_PRESS_SECS`] counts even if the finger lifted before the field had
+/// focus (egui focuses a field on release), so the press is remembered for a
+/// moment.
+fn menu_open(
+    ctx: &Context,
+    id: Id,
+    field: egui::Rect,
+    bar: Option<egui::Rect>,
+    pressed_at: Option<egui::Pos2>,
+) -> bool {
+    let now = ctx.input(|i| i.time);
+    let typed = ctx.input(|i| {
+        i.events
+            .iter()
+            .any(|e| matches!(e, Event::Text(_) | Event::Paste(_)))
+    });
+    // A tap in the field closes an open menu; a tap on the bar is a choice.
+    let tapped_field = pressed_at
+        .is_some_and(|p| field.expand(4.0).contains(p) && !bar.is_some_and(|b| b.contains(p)));
+    if typed || tapped_field {
+        close_menu(ctx);
+    }
+    let long: Option<(egui::Pos2, f64)> = ctx.data(|d| d.get_temp(Id::new(LONG_PRESS)));
+    if let Some((at, when)) = long
+        && now - when < 1.5
+        && field.expand(4.0).contains(at)
+    {
+        ctx.data_mut(|d| {
+            d.insert_temp(Id::new(MENU), id);
+            d.remove::<(egui::Pos2, f64)>(Id::new(LONG_PRESS));
+        });
+    }
+    ctx.data(|d| d.get_temp::<Id>(Id::new(MENU))) == Some(id)
 }
