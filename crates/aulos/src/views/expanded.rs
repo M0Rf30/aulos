@@ -439,19 +439,29 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
         pos2(rect.right() - 20.0 - 32.0, rect.top() + 12.0),
         vec2(32.0, 32.0),
     );
-    let mini = ui.scope_builder(UiBuilder::new().max_rect(pip), |ui| {
-        IconBtn::new(regular::PICTURE_IN_PICTURE)
-            .size(32.0)
-            .icon_size(17.0)
-            .color(SOFT)
-            .tip(aulos_core::fl!("mini-player"))
-            .show(ui)
-    });
-    if mini.inner.clicked() {
-        let ctx = ui.ctx().clone();
-        app.expanded = false;
-        app.set_mini(&ctx, true);
+    // Phones and the browser have no mini player.
+    let has_mini = App::mini_supported();
+    if has_mini {
+        let mini = ui.scope_builder(UiBuilder::new().max_rect(pip), |ui| {
+            IconBtn::new(regular::PICTURE_IN_PICTURE)
+                .size(32.0)
+                .icon_size(17.0)
+                .color(SOFT)
+                .tip(aulos_core::fl!("mini-player"))
+                .show(ui)
+        });
+        if mini.inner.clicked() {
+            let ctx = ui.ctx().clone();
+            app.expanded = false;
+            app.set_mini(&ctx, true);
+        }
     }
+    // The rightmost button's rect: the mini player's, else the visualizer's.
+    let pip = if has_mini {
+        pip
+    } else {
+        Rect::from_min_size(pip.right_top() + vec2(4.0, 0.0), vec2(0.0, 32.0))
+    };
 
     // The visualizer toggle sits left of the mini-player button.
     #[cfg(feature = "visualizer")]
@@ -480,11 +490,12 @@ fn header(app: &mut App, ui: &mut Ui, rect: Rect, track: Option<&Track>) {
     let extra = 0.0;
 
     // Volume sits left of the buttons.
+    let pip_w = if has_mini { 32.0 } else { 0.0 };
     let with_volume = rect.width() >= 640.0;
     let side = if with_volume {
-        20.0 + 32.0 + extra + 8.0 + VOLUME_W + 30.0 + 12.0
+        20.0 + pip_w + extra + 8.0 + VOLUME_W + 30.0 + 12.0
     } else {
-        20.0 + 32.0 + extra + 36.0 + 12.0
+        20.0 + pip_w + extra + 36.0 + 12.0
     };
     if with_volume {
         volume_control(app, ui, buttons_left - 8.0, rect.top() + 28.0);

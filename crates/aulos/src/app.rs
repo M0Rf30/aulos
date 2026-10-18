@@ -655,9 +655,15 @@ impl App {
             .map_or(self.session.config.config.volume, |p| p.volume())
     }
 
+    /// Whether this platform has a mini player: it is a small, fixed-size
+    /// desktop window, so phones and the browser do without.
+    pub const fn mini_supported() -> bool {
+        cfg!(not(any(target_os = "android", target_arch = "wasm32")))
+    }
+
     /// Switches the window between the full UI and the mini player.
     pub fn set_mini(&mut self, ctx: &Context, mini: bool) {
-        if self.mini == mini {
+        if self.mini == mini || (mini && !Self::mini_supported()) {
             return;
         }
         self.mini = mini;
@@ -667,12 +673,15 @@ impl App {
         }
         if mini {
             self.saved_size = Some(ctx.content_rect().size());
+            // A fixed size: the layout is drawn for it, and compositors that
+            // tile or scale would otherwise hand back any other size.
+            let size = egui::vec2(360.0, 176.0);
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-                360.0, 176.0,
-            )));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(360.0, 176.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
         } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
                 420.0, 190.0,

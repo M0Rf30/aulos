@@ -75,39 +75,45 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     cover_image(ui, &app.covers, cover, tex, &key, 6);
 
     // Window buttons, stacked on the right.
+    let can_pin = pin_supported();
     let pin = Rect::from_min_size(pos2(right - 28.0, top), vec2(28.0, 28.0));
-    let expand = Rect::from_min_size(pos2(right - 28.0, top + 30.0), vec2(28.0, 28.0));
-    let pinned = app.views.mini.pinned;
-    if pinned {
-        ui.painter()
-            .rect_filled(pin, CornerRadius::same(6), Color32::WHITE.alpha(0.08));
-    }
-    let pin_resp = ui.scope_builder(UiBuilder::new().max_rect(pin), |ui| {
-        IconBtn::new(if pinned {
-            fill::PUSH_PIN
-        } else {
-            regular::PUSH_PIN
-        })
-        .filled(pinned)
-        .size(28.0)
-        .icon_size(14.0)
-        .color(if pinned { t.accent.fill } else { SUB })
-        .tip(if pinned {
-            aulos_core::fl!("mini-unpin")
-        } else {
-            aulos_core::fl!("mini-keep-on-top")
-        })
-        .show(ui)
-    });
-    if pin_resp.inner.clicked() {
-        app.views.mini.pinned = !pinned;
-        let level = if pinned {
-            WindowLevel::Normal
-        } else {
-            WindowLevel::AlwaysOnTop
-        };
-        ui.ctx()
-            .send_viewport_cmd(ViewportCommand::WindowLevel(level));
+    let expand = Rect::from_min_size(
+        pos2(right - 28.0, top + if can_pin { 30.0 } else { 0.0 }),
+        vec2(28.0, 28.0),
+    );
+    if can_pin {
+        let pinned = app.views.mini.pinned;
+        if pinned {
+            ui.painter()
+                .rect_filled(pin, CornerRadius::same(6), Color32::WHITE.alpha(0.08));
+        }
+        let pin_resp = ui.scope_builder(UiBuilder::new().max_rect(pin), |ui| {
+            IconBtn::new(if pinned {
+                fill::PUSH_PIN
+            } else {
+                regular::PUSH_PIN
+            })
+            .filled(pinned)
+            .size(28.0)
+            .icon_size(14.0)
+            .color(if pinned { t.accent.fill } else { SUB })
+            .tip(if pinned {
+                aulos_core::fl!("mini-unpin")
+            } else {
+                aulos_core::fl!("mini-keep-on-top")
+            })
+            .show(ui)
+        });
+        if pin_resp.inner.clicked() {
+            app.views.mini.pinned = !pinned;
+            let level = if pinned {
+                WindowLevel::Normal
+            } else {
+                WindowLevel::AlwaysOnTop
+            };
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        }
     }
     expand_button(app, ui, expand);
 
@@ -200,6 +206,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         halo: false,
     };
     transport_row(app, ui, row, &style);
+}
+
+/// Always-on-top is a window-level request that Wayland compositors do not
+/// honor, so the pin is offered elsewhere only.
+fn pin_supported() -> bool {
+    !(cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some())
 }
 
 fn expand_button(app: &mut App, ui: &mut Ui, rect: Rect) {
