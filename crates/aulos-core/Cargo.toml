@@ -32,7 +32,7 @@ bytes = "1"
 # out of core) that rodio 0.22 doesn't compile against. Depending on the
 # fork directly (not via `[patch.crates-io]`) sidesteps that conflict
 # entirely, matching the working approach in the sibling `rmpd` project.
-symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "081073690d96b476ce63ea097c06bcbd787fff16", features = [
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "85aa84935574412f6e8a14e502138271ce634f4d", features = [
     "all",
     "dsd",
 ] }
@@ -40,7 +40,7 @@ symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "081073690d
 # `symphonia-tagging` crate (branch `rmpd-next`) shares its field mapping
 # tables with the readers, so what is written is read back identically. Same
 # rev as `symphonia`, so there is one `symphonia-core` in the graph.
-symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "081073690d96b476ce63ea097c06bcbd787fff16" }
+symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "85aa84935574412f6e8a14e502138271ce634f4d" }
 # Pure-Rust Chromaprint port: AcoustID fingerprints for the tag editor's
 # acoustic lookup/submission (`src/library/fingerprint.rs`).
 rusty-chromaprint = "0.3"
