@@ -163,6 +163,12 @@ impl LocalBackend {
         shared.tap.wanted = wanted;
         shared.tap.cursor.reset();
     }
+
+    /// Turns decoder trimming of encoder delay and padding on or off for the
+    /// next track opened; the track being heard keeps its setting.
+    pub fn set_gapless(&mut self, on: bool) {
+        self.shared.borrow_mut().gapless = on;
+    }
 }
 
 impl PlaybackBackend for LocalBackend {
@@ -428,14 +434,15 @@ struct Feeder {
 }
 
 impl Feeder {
-    /// Opens `data` for decoding at `out_rate`.
-    fn open(data: &TrackData, out_rate: u32) -> Result<Self, String> {
+    /// Opens `data` for decoding at `out_rate`; `gapless` trims encoder delay
+    /// and padding.
+    fn open(data: &TrackData, out_rate: u32, gapless: bool) -> Result<Self, String> {
         let len = data.bytes.0.len() as u64;
         let mut decoder = SymphoniaDecoder::open_reader(
             Cursor::new(data.bytes.clone()),
             Some(len),
             data.hint.as_deref(),
-            true,
+            gapless,
         )
         .map_err(|e| format!("This file cannot be played: {e}"))?;
         if decoder.is_dsd() {
@@ -741,6 +748,8 @@ struct Shared {
     error: Option<String>,
     /// Planar scratch for building `AudioBuffer`s.
     planar: Vec<f32>,
+    /// Decoder trimming of encoder delay and padding for tracks opened next.
+    gapless: bool,
     #[cfg(feature = "visualizer")]
     tap: Tap,
 }
@@ -766,6 +775,7 @@ impl Shared {
             pause_epoch: 0,
             error: None,
             planar: Vec::new(),
+            gapless: true,
             #[cfg(feature = "visualizer")]
             tap: Tap::default(),
         }
@@ -888,7 +898,7 @@ impl Shared {
         self.loading = false;
         let opened = loaded.and_then(|data| {
             let rate = self.graph.as_ref().map_or(48_000, |g| g.rate);
-            Feeder::open(&data, rate).map(|feeder| (data, feeder))
+            Feeder::open(&data, rate, self.gapless).map(|feeder| (data, feeder))
         });
         match opened {
             Ok((data, feeder)) => {
@@ -978,7 +988,11 @@ impl Shared {
         self.retire_chunks(fade);
         let result = match self.feeder.take() {
             Some(feeder) if reuse => Ok(feeder),
-            _ => Feeder::open(&current, self.graph.as_ref().map_or(48_000, |g| g.rate)),
+            _ => Feeder::open(
+                &current,
+                self.graph.as_ref().map_or(48_000, |g| g.rate),
+                self.gapless,
+            ),
         }
         .and_then(|mut feeder| feeder.seek(secs).map(|()| feeder));
         let mut feeder = match result {
@@ -1187,7 +1201,7 @@ impl Shared {
             return false;
         };
         let rate = self.graph.as_ref().map_or(48_000, |g| g.rate);
-        match Feeder::open(&data, rate) {
+        match Feeder::open(&data, rate, self.gapless) {
             Ok(feeder) => {
                 self.timeline.begin_next(feeder.duration());
                 self.upcoming = Some(data);
