@@ -255,7 +255,7 @@ fn transcode(
     progress_base: u32,
     progress_span: u32,
 ) -> Result<(), ConvertError> {
-    let mut source = AudioSource::open(source_path)?;
+    let mut source = AudioSource::open(source_path, settings(job).gapless)?;
     if let Some(start) = start.filter(|&s| s > 0.0) {
         source.seek(start)?;
     }
@@ -570,6 +570,8 @@ struct AudioSource {
     time_base: Option<TimeBase>,
     /// Pending sample-accurate seek (frames before the target are discarded).
     seek_skip: Option<SeekSkip>,
+    /// Whether the decoder trims the demuxer-flagged delay/padding.
+    gapless: bool,
 }
 
 impl ResettableSeek for AudioSource {
@@ -590,7 +592,7 @@ impl ResettableSeek for AudioSource {
 }
 
 impl AudioSource {
-    fn open(path: &Path) -> Result<Self, ConvertError> {
+    fn open(path: &Path, gapless: bool) -> Result<Self, ConvertError> {
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -634,7 +636,7 @@ impl AudioSource {
         let time_base = track.time_base;
 
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&audio, &AudioDecoderOptions::default())
+            .make_audio_decoder(&audio, &AudioDecoderOptions::default().gapless(gapless))
             .map_err(|e| ConvertError::Decode(format!("no decoder available: {e}")))?;
 
         // The decoder may report a different output rate than the container (explicitly
@@ -660,6 +662,7 @@ impl AudioSource {
             sample_pos: 0,
             time_base,
             seek_skip: None,
+            gapless,
         })
     }
 
@@ -695,7 +698,13 @@ impl AudioSource {
         let Some(skip) = self.seek_skip.as_mut() else {
             return 0;
         };
-        let valid_start = packet.pts.saturating_add(packet.trim_start);
+        // With gapless on the decoder already dropped `trim_start` frames from the front;
+        // with it off the buffer starts at `pts`.
+        let valid_start = if self.gapless {
+            packet.pts.saturating_add(packet.trim_start)
+        } else {
+            packet.pts
+        };
         let (n, done) = skip.advance(valid_start, frames, tb, rate);
         if done {
             self.seek_skip = None;
@@ -722,8 +731,10 @@ impl AudioSource {
                 };
                 (track.id, track.time_base, audio)
             };
-        self.decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&audio, &AudioDecoderOptions::default())?;
+        self.decoder = symphonia::default::get_codecs().make_audio_decoder(
+            &audio,
+            &AudioDecoderOptions::default().gapless(self.gapless),
+        )?;
         self.track_id = track_id;
         self.time_base = time_base;
         self.sample_buf.clear();
@@ -771,7 +782,14 @@ impl AudioSource {
 
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
-                Err(SymphoniaError::DecodeError(_)) => continue,
+                // A corrupt packet or transient I/O error costs only that packet.
+                Err(SymphoniaError::DecodeError(_) | SymphoniaError::IoError(_)) => continue,
+                Err(SymphoniaError::ResetRequired) => {
+                    self.reinit_after_reset().map_err(|e| {
+                        ConvertError::Decode(format!("failed to reinitialise after reset: {e}"))
+                    })?;
+                    continue;
+                }
                 Err(e) => {
                     return Err(ConvertError::Decode(format!(
                         "failed to decode packet: {e}"
@@ -817,7 +835,7 @@ mod tests {
     fn alac_sources_report_their_bit_depth() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/probe");
         for (name, depth) in [("alac16.m4a", 16), ("alac24.m4a", 24)] {
-            let source = AudioSource::open(&dir.join(name)).expect(name);
+            let source = AudioSource::open(&dir.join(name), true).expect(name);
             assert_eq!(source.bits_per_sample, Some(depth), "{name}");
         }
     }
@@ -1175,6 +1193,38 @@ mod tests {
             let reader = hound::WavReader::open(out_dir.join(&name)).unwrap();
             assert_eq!(reader.duration(), 44_100, "{name} is a complete encode");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Converting a LAME-tagged MP3 with `gapless` on writes exactly the track's frame
+    /// count; with it off the encoder delay/padding stay in the output.
+    #[test]
+    fn gapless_setting_controls_trimming_of_encoder_delay_and_padding() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/probe/gapless_lame.mp3");
+        let track_frames = AudioSource::open(&fixture, true)
+            .unwrap()
+            .total_frames
+            .expect("LAME tag gives the frame count");
+
+        let dir = temp_dir("gapless-setting");
+        let mut frames = [0u32; 2];
+        for (i, gapless) in [true, false].into_iter().enumerate() {
+            let out_dir = dir.join(format!("out{i}"));
+            let mut settings =
+                JobSettings::for_test(encoder::OutputFormat::Wav16, None, out_dir.clone());
+            settings.gapless = gapless;
+            let mut job = ConvertJob::new(i as u64, fixture.clone(), JobKind::Convert);
+            job.start(settings);
+            run(&job).expect("conversion should succeed");
+            let reader = hound::WavReader::open(out_dir.join("gapless_lame.wav")).unwrap();
+            frames[i] = reader.duration();
+        }
+        assert_eq!(u64::from(frames[0]), track_frames);
+        assert!(
+            frames[1] > frames[0],
+            "untrimmed output keeps delay/padding"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

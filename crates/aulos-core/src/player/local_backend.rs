@@ -108,6 +108,12 @@ impl LocalBackend {
         self.engine.set_crossfade(secs.max(0.0));
     }
 
+    /// Turn decoder-side gapless trimming of encoder delay/padding on or off.
+    /// Applies to tracks opened afterwards.
+    pub fn set_gapless(&mut self, on: bool) {
+        self.engine.set_gapless(on);
+    }
+
     /// Set the fade in/out duration in seconds (`0` = fades disabled).
     /// Applies to play, pause, stop and manual skips; see
     /// [`super::engine::fade`].

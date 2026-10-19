@@ -770,6 +770,7 @@ impl Player {
             return;
         }
         self.gapless = on;
+        self.local_backend.set_gapless(on);
         self.refresh_pre_queue_if_playing();
     }
 

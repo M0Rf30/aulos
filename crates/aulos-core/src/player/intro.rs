@@ -47,6 +47,7 @@ fn decode() -> Result<(Vec<f32>, u32, usize), String> {
         Cursor::new(JINGLE_MP3),
         Some(JINGLE_MP3.len() as u64),
         Some("mp3"),
+        true,
     )
     .map_err(|e| e.0)?;
     let mut samples = Vec::new();

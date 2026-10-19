@@ -147,6 +147,8 @@ pub struct SymphoniaDecoder {
     /// Pending sample-accurate seek: decoded frames before the requested timestamp are
     /// discarded.
     seek_skip: Option<SeekSkip>,
+    /// Whether the decoder trims encoder delay/padding (`packet.trim_start`/`trim_end`).
+    gapless: bool,
 }
 
 const MAX_CONSECUTIVE_DSD_RESETS: usize = 1024;
@@ -276,6 +278,12 @@ fn ticks_to_frames(ticks: u64, tb: TimeBase, rate: u32) -> u64 {
     u64::try_from((num + denom / 2) / denom).unwrap_or(u64::MAX)
 }
 
+/// Decoder options for the user's gapless setting: on, the decoder trims the delay/padding
+/// the demuxer flags on each packet; off, the decoded audio is left untrimmed.
+fn decoder_options(gapless: bool) -> AudioDecoderOptions {
+    AudioDecoderOptions::default().gapless(gapless)
+}
+
 /// Frames to drop after a seek so playback starts exactly at the requested timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SeekSkip {
@@ -326,7 +334,7 @@ impl SeekSkip {
 
 impl SymphoniaDecoder {
     /// Open a local file for decoding.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, gapless: bool) -> Result<Self> {
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -337,7 +345,7 @@ impl SymphoniaDecoder {
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         // A local WavPack `.wv` picks up a sibling `.wvc` (hybrid lossless).
-        Self::from_media_source(mss, hint, local_file_format_options(path))
+        Self::from_media_source(mss, hint, local_file_format_options(path), gapless)
     }
 
     /// Open an arbitrary seekable byte source for decoding — e.g. a remote
@@ -353,6 +361,7 @@ impl SymphoniaDecoder {
         reader: R,
         byte_len: Option<u64>,
         hint_extension: Option<&str>,
+        gapless: bool,
     ) -> Result<Self>
     where
         R: Read + Seek + Send + Sync + 'static,
@@ -365,19 +374,23 @@ impl SymphoniaDecoder {
         let source = ReadSeekMediaSource::new(reader, byte_len);
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-        Self::from_media_source(mss, hint, FormatOptions::default())
+        Self::from_media_source(mss, hint, FormatOptions::default(), gapless)
     }
 
     /// Convenience wrapper over [`Self::open_reader`] for aulos's own
     /// Subsonic/Navidrome remote-library use case: opens a decoder directly
     /// against an [`HttpRangeReader`], translating its `content_length()`
     /// convention (`0` = unknown) into the `Option<u64>` `open_reader` wants.
-    pub fn open_http_range(reader: HttpRangeReader, hint_extension: Option<&str>) -> Result<Self> {
+    pub fn open_http_range(
+        reader: HttpRangeReader,
+        hint_extension: Option<&str>,
+        gapless: bool,
+    ) -> Result<Self> {
         let byte_len = match reader.content_length() {
             0 => None,
             len => Some(len),
         };
-        Self::open_reader(reader, byte_len, hint_extension)
+        Self::open_reader(reader, byte_len, hint_extension, gapless)
     }
 
     /// Open a non-seekable byte source for decoding — e.g. an internet
@@ -389,6 +402,7 @@ impl SymphoniaDecoder {
         reader: R,
         hint_extension: Option<&str>,
         mime_type: Option<&str>,
+        gapless: bool,
     ) -> Result<Self>
     where
         R: Read + Send + Sync + 'static,
@@ -404,7 +418,7 @@ impl SymphoniaDecoder {
         let source = StreamMediaSource::new(reader);
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-        Self::from_media_source(mss, hint, FormatOptions::default())
+        Self::from_media_source(mss, hint, FormatOptions::default(), gapless)
     }
 
     /// Shared probe + track-selection + decoder-construction logic used by
@@ -414,6 +428,7 @@ impl SymphoniaDecoder {
         mss: MediaSourceStream<'static>,
         hint: Hint,
         format_opts: FormatOptions,
+        gapless: bool,
     ) -> Result<Self> {
         // Probe the media source.
         let reader = super::format_registry::probe()
@@ -462,7 +477,7 @@ impl SymphoniaDecoder {
         // Create decoder in pass-through mode (no PCM conversion).
         // PCM conversion can be enabled later if needed.
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(audio, &AudioDecoderOptions::default())
+            .make_audio_decoder(audio, &decoder_options(gapless))
             .map_err(|e| PlayerError(format!("Failed to create decoder: {e}")))?;
 
         // The decoder may report a different output rate than the container (explicitly
@@ -489,6 +504,7 @@ impl SymphoniaDecoder {
             bit_order,
             uses_pcm_conversion: false,
             seek_skip: None,
+            gapless,
         })
     }
 
@@ -536,7 +552,7 @@ impl SymphoniaDecoder {
 
         // Create new decoder with PCM conversion.
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params_with_pcm, &AudioDecoderOptions::default())
+            .make_audio_decoder(&params_with_pcm, &decoder_options(self.gapless))
             .map_err(|e| PlayerError(format!("Failed to create PCM decoder: {e}")))?;
 
         // Get actual output sample rate from decoder.
@@ -616,7 +632,16 @@ impl SymphoniaDecoder {
             // Decode the packet.
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
-                Err(SymphoniaError::DecodeError(_)) => continue,
+                // Contract: a corrupt packet (`DecodeError`) or a transient I/O hiccup
+                // (`IoError`) costs only that packet; keep decoding.
+                Err(SymphoniaError::DecodeError(_) | SymphoniaError::IoError(_)) => continue,
+                // The stream changed under the decoder: rebuild it, then carry on.
+                Err(SymphoniaError::ResetRequired) => {
+                    self.reinit_after_reset().map_err(|e| {
+                        PlayerError(format!("Failed to reinitialise after stream change: {e}"))
+                    })?;
+                    continue;
+                }
                 Err(e) => {
                     return Err(PlayerError(format!("Failed to decode packet: {e}")));
                 }
@@ -693,9 +718,15 @@ impl SymphoniaDecoder {
         let Some(skip) = self.seek_skip.as_mut() else {
             return 0;
         };
-        // `pts` is the start of the decoded block; `trim_start` frames (encoder delay /
-        // pre-roll flagged by the demuxer) are already removed from the decoded buffer.
-        let valid_start = packet.pts.saturating_add(packet.trim_start);
+        // `pts` is the start of the decoded block. With gapless on, the decoder has already
+        // removed the `trim_start` frames (encoder delay / pre-roll flagged by the demuxer)
+        // from the buffer, so the first frame left sits `trim_start` after `pts`; with it
+        // off nothing is trimmed and the buffer starts at `pts`.
+        let valid_start = if self.gapless {
+            packet.pts.saturating_add(packet.trim_start)
+        } else {
+            packet.pts
+        };
         let (n, done) = skip.advance(valid_start, frames, tb, rate);
         if done {
             self.seek_skip = None;
@@ -730,7 +761,7 @@ impl SymphoniaDecoder {
             params.extra_data = Some(self.sample_rate.to_le_bytes().to_vec().into_boxed_slice());
         }
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default())?;
+            .make_audio_decoder(&params, &decoder_options(self.gapless))?;
 
         // Pass-through DSD keeps the container (DSD) rate, which DoP needs.
         let new_rate = if keep_pcm {
@@ -878,6 +909,93 @@ impl Decoder for SymphoniaDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mono 44.1 kHz, 1 s sine encoded with LAME (carries a LAME tag with encoder
+    /// delay/padding, so the MP3 demuxer reports `delay`, `padding` and `num_frames`).
+    fn gapless_mp3() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/probe/gapless_lame.mp3")
+    }
+
+    /// `(num_frames, delay, padding)` of the fixture's audio track, per the demuxer.
+    fn gapless_track_info() -> (u64, u64, u64) {
+        let mss = MediaSourceStream::new(
+            Box::new(std::fs::File::open(gapless_mp3()).unwrap()),
+            Default::default(),
+        );
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+        let reader = super::super::format_registry::probe()
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .unwrap();
+        let track = reader.default_track(TrackType::Audio).unwrap();
+        (
+            track.num_frames.expect("num_frames"),
+            u64::from(track.delay.expect("delay")),
+            u64::from(track.padding.expect("padding")),
+        )
+    }
+
+    /// Frames (per channel) the decoder yields for the whole fixture.
+    fn decoded_frames(gapless: bool) -> u64 {
+        let mut decoder = SymphoniaDecoder::open(&gapless_mp3(), gapless).unwrap();
+        let channels = usize::from(decoder.channels());
+        let mut buf = vec![0.0f32; 4096 * channels];
+        let mut samples = 0usize;
+        loop {
+            let n = decoder.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            samples += n;
+        }
+        (samples / channels) as u64
+    }
+
+    #[test]
+    fn gapless_on_yields_exactly_the_track_frames() {
+        let (n_frames, delay, padding) = gapless_track_info();
+        assert!(delay > 0 && padding > 0, "fixture lacks LAME delay/padding");
+        assert_eq!(decoded_frames(true), n_frames);
+    }
+
+    #[test]
+    fn gapless_off_yields_the_untrimmed_frames() {
+        let (n_frames, delay, padding) = gapless_track_info();
+        assert_eq!(decoded_frames(false), n_frames + delay + padding);
+    }
+
+    /// A seek must land on the same audio whether or not the decoder trims: the frames after
+    /// the seek target are identical, so `SeekSkip` is accounted against the trimmed output.
+    #[test]
+    fn seek_lands_on_the_target_with_and_without_gapless() {
+        let target = 0.5f64;
+        let read_rest = |gapless: bool| {
+            let mut decoder = SymphoniaDecoder::open(&gapless_mp3(), gapless).unwrap();
+            decoder.seek(target).unwrap();
+            let mut buf = vec![0.0f32; 4096];
+            let mut samples = 0usize;
+            loop {
+                let n = decoder.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                samples += n;
+            }
+            samples as u64
+        };
+        let (n_frames, _, _) = gapless_track_info();
+        let expected = n_frames - (target * 44_100.0) as u64;
+        // Gapless on: exactly the frames from the target to the trimmed end.
+        assert_eq!(read_rest(true), expected);
+        // Off: the same span plus only the trailing padding (the delay lies before the target).
+        let (_, _, padding) = gapless_track_info();
+        assert_eq!(read_rest(false), expected + padding);
+    }
 
     #[test]
     fn dsd_packet_skip_loop_handles_many_events() {
@@ -1034,9 +1152,9 @@ mod tests {
                             eprintln!("ICY title: {:?}", m.stream_title());
                         }
                     });
-                SymphoniaDecoder::open_stream(reader, None, None).expect("open_stream")
+                SymphoniaDecoder::open_stream(reader, None, None, true).expect("open_stream")
             }
-            None => SymphoniaDecoder::open_stream(counting, None, None).expect("open_stream"),
+            None => SymphoniaDecoder::open_stream(counting, None, None, true).expect("open_stream"),
         };
 
         eprintln!("opened decoder: duration={:?}", decoder.duration());

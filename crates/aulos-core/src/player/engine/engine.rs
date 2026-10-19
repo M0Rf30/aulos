@@ -165,9 +165,9 @@ pub enum PlaySource {
 impl PlaySource {
     /// Open the decoder for this source. For `Reader`/`LiveStream`, this is
     /// where the (potentially slow) HTTP connect + probe actually happens.
-    fn open_decoder(self, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
+    fn open_decoder(self, stop: &Arc<AtomicBool>, gapless: bool) -> Result<SymphoniaDecoder> {
         match self {
-            PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path),
+            PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path, gapless),
             PlaySource::Reader {
                 url,
                 client,
@@ -178,7 +178,7 @@ impl PlaySource {
                     let len = reader.content_length();
                     (len > 0).then_some(len)
                 };
-                SymphoniaDecoder::open_reader(reader, byte_len, hint_extension.as_deref())
+                SymphoniaDecoder::open_reader(reader, byte_len, hint_extension.as_deref(), gapless)
             }
             PlaySource::LiveStream {
                 url,
@@ -194,7 +194,7 @@ impl PlaySource {
                     let (reader, hint) =
                         crate::player::hls::HlsReader::open(client, &url, Arc::clone(stop))
                             .map_err(PlayerError)?;
-                    return SymphoniaDecoder::open_stream(reader, hint.as_deref(), None);
+                    return SymphoniaDecoder::open_stream(reader, hint.as_deref(), None, gapless);
                 }
                 let response = client
                     .get(&url)
@@ -229,12 +229,14 @@ impl PlaySource {
                             reader,
                             hint_extension.as_deref(),
                             mime.as_deref(),
+                            gapless,
                         )
                     }
                     None => SymphoniaDecoder::open_stream(
                         response,
                         hint_extension.as_deref(),
                         mime.as_deref(),
+                        gapless,
                     ),
                 }
             }
@@ -309,7 +311,7 @@ fn reconnect_live(retry: &LiveRetry, ctx: &ThreadContext) -> Option<SymphoniaDec
             hint_extension: retry.hint_extension.clone(),
             icy_title: Arc::clone(&retry.icy_title),
         };
-        match source.open_decoder(&ctx.stop_flag) {
+        match source.open_decoder(&ctx.stop_flag, ctx.gapless.load(Ordering::Acquire)) {
             Ok(decoder) => {
                 tracing::info!("live stream reconnected after a hiccup (attempt {attempt})");
                 return Some(decoder);
@@ -402,7 +404,7 @@ enum PendingSource {
 }
 
 impl PendingSource {
-    fn new(source: PlaySource, stop: &Arc<AtomicBool>) -> Self {
+    fn new(source: PlaySource, stop: &Arc<AtomicBool>, gapless: bool) -> Self {
         if matches!(source, PlaySource::LocalFile(_)) {
             return Self::Lazy(source);
         }
@@ -413,7 +415,7 @@ impl PendingSource {
                 let tx = tx.clone();
                 let stop = Arc::clone(stop);
                 move || {
-                    let _ = tx.send(source.open_decoder(&stop));
+                    let _ = tx.send(source.open_decoder(&stop, gapless));
                 }
             });
         match spawned {
@@ -427,9 +429,9 @@ impl PendingSource {
         }
     }
 
-    fn open(self, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
+    fn open(self, stop: &Arc<AtomicBool>, gapless: bool) -> Result<SymphoniaDecoder> {
         match self {
-            Self::Lazy(source) => source.open_decoder(stop),
+            Self::Lazy(source) => source.open_decoder(stop, gapless),
             Self::Opened(decoder) => Ok(*decoder),
             Self::Opening(rx) => loop {
                 match rx.recv_timeout(Duration::from_millis(50)) {
@@ -531,6 +533,9 @@ struct ThreadContext {
     eq_bypass: Arc<AtomicBool>,
     /// `f32` crossfade seconds, bit-packed for lock-free reads.
     crossfade_bits: Arc<AtomicU32>,
+    /// Whether decoders trim encoder delay/padding (the user's gapless
+    /// setting); read when a decoder is opened.
+    gapless: Arc<AtomicBool>,
     next_track: Arc<Mutex<Option<PendingTrack>>>,
     status: Arc<SharedStatus>,
     /// Fade in/out ramp control shared with the output's device callback.
@@ -573,6 +578,9 @@ pub struct PlaybackEngine {
     eq_coeffs: SharedCoeffs,
     eq_bypass: Arc<AtomicBool>,
     crossfade_bits: Arc<AtomicU32>,
+    /// Whether decoders trim encoder delay/padding (the user's gapless
+    /// setting); read when a decoder is opened.
+    gapless: Arc<AtomicBool>,
     next_track: Arc<Mutex<Option<PendingTrack>>>,
     status: Arc<SharedStatus>,
     fade: Arc<FadeControl>,
@@ -603,6 +611,7 @@ impl PlaybackEngine {
             eq_coeffs,
             eq_bypass,
             crossfade_bits: Arc::new(AtomicU32::new(0f32.to_bits())),
+            gapless: Arc::new(AtomicBool::new(true)),
             next_track: Arc::new(Mutex::new(None)),
             status: Arc::new(SharedStatus::default()),
             fade: FadeControl::new(),
@@ -621,6 +630,7 @@ impl PlaybackEngine {
             eq_coeffs: self.eq_coeffs.clone(),
             eq_bypass: self.eq_bypass.clone(),
             crossfade_bits: self.crossfade_bits.clone(),
+            gapless: self.gapless.clone(),
             next_track: self.next_track.clone(),
             status: self.status.clone(),
             fade: self.fade.clone(),
@@ -705,24 +715,26 @@ impl PlaybackEngine {
         // network round trip), so it happens on the dedicated playback
         // thread instead — see `PlaySource::open_decoder` / `ThreadStart::Pending`.
         let start = match source {
-            PlaySource::LocalFile(path) => match SymphoniaDecoder::open(&path) {
-                Ok(decoder) => {
-                    self.status
-                        .duration_nanos
-                        .store(secs_to_nanos(decoder.duration()), Ordering::Release);
-                    ThreadStart::Ready(decoder)
+            PlaySource::LocalFile(path) => {
+                match SymphoniaDecoder::open(&path, self.gapless.load(Ordering::Acquire)) {
+                    Ok(decoder) => {
+                        self.status
+                            .duration_nanos
+                            .store(secs_to_nanos(decoder.duration()), Ordering::Release);
+                        ThreadStart::Ready(decoder)
+                    }
+                    Err(e) => {
+                        // Keep tracking the threads that are still fading out.
+                        self.retiring = prev;
+                        // Undo `reset_for_play`: no playback thread exists for
+                        // this call, so `probing` would otherwise stay `true`
+                        // forever (position pinned to zero, `is_finished` false).
+                        self.run_state.store(RUN_STOPPED, Ordering::Release);
+                        self.status.reset_for_stop();
+                        return Err(e);
+                    }
                 }
-                Err(e) => {
-                    // Keep tracking the threads that are still fading out.
-                    self.retiring = prev;
-                    // Undo `reset_for_play`: no playback thread exists for
-                    // this call, so `probing` would otherwise stay `true`
-                    // forever (position pinned to zero, `is_finished` false).
-                    self.run_state.store(RUN_STOPPED, Ordering::Release);
-                    self.status.reset_for_stop();
-                    return Err(e);
-                }
-            },
+            }
             pending_source => ThreadStart::Pending(pending_source),
         };
 
@@ -788,6 +800,12 @@ impl PlaybackEngine {
             .store(seconds.max(0.0).to_bits(), Ordering::Release);
     }
 
+    /// Turn decoder-side gapless trimming on or off. Applies to decoders opened
+    /// afterwards (the next `play()` / look-ahead), not the one playing now.
+    pub fn set_gapless(&self, on: bool) {
+        self.gapless.store(on, Ordering::Release);
+    }
+
     /// Set the fade in/out duration in seconds (`0.0` = fades disabled).
     pub fn set_fade_secs(&self, seconds: f32) {
         self.fade.set_secs(seconds);
@@ -800,7 +818,11 @@ impl PlaybackEngine {
     /// the current crossfade setting, not by the caller.
     pub fn queue_next(&self, source: PlaySource, replay_gain_db: Option<f32>) {
         *self.next_track.lock() = Some(PendingTrack {
-            source: PendingSource::new(source, &self.stop_flag),
+            source: PendingSource::new(
+                source,
+                &self.stop_flag,
+                self.gapless.load(Ordering::Acquire),
+            ),
             replay_gain_db,
         });
         // `track_finished` is deliberately left alone: queuing a look-ahead
@@ -898,7 +920,7 @@ fn playback_thread_main(
     // that don't require leaving this function at all.
     let mut live_retry = live_retry_from_start(&start);
 
-    let opened = resolve_start(start, &ctx.stop_flag);
+    let opened = resolve_start(start, &ctx.stop_flag, ctx.gapless.load(Ordering::Acquire));
 
     // Wait for the predecessor(s) that are fading out; only after they have
     // closed their stream is it safe to open ours and to reset the shared
@@ -991,19 +1013,27 @@ fn playback_thread_main(
     }
 }
 
-fn resolve_start(start: ThreadStart, stop: &Arc<AtomicBool>) -> Result<SymphoniaDecoder> {
+fn resolve_start(
+    start: ThreadStart,
+    stop: &Arc<AtomicBool>,
+    gapless: bool,
+) -> Result<SymphoniaDecoder> {
     match start {
         ThreadStart::Ready(decoder) => Ok(decoder),
-        ThreadStart::Pending(source) => source.open_decoder(stop),
+        ThreadStart::Pending(source) => source.open_decoder(stop, gapless),
     }
 }
 
 /// Open a pre-queued track's decoder, computing its linear gain. Logs and
 /// returns `None` on failure (mirrors rmpd's `next_song` handling: a failed
 /// open is treated as "nothing pending", never propagated as a hard error).
-fn open_pending(pending: PendingTrack, stop: &Arc<AtomicBool>) -> Option<(SymphoniaDecoder, f32)> {
+fn open_pending(
+    pending: PendingTrack,
+    stop: &Arc<AtomicBool>,
+    gapless: bool,
+) -> Option<(SymphoniaDecoder, f32)> {
     let gain = pending.replay_gain_db.map(db_to_linear).unwrap_or(1.0);
-    match pending.source.open(stop) {
+    match pending.source.open(stop, gapless) {
         Ok(decoder) => Some((decoder, gain)),
         Err(e) => {
             tracing::warn!("failed to open pre-queued next track: {e}");
@@ -1129,11 +1159,10 @@ fn run_dsd(
 
         if bytes_read == 0 {
             ctx.status.track_finished.store(true, Ordering::Release);
-            let next = ctx
-                .next_track
-                .lock()
-                .take()
-                .and_then(|p| open_pending(p, &ctx.stop_flag));
+            let next =
+                ctx.next_track.lock().take().and_then(|p| {
+                    open_pending(p, &ctx.stop_flag, ctx.gapless.load(Ordering::Acquire))
+                });
             let _ = output.stop();
             return match next {
                 Some((next_decoder, next_gain)) => DsdOutcome::Advance(next_decoder, next_gain),
@@ -1426,7 +1455,7 @@ fn run_pcm(
                 && !crossfade_suppressed
                 && let Some(pending) = ctx.next_track.lock().take()
             {
-                match open_pending(pending, &ctx.stop_flag) {
+                match open_pending(pending, &ctx.stop_flag, ctx.gapless.load(Ordering::Acquire)) {
                     Some((next_decoder, next_gain))
                         if !next_decoder.is_dsd() && next_decoder.format() == format =>
                     {
@@ -1532,11 +1561,10 @@ fn run_pcm(
             // EOS: claim a pre-fetched next track regardless of format/DSD
             // -ness — unlike rmpd, aulos rebuilds the output on a format
             // change instead of refusing the gapless advance outright.
-            let gapless_next = ctx
-                .next_track
-                .lock()
-                .take()
-                .and_then(|p| open_pending(p, &ctx.stop_flag));
+            let gapless_next =
+                ctx.next_track.lock().take().and_then(|p| {
+                    open_pending(p, &ctx.stop_flag, ctx.gapless.load(Ordering::Acquire))
+                });
 
             match gapless_next {
                 Some((next_decoder, next_gain))

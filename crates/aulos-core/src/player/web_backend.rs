@@ -435,6 +435,7 @@ impl Feeder {
             Cursor::new(data.bytes.clone()),
             Some(len),
             data.hint.as_deref(),
+            true,
         )
         .map_err(|e| format!("This file cannot be played: {e}"))?;
         if decoder.is_dsd() {

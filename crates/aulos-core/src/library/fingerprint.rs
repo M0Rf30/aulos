@@ -65,7 +65,7 @@ impl Fingerprint {
 ///
 /// Blocking and CPU-bound; call it from a worker thread.
 pub fn compute(path: &Path) -> Result<Fingerprint, String> {
-    let mut decoder = SymphoniaDecoder::open(path)
+    let mut decoder = SymphoniaDecoder::open(path, true)
         .map_err(|e| format!("Cannot decode {}: {e}", path.display()))?;
     if decoder.is_dsd() {
         decoder

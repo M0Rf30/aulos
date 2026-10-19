@@ -103,6 +103,10 @@ pub struct JobSettings {
     /// Carry the source's tags and front cover over to the output. The
     /// title/artist/number a CUE sheet itself provides are always written.
     pub copy_tags: bool,
+    /// Trim the encoder delay/padding the source flags (MP3/AAC priming), as in
+    /// playback, so the output carries only the real audio. Taken from
+    /// `Config::gapless`.
+    pub gapless: bool,
 }
 
 /// A single conversion/rip job tracked by the UI and run by [`run_job`].
@@ -382,6 +386,7 @@ impl JobSettings {
             name_pattern: config.convert_name_pattern.clone(),
             split_cue: config.convert_split_cue,
             copy_tags: config.convert_copy_tags,
+            gapless: config.gapless,
         }
     }
 }
@@ -406,6 +411,7 @@ impl JobSettings {
             name_pattern: "{filename}".to_owned(),
             split_cue: true,
             copy_tags: true,
+            gapless: true,
         }
     }
 }
