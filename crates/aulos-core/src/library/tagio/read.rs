@@ -27,7 +27,7 @@ pub(super) fn read(path: &Path, container: super::Container) -> Result<FileTags>
         hint.with_extension(ext);
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut reader = symphonia::default::get_probe()
+    let mut reader = crate::player::engine::format_registry::probe()
         .probe(
             &hint,
             mss,

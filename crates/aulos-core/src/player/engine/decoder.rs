@@ -41,27 +41,6 @@ use crate::player::http_range_reader::HttpRangeReader;
 
 pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 
-/// File extensions this decoder recognizes, for use by a file-picker filter
-/// or library scanner. Symphonia's probe is content-based and doesn't
-/// strictly require a matching extension — this list only ever feeds a
-/// [`Hint`], never gates whether a file is attempted.
-///
-/// Mirrors every audio extension the Symphonia fork's demuxers declare
-/// (`support_format!` in each `symphonia-format-*`/`-bundle-*`/`-codec-*`
-/// crate, enabled by the `all` + `dsd` features), plus `alac` (stored in an
-/// MP4 container) and `mka` (Matroska audio, probed by content). Video-only
-/// extensions (avi, mkv, mov, flv, wmv, asf, MPEG-PS/TS, rm/rmvb, ogv/ogm...)
-/// are deliberately left out: this is a music player.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "16sv", "8svx", "aac", "adif", "adp", "ads", "adx", "afc", "aif", "aifc", "aiff", "alac",
-    "amr", "ape", "ast", "au", "awb", "bcstm", "bfstm", "brstm", "bw64", "caf", "dff", "dsf",
-    "dtk", "flac", "hca", "iec61937", "iff", "latm", "lc3", "loas", "m4a", "m4b", "m4p", "m4r",
-    "maud", "mka", "mp+", "mp1", "mp2", "mp3", "mp4", "mpc", "mpp", "msbc", "msf", "oga", "ogg",
-    "ogx", "opus", "qcp", "ra", "rf64", "rma", "sbc", "shn", "snd", "spdif", "spx", "ss2", "svag",
-    "svx", "tak", "tta", "vag", "voc", "vpk", "vqe", "vqf", "vql", "w64", "wav", "wave", "webm",
-    "wma", "wv", "xvag",
-];
-
 /// Minimal audio format descriptor. Dependency-free by design — aulos has no
 /// shared "song"/media domain crate to pull a richer type from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,13 +385,20 @@ impl SymphoniaDecoder {
     /// the source only needs `Read + Send + Sync`: seeking is never
     /// supported (see [`StreamMediaSource`]), matching an unbounded live
     /// stream's actual capabilities.
-    pub fn open_stream<R>(reader: R, hint_extension: Option<&str>) -> Result<Self>
+    pub fn open_stream<R>(
+        reader: R,
+        hint_extension: Option<&str>,
+        mime_type: Option<&str>,
+    ) -> Result<Self>
     where
         R: Read + Send + Sync + 'static,
     {
         let mut hint = Hint::new();
         if let Some(ext) = hint_extension {
             hint.with_extension(ext);
+        }
+        if let Some(mime) = mime_type {
+            hint.mime_type(mime);
         }
 
         let source = StreamMediaSource::new(reader);
@@ -430,7 +416,7 @@ impl SymphoniaDecoder {
         format_opts: FormatOptions,
     ) -> Result<Self> {
         // Probe the media source.
-        let reader = symphonia::default::get_probe()
+        let reader = super::format_registry::probe()
             .probe(&hint, mss, format_opts, MetadataOptions::default())
             .map_err(|e| PlayerError(format!("Failed to probe format: {e}")))?;
 
@@ -1048,9 +1034,9 @@ mod tests {
                             eprintln!("ICY title: {:?}", m.stream_title());
                         }
                     });
-                SymphoniaDecoder::open_stream(reader, None).expect("open_stream")
+                SymphoniaDecoder::open_stream(reader, None, None).expect("open_stream")
             }
-            None => SymphoniaDecoder::open_stream(counting, None).expect("open_stream"),
+            None => SymphoniaDecoder::open_stream(counting, None, None).expect("open_stream"),
         };
 
         eprintln!("opened decoder: duration={:?}", decoder.duration());

@@ -35,11 +35,7 @@ pub fn split_batches<T>(items: Vec<T>, size: usize) -> Vec<Vec<T>> {
 pub fn is_audio_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|ext| {
-            crate::player::engine::decoder::SUPPORTED_EXTENSIONS
-                .iter()
-                .any(|supported| supported.eq_ignore_ascii_case(ext))
-        })
+        .is_some_and(crate::player::engine::format_registry::is_supported_extension)
 }
 
 /// Every audio file under `root` (recursively), sorted by path.

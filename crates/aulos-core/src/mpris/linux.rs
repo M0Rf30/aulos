@@ -253,7 +253,7 @@ impl RootInterface for DbusPlayer {
     async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
         // Mirrors resources/io.github.m0rf30.Aulos.desktop's `MimeType=`
         // list, itself verified against
-        // `player::engine::decoder::SUPPORTED_EXTENSIONS`.
+        // `player::engine::format_registry::SCAN_EXTENSIONS`.
         Ok(vec![
             "audio/mpeg".to_owned(),
             "audio/flac".to_owned(),

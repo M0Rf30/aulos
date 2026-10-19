@@ -606,7 +606,7 @@ impl AudioSource {
         };
         let mss = MediaSourceStream::new(Box::new(counting), Default::default());
 
-        let reader = symphonia::default::get_probe()
+        let reader = crate::player::engine::format_registry::probe()
             .probe(
                 &hint,
                 mss,

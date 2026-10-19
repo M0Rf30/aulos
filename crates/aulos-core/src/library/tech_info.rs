@@ -342,7 +342,7 @@ pub fn probe(path: &Path) -> Result<TechInfo, String> {
         hint.with_extension(ext);
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut reader = symphonia::default::get_probe()
+    let mut reader = crate::player::engine::format_registry::probe()
         .probe(
             &hint,
             mss,

@@ -7,7 +7,6 @@
 use super::scan_progress::ScanProgress;
 use super::tags;
 use super::{Track, db::LibraryDb};
-use crate::player::engine::decoder::SUPPORTED_EXTENSIONS;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -287,11 +286,7 @@ impl LibraryScanner {
     pub(crate) fn is_audio_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-                SUPPORTED_EXTENSIONS
-                    .iter()
-                    .any(|supported| supported.eq_ignore_ascii_case(ext))
-            })
+            .is_some_and(crate::player::engine::format_registry::is_supported_extension)
     }
 
     /// Read metadata from an audio file via symphonia (see `super::tags`).

@@ -24,6 +24,7 @@ pub mod decoder;
 pub mod dop;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dop_output;
+pub mod format_registry;
 // `engine::engine` intentionally mirrors rmpd's module layout; renaming would
 // churn every `use` path across the crate (including app.rs).
 #[cfg(not(target_arch = "wasm32"))]

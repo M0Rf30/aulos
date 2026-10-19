@@ -194,13 +194,18 @@ impl PlaySource {
                     let (reader, hint) =
                         crate::player::hls::HlsReader::open(client, &url, Arc::clone(stop))
                             .map_err(PlayerError)?;
-                    return SymphoniaDecoder::open_stream(reader, hint.as_deref());
+                    return SymphoniaDecoder::open_stream(reader, hint.as_deref(), None);
                 }
                 let response = client
                     .get(&url)
                     .header("Icy-MetaData", "1")
                     .send()
                     .map_err(|e| PlayerError(format!("Failed to connect to stream: {e}")))?;
+                let mime = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.split(';').next().unwrap_or(v).trim().to_owned());
                 let metadata_interval =
                     icy_metadata::IcyHeaders::parse_from_headers(response.headers())
                         .metadata_interval();
@@ -220,9 +225,17 @@ impl PlaySource {
                                     metadata.and_then(|m| m.stream_title().map(str::to_string));
                                 *icy_title.lock() = title;
                             });
-                        SymphoniaDecoder::open_stream(reader, hint_extension.as_deref())
+                        SymphoniaDecoder::open_stream(
+                            reader,
+                            hint_extension.as_deref(),
+                            mime.as_deref(),
+                        )
                     }
-                    None => SymphoniaDecoder::open_stream(response, hint_extension.as_deref()),
+                    None => SymphoniaDecoder::open_stream(
+                        response,
+                        hint_extension.as_deref(),
+                        mime.as_deref(),
+                    ),
                 }
             }
         }

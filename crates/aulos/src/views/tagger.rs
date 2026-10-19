@@ -583,7 +583,7 @@ async fn pick_files() -> TaggerEvent {
     let filter_name = aulos_core::fl!("tagger-ui-filter-audio");
     let filter = Filter::new(
         &filter_name,
-        aulos_core::player::engine::decoder::SUPPORTED_EXTENSIONS
+        aulos_core::player::engine::format_registry::SCAN_EXTENSIONS
             .iter()
             .copied(),
     );

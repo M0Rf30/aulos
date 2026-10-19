@@ -697,7 +697,7 @@ mod tests {
 
         let file = File::open(path).expect("reopen encoded file");
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut reader = symphonia::default::get_probe()
+        let mut reader = crate::player::engine::format_registry::probe()
             .probe(
                 &Default::default(),
                 mss,

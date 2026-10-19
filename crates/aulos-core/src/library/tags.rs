@@ -140,7 +140,7 @@ fn probe_source(
 
     let mss = MediaSourceStream::new(source, Default::default());
 
-    let mut reader = symphonia::default::get_probe()
+    let mut reader = crate::player::engine::format_registry::probe()
         .probe(
             &hint,
             mss,
