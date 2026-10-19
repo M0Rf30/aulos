@@ -164,6 +164,10 @@ impl Track {
     /// favorite/rating calls: the database row id for local tracks, and
     /// the provider's own id (Subsonic song id, MPD path; stored in
     /// `path`) for remote ones, whose `id` is `0` while live.
+    ///
+    /// Not provider-qualified on purpose: the key is handed to the active
+    /// provider's API as is, and the in-memory library only holds the active
+    /// provider's tracks, so ids of two servers never meet in one list.
     #[must_use]
     pub fn key(&self) -> String {
         if &*self.provider_id == "local" {

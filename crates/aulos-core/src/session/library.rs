@@ -206,7 +206,9 @@ impl Session {
     /// lists and the current track.
     fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
         self.library.for_each_track(track_id, &mut f);
+        let active = self.providers.registry.active_id();
         if let Some(ct) = self.playback.current_track.as_mut()
+            && &*ct.provider_id == active
             && ct.has_key(track_id)
         {
             f(ct);
