@@ -1278,8 +1278,14 @@ impl App {
         window.maximized = maximized;
         // The size is the viewport's: `inner_rect` is `None` on Wayland (a
         // client can neither read nor set its position there), which used to
-        // keep the size from ever being stored.
-        let viewport = ctx.viewport_rect().size();
+        // keep the size from ever being stored. It is read from this frame's
+        // raw input: until the window has a real size (a maximized window on
+        // Wayland is 0x0 before its first configure) `viewport_rect` holds
+        // egui's 10000x10000 placeholder, which was saved and then asked of
+        // the GPU on the next launch.
+        let viewport = ctx
+            .input(|i| i.raw.screen_rect)
+            .map_or(egui::Vec2::ZERO, |rect| rect.size());
         let has_size = viewport.x > 0.0 && viewport.y > 0.0;
         if has_size && (!maximized || stored.is_none()) {
             window.size = [(viewport.x * zoom).round(), (viewport.y * zoom).round()];

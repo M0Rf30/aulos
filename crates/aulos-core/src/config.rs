@@ -265,8 +265,10 @@ impl Default for WindowGeometry {
 }
 
 impl WindowGeometry {
-    /// Largest window side restored; a saved value past it is corrupt.
-    const MAX_SIDE: f32 = 16_384.0;
+    /// Largest window side restored (logical points); a saved value past it
+    /// is corrupt. Twice this stays within the common 8192 px GPU texture
+    /// limit, so the surface can still be configured at a 2x scale.
+    const MAX_SIDE: f32 = 4096.0;
     /// Furthest a window corner may sit from the origin and still be restored.
     const MAX_OFFSET: f32 = 32_768.0;
 
@@ -1061,7 +1063,7 @@ mod persistence_tests {
             maximized: true,
         };
         let clamped = huge.clamped(min).unwrap();
-        assert_eq!(clamped.size, [16_384.0, 800.0]);
+        assert_eq!(clamped.size, [4096.0, 800.0]);
         assert_eq!(clamped.position, Some([-3.0, 40.0]));
         assert!(clamped.maximized);
         let broken = WindowGeometry {
