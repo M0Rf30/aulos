@@ -1173,17 +1173,6 @@ fn track_rows(
         if resp.drag_started() {
             st.dragging = Some(i);
         }
-        if resp.drag_stopped()
-            && let (Cur::Plain(p), Some(from), Some(slot)) =
-                (cur, st.dragging.take(), st.drop_slot.take())
-            && let Some(to) = super::drop_target(from, slot)
-        {
-            out.acts.push(Act::MoveTrack {
-                id: p.id.clone(),
-                from,
-                to,
-            });
-        }
         let current = app
             .session
             .playback
@@ -1348,6 +1337,24 @@ fn track_rows(
     ui.add_space((n - last) as f32 * ROW_H);
 
     // Drop slot, indicator and edge auto-scroll while a row is dragged.
+    // Settle here, not on the dragged row: auto-scroll can virtualize that row
+    // away before the button is released.
+    let button_down = ui.ctx().input(|i| i.pointer.any_down());
+    if st.dragging.is_some()
+        && !button_down
+        && let (Cur::Plain(p), Some(from), Some(slot)) =
+            (cur, st.dragging.take(), st.drop_slot.take())
+        && let Some(to) = super::drop_target(from, slot)
+    {
+        out.acts.push(Act::MoveTrack {
+            id: p.id.clone(),
+            from,
+            to,
+        });
+    }
+    if !button_down {
+        st.dragging = None;
+    }
     st.drop_slot = None;
     if st.dragging.is_some()
         && let Some(pointer) = ui.ctx().input(|i| i.pointer.interact_pos())

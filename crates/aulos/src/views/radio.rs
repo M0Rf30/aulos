@@ -100,6 +100,9 @@ struct Ctx {
 /// Called when the route is entered: start loading what the page needs.
 pub fn enter(app: &mut App) {
     app.views.radio.entered = Some(Instant::now());
+    // A rename left open on an earlier visit is dropped, not resumed.
+    app.views.radio.renaming = None;
+    app.views.radio.rename_focus = false;
     let load = app.session.radio.load();
     app.run(load);
 }

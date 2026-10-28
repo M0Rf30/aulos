@@ -45,8 +45,8 @@ pub struct State {
     browsing_list: bool,
     entered: Option<Instant>,
     selected_at: Option<Instant>,
-    /// Plain text of the open show's description.
-    desc: (i64, String),
+    /// The open show's id and description, and its plain text.
+    desc: (i64, String, String),
     /// Episode indices passing the filters, with the key they were built for.
     cache_key: u64,
     cache_idx: Vec<usize>,
@@ -84,6 +84,8 @@ struct Ctx {
 pub fn enter(app: &mut App) {
     app.views.podcasts.entered = Some(Instant::now());
     app.views.podcasts.browsing_list = false;
+    // An unsubscribe armed on an earlier visit must be armed again.
+    app.views.podcasts.pending_unsub = None;
     let load = app.session.podcasts.load();
     app.run(load);
 }
@@ -599,8 +601,12 @@ fn show_detail(
     else {
         return;
     };
-    if st.desc.0 != show.id {
-        st.desc = (show.id, plain_text(&show.description));
+    if st.desc.0 != show.id || st.desc.1 != show.description {
+        st.desc = (
+            show.id,
+            show.description.clone(),
+            plain_text(&show.description),
+        );
     }
     hero(ui, cx, st, pod, covers, show, intents);
     ui.add_space(18.0);
@@ -766,7 +772,7 @@ fn hero(
                     meta.push_str(&aulos_core::fl!("podcast-refreshing"));
                 }
                 crate::widgets::label_text(ui, &meta, theme::regular(13.0), cx.pal.text_2);
-                if !st.desc.1.is_empty() {
+                if !st.desc.2.is_empty() {
                     description(ui, cx, st, w);
                 }
                 ui.add_space(2.0);
@@ -847,7 +853,7 @@ fn hero(
 /// The show description, clamped to three lines until clicked.
 fn description(ui: &mut Ui, cx: &Ctx, st: &mut State, width: f32) {
     let mut job = egui::text::LayoutJob::single_section(
-        st.desc.1.clone(),
+        st.desc.2.clone(),
         egui::text::TextFormat {
             font_id: theme::regular(13.0),
             color: cx.pal.text_15,
