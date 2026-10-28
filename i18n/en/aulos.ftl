@@ -1361,8 +1361,7 @@ settings-inhibit-desc = Holds a desktop inhibit lock during playback.
 settings-close-tray-title = Close to the system tray
 settings-close-tray-desc = Closing the window hides Aulos in the tray instead of quitting; quit from the tray menu. Needs a desktop with tray support.
 settings-minimize-tray-title = Minimize to the system tray
-settings-minimize-tray-desc = Minimizing the window hides it in the tray; click the tray icon to bring it back.
-settings-tray-no-hide-desc = Not available in this session: Wayland does not let an application hide its window. Start Aulos with WINIT_UNIX_BACKEND=x11 to use it.
+settings-minimize-tray-desc = Minimizing the window hides it in the tray; click the tray icon to bring it back. Wayland does not tell apps when a window is minimized, so there it only works with close to tray.
 
 # Settings page: experimental
 settings-experimental-note = Features still being tested

@@ -1361,8 +1361,7 @@ settings-inhibit-desc = Hält während der Wiedergabe eine Desktop-Inhibit-Sperr
 settings-close-tray-title = In den Infobereich schließen
 settings-close-tray-desc = Beim Schließen des Fensters bleibt Aulos im Infobereich, statt sich zu beenden; beenden über das Menü des Symbols. Benötigt einen Desktop mit Infobereich-Unterstützung.
 settings-minimize-tray-title = In den Infobereich minimieren
-settings-minimize-tray-desc = Beim Minimieren wird das Fenster im Infobereich versteckt; ein Klick auf das Symbol holt es zurück.
-settings-tray-no-hide-desc = In dieser Sitzung nicht verfügbar: Wayland erlaubt Anwendungen nicht, ihr Fenster auszublenden. Starte Aulos mit WINIT_UNIX_BACKEND=x11, um es zu nutzen.
+settings-minimize-tray-desc = Beim Minimieren wird das Fenster im Infobereich versteckt; ein Klick auf das Symbol holt es zurück. Wayland meldet Apps nicht, wenn ein Fenster minimiert wird; dort funktioniert nur das Schließen in den Infobereich.
 
 # Settings page: experimental
 settings-experimental-note = Funktionen, die noch getestet werden

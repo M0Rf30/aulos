@@ -4,6 +4,7 @@
 use crate::theme::{self, Accent, Palette, Quality, Theme};
 use crate::tray::{self, TrayCommand, TrayEvent, TrayIcon};
 use crate::views;
+use crate::wake::Wake;
 use crate::widgets::Covers;
 use aulos_core::config::{Config, ThemeMode};
 use aulos_core::library::{
@@ -164,13 +165,28 @@ enum TrayState {
     Failed,
 }
 
+/// What the headless loop does after a pass of [`App::pump_hidden`].
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub enum Hidden {
+    /// Nothing asked for the window: wait for the next event.
+    Wait,
+    /// The user wants the window back (tray, MPRIS `Raise`).
+    Show,
+    /// The user chose to quit.
+    Quit,
+}
+
 /// Smoke-screenshot driver (see `smoke.rs`).
 pub use crate::smoke::Smoke;
 
 pub struct App {
     pub session: Session,
     pub handle: Spawner,
+    /// The open window's context (a private, never-run one while the window
+    /// is closed to the tray).
     pub ctx: Context,
+    /// What background tasks call to wake the UI (or the headless loop).
+    pub wake: Wake,
     tx: mpsc::Sender<SessionEvent>,
     rx: mpsc::Receiver<SessionEvent>,
     app_tx: mpsc::Sender<AppEvent>,
@@ -244,6 +260,10 @@ pub struct App {
     pub viz_settings: crate::viz::Settings,
     #[cfg(feature = "visualizer")]
     render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// The visualizer was open when the window closed to the tray: it is
+    /// started again in the next window.
+    #[cfg(feature = "visualizer")]
+    viz_resume: bool,
 }
 
 /// The interface zoom levels the settings control and Ctrl+= / Ctrl+- walk through.
@@ -291,19 +311,23 @@ fn native_window(_: &eframe::CreationContext<'_>) -> Option<NativeWindow> {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, handle: Spawner) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
+    /// What a window's egui context needs before the first frame: fonts, the
+    /// zoom keys off, and the cover thumbnails sized for its density.
+    fn prepare_ctx(ctx: &Context) {
+        theme::install_fonts(ctx);
         // Zoom keys are handled in `shortcuts` so the choice persists.
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // Thumbnails at the physical size of a grid card (256 px at 1x).
+        aulos_core::library::covers::CoverThumb::set_max_dim(
+            (256.0 * ctx.pixels_per_point()).round().clamp(128.0, 640.0) as u32,
+        );
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>, handle: Spawner) -> Self {
+        Self::prepare_ctx(&cc.egui_ctx);
         let (tx, rx) = mpsc::channel();
         let (app_tx, app_rx) = mpsc::channel();
         let (session, init_errors) = Session::bootstrap();
-        // Thumbnails at the physical size of a grid card (256 px at 1x).
-        aulos_core::library::covers::CoverThumb::set_max_dim(
-            (256.0 * cc.egui_ctx.pixels_per_point())
-                .round()
-                .clamp(128.0, 640.0) as u32,
-        );
         let dark = Self::resolve_dark(session.config.config.theme_mode, cc.egui_ctx.system_theme());
         let pal = if dark { theme::DARK } else { theme::LIGHT };
         let accent = Accent::default_for(&pal);
@@ -313,6 +337,7 @@ impl App {
             session,
             handle,
             ctx: cc.egui_ctx.clone(),
+            wake: Wake::new(cc.egui_ctx.clone()),
             tx,
             rx,
             app_tx,
@@ -363,6 +388,8 @@ impl App {
             viz_settings,
             #[cfg(feature = "visualizer")]
             render_state: cc.wgpu_render_state.clone(),
+            #[cfg(feature = "visualizer")]
+            viz_resume: false,
         };
         theme::apply(&app.ctx, &app.pal);
         app.apply_zoom();
@@ -385,7 +412,7 @@ impl App {
         if std::env::var_os("AULOS_SMOKE").is_some() {
             return;
         }
-        let (tx, ctx) = (self.app_tx.clone(), self.ctx.clone());
+        let (tx, ctx) = (self.app_tx.clone(), self.wake.clone());
         self.handle.spawn(async move {
             let mut events = std::pin::pin!(mpris::mpris_stream(window));
             while let Some(event) = events.next().await {
@@ -409,7 +436,7 @@ impl App {
 
     /// A sink that queues an event for `logic()` and wakes the UI.
     pub fn sink(&self) -> impl FnMut(SessionEvent) + Send + 'static {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, ctx) = (self.tx.clone(), self.wake.clone());
         move |event| {
             if tx.send(event).is_ok() {
                 ctx.request_repaint();
@@ -587,6 +614,22 @@ impl App {
             life: f64::from(theme::motion::TOAST_LIFE),
         });
         self.ctx.request_repaint();
+    }
+
+    /// The part of a frame that needs no window: feeds the queued session and
+    /// app events to the session and keeps the background streams in step.
+    /// The headless loop runs it alone while the window is closed to the tray.
+    fn pump_events(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            let update = self.session.apply_session_event(event);
+            self.run(update);
+        }
+        while let Ok(event) = self.app_rx.try_recv() {
+            self.apply_app_event(event);
+        }
+        if std::mem::take(&mut self.streams_dirty) {
+            self.sync_streams();
+        }
     }
 
     /// Starts the background streams whose key appeared and stops those
@@ -861,7 +904,7 @@ impl App {
             return;
         };
         self.art_pending = Some(key.clone());
-        let (tx, ctx) = (self.app_tx.clone(), self.ctx.clone());
+        let (tx, ctx) = (self.app_tx.clone(), self.wake.clone());
         // The expanded cover is drawn up to ~480 points wide: keep it sharp at
         // any density (the blurred backdrop is soft by design, so it is not).
         let large_dim =
@@ -918,6 +961,11 @@ impl App {
                 accent,
                 large,
             } => {
+                if self.window_hidden {
+                    // No window to draw it in: the art is rebuilt when one
+                    // opens (`attach`).
+                    return;
+                }
                 if self.art_pending.as_deref() == Some(&key) {
                     self.art_pending = None;
                 }
@@ -965,33 +1013,27 @@ impl App {
     }
 
     /// Quits for real: the window's close request is not turned into "hide
-    /// to the tray".
+    /// to the tray", and a window already closed to the tray ends the
+    /// headless loop (see `host.rs`).
     fn quit(&mut self) {
         self.quitting = true;
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// Whether the window can be hidden and shown again. A Wayland client
-    /// can do neither (winit ignores `set_visible` and cannot un-minimize
-    /// there). The window's outer rectangle is likewise unknown on Wayland
-    /// only, which is what tells the sessions apart.
-    pub fn can_hide_window(&self) -> bool {
-        self.ctx.input(|i| i.viewport().outer_rect.is_some())
-    }
-
-    /// Hides the window (the tray icon stays).
+    /// Hides the app in the tray: the window closes (the only way a Wayland
+    /// client can disappear, and the same everywhere else) while the session,
+    /// the media controls and the tray icon keep running; `host.rs` opens a
+    /// new window when [`Self::show_window`] asks for one.
     fn hide_window(&mut self) {
         self.window_hidden = true;
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         self.tray_window_changed();
     }
 
-    /// Shows, un-minimizes and focuses the window.
+    /// Shows, un-minimizes and focuses the window; a window that was closed
+    /// to the tray is opened again by the host.
     fn show_window(&mut self) {
         self.window_hidden = false;
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1005,11 +1047,10 @@ impl App {
         }
     }
 
-    /// A tray icon that is shown by a desktop's tray host, on a window
-    /// system that can hide the window again: the only case where hiding the
-    /// window cannot lose it.
+    /// A tray icon that is shown by a desktop's tray host: the only case
+    /// where hiding the window cannot lose it.
     fn tray_can_hold_window(&self) -> bool {
-        matches!(self.tray, TrayState::Active { online: true, .. }) && self.can_hide_window()
+        matches!(self.tray, TrayState::Active { online: true, .. })
     }
 
     /// Carries out a tray click or menu entry.
@@ -1030,14 +1071,12 @@ impl App {
         }
     }
 
-    /// Keeps the tray icon in step with the settings (created when either
-    /// option is on, removed when both are off) and acts on the window's
-    /// close and minimize. Without a working tray the window is never
-    /// hidden, so it cannot be lost.
-    fn sync_tray(&mut self, ctx: &Context, minimized: bool) {
+    /// Keeps the tray icon in step with the settings: created when either
+    /// option is on, removed when both are off. Without a working tray the
+    /// window is never hidden, so it cannot be lost.
+    fn sync_tray_icon(&mut self) {
         let cfg = &self.session.config.config;
         let wanted = cfg.close_to_tray || cfg.minimize_to_tray;
-        let (close_to_tray, minimize_to_tray) = (cfg.close_to_tray, cfg.minimize_to_tray);
         match &self.tray {
             TrayState::Off if wanted && tray::SUPPORTED => self.start_tray(),
             TrayState::Active { icon, .. } if !wanted || icon.is_closed() => {
@@ -1053,11 +1092,19 @@ impl App {
             TrayState::Failed if !wanted => self.tray = TrayState::Off,
             _ => {}
         }
+    }
 
+    /// Acts on the window's close and minimize: with the matching option on
+    /// and a tray icon showing, they hide the app in the tray instead.
+    fn sync_tray(&mut self, ctx: &Context, minimized: bool) {
+        self.sync_tray_icon();
+        let cfg = &self.session.config.config;
+        let (close_to_tray, minimize_to_tray) = (cfg.close_to_tray, cfg.minimize_to_tray);
         let close_requested = ctx.input(|i| i.viewport().close_requested());
         if close_requested && !self.quitting && close_to_tray && self.tray_can_hold_window() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.hide_window();
+            // The close goes through: the window is destroyed, the app stays.
+            self.window_hidden = true;
+            self.tray_window_changed();
         } else if minimized
             && !self.was_minimized
             && !self.window_hidden
@@ -1078,7 +1125,7 @@ impl App {
             return;
         }
         self.tray = TrayState::Starting;
-        let (tx, ctx) = (self.app_tx.clone(), self.ctx.clone());
+        let (tx, ctx) = (self.app_tx.clone(), self.wake.clone());
         self.handle.spawn(async move {
             let (events, wake) = (tx.clone(), ctx.clone());
             let started = TrayIcon::start(move |event| {
@@ -1212,8 +1259,9 @@ impl App {
     /// flag (its size is not the one to come back to).
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     fn track_window_geometry(&mut self, ctx: &Context) {
-        // Smoke runs force their own window size.
-        if self.smoke.is_some() {
+        // Smoke runs force their own window size; the mini player's is not
+        // the one to come back to.
+        if self.smoke.is_some() || self.mini {
             return;
         }
         let info = ctx.input(|i| i.viewport().clone());
@@ -1221,26 +1269,26 @@ impl App {
             return;
         }
         let now = ctx.input(|i| i.time);
-        // The window builder takes points at the display's own scale, but the
-        // info is divided by the interface zoom on top of it.
+        // The window builder takes points at the display's own scale, but egui's
+        // rects are divided by the interface zoom on top of it.
         let zoom = ctx.zoom_factor();
         let maximized = info.maximized.unwrap_or(false);
         let stored = self.session.config.config.window.clone();
         let mut window = stored.clone().unwrap_or_default();
         window.maximized = maximized;
-        if !maximized || stored.is_none() {
-            if let Some(inner) = info.inner_rect {
-                window.size = [
-                    (inner.width() * zoom).round(),
-                    (inner.height() * zoom).round(),
-                ];
-            }
+        // The size is the viewport's: `inner_rect` is `None` on Wayland (a
+        // client can neither read nor set its position there), which used to
+        // keep the size from ever being stored.
+        let viewport = ctx.viewport_rect().size();
+        let has_size = viewport.x > 0.0 && viewport.y > 0.0;
+        if has_size && (!maximized || stored.is_none()) {
+            window.size = [(viewport.x * zoom).round(), (viewport.y * zoom).round()];
             if let Some(outer) = info.outer_rect {
                 window.position =
                     Some([(outer.min.x * zoom).round(), (outer.min.y * zoom).round()]);
             }
         }
-        if stored.as_ref() != Some(&window) && info.inner_rect.is_some() {
+        if has_size && stored.as_ref() != Some(&window) {
             self.session.config.config.window = Some(window);
             self.window_changed_at = Some(now);
         }
@@ -1253,6 +1301,78 @@ impl App {
                 ctx.request_repaint_after(Duration::from_secs_f64(left));
             }
         }
+    }
+
+    /// The window is gone (closed to the tray): drops everything bound to its
+    /// egui context and puts a private one in its place, so the app keeps
+    /// running without a window. The state worth keeping (route, queue,
+    /// photos and icons, …) stays; [`Self::attach`] rebuilds the rest.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn detach(&mut self) {
+        self.ctx = Context::default();
+        self.wake.detach();
+        self.covers.rebind(self.ctx.clone());
+        self.toasts.clear();
+        self.backdrop = None;
+        self.cover_large = None;
+        self.art_fade = ArtFade::default();
+        self.views.release_textures();
+        // The mini player is a window size, not a setting: a new window
+        // starts as the full UI.
+        self.mini = false;
+        self.saved_size = None;
+        self.window_changed_at = None;
+        #[cfg(feature = "visualizer")]
+        {
+            self.render_state = None;
+        }
+    }
+
+    /// A new window of the running app (opened from the tray): binds the app
+    /// to its egui context and wgpu device.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn attach(&mut self, cc: &eframe::CreationContext<'_>) {
+        Self::prepare_ctx(&cc.egui_ctx);
+        self.ctx = cc.egui_ctx.clone();
+        self.wake.attach(self.ctx.clone());
+        self.covers.rebind(self.ctx.clone());
+        self.art_ppp = self.ctx.pixels_per_point();
+        self.art_pending = None;
+        self.art_done = None;
+        self.art_dirty = true;
+        #[cfg(feature = "visualizer")]
+        {
+            self.render_state = cc.wgpu_render_state.clone();
+        }
+        theme::apply(&self.ctx, &self.pal);
+        self.apply_zoom();
+        self.window_hidden = false;
+        self.was_minimized = false;
+        self.tray_window_changed();
+    }
+
+    /// One pass of what runs without a window: the session keeps playing, the
+    /// media controls and the tray icon keep answering. Returns what the
+    /// headless loop does next.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn pump_hidden(&mut self) -> Hidden {
+        self.session.set_window_focused(false);
+        self.sync_tray_icon();
+        self.session.set_seeking(false);
+        self.pump_events();
+        if self.quitting {
+            Hidden::Quit
+        } else if self.window_hidden {
+            Hidden::Wait
+        } else {
+            Hidden::Show
+        }
+    }
+
+    /// Whether the user chose to quit (and no window is needed to say so).
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn is_hidden(&self) -> bool {
+        self.window_hidden && !self.quitting
     }
 
     /// Applies `ui_scale` on top of the density base, capped so the layout
@@ -1515,16 +1635,7 @@ impl eframe::App for App {
         let _ = minimized;
         self.sync_tray(ctx, minimized);
         self.session.set_seeking(self.seek_preview.is_some());
-        while let Ok(event) = self.rx.try_recv() {
-            let update = self.session.apply_session_event(event);
-            self.run(update);
-        }
-        while let Ok(event) = self.app_rx.try_recv() {
-            self.apply_app_event(event);
-        }
-        if std::mem::take(&mut self.streams_dirty) {
-            self.sync_streams();
-        }
+        self.pump_events();
         if self.zoom_base.is_none()
             && let Some(native) = ctx.native_pixels_per_point()
         {
@@ -1536,6 +1647,11 @@ impl eframe::App for App {
         self.track_window_geometry(ctx);
         // Every frame: a rotation or a window resize changes the cap.
         self.apply_zoom();
+        // Only once the window has a size: the render target is made for it.
+        #[cfg(feature = "visualizer")]
+        if std::mem::take(&mut self.viz_resume) {
+            self.set_visualizer(true);
+        }
         self.covers.upload_pending(&self.session.library.covers);
         #[cfg(target_arch = "wasm32")]
         for command in crate::media_session::sync(ctx, &mut self.session) {
@@ -1639,7 +1755,10 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         #[cfg(feature = "visualizer")]
-        self.set_visualizer(false);
+        {
+            self.viz_resume = self.viz.is_some();
+            self.set_visualizer(false);
+        }
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         if self.window_changed_at.take().is_some() {
             self.session.config.save();

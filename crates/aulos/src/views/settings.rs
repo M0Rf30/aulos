@@ -1041,7 +1041,7 @@ fn scrobble_update(app: &mut App, msg: ScrobbleMessage) {
         app.session.config.save();
     }
     let tx = app.views.settings.sender();
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     let _ = effect.spawn(&app.handle, move |m| {
         if tx.send(Msg::Scrobble(m)).is_ok() {
             ctx.request_repaint();
@@ -1118,7 +1118,7 @@ fn pick_folder(app: &mut App) {
     }
     app.views.settings.picking_folder = true;
     let tx = app.views.settings.sender();
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     app.handle.spawn(async move {
         let result =
             dialogs::pick_music_folder(&aulos_core::fl!("settings-pick-folder-title")).await;
@@ -1164,7 +1164,7 @@ pub fn allow_pending_folders(app: &mut App) {
 
 fn allow_folders(app: &mut App, paths: Vec<PathBuf>) {
     let tx = app.views.settings.sender();
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     app.handle.spawn(async move {
         let mut result = Ok(());
         for path in paths {
@@ -3665,21 +3665,11 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
     if crate::tray::SUPPORTED {
         let cfg = &app.session.config.config;
         let (close, minimize) = (cfg.close_to_tray, cfg.minimize_to_tray);
-        // Wayland cannot hide a window: say so instead of a switch that
-        // does nothing.
-        let hideable = app.can_hide_window();
-        let desc = |normal: String| {
-            if hideable {
-                normal
-            } else {
-                aulos_core::fl!("settings-tray-no-hide-desc")
-            }
-        };
         if let Some(on) = toggle_row(
             ui,
             &pal,
             &aulos_core::fl!("settings-close-tray-title"),
-            &desc(aulos_core::fl!("settings-close-tray-desc")),
+            &aulos_core::fl!("settings-close-tray-desc"),
             false,
             close,
         ) {
@@ -3689,7 +3679,7 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
             ui,
             &pal,
             &aulos_core::fl!("settings-minimize-tray-title"),
-            &desc(aulos_core::fl!("settings-minimize-tray-desc")),
+            &aulos_core::fl!("settings-minimize-tray-desc"),
             false,
             minimize,
         ) {

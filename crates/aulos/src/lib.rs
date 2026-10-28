@@ -12,6 +12,8 @@
 mod android;
 mod app;
 mod dialogs;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+mod host;
 #[cfg(target_arch = "wasm32")]
 mod media_session;
 mod smoke;
@@ -20,6 +22,7 @@ mod tray;
 mod views;
 #[cfg(feature = "visualizer")]
 mod viz;
+mod wake;
 mod widgets;
 
 /// Caps glibc's per-thread malloc arenas and returns freed memory sooner:
@@ -68,7 +71,7 @@ pub fn run() -> eframe::Result {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let result = run_window(&runtime, open_paths);
+    let result = host::run(&runtime, open_paths);
     // Dropping the runtime would wait for running scan/convert/tag jobs, so
     // closing the window would leave the process hanging.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
@@ -82,79 +85,6 @@ const MIN_WINDOW_SIZE: [f32; 2] = [420.0, 190.0];
 /// How long closing the app waits for blocking jobs before abandoning them.
 #[cfg(not(target_arch = "wasm32"))]
 const RUNTIME_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Opens the window on the calling thread (with `runtime` entered) and runs
-/// until it closes.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-fn run_window(
-    runtime: &tokio::runtime::Runtime,
-    open_paths: Vec<std::path::PathBuf>,
-) -> eframe::Result {
-    let _guard = runtime.enter();
-    let handle = aulos_core::task::Spawner::new(runtime.handle().clone());
-
-    // The last window size and place come from the settings (not eframe's own
-    // persistence): one settings file, one save path. A smoke run takes its
-    // size from the environment and leaves the saved geometry alone.
-    let saved = match smoke::window_size() {
-        Some(_) => None,
-        None => aulos_core::config::Config::load()
-            .window
-            .and_then(|window| window.clamped(MIN_WINDOW_SIZE)),
-    };
-    let size = smoke::window_size()
-        .or_else(|| saved.as_ref().map(|window| window.size))
-        .unwrap_or([1280.0, 800.0]);
-    let run = |backends| {
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size(size)
-            .with_min_inner_size(MIN_WINDOW_SIZE);
-        if let Some(window) = &saved {
-            // Wayland ignores the position; a compositor places the window.
-            if let Some(position) = window.position {
-                viewport = viewport.with_position(position);
-            }
-            viewport = viewport.with_maximized(window.maximized);
-        }
-        let options = eframe::NativeOptions {
-            viewport: viewport
-                .with_title("Aulos")
-                .with_app_id("io.github.m0rf30.Aulos")
-                // X11 and desktops that don't resolve the icon from the
-                // desktop file via the app id need it on the window itself.
-                .with_icon(
-                    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
-                        .unwrap_or_default(),
-                ),
-            // wgpu's default reserves 128-256 MB blocks; ~10 MB is ever used.
-            wgpu_options: low_memory_wgpu(backends),
-            ..Default::default()
-        };
-        let handle = handle.clone();
-        let open_paths = open_paths.clone();
-        eframe::run_native(
-            "Aulos",
-            options,
-            Box::new(|cc| {
-                let mut app = app::App::new(cc, handle);
-                app.open_files(open_paths);
-                Ok(Box::new(app))
-            }),
-        )
-    };
-    // Vulkan alone keeps Mesa's GL stack (libgallium, LLVM; ~50 MB) from
-    // loading; fall back to every backend when it has no adapter.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WGPU_BACKEND").is_none() {
-        match run(Some(eframe::wgpu::Backends::VULKAN)) {
-            Err(eframe::Error::Wgpu(err)) => {
-                tracing::warn!("Vulkan unavailable ({err}); retrying with all backends");
-            }
-            other => return other,
-        }
-    }
-    run(None)
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Default wgpu setup (restricted to `backends` when given) with small memory blocks (`MemoryHints::MemoryUsage`):

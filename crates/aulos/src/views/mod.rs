@@ -59,6 +59,15 @@ pub struct State {
     pub visualizer: visualizer::State,
 }
 
+impl State {
+    /// Forgets every texture held by a view: they belong to a window that
+    /// closed.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn release_textures(&mut self) {
+        self.tagger.release_textures();
+    }
+}
+
 /// Where a side sheet (queue, properties) sits: `(width, top, bottom)` in
 /// screen points. Desktop sheets float at the right edge between the toolbar
 /// and the now bar; phone sheets span the width and stop above the player

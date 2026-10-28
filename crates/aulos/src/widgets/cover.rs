@@ -8,6 +8,7 @@ use egui::{
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Thumbnails uploaded to the GPU per frame: a big library otherwise stalls
 /// one frame and peaks staging memory.
@@ -16,6 +17,26 @@ const UPLOADS_PER_FRAME: usize = 8;
 const IDLE_FRAMES: u64 = 240;
 /// GPU bytes of thumbnails kept; the least recently drawn go first.
 const RESIDENT_BUDGET: usize = 48 << 20;
+
+/// A remote picture (icon, artist photo): its texture and the pixels, kept
+/// so the texture can be made again for a new window's context.
+struct Remote {
+    tex: TextureHandle,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    image: Arc<ColorImage>,
+}
+
+impl Remote {
+    fn new(ctx: &Context, name: String, image: ColorImage) -> Self {
+        let image = Arc::new(image);
+        let tex = ctx.load_texture(name, Arc::clone(&image), TextureOptions::LINEAR);
+        Self {
+            tex,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            image,
+        }
+    }
+}
 
 struct Thumb {
     tex: TextureHandle,
@@ -39,8 +60,8 @@ pub struct Covers {
     frame: Cell<u64>,
     /// GPU bytes held by `thumbs`.
     resident: usize,
-    icons: HashMap<String, TextureHandle>,
-    photos: HashMap<String, TextureHandle>,
+    icons: HashMap<String, Remote>,
+    photos: HashMap<String, Remote>,
     gradients: RefCell<HashMap<(Color32, Color32), TextureHandle>>,
 }
 
@@ -84,11 +105,11 @@ impl Covers {
     }
     /// A remote icon (radio station, podcast art) by URL.
     pub fn icon(&self, url: &str) -> Option<&TextureHandle> {
-        self.icons.get(url)
+        self.icons.get(url).map(|icon| &icon.tex)
     }
     /// An artist photo by artist name.
     pub fn photo(&self, name: &str) -> Option<&TextureHandle> {
-        self.photos.get(name)
+        self.photos.get(name).map(|photo| &photo.tex)
     }
 
     /// The core has a new or changed thumbnail for `key`: forget the old
@@ -181,23 +202,44 @@ impl Covers {
         self.resident = resident;
     }
     pub fn add_icon(&mut self, icon: OnlineIcon) {
-        let tex = self.ctx.load_texture(
-            format!("icon:{}", icon.url),
-            to_image(icon.width, icon.height, &icon.rgba),
-            TextureOptions::LINEAR,
-        );
-        self.icons.insert(icon.url, tex);
+        let image = to_image(icon.width, icon.height, &icon.rgba);
+        let remote = Remote::new(&self.ctx, format!("icon:{}", icon.url), image);
+        self.icons.insert(icon.url, remote);
     }
     pub fn add_photo(&mut self, photo: ArtistPhoto) {
-        let tex = self.ctx.load_texture(
-            format!("photo:{}", photo.name),
-            to_image(photo.width, photo.height, &photo.rgba),
-            TextureOptions::LINEAR,
-        );
-        self.photos.insert(photo.name, tex);
+        let image = to_image(photo.width, photo.height, &photo.rgba);
+        let remote = Remote::new(&self.ctx, format!("photo:{}", photo.name), image);
+        self.photos.insert(photo.name, remote);
     }
     pub fn clear_photos(&mut self) {
         self.photos.clear();
+    }
+
+    /// Moves every texture to another egui context (a window closed to the
+    /// tray and opened again has a new one). Thumbnails are not carried
+    /// over: the views ask for the ones they draw and they upload again
+    /// from the core's copy.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn rebind(&mut self, ctx: Context) {
+        self.thumbs.clear();
+        self.resident = 0;
+        self.wanted.borrow_mut().clear();
+        self.gradients.borrow_mut().clear();
+        for (url, icon) in &mut self.icons {
+            icon.tex = ctx.load_texture(
+                format!("icon:{url}"),
+                Arc::clone(&icon.image),
+                TextureOptions::LINEAR,
+            );
+        }
+        for (name, photo) in &mut self.photos {
+            photo.tex = ctx.load_texture(
+                format!("photo:{name}"),
+                Arc::clone(&photo.image),
+                TextureOptions::LINEAR,
+            );
+        }
+        self.ctx = ctx;
     }
 
     /// A cached 8×8 diagonal (top-left → bottom-right) gradient texture.

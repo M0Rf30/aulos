@@ -1363,8 +1363,7 @@ settings-inhibit-desc = Mantém um bloqueio de inibição da área de trabalho d
 settings-close-tray-title = Fechar para a bandeja do sistema
 settings-close-tray-desc = Ao fechar a janela, o Aulos fica na bandeja em vez de sair; saia pelo menu do ícone. Requer uma área de trabalho com suporte à bandeja.
 settings-minimize-tray-title = Minimizar para a bandeja do sistema
-settings-minimize-tray-desc = Ao minimizar, a janela fica oculta na bandeja; clique no ícone para trazê-la de volta.
-settings-tray-no-hide-desc = Indisponível nesta sessão: o Wayland não permite que um aplicativo oculte sua janela. Inicie o Aulos com WINIT_UNIX_BACKEND=x11 para usá-lo.
+settings-minimize-tray-desc = Ao minimizar, a janela fica oculta na bandeja; clique no ícone para trazê-la de volta. O Wayland não avisa os aplicativos quando uma janela é minimizada; lá só funciona fechar para a bandeja.
 
 # Settings page: experimental
 settings-experimental-note = Recursos ainda em teste

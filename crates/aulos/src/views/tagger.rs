@@ -93,6 +93,14 @@ pub struct State {
     add_open: bool,
 }
 
+impl State {
+    /// Forgets the thumbnails: their textures belong to a window that closed.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn release_textures(&mut self) {
+        self.thumbs = ThumbCache::default();
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         let (tx, rx) = channel();
@@ -208,7 +216,7 @@ fn select_range(app: &mut App, from: FileId, to: FileId) {
 /// Runs one of the editor's background jobs, feeding its event back.
 fn spawn(app: &App, job: impl Future<Output = TaggerEvent> + Send + 'static) {
     let tx = app.views.tagger.tx.clone();
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     app.handle.spawn(async move {
         let event = job.await;
         let _ = tx.send(event);

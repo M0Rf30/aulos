@@ -2152,7 +2152,7 @@ fn io_sender(app: &mut App) -> mpsc::Sender<IoMsg> {
 
 fn spawn_import(app: &mut App) {
     let tx = io_sender(app);
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     app.handle.spawn(async move {
         let _ = tx.send(IoMsg::Picked(pick_playlist_files().await));
         ctx.request_repaint();
@@ -2189,7 +2189,7 @@ fn export(app: &mut App, sel: &Sel) {
     };
     let relative = app.session.config.config.m3u_relative_paths;
     let tx = io_sender(app);
-    let ctx = app.ctx.clone();
+    let ctx = app.wake.clone();
     app.handle.spawn(async move {
         let result = export_flow(&name, source, relative).await;
         let _ = tx.send(IoMsg::Exported(result));

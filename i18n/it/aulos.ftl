@@ -1362,8 +1362,7 @@ settings-inhibit-desc = Mantiene un blocco di inibizione del desktop durante la 
 settings-close-tray-title = Chiudi nell’area di notifica
 settings-close-tray-desc = Chiudendo la finestra Aulos resta nell’area di notifica invece di uscire; esci dal menu dell’icona. Richiede un desktop con supporto all’area di notifica.
 settings-minimize-tray-title = Riduci nell’area di notifica
-settings-minimize-tray-desc = Riducendo la finestra la nascondi nell’area di notifica; clicca l’icona per riportarla.
-settings-tray-no-hide-desc = Non disponibile in questa sessione: Wayland non permette a un’applicazione di nascondere la propria finestra. Avvia Aulos con WINIT_UNIX_BACKEND=x11 per usarla.
+settings-minimize-tray-desc = Riducendo la finestra la nascondi nell’area di notifica; clicca l’icona per riportarla. Wayland non segnala alle app quando una finestra viene ridotta, quindi lì funziona solo la chiusura nell’area di notifica.
 
 # Settings page: experimental
 settings-experimental-note = Funzioni ancora in fase di test

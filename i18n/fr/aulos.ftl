@@ -1362,8 +1362,7 @@ settings-inhibit-desc = Maintient un verrou d’inhibition du bureau pendant la 
 settings-close-tray-title = Fermer dans la zone de notification
 settings-close-tray-desc = Fermer la fenêtre laisse Aulos dans la zone de notification au lieu de quitter ; quittez depuis le menu de l’icône. Nécessite un bureau prenant en charge la zone de notification.
 settings-minimize-tray-title = Réduire dans la zone de notification
-settings-minimize-tray-desc = Réduire la fenêtre la masque dans la zone de notification ; cliquez sur l’icône pour la rouvrir.
-settings-tray-no-hide-desc = Indisponible dans cette session : Wayland ne permet pas à une application de masquer sa fenêtre. Lancez Aulos avec WINIT_UNIX_BACKEND=x11 pour l’utiliser.
+settings-minimize-tray-desc = Réduire la fenêtre la masque dans la zone de notification ; cliquez sur l’icône pour la rouvrir. Wayland n’indique pas aux applications qu’une fenêtre est réduite : seule la fermeture vers la zone de notification y fonctionne.
 
 # Settings page: experimental
 settings-experimental-note = Fonctionnalités encore en phase de test

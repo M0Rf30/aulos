@@ -1531,7 +1531,7 @@ fn apply(app: &mut App, intent: Intent) {
     match intent {
         Intent::AddFiles => {
             let tx = app.views.converter.tx.clone();
-            let ctx = app.ctx.clone();
+            let ctx = app.wake.clone();
             app.handle.spawn(async move {
                 let files = pick_files().await;
                 // Cancelled: nothing to add.
@@ -1543,7 +1543,7 @@ fn apply(app: &mut App, intent: Intent) {
         }
         Intent::ChangeDir => {
             let tx = app.views.converter.tx.clone();
-            let ctx = app.ctx.clone();
+            let ctx = app.wake.clone();
             app.handle.spawn(async move {
                 if let Some(dir) = pick_folder().await {
                     let _ = tx.send(Picked::OutDir(dir));

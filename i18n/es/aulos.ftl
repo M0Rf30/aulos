@@ -1361,8 +1361,7 @@ settings-inhibit-desc = Mantiene un bloqueo de inhibición del escritorio durant
 settings-close-tray-title = Cerrar a la bandeja del sistema
 settings-close-tray-desc = Al cerrar la ventana, Aulos queda en la bandeja en lugar de salir; sal desde el menú del icono. Requiere un escritorio con bandeja del sistema.
 settings-minimize-tray-title = Minimizar a la bandeja del sistema
-settings-minimize-tray-desc = Al minimizar, la ventana se oculta en la bandeja; haz clic en el icono para recuperarla.
-settings-tray-no-hide-desc = No disponible en esta sesión: Wayland no permite que una aplicación oculte su ventana. Inicia Aulos con WINIT_UNIX_BACKEND=x11 para usarlo.
+settings-minimize-tray-desc = Al minimizar, la ventana se oculta en la bandeja; haz clic en el icono para recuperarla. Wayland no avisa a las aplicaciones de que una ventana se minimiza, así que allí solo funciona cerrar a la bandeja.
 
 # Settings page: experimental
 settings-experimental-note = Funciones aún en pruebas
