@@ -25,6 +25,8 @@ ignore = [
     "RUSTSEC-2026-0370", # zvariant
     "RUSTSEC-2026-0371", # zbus_names
     "RUSTSEC-2026-0372", # zvariant_derive
+    # basic-toml is archived; only i18n-config (latest 0.4.8, via i18n-embed-fl) uses it, at compile time, to read our own i18n.toml
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]
