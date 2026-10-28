@@ -402,7 +402,7 @@ fn parse_envelope(http_status: u16, body: &str) -> Result<Envelope, String> {
 fn send(request: crate::http::blocking::RequestBuilder) -> Result<Envelope, String> {
     let response = request
         .send()
-        .map_err(|e| format!("AcoustID request failed: {e}"))?;
+        .map_err(|e| format!("AcoustID request failed: {}", e.without_url()))?;
     let status = response.status().as_u16();
     let body = super::read_capped_body(response, MAX_RESPONSE_BYTES)?;
     parse_envelope(status, &String::from_utf8_lossy(&body))

@@ -42,9 +42,9 @@ impl HttpRangeReader {
         let response = client
             .get(&url)
             .send()
-            .map_err(|e| format!("HTTP request failed: {e}"))?
+            .map_err(|e| format!("HTTP request failed: {}", e.without_url()))?
             .error_for_status()
-            .map_err(|e| format!("HTTP request returned an error status: {e}"))?;
+            .map_err(|e| format!("HTTP request returned an error status: {}", e.without_url()))?;
 
         let content_length = response.content_length().unwrap_or(0);
 
@@ -83,7 +83,9 @@ impl HttpRangeReader {
             .get(&self.url)
             .header("Range", format!("bytes={byte_offset}-"))
             .send()
-            .map_err(|e| io::Error::other(format!("HTTP Range request failed: {e}")))?;
+            .map_err(|e| {
+                io::Error::other(format!("HTTP Range request failed: {}", e.without_url()))
+            })?;
 
         if byte_offset > 0 {
             if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {

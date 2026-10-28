@@ -200,7 +200,9 @@ impl PlaySource {
                     .get(&url)
                     .header("Icy-MetaData", "1")
                     .send()
-                    .map_err(|e| PlayerError(format!("Failed to connect to stream: {e}")))?;
+                    .map_err(|e| {
+                        PlayerError(format!("Failed to connect to stream: {}", e.without_url()))
+                    })?;
                 let mime = response
                     .headers()
                     .get(reqwest::header::CONTENT_TYPE)

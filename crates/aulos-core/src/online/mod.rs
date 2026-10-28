@@ -59,14 +59,15 @@ pub(crate) fn block_for(d: Duration) {
 }
 
 /// What a failed request to `url` means to the user. Natively the error is
-/// reported as it came, labeled with `what`; in a browser a request that got
-/// no answer is mostly a CORS refusal or a down server, which the page cannot
-/// tell apart, so it says both (see [`crate::http::no_answer_message`]).
-pub(crate) fn request_error(what: &str, url: &str, error: &reqwest::Error) -> String {
+/// reported as it came (without its URL, which may carry a token), labeled
+/// with `what`; in a browser a request that got no answer is mostly a CORS
+/// refusal or a down server, which the page cannot tell apart, so it says
+/// both (see [`crate::http::no_answer_message`]).
+pub(crate) fn request_error(what: &str, url: &str, error: reqwest::Error) -> String {
     if cfg!(target_arch = "wasm32") && error.status().is_none() && !error.is_decode() {
         crate::http::no_answer_message(url)
     } else {
-        format!("{what}: {error}")
+        format!("{what}: {}", error.without_url())
     }
 }
 

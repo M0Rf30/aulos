@@ -368,7 +368,7 @@ pub async fn probe_stream_format(url: &str) -> Result<StreamFormat, String> {
     let response = crate::task::timeout(PROBE_TIMEOUT, super::http().get(&stream_url).send())
         .await
         .map_err(|_| "Stream probe timed out".to_string())?
-        .map_err(|e| super::request_error("Stream probe failed", &stream_url, &e))?;
+        .map_err(|e| super::request_error("Stream probe failed", &stream_url, e))?;
     if !response.status().is_success() {
         return Err(format!("Stream probe returned HTTP {}", response.status()));
     }
@@ -460,7 +460,7 @@ async fn fetch_stations(
     let response = request
         .send()
         .await
-        .map_err(|e| super::request_error("Radio search failed", url, &e))?;
+        .map_err(|e| super::request_error("Radio search failed", url, e))?;
     if !response.status().is_success() {
         return Err(format!("Radio search returned HTTP {}", response.status()));
     }
@@ -612,7 +612,7 @@ pub async fn resolve_stream_url(client: &reqwest::Client, url: &str) -> Result<S
             .get(&current)
             .send()
             .await
-            .map_err(|e| super::request_error("Failed to fetch playlist", &current, &e))?;
+            .map_err(|e| super::request_error("Failed to fetch playlist", &current, e))?;
         if !response.status().is_success() {
             return Err(format!(
                 "Failed to fetch playlist: HTTP {}",

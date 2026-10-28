@@ -182,7 +182,7 @@ fn fetch_text(client: &crate::http::blocking::Client, url: &Url) -> Result<Strin
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .and_then(reqwest::blocking::Response::text)
-        .map_err(|e| format!("Failed to fetch HLS playlist: {e}"))
+        .map_err(|e| format!("Failed to fetch HLS playlist: {}", e.without_url()))
 }
 
 fn io_err(message: String) -> io::Error {
@@ -203,7 +203,9 @@ impl Read for HlsReader {
                     .send()
                     .and_then(reqwest::blocking::Response::error_for_status)
                     .and_then(reqwest::blocking::Response::bytes)
-                    .map_err(|e| io_err(format!("Failed to fetch HLS segment: {e}")))?;
+                    .map_err(|e| {
+                        io_err(format!("Failed to fetch HLS segment: {}", e.without_url()))
+                    })?;
                 self.current = io::Cursor::new(bytes.to_vec());
                 continue;
             }

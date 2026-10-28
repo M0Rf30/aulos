@@ -506,7 +506,7 @@ fn get_json(url: &str) -> Result<Value, SimilarError> {
     let resp = crate::online::musicbrainz::http_client()
         .get(url)
         .send()
-        .map_err(|e| SimilarError::Network(e.to_string()))?;
+        .map_err(|e| SimilarError::Network(e.without_url().to_string()))?;
     let status = resp.status().as_u16();
     let body =
         super::read_capped_text(resp, super::API_MAX_BYTES).map_err(SimilarError::Network)?;
@@ -578,7 +578,7 @@ impl SimilarArtists for LastFmSimilar {
         let resp = crate::online::scrobble::http_client()
             .get(&url)
             .send()
-            .map_err(|e| SimilarError::Network(e.to_string()))?;
+            .map_err(|e| SimilarError::Network(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
         let body =
             super::read_capped_text(resp, super::API_MAX_BYTES).map_err(SimilarError::Network)?;

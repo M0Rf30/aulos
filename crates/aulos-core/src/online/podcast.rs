@@ -54,7 +54,7 @@ pub async fn fetch_feed(
         .get(feed_url)
         .send()
         .await
-        .map_err(|e| super::request_error("Failed to fetch feed", feed_url, &e))?;
+        .map_err(|e| super::request_error("Failed to fetch feed", feed_url, e))?;
     if !response.status().is_success() {
         return Err(format!("Failed to fetch feed: HTTP {}", response.status()));
     }
@@ -230,7 +230,7 @@ pub async fn search_itunes(
         .get(&url)
         .send()
         .await
-        .map_err(|e| super::request_error("iTunes search failed", &url, &e))?;
+        .map_err(|e| super::request_error("iTunes search failed", &url, e))?;
     if !response.status().is_success() {
         return Err(format!("iTunes search returned HTTP {}", response.status()));
     }
@@ -403,9 +403,13 @@ pub fn download_episode(
         let mut response = super::HTTP_CLIENT
             .get(&episode.enclosure_url)
             .send()
-            .map_err(|e| DownloadError::Failed(format!("Download request error: {e}")))?
+            .map_err(|e| {
+                DownloadError::Failed(format!("Download request error: {}", e.without_url()))
+            })?
             .error_for_status()
-            .map_err(|e| DownloadError::Failed(format!("Download response error: {e}")))?;
+            .map_err(|e| {
+                DownloadError::Failed(format!("Download response error: {}", e.without_url()))
+            })?;
         let total = response.content_length().filter(|&n| n > 0);
         let mut file = std::fs::File::create(&dest)
             .map_err(|e| DownloadError::Failed(format!("Create download file error: {e}")))?;
