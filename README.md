@@ -113,6 +113,7 @@ English, Italian, German, French, Spanish and Brazilian Portuguese. The interfac
 
 - **Media keys and now playing**: MPRIS on Linux, System Media Transport Controls on Windows, Now Playing on macOS, including cover art and seeking.
 - **Notifications** with cover art on track change, only while the window isn't focused.
+- **System tray** (Linux): optional "close to tray" and "minimize to tray", with a StatusNotifierItem icon (Show/Hide, Play/Pause, Next, Previous, Quit). Needs a desktop with tray support and an X11 window (Wayland clients cannot hide their window; start with `WINIT_UNIX_BACKEND=x11`).
 - **Sleep inhibit** while music plays: through the desktop portal on Linux (falling back to systemd-logind), natively on Windows and macOS.
 
 ### Visualizer
