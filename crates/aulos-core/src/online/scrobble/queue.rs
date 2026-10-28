@@ -48,22 +48,24 @@ impl Queue {
     }
 
     /// Load the queue from `path`. A missing file yields an empty queue; a
-    /// corrupt or unknown-version one is moved aside to `<path>.bad` (so the
-    /// next save does not destroy it) and an empty queue is used.
+    /// corrupt or unknown-version one is moved aside to `<path>.bad` (or the
+    /// first free `<path>.bad.N`, so the next save does not destroy it) and an
+    /// empty queue is used.
     pub fn load(path: &Path) -> Self {
         let items = match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<FileFormat>(&bytes) {
                 Ok(f) if f.version == FILE_VERSION => f.items,
                 _ => {
-                    let mut bad = path.as_os_str().to_owned();
-                    bad.push(".bad");
-                    tracing::error!(
-                        "Unusable scrobble queue {}; keeping it as {}",
-                        path.display(),
-                        Path::new(&bad).display()
-                    );
-                    if let Err(e) = std::fs::rename(path, &bad) {
-                        tracing::warn!("Could not move the scrobble queue aside: {e}");
+                    match crate::fs_atomic::set_aside(path) {
+                        Ok(bad) => tracing::error!(
+                            "Unusable scrobble queue {}; keeping it as {}",
+                            path.display(),
+                            bad.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Unusable scrobble queue {}; could not move it aside: {e}",
+                            path.display()
+                        ),
                     }
                     Vec::new()
                 }

@@ -681,8 +681,8 @@ impl Config {
 
     /// Loads the settings stored at `path`. Defaults when the file does not
     /// exist (first launch) or cannot be read; a file that is not valid RON
-    /// is moved aside to `<path>.bad` (so the next save does not destroy it)
-    /// and the defaults are used.
+    /// is moved aside to `<path>.bad`, or the first free `<path>.bad.N` (so the
+    /// next save does not destroy it), and the defaults are used.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn load_from(path: &Path) -> Config {
@@ -704,24 +704,28 @@ impl Config {
         }
     }
 
-    /// Moves a settings file that cannot be used to `<path>.bad`, so the
-    /// defaults that replace it are never written over the user's data.
+    /// Moves a settings file that cannot be used to `<path>.bad` (or the
+    /// first free `<path>.bad.N`, earlier backups are kept), so the defaults
+    /// that replace it are never written over the user's data.
     #[cfg(not(target_arch = "wasm32"))]
     fn set_aside(path: &Path, why: &str) {
-        let mut bad = path.as_os_str().to_owned();
-        bad.push(".bad");
-        tracing::error!(
-            "Settings {} {why}; keeping it as {} and using defaults",
-            path.display(),
-            Path::new(&bad).display()
-        );
-        if let Err(e) = std::fs::rename(path, &bad) {
-            tracing::warn!("Could not move the unusable settings aside: {e}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600));
+        match crate::fs_atomic::set_aside(path) {
+            Ok(bad) => {
+                tracing::error!(
+                    "Settings {} {why}; keeping it as {} and using defaults",
+                    path.display(),
+                    bad.display()
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Settings {} {why}; could not move them aside: {e}",
+                path.display()
+            ),
         }
     }
 
@@ -1108,6 +1112,26 @@ mod persistence_tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.ron.bad")).unwrap(),
             "(volume: not-a-number"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_corruption_keeps_the_first_backup() {
+        let dir = scratch("two-corruptions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, "(volume: first").unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+        std::fs::write(&path, "(volume: second").unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.ron.bad")).unwrap(),
+            "(volume: first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.ron.bad.1")).unwrap(),
+            "(volume: second"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

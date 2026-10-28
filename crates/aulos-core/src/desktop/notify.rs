@@ -83,14 +83,14 @@ fn image_ext(bytes: &[u8]) -> &'static str {
 pub fn prepare_cover(track: &Track, cover_bytes: Option<&[u8]>) -> Option<PathBuf> {
     if let Some(bytes) = cover_bytes.filter(|b| !b.is_empty()) {
         let dir = crate::paths::cache_dir().join("notify");
-        std::fs::create_dir_all(&dir).ok()?;
         // Keyed by content so the file can be reused and never half-read:
         // a different cover is simply a different file.
         let digest = md5::compute(bytes);
         let path = dir.join(format!("{digest:x}.{}", image_ext(bytes)));
         if !path.exists() {
-            std::fs::write(&path, bytes).ok()?;
+            crate::fs_atomic::write(&path, bytes, false).ok()?;
         }
+        crate::fs_atomic::prune_dir(&dir, &path, crate::fs_atomic::COVER_CACHE_KEEP);
         return Some(path);
     }
     let url = crate::mpris::extract_art_url(track.id, &track.path)?;
