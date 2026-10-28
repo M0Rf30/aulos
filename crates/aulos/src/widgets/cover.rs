@@ -44,6 +44,21 @@ struct Thumb {
     bytes: usize,
 }
 
+/// A remote icon (radio station, podcast art). The pixels stay, the texture
+/// is only held while the icon is drawn: it uploads on first draw and is
+/// released after [`IDLE_FRAMES`] unseen, then uploads again when needed.
+struct Icon {
+    image: Arc<ColorImage>,
+    tex: Option<TextureHandle>,
+    last_used: Cell<u64>,
+}
+
+/// A cached gradient texture and when it was last drawn.
+struct Gradient {
+    tex: TextureHandle,
+    last_used: Cell<u64>,
+}
+
 /// Every texture the views draw, keyed by what the core calls it. Gradient
 /// placeholders are built on demand and cached, so `&Covers` is enough to
 /// draw (single-threaded UI only).
@@ -60,9 +75,12 @@ pub struct Covers {
     frame: Cell<u64>,
     /// GPU bytes held by `thumbs`.
     resident: usize,
-    icons: HashMap<String, Remote>,
+    icons: HashMap<String, Icon>,
+    /// URLs of icons drawn without a texture, awaiting a throttled upload.
+    wanted_icons: RefCell<HashSet<String>>,
     photos: HashMap<String, Remote>,
-    gradients: RefCell<HashMap<(Color32, Color32), TextureHandle>>,
+    /// Placeholder and fill gradients; the ones idle too long are released.
+    gradients: RefCell<HashMap<(Color32, Color32), Gradient>>,
 }
 
 fn to_image(w: u32, h: u32, rgba: &[u8]) -> ColorImage {
@@ -79,6 +97,7 @@ impl Covers {
             frame: Cell::new(0),
             resident: 0,
             icons: HashMap::new(),
+            wanted_icons: RefCell::default(),
             photos: HashMap::new(),
             gradients: RefCell::default(),
         }
@@ -105,7 +124,15 @@ impl Covers {
     }
     /// A remote icon (radio station, podcast art) by URL.
     pub fn icon(&self, url: &str) -> Option<&TextureHandle> {
-        self.icons.get(url).map(|icon| &icon.tex)
+        let icon = self.icons.get(url)?;
+        if let Some(tex) = &icon.tex {
+            icon.last_used.set(self.frame.get());
+            return Some(tex);
+        }
+        if self.wanted_icons.borrow_mut().insert(url.to_owned()) {
+            self.ctx.request_repaint();
+        }
+        None
     }
     /// An artist photo by artist name.
     pub fn photo(&self, name: &str) -> Option<&TextureHandle> {
@@ -167,13 +194,40 @@ impl Covers {
                 self.resident -= old.bytes;
             }
         }
-        if !self.wanted.borrow().is_empty() {
+        let icon_batch: Vec<String> = self
+            .wanted_icons
+            .get_mut()
+            .iter()
+            .take(UPLOADS_PER_FRAME)
+            .cloned()
+            .collect();
+        for url in icon_batch {
+            self.wanted_icons.get_mut().remove(&url);
+            if let Some(icon) = self.icons.get_mut(&url) {
+                icon.tex = Some(self.ctx.load_texture(
+                    format!("icon:{url}"),
+                    Arc::clone(&icon.image),
+                    TextureOptions::LINEAR,
+                ));
+                icon.last_used.set(frame);
+            }
+        }
+        if !self.wanted.borrow().is_empty() || !self.wanted_icons.borrow().is_empty() {
             self.ctx.request_repaint();
         }
         self.evict(frame);
     }
 
     fn evict(&mut self, frame: u64) {
+        let idle = |last_used: u64| frame.saturating_sub(last_used) > IDLE_FRAMES;
+        for icon in self.icons.values_mut() {
+            if icon.tex.is_some() && idle(icon.last_used.get()) {
+                icon.tex = None;
+            }
+        }
+        self.gradients
+            .get_mut()
+            .retain(|_, g| !idle(g.last_used.get()));
         let mut resident = self.resident;
         self.thumbs.retain(|_, t| {
             let idle = frame.saturating_sub(t.last_used.get()) > IDLE_FRAMES;
@@ -202,9 +256,12 @@ impl Covers {
         self.resident = resident;
     }
     pub fn add_icon(&mut self, icon: OnlineIcon) {
-        let image = to_image(icon.width, icon.height, &icon.rgba);
-        let remote = Remote::new(&self.ctx, format!("icon:{}", icon.url), image);
-        self.icons.insert(icon.url, remote);
+        let entry = Icon {
+            image: Arc::new(to_image(icon.width, icon.height, &icon.rgba)),
+            tex: None,
+            last_used: Cell::new(self.frame.get()),
+        };
+        self.icons.insert(icon.url, entry);
     }
     pub fn add_photo(&mut self, photo: ArtistPhoto) {
         let image = to_image(photo.width, photo.height, &photo.rgba);
@@ -225,12 +282,9 @@ impl Covers {
         self.resident = 0;
         self.wanted.borrow_mut().clear();
         self.gradients.borrow_mut().clear();
-        for (url, icon) in &mut self.icons {
-            icon.tex = ctx.load_texture(
-                format!("icon:{url}"),
-                Arc::clone(&icon.image),
-                TextureOptions::LINEAR,
-            );
+        self.wanted_icons.borrow_mut().clear();
+        for icon in self.icons.values_mut() {
+            icon.tex = None;
         }
         for (name, photo) in &mut self.photos {
             photo.tex = ctx.load_texture(
@@ -245,8 +299,9 @@ impl Covers {
     /// A cached 8×8 diagonal (top-left → bottom-right) gradient texture.
     pub fn gradient(&self, from: Color32, to: Color32) -> TextureHandle {
         let mut map = self.gradients.borrow_mut();
-        if let Some(t) = map.get(&(from, to)) {
-            return t.clone();
+        if let Some(g) = map.get(&(from, to)) {
+            g.last_used.set(self.frame.get());
+            return g.tex.clone();
         }
         const N: usize = 16;
         let mut pixels = Vec::with_capacity(N * N);
@@ -264,7 +319,11 @@ impl Covers {
         let tex = self
             .ctx
             .load_texture("gradient", img, TextureOptions::LINEAR);
-        map.insert((from, to), tex.clone());
+        let entry = Gradient {
+            tex: tex.clone(),
+            last_used: Cell::new(self.frame.get()),
+        };
+        map.insert((from, to), entry);
         tex
     }
 

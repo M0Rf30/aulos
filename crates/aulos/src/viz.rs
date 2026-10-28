@@ -332,6 +332,8 @@ struct Renderer {
     started: Instant,
     frame: u32,
     gain: f32,
+    /// The audio after `gain`, kept between frames so none allocates.
+    scaled: Vec<f32>,
     in_flight: Arc<AtomicU32>,
 }
 
@@ -387,6 +389,7 @@ impl Renderer {
             started: Instant::now(),
             frame: 0,
             gain: settings.sensitivity,
+            scaled: Vec::new(),
             in_flight: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -490,8 +493,9 @@ impl Renderer {
     fn render(&mut self, pcm: &[f32]) {
         if !pcm.is_empty() {
             if (self.gain - 1.0).abs() > f32::EPSILON {
-                let scaled: Vec<f32> = pcm.iter().map(|s| s * self.gain).collect();
-                self.engine.push_pcm_f32(&scaled, 2);
+                self.scaled.clear();
+                self.scaled.extend(pcm.iter().map(|s| s * self.gain));
+                self.engine.push_pcm_f32(&self.scaled, 2);
             } else {
                 self.engine.push_pcm_f32(pcm, 2);
             }
@@ -604,8 +608,13 @@ impl Loop {
         }
         let mut resized = false;
         if want != self.size && self.wanted_since.1.elapsed() >= RESIZE_SETTLE {
-            self.size = want;
             resized = self.renderer.resize(want);
+            if resized || self.renderer.target.size == want {
+                self.size = want;
+            } else {
+                // The old target stays; try again after another settle period.
+                self.wanted_since.1 = Instant::now();
+            }
         }
         if self.renderer.in_flight.load(Ordering::Acquire) >= MAX_IN_FLIGHT {
             return;
