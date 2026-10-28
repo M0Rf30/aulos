@@ -205,7 +205,7 @@ impl ArtistInfoStore {
         let Ok(json) = serde_json::to_string(index) else {
             return;
         };
-        if let Err(e) = write_cache_atomically(&self.index_path, &json) {
+        if let Err(e) = crate::fs_atomic::write(&self.index_path, json.as_bytes(), false) {
             tracing::warn!("failed to save artist_info cache: {e}");
         }
     }
@@ -233,7 +233,7 @@ impl ArtistInfoStore {
 
     /// Saves raw (encoded) image bytes for `key` to disk. Best-effort.
     pub fn save_image(&self, key: &str, bytes: &[u8]) {
-        if let Err(e) = std::fs::write(self.image_path(key), bytes) {
+        if let Err(e) = crate::fs_atomic::write(&self.image_path(key), bytes, false) {
             tracing::warn!("failed to save artist image to cache: {e}");
         }
     }
@@ -245,15 +245,6 @@ impl ArtistInfoStore {
         let bytes = std::fs::read(self.image_path(key)).ok()?;
         crate::library::CoverArt::decode_thumbnail(&bytes, 640)
     }
-}
-
-/// Writes `content` to `path` via a temp-file-then-rename, so a crash or
-/// power loss mid-write can never leave a truncated/corrupt cache file in
-/// `path`'s place. Mirrors `crate::autoeq::manager::write_cache_atomically`.
-fn write_cache_atomically(path: &Path, content: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)
 }
 
 // ── Deezer (images) ─────────────────────────────────────────────────────

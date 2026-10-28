@@ -224,7 +224,11 @@ impl LibraryScanner {
         for path in paths {
             if path.is_dir() {
                 // A created or moved-in folder: index the audio beneath it.
-                for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+                for entry in WalkDir::new(path)
+                    .follow_links(true)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                {
                     if entry.file_type().is_file() && Self::scan_file(db, entry.path()) > 0 {
                         changed.push(entry.path().to_path_buf());
                     }

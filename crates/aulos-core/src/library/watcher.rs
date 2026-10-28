@@ -25,6 +25,10 @@ mod native {
     /// Quiet time after the last filesystem event before a batch is emitted.
     const DEBOUNCE: Duration = Duration::from_secs(2);
 
+    /// Longest a batch may keep growing before it is emitted even though
+    /// events are still arriving.
+    const MAX_BATCH_AGE: Duration = Duration::from_secs(10);
+
     /// Watches `music_dirs` recursively with `notify::RecommendedWatcher` and
     /// yields the deduplicated, sorted set of changed paths once the filesystem
     /// has been quiet for two seconds. The watcher lives as long as the stream is
@@ -88,8 +92,13 @@ mod native {
 
                 let mut changed_paths = vec![first];
 
-                // Collect more events until 2 seconds of silence.
+                // Collect more events until 2 seconds of silence, or until
+                // the batch is MAX_BATCH_AGE old (a long copy never goes quiet).
+                let started = web_time::Instant::now();
                 loop {
+                    if started.elapsed() >= MAX_BATCH_AGE {
+                        break;
+                    }
                     match crate::task::timeout(DEBOUNCE, rx.recv()).await {
                         Ok(Some(path)) => {
                             changed_paths.push(path);
