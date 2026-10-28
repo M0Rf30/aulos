@@ -63,6 +63,8 @@ fn session_with(config_path: Option<PathBuf>, config: Config) -> Session {
             registry: ProviderRegistry::new(),
             mpd_providers: Vec::new(),
             mpd_generation: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            mpd_connections: 0,
             subsonic_providers: Vec::new(),
             provider_list: Vec::new(),
             active_index: None,

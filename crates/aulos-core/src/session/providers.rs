@@ -34,6 +34,12 @@ pub struct ProvidersState {
     /// previous providers are replaced instead of kept running on them.
     #[cfg(not(target_arch = "wasm32"))]
     pub mpd_generation: u64,
+    /// Bumped each time an MPD provider (re)connects. Part of the MPD status
+    /// poll key only: the poll holds a client clone that dies with the
+    /// connection, so it must restart. The idle stream is keyed by
+    /// `mpd_generation` instead, since restarting it would reconnect again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub mpd_connections: u64,
     /// Shared references to Subsonic providers for scrobbling.
     pub subsonic_providers: Vec<Arc<SubsonicProvider>>,
     /// Ordered list of (provider_id, display_name) for the selector dropdown.
@@ -139,6 +145,8 @@ impl ProvidersState {
             mpd_providers: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             mpd_generation: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            mpd_connections: 0,
             subsonic_providers: Vec::new(),
             provider_list: Vec::new(),
             active_index: None,
@@ -706,6 +714,10 @@ impl Session {
     pub fn on_mpd_connected(&mut self, provider_id: &str) -> MpdConnected {
         tracing::info!("MPD provider '{provider_id}' is now connected");
         self.providers.provider_errors.remove(provider_id);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.providers.mpd_connections += 1;
+        }
 
         if let Some(idx) = self
             .providers
@@ -744,6 +756,23 @@ impl Session {
             .player
             .as_ref()
             .is_none_or(|p| p.state() == PlaybackState::Stopped);
+        // A kept player's backend still holds the pre-reconnect client.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !recreate_player
+            && let Some(client) = self
+                .providers
+                .mpd_providers
+                .iter()
+                .find(|p| p.id() == provider_id)
+                .and_then(|p| p.client_clone())
+            && let Some(mpd) = self
+                .playback
+                .player
+                .as_mut()
+                .and_then(|p| p.mpd_backend_mut())
+        {
+            mpd.set_client(client);
+        }
         MpdConnected {
             recreate_player,
             reload: self.reload_library(),
@@ -831,6 +860,23 @@ mod tests {
         // matters here, so clear the way it does.
         session.providers.provider_errors.remove("mpd-a");
         assert!(session.providers.statuses()[1].error.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reconnecting_restarts_the_status_poll_but_not_the_idle_stream() {
+        let mut session = test_session();
+        let (generation, connections) = (
+            session.providers.mpd_generation,
+            session.providers.mpd_connections,
+        );
+
+        let _ = session.on_mpd_connected("mpd-a");
+
+        // `mpd_generation` keys the idle stream, `mpd_connections` the status
+        // poll: bumping the former would make the idle stream reconnect again.
+        assert_eq!(session.providers.mpd_generation, generation);
+        assert_eq!(session.providers.mpd_connections, connections + 1);
     }
 
     #[test]

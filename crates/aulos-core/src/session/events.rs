@@ -350,10 +350,11 @@ pub enum BackgroundKey {
     ExtrasSync,
     /// 500 ms progress ticker while conversion jobs run.
     ConvertTick,
-    /// Status poll of the MPD server with this provider id, under this
-    /// `ProvidersState::mpd_generation`: rebuilding the providers makes a
-    /// new key, so the poll is restarted on the new ones.
-    MpdStatus(Arc<str>, u64),
+    /// Status poll of the MPD server with this provider id, under these
+    /// `ProvidersState::{mpd_generation, mpd_connections}`: rebuilding the
+    /// providers or any (re)connect makes a new key, so the poll is
+    /// restarted on the current client.
+    MpdStatus(Arc<str>, u64, u64),
     /// Idle/connection events of the MPD provider at this position of the
     /// provider list, under this `ProvidersState::mpd_generation`.
     MpdIdle(usize, u64),
@@ -489,7 +490,11 @@ impl Session {
         {
             let provider_id = provider.provider_id_arc();
             streams.push((
-                BackgroundKey::MpdStatus(Arc::clone(&provider_id), self.providers.mpd_generation),
+                BackgroundKey::MpdStatus(
+                    Arc::clone(&provider_id),
+                    self.providers.mpd_generation,
+                    self.providers.mpd_connections,
+                ),
                 status_stream(mpd.client(), provider_id)
                     .map(|status| SessionEvent::MpdStatus(Box::new(status)))
                     .boxed(),
@@ -1044,8 +1049,8 @@ mod tests {
             BackgroundKey::MpdIdle(0, 0),
             BackgroundKey::MpdIdle(1, 0),
             BackgroundKey::MpdIdle(0, 1),
-            BackgroundKey::MpdStatus(Arc::from("a"), 0),
-            BackgroundKey::MpdStatus(Arc::from("a"), 0),
+            BackgroundKey::MpdStatus(Arc::from("a"), 0, 0),
+            BackgroundKey::MpdStatus(Arc::from("a"), 0, 0),
             BackgroundKey::FsWatcher(vec![PathBuf::from("/m")]),
             BackgroundKey::FsWatcher(vec![PathBuf::from("/m")]),
         ]

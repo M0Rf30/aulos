@@ -140,6 +140,12 @@ mod native {
             self.client.clone()
         }
 
+        /// Replace the client after the provider reconnected, so transport
+        /// commands stop going to the dead connection.
+        pub fn set_client(&mut self, client: Client) {
+            self.client = client;
+        }
+
         /// Take the URI that was passed to the last `play()` call.
         ///
         /// Used by the caller to dispatch the actual async MPD play command.
