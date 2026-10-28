@@ -349,7 +349,13 @@ pub fn stream_source(track: &Track) -> TrackSource {
     let url = signer
         .client
         .stream_url(&track.path.to_string_lossy(), &signer.options)
-        .map_or_else(|_| track.source_uri.clone(), |url| url.to_string());
+        .map_or_else(
+            |e| {
+                tracing::warn!("Cannot sign the stream of {}: {e}", track.source_uri);
+                track.source_uri.clone()
+            },
+            |url| url.to_string(),
+        );
     TrackSource::HttpStream {
         url,
         accept_invalid_certs: signer.accept_invalid_certs,
