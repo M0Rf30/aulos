@@ -35,6 +35,29 @@ pub fn pick_cover_file(names: &[String]) -> Option<&str> {
     })
 }
 
+/// Whether a folder name looks like one disc of a multi-disc album: CD, Disc,
+/// Disk or Disco (any case), an optional space, `-` or `_`, then a number.
+#[must_use]
+pub fn is_disc_folder_name(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    let Some(rest) = ["disco", "disc", "disk", "cd"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+    else {
+        return false;
+    };
+    let digits = rest.trim_start_matches([' ', '-', '_']);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// The album folder above `dir` when `dir` is a disc folder.
+#[must_use]
+pub fn disc_parent(dir: &Path) -> Option<&Path> {
+    is_disc_folder_name(dir.file_name()?.to_str()?)
+        .then(|| dir.parent())
+        .flatten()
+}
+
 /// Handles cover art extraction and caching.
 pub struct CoverArt;
 
@@ -71,9 +94,18 @@ impl CoverArt {
 
     /// Look for cover art files in the same directory as the audio file.
     /// Common names: cover.jpg, folder.jpg, front.jpg, album.jpg, etc.
+    ///
+    /// When the directory is a disc folder (`CD1`, `Disc 2`, ...) and has no
+    /// cover of its own, the album folder above it is searched too.
     pub fn find_in_directory(audio_path: &Path) -> Option<Vec<u8>> {
         let dir = audio_path.parent()?;
+        Self::find_in_dir(dir).or_else(|| {
+            let parent = disc_parent(dir)?;
+            Self::find_in_dir(parent)
+        })
+    }
 
+    fn find_in_dir(dir: &Path) -> Option<Vec<u8>> {
         for name in &COVER_NAMES {
             for ext in &COVER_EXTENSIONS {
                 let candidate = dir.join(format!("{name}.{ext}"));
@@ -414,5 +446,38 @@ mod tests {
         assert_eq!(pick_cover_file(&files), Some("cover.jpg"));
         assert_eq!(pick_cover_file(&names(&["notes.txt", "back.jpg"])), None);
         assert_eq!(pick_cover_file(&[]), None);
+    }
+
+    #[test]
+    fn disc_folder_names() {
+        for yes in ["CD1", "cd 2", "Disc 01", "disk-3", "DISCO_4", "Cd10"] {
+            assert!(is_disc_folder_name(yes), "{yes}");
+        }
+        for no in ["CD", "Disc", "Discovery", "CD1 Bonus", "Album", "2CD", ""] {
+            assert!(!is_disc_folder_name(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn finds_cover_in_parent_of_disc_folder() {
+        let root = std::env::temp_dir().join(format!("aulos-disc-cover-{}", std::process::id()));
+        let cd1 = root.join("Artist/Album/CD1");
+        std::fs::create_dir_all(&cd1).unwrap();
+        std::fs::write(root.join("Artist/Album/cover.jpg"), b"img").unwrap();
+        assert_eq!(
+            CoverArt::find_in_directory(&cd1.join("01.flac")).as_deref(),
+            Some(&b"img"[..])
+        );
+        // A non-disc folder does not look upward.
+        let other = root.join("Artist/Album/Bonus");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(CoverArt::find_in_directory(&other.join("01.flac")).is_none());
+        // Own cover wins.
+        std::fs::write(cd1.join("folder.png"), b"own").unwrap();
+        assert_eq!(
+            CoverArt::find_in_directory(&cd1.join("01.flac")).as_deref(),
+            Some(&b"own"[..])
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

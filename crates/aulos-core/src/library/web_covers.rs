@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use super::covers::{CoverThumb, ThumbStamp};
-use super::{CoverArt, pick_cover_file, web_scanner};
+use super::{CoverArt, disc_parent, pick_cover_file, web_scanner};
 use crate::web_fs;
 
 /// The encoded cover of the track `track_path`: its embedded picture, else
@@ -26,6 +26,13 @@ pub async fn cover_bytes(track_path: &Path) -> Option<Vec<u8>> {
         return Some(bytes);
     }
     let dir = track_path.parent()?;
+    if let Some(bytes) = folder_cover(dir).await {
+        return Some(bytes);
+    }
+    folder_cover(disc_parent(dir)?).await
+}
+
+async fn folder_cover(dir: &Path) -> Option<Vec<u8>> {
     let names = web_fs::list_dir(dir).await.ok()?;
     let image = dir.join(pick_cover_file(&names)?);
     web_fs::read_file(&image).await.ok()
@@ -59,7 +66,11 @@ pub async fn thumb_stamp(track_path: &Path) -> Option<ThumbStamp> {
 /// folder's file names instead: adding a `cover.jpg` changes it.
 pub async fn coverless_stamp(track_path: &Path) -> Option<ThumbStamp> {
     let mut stamp = thumb_stamp(track_path).await?;
-    let mut names = web_fs::list_dir(track_path.parent()?).await.ok()?;
+    let dir = track_path.parent()?;
+    let mut names = web_fs::list_dir(dir).await.ok()?;
+    if let Some(parent) = disc_parent(dir) {
+        names.extend(web_fs::list_dir(parent).await.unwrap_or_default());
+    }
     names.sort_unstable();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     names.hash(&mut hasher);

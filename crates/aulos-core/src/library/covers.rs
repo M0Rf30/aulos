@@ -111,6 +111,9 @@ impl ThumbStamp {
         let mut stamp = Self::of(path)?;
         let dir = Self::of(path.parent()?)?;
         stamp.mtime_ns = stamp.mtime_ns.max(dir.mtime_ns);
+        if let Some(album) = super::disc_parent(path.parent()?).and_then(Self::of) {
+            stamp.mtime_ns = stamp.mtime_ns.max(album.mtime_ns);
+        }
         Some(stamp)
     }
 }
