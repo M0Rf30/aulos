@@ -15,6 +15,7 @@ use crate::provider::{MusicProvider, ProviderError};
 use crate::task::Effect;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How long a rule edit settles before its match count is queried.
 const MATCH_COUNT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -41,8 +42,13 @@ pub struct PlaylistEditing {
 #[derive(Debug, Clone)]
 pub enum PlaylistEvent {
     /// The active provider's playlists, tracks included; `Err` when they
-    /// could not be listed (the loaded ones stay).
-    Loaded(Result<Vec<Playlist>, String>),
+    /// could not be listed (the loaded ones stay). `generation` is the
+    /// [`PlaylistsState`] load generation the request was made at; a result
+    /// of an older one is dropped.
+    Loaded {
+        generation: u64,
+        result: Result<Vec<Playlist>, String>,
+    },
     /// Result of a provider playlist mutation (add/create/delete/rename).
     OpDone {
         op: PlaylistOp,
@@ -59,7 +65,13 @@ pub enum PlaylistEvent {
     },
     /// Resolved tracks of the selected smart playlist (detail view), and
     /// how many tracks its rules match before the row limit cuts them.
-    SmartTracksLoaded { tracks: Vec<Track>, total: usize },
+    /// `generation` is the selection it was resolved for; a result of an
+    /// earlier selection is dropped.
+    SmartTracksLoaded {
+        generation: u64,
+        tracks: Vec<Track>,
+        total: usize,
+    },
     /// How many tracks the in-editor rules at `revision` match (limit
     /// ignored); `None` when the query failed or a newer edit superseded it.
     SmartMatchCount { revision: u64, count: Option<usize> },
@@ -124,9 +136,28 @@ pub struct PlaylistsState {
     pub smart_playlist_total: usize,
     /// The smart-playlist rules editor, while open.
     pub smart_playlist_editor: Option<EditorState>,
+    /// Bumped by every [`Session::load_playlists`] and every optimistic
+    /// local edit of the loaded copy; only a [`PlaylistEvent::Loaded`] made
+    /// at the current value is applied, so an older in-flight snapshot can
+    /// neither overwrite a newer edit nor shift positional removes.
+    load_generation: AtomicU64,
+    /// Bumped by every smart-playlist selection; see
+    /// [`PlaylistEvent::SmartTracksLoaded`].
+    smart_detail_generation: u64,
 }
 
 impl PlaylistsState {
+    /// Starts a new playlist load, invalidating any in flight, and returns
+    /// its generation.
+    fn begin_load(&self) -> u64 {
+        self.load_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Invalidates in-flight loads (the loaded copy was just edited).
+    fn invalidate_loads(&self) {
+        self.load_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The tracks of the playlist at `idx`, if it exists and has any.
     #[must_use]
     pub fn playlist_tracks(&self, idx: usize) -> Option<&[Track]> {
@@ -147,6 +178,7 @@ impl PlaylistsState {
         }
         playlist.tracks.remove(track);
         playlist.refresh_totals();
+        self.invalidate_loads();
         true
     }
 
@@ -162,6 +194,7 @@ impl PlaylistsState {
         }
         let track = playlist.tracks.remove(from);
         playlist.tracks.insert(to, track);
+        self.invalidate_loads();
         true
     }
 
@@ -264,8 +297,10 @@ impl PlaylistsState {
     pub fn select_smart_playlist(&mut self, idx: usize) -> Effect<PlaylistEvent> {
         self.smart_playlist_tracks.clear();
         self.smart_playlist_total = 0;
+        self.smart_detail_generation += 1;
+        let generation = self.smart_detail_generation;
         match self.smart_playlists.get(idx).cloned() {
-            Some(playlist) => smart_detail_effect(playlist),
+            Some(playlist) => smart_detail_effect(generation, playlist),
             None => Effect::none(),
         }
     }
@@ -321,12 +356,16 @@ impl Session {
         let Some(provider) = self.providers.registry.active_shared() else {
             return Effect::none();
         };
+        let generation = self.playlists.begin_load();
         Effect::future(async move {
             let mut playlists = match provider.list_playlists().await {
                 Ok(playlists) => playlists,
                 Err(e) => {
                     tracing::warn!("list_playlists failed: {e}");
-                    return PlaylistEvent::Loaded(Err(e.to_string()));
+                    return PlaylistEvent::Loaded {
+                        generation,
+                        result: Err(e.to_string()),
+                    };
                 }
             };
             // `list_playlists` returns summaries only (no tracks) for the
@@ -340,7 +379,10 @@ impl Session {
                     playlist.tracks = full.tracks;
                 }
             }
-            PlaylistEvent::Loaded(Ok(playlists))
+            PlaylistEvent::Loaded {
+                generation,
+                result: Ok(playlists),
+            }
         })
     }
 
@@ -459,14 +501,23 @@ impl Session {
     /// smart-playlist tracks start playing.
     pub fn apply_playlist_event(&mut self, event: PlaylistEvent) -> PlaylistUpdate {
         match event {
-            PlaylistEvent::Loaded(Ok(playlists)) => {
+            PlaylistEvent::Loaded { generation, .. }
+                if generation != self.playlists.load_generation.load(Ordering::Relaxed) =>
+            {
+                PlaylistUpdate::outcome(PlaylistOutcome::None)
+            }
+            PlaylistEvent::Loaded {
+                result: Ok(playlists),
+                ..
+            } => {
                 self.playlists.playlists = playlists;
                 self.refresh_search();
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
-            PlaylistEvent::Loaded(Err(reason)) => {
-                PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
-            }
+            PlaylistEvent::Loaded {
+                result: Err(reason),
+                ..
+            } => PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason)),
             PlaylistEvent::OpDone { op, result } => match result {
                 Ok(()) => match op {
                     PlaylistOp::AddTrack => PlaylistUpdate::outcome(PlaylistOutcome::None),
@@ -506,9 +557,15 @@ impl Session {
                 }
                 PlaylistUpdate::outcome(PlaylistOutcome::Failed(reason))
             }
-            PlaylistEvent::SmartTracksLoaded { tracks, total } => {
-                self.playlists.smart_playlist_tracks = tracks;
-                self.playlists.smart_playlist_total = total;
+            PlaylistEvent::SmartTracksLoaded {
+                generation,
+                tracks,
+                total,
+            } => {
+                if generation == self.playlists.smart_detail_generation {
+                    self.playlists.smart_playlist_tracks = tracks;
+                    self.playlists.smart_playlist_total = total;
+                }
                 PlaylistUpdate::outcome(PlaylistOutcome::None)
             }
             PlaylistEvent::SmartMatchCount { revision, count } => {
@@ -575,7 +632,7 @@ fn smart_list_effect(
 /// Resolves `playlist` for the detail view: its tracks (limit applied) and
 /// the number of tracks its rules match before the limit. Failures log and
 /// yield nothing.
-fn smart_detail_effect(playlist: SmartPlaylist) -> Effect<PlaylistEvent> {
+fn smart_detail_effect(generation: u64, playlist: SmartPlaylist) -> Effect<PlaylistEvent> {
     let db_path = crate::paths::library_db_path();
     Effect::future(async move {
         let (tracks, total) = crate::task::spawn_blocking(move || {
@@ -592,7 +649,11 @@ fn smart_detail_effect(playlist: SmartPlaylist) -> Effect<PlaylistEvent> {
         })
         .await
         .unwrap_or_default();
-        PlaylistEvent::SmartTracksLoaded { tracks, total }
+        PlaylistEvent::SmartTracksLoaded {
+            generation,
+            tracks,
+            total,
+        }
     })
 }
 
@@ -879,7 +940,11 @@ mod tests {
         };
 
         let loaded = vec![playlist("Road Mix", vec![]), playlist("Other", vec![])];
-        let update = session.apply_playlist_event(PlaylistEvent::Loaded(Ok(loaded)));
+        let generation = session.playlists.begin_load();
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation,
+            result: Ok(loaded),
+        });
         assert!(matches!(update.outcome, PlaylistOutcome::None));
         assert_eq!(names(&session), ["Road Mix"]);
     }
@@ -890,7 +955,11 @@ mod tests {
         session.playlists.playlists = vec![playlist("Road Mix", vec![])];
         session.playlists.smart_playlists = vec![EditorState::new().playlist];
 
-        let update = session.apply_playlist_event(PlaylistEvent::Loaded(Err("disk I/O".into())));
+        let generation = session.playlists.begin_load();
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation,
+            result: Err("disk I/O".into()),
+        });
         assert!(matches!(update.outcome, PlaylistOutcome::Failed(r) if r == "disk I/O"));
         assert_eq!(session.playlists.playlists.len(), 1);
 
@@ -906,13 +975,74 @@ mod tests {
     #[test]
     fn smart_detail_event_stores_the_tracks_and_the_total_before_the_limit() {
         let mut session = test_session();
+        let generation = session.playlists.smart_detail_generation;
         let update = session.apply_playlist_event(PlaylistEvent::SmartTracksLoaded {
+            generation,
             tracks: vec![track(), track()],
             total: 118,
         });
         assert!(matches!(update.outcome, PlaylistOutcome::None));
         assert_eq!(session.playlists.smart_playlist_tracks.len(), 2);
         assert_eq!(session.playlists.smart_playlist_total, 118);
+    }
+
+    #[test]
+    fn stale_smart_detail_results_are_dropped() {
+        let mut session = test_session();
+        // Select A, then B (no such rows: only the generation moves).
+        drop(session.playlists.select_smart_playlist(0));
+        let a = session.playlists.smart_detail_generation;
+        drop(session.playlists.select_smart_playlist(0));
+        let b = session.playlists.smart_detail_generation;
+        assert_ne!(a, b);
+
+        let _ = session.apply_playlist_event(PlaylistEvent::SmartTracksLoaded {
+            generation: b,
+            tracks: vec![named("b")],
+            total: 1,
+        });
+        let _ = session.apply_playlist_event(PlaylistEvent::SmartTracksLoaded {
+            generation: a,
+            tracks: vec![named("a1"), named("a2")],
+            total: 2,
+        });
+        assert_eq!(session.playlists.smart_playlist_tracks.len(), 1);
+        assert_eq!(session.playlists.smart_playlist_tracks[0].title, "b");
+        assert_eq!(session.playlists.smart_playlist_total, 1);
+    }
+
+    #[test]
+    fn stale_playlist_loads_are_dropped() {
+        let mut session = test_session();
+        let old = session.playlists.begin_load();
+        let new = session.playlists.begin_load();
+        let _ = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation: new,
+            result: Ok(vec![playlist("new", vec![])]),
+        });
+        let update = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation: old,
+            result: Err("late".into()),
+        });
+        assert!(matches!(update.outcome, PlaylistOutcome::None));
+        let _ = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation: old,
+            result: Ok(vec![playlist("old", vec![])]),
+        });
+        assert_eq!(session.playlists.playlists[0].name, "new");
+    }
+
+    #[test]
+    fn optimistic_edit_invalidates_an_in_flight_load() {
+        let mut session = test_session();
+        session.playlists.playlists = vec![playlist("p", vec![named("a"), named("b")])];
+        let in_flight = session.playlists.begin_load();
+        assert!(session.playlists.remove_track_local(0, 0));
+        let _ = session.apply_playlist_event(PlaylistEvent::Loaded {
+            generation: in_flight,
+            result: Ok(vec![playlist("p", vec![named("a"), named("b")])]),
+        });
+        assert_eq!(titles(&session.playlists), ["b"]);
     }
 
     #[test]

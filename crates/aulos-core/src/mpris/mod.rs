@@ -145,7 +145,7 @@ struct SharedState {
     /// BLOBs in its library database rather than as loose files on disk, but
     /// media-session clients need an actual file to read pixels from — see
     /// [`MprisHandle::cached_art_url`]/[`MprisHandle::cache_art_url`].
-    art_cache: Mutex<HashMap<i64, Option<String>>>,
+    art_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl SharedState {
@@ -210,25 +210,43 @@ impl MprisHandle {
     /// track has no embedded art; `None` means it hasn't been resolved yet,
     /// and the caller should resolve it off-thread (see [`extract_art_url`])
     /// and record the outcome via [`Self::cache_art_url`].
-    pub fn cached_art_url(&self, track_id: i64) -> Option<Option<String>> {
-        self.shared.art_cache.lock().get(&track_id).cloned()
+    pub fn cached_art_url(&self, art_key: &str) -> Option<Option<String>> {
+        self.shared.art_cache.lock().get(art_key).cloned()
     }
 
-    /// Records a resolved cover-art URL for `track_id`, populating the
-    /// cache read by [`Self::cached_art_url`].
-    pub fn cache_art_url(&self, track_id: i64, url: Option<String>) {
-        self.shared.art_cache.lock().insert(track_id, url);
+    /// Records a resolved cover-art URL for `art_key` (see [`art_key`]),
+    /// populating the cache read by [`Self::cached_art_url`].
+    pub fn cache_art_url(&self, art_key: String, url: Option<String>) {
+        self.shared.art_cache.lock().insert(art_key, url);
+    }
+}
+
+/// Identity of a track for the cover-art cache. Local tracks are told apart
+/// by row id; every other track (remote `id: 0`, podcast episodes `id: -1`,
+/// possibly with an empty path while streaming) by provider, path and
+/// source URI.
+#[must_use]
+pub fn art_key(track: &crate::library::Track) -> String {
+    if &*track.provider_id == "local" {
+        format!("local\u{0}{}", track.id)
+    } else {
+        format!(
+            "{}\u{0}{}\u{0}{}",
+            track.provider_id,
+            track.path.display(),
+            track.source_uri
+        )
     }
 }
 
 /// [`extract_art_url`] off the caller's thread (it parses tags and writes to
 /// an on-disk cache synchronously); the event is the resolved URL, if any.
 pub fn resolve_art_url(
-    track_id: i64,
+    art_key: String,
     path: std::path::PathBuf,
 ) -> crate::task::Effect<Option<String>> {
     crate::task::Effect::future(async move {
-        crate::task::spawn_blocking(move || extract_art_url(track_id, &path))
+        crate::task::spawn_blocking(move || extract_art_url(&art_key, &path))
             .await
             .unwrap_or(None)
     })
@@ -239,7 +257,7 @@ pub fn resolve_art_url(
 /// This is the only disk-writing cover art cache in Aulos (the library's own
 /// cache stores album art as database BLOBs, which other processes can't
 /// read directly) and is scoped entirely to the media session's needs.
-pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
+pub fn extract_art_url(art_key: &str, path: &Path) -> Option<String> {
     let bytes = crate::library::CoverArt::extract_from_file(path)?;
     let ext = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "png"
@@ -248,7 +266,7 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     } else {
         "jpg"
     };
-    // Keyed by content as well as track id: ids can be reused (rescans,
+    // Keyed by content as well as track key: ids can be reused (rescans,
     // other providers) and the file must not serve another cover's art.
     let hash = {
         use std::hash::{Hash, Hasher};
@@ -257,7 +275,7 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
         hasher.finish()
     };
     let dir = crate::paths::cache_dir().join("mpris");
-    let file_path = dir.join(format!("{track_id}-{hash:016x}.{ext}"));
+    let file_path = dir.join(art_file_name(art_key, hash, ext));
     if !file_path.exists() {
         // Atomic, so a crash never leaves a truncated cover that `exists()`
         // would trust.
@@ -265,6 +283,14 @@ pub fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     }
     crate::fs_atomic::prune_dir(&dir, &file_path, crate::fs_atomic::COVER_CACHE_KEEP);
     crate::path_to_file_uri(&file_path)
+}
+
+/// Filesystem-safe cache file name: the key is hashed, never embedded.
+fn art_file_name(art_key: &str, content_hash: u64, ext: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    art_key.hash(&mut hasher);
+    format!("{:016x}-{content_hash:016x}.{ext}", hasher.finish())
 }
 
 /// Whether the transition from `previous` to `next` is worth telling a
@@ -315,4 +341,66 @@ fn seek_target(previous: &MprisSnapshot, next: &MprisSnapshot) -> Option<i64> {
 /// `window` is the app's native window; only Windows needs it.
 pub fn mpris_stream(window: Option<NativeWindow>) -> impl Stream<Item = MprisEvent> {
     backend::stream(window)
+}
+
+#[cfg(test)]
+mod art_key_tests {
+    use super::*;
+    use crate::library::Track;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn track(provider: &str, id: i64, path: &str, source_uri: &str) -> Track {
+        Track {
+            id,
+            path: PathBuf::from(path),
+            title: String::new(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::ZERO,
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: provider.into(),
+            source_uri: source_uri.into(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+            bit_depth: 0,
+            release_type: String::new(),
+            suffix: String::new(),
+            added_at: 0,
+            favorited_at: 0,
+        }
+    }
+
+    #[test]
+    fn podcast_episodes_and_remote_tracks_get_distinct_keys() {
+        let e1 = track("podcast", -1, "", "https://x/1.mp3");
+        let e2 = track("podcast", -1, "", "https://x/2.mp3");
+        assert_ne!(art_key(&e1), art_key(&e2));
+        let r1 = track("subsonic", 0, "song-1", "subsonic://s/song-1");
+        let r2 = track("subsonic", 0, "song-2", "subsonic://s/song-2");
+        assert_ne!(art_key(&r1), art_key(&r2));
+        let l1 = track("local", 1, "/a", "/a");
+        let l2 = track("local", 2, "/b", "/b");
+        assert_ne!(art_key(&l1), art_key(&l2));
+    }
+
+    #[test]
+    fn art_file_names_are_filesystem_safe_and_key_specific() {
+        let key = "podcast\u{0}\u{0}https://x/1.mp3?a=b/c";
+        let name = art_file_name(key, 7, "jpg");
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c))
+        );
+        assert_ne!(name, art_file_name("other", 7, "jpg"));
+        assert_eq!(name, art_file_name(key, 7, "jpg"));
+    }
 }

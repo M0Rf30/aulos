@@ -29,7 +29,7 @@ pub enum PlaybackEvent {
     /// The MPRIS cover-art URL of a track was resolved off-thread (`None`:
     /// no art).
     MprisArt {
-        track_id: i64,
+        art_key: String,
         art_url: Option<String>,
     },
     /// An online lyrics lookup finished.

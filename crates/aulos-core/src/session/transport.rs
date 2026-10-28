@@ -787,9 +787,9 @@ impl Session {
                 self.home.cache.invalidate();
                 PlaybackUpdate::none()
             }
-            PlaybackEvent::MprisArt { track_id, art_url } => {
+            PlaybackEvent::MprisArt { art_key, art_url } => {
                 if let Some(handle) = &self.playback.mpris {
-                    handle.cache_art_url(track_id, art_url);
+                    handle.cache_art_url(art_key, art_url);
                 }
                 PlaybackUpdate::effect(self.publish_mpris())
             }
@@ -848,14 +848,18 @@ impl Session {
         };
         let track = self.playback.current_track.as_ref();
         let (art_url, art_effect) = match track {
-            Some(t) => match handle.cached_art_url(t.id) {
+            Some(t) => match handle.cached_art_url(&crate::mpris::art_key(t)) {
                 Some(cached) => (cached, Effect::none()),
                 None => {
-                    let (track_id, path) = (t.id, t.path.clone());
+                    let (art_key, path) = (crate::mpris::art_key(t), t.path.clone());
                     (
                         None,
-                        crate::mpris::resolve_art_url(track_id, path)
-                            .map(move |art_url| PlaybackEvent::MprisArt { track_id, art_url }),
+                        crate::mpris::resolve_art_url(art_key.clone(), path).map(move |art_url| {
+                            PlaybackEvent::MprisArt {
+                                art_key: art_key.clone(),
+                                art_url,
+                            }
+                        }),
                     )
                 }
             },

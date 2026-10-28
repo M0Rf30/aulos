@@ -93,7 +93,7 @@ pub fn prepare_cover(track: &Track, cover_bytes: Option<&[u8]>) -> Option<PathBu
         crate::fs_atomic::prune_dir(&dir, &path, crate::fs_atomic::COVER_CACHE_KEEP);
         return Some(path);
     }
-    let url = crate::mpris::extract_art_url(track.id, &track.path)?;
+    let url = crate::mpris::extract_art_url(&crate::mpris::art_key(track), &track.path)?;
     crate::file_uri_to_path(&url)
 }
 
