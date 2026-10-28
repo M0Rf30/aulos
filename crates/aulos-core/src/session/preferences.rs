@@ -20,6 +20,11 @@ pub(super) fn apply_playback_settings(player: &mut Player, config: &Config) {
     player.set_crossfade(config.crossfade_duration_secs);
     player.set_replay_gain_mode(config.replay_gain_mode);
     player.set_stop_after_each(config.stop_after_current);
+    // The queue starts with shuffle off / repeat none; the UI shows the saved
+    // values, so without this the buttons lit up but did nothing after a
+    // launch or provider switch.
+    player.set_shuffle(config.shuffle);
+    player.set_repeat_mode(config.repeat_mode);
 }
 
 impl Session {
