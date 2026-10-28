@@ -2,6 +2,7 @@
 //! textures, accent, backdrop, toasts) and the window layout.
 
 use crate::theme::{self, Accent, Palette, Quality, Theme};
+use crate::tray::{self, TrayCommand, TrayEvent, TrayIcon};
 use crate::views;
 use crate::widgets::Covers;
 use aulos_core::config::{Config, ThemeMode};
@@ -144,6 +145,23 @@ pub enum AppEvent {
     /// The OS media session (media keys, Now Playing, MPRIS) came up or
     /// relayed a command.
     Media(MprisEvent),
+    /// The tray icon registered with the desktop, or could not.
+    TrayStarted(Result<TrayIcon, String>),
+    /// A click, a menu entry or a host change of the tray icon.
+    Tray(TrayEvent),
+}
+
+/// The system tray icon of "close/minimize to tray".
+enum TrayState {
+    /// No option wants it.
+    Off,
+    /// Registering with the desktop.
+    Starting,
+    /// Registered. `online`: a tray host is displaying it.
+    Active { icon: TrayIcon, online: bool },
+    /// Registering failed: closing quits as usual until an option is
+    /// switched off and on again.
+    Failed,
 }
 
 /// Smoke-screenshot driver (see `smoke.rs`).
@@ -180,6 +198,10 @@ pub struct App {
     art_ppp: f32,
     /// Smoke runs only: multiplies the zoom so one point is one pixel at 100%.
     zoom_base: Option<f32>,
+    /// Desktop: when the window geometry in the settings last changed and has
+    /// not been queued for saving yet (see [`Self::track_window_geometry`]).
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    window_changed_at: Option<f64>,
     art_pending: Option<String>,
     art_done: Option<String>,
     /// Blurred backdrop of the current cover (expanded and mini views).
@@ -205,6 +227,15 @@ pub struct App {
     pub views: views::State,
     saved_size: Option<egui::Vec2>,
     pub smoke: Option<Smoke>,
+    tray: TrayState,
+    /// The window is hidden to the tray.
+    window_hidden: bool,
+    /// Whether the window was minimized in the previous frame (hiding on
+    /// minimize acts on the edge only).
+    was_minimized: bool,
+    /// The user chose to quit (tray menu, MPRIS): the close is not
+    /// intercepted.
+    quitting: bool,
     /// The running visualizer (None: hidden, nothing renders or captures).
     #[cfg(feature = "visualizer")]
     pub viz: Option<crate::viz::Viz>,
@@ -300,6 +331,8 @@ impl App {
             art_dirty: true,
             art_ppp: cc.egui_ctx.pixels_per_point(),
             zoom_base: std::env::var_os("AULOS_SMOKE").is_none().then_some(1.0),
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            window_changed_at: None,
             art_pending: None,
             art_done: None,
             backdrop: None,
@@ -320,6 +353,10 @@ impl App {
             views: views::State::default(),
             saved_size: None,
             smoke: Smoke::from_env(),
+            tray: TrayState::Off,
+            window_hidden: false,
+            was_minimized: false,
+            quitting: false,
             #[cfg(feature = "visualizer")]
             viz: None,
             #[cfg(feature = "visualizer")]
@@ -854,6 +891,27 @@ impl App {
                 self.run(update);
             }
             AppEvent::Media(MprisEvent::Command(command)) => self.media_command(command),
+            AppEvent::TrayStarted(Ok(icon)) => {
+                icon.set_window_visible(&self.handle, !self.window_hidden);
+                self.tray = TrayState::Active { icon, online: true };
+            }
+            AppEvent::TrayStarted(Err(error)) => {
+                tracing::warn!("system tray unavailable, closing quits as usual: {error}");
+                self.tray = TrayState::Failed;
+            }
+            AppEvent::Tray(TrayEvent::Command(command)) => self.tray_command(command),
+            AppEvent::Tray(TrayEvent::Offline) => {
+                tracing::warn!("the system tray host went away; showing the window");
+                if let TrayState::Active { online, .. } = &mut self.tray {
+                    *online = false;
+                }
+                self.show_window();
+            }
+            AppEvent::Tray(TrayEvent::Online) => {
+                if let TrayState::Active { online, .. } = &mut self.tray {
+                    *online = true;
+                }
+            }
             AppEvent::Art {
                 key,
                 backdrop,
@@ -906,16 +964,152 @@ impl App {
         self.run(update);
     }
 
+    /// Quits for real: the window's close request is not turned into "hide
+    /// to the tray".
+    fn quit(&mut self) {
+        self.quitting = true;
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Whether the window can be hidden and shown again. A Wayland client
+    /// can do neither (winit ignores `set_visible` and cannot un-minimize
+    /// there). The window's outer rectangle is likewise unknown on Wayland
+    /// only, which is what tells the sessions apart.
+    pub fn can_hide_window(&self) -> bool {
+        self.ctx.input(|i| i.viewport().outer_rect.is_some())
+    }
+
+    /// Hides the window (the tray icon stays).
+    fn hide_window(&mut self) {
+        self.window_hidden = true;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.tray_window_changed();
+    }
+
+    /// Shows, un-minimizes and focuses the window.
+    fn show_window(&mut self) {
+        self.window_hidden = false;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.tray_window_changed();
+    }
+
+    /// Tells the tray menu whether its Show/Hide entry reads "Show".
+    fn tray_window_changed(&self) {
+        if let TrayState::Active { icon, .. } = &self.tray {
+            icon.set_window_visible(&self.handle, !self.window_hidden);
+        }
+    }
+
+    /// A tray icon that is shown by a desktop's tray host, on a window
+    /// system that can hide the window again: the only case where hiding the
+    /// window cannot lose it.
+    fn tray_can_hold_window(&self) -> bool {
+        matches!(self.tray, TrayState::Active { online: true, .. }) && self.can_hide_window()
+    }
+
+    /// Carries out a tray click or menu entry.
+    fn tray_command(&mut self, command: TrayCommand) {
+        match command {
+            TrayCommand::Toggle => {
+                let minimized = self.ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+                if self.window_hidden || minimized {
+                    self.show_window();
+                } else {
+                    self.hide_window();
+                }
+            }
+            TrayCommand::Quit => self.quit(),
+            TrayCommand::PlayPause => self.media_command(MprisCommand::PlayPause),
+            TrayCommand::Next => self.media_command(MprisCommand::Next),
+            TrayCommand::Previous => self.media_command(MprisCommand::Previous),
+        }
+    }
+
+    /// Keeps the tray icon in step with the settings (created when either
+    /// option is on, removed when both are off) and acts on the window's
+    /// close and minimize. Without a working tray the window is never
+    /// hidden, so it cannot be lost.
+    fn sync_tray(&mut self, ctx: &Context, minimized: bool) {
+        let cfg = &self.session.config.config;
+        let wanted = cfg.close_to_tray || cfg.minimize_to_tray;
+        let (close_to_tray, minimize_to_tray) = (cfg.close_to_tray, cfg.minimize_to_tray);
+        match &self.tray {
+            TrayState::Off if wanted && tray::SUPPORTED => self.start_tray(),
+            TrayState::Active { icon, .. } if !wanted || icon.is_closed() => {
+                if wanted {
+                    tracing::warn!("the system tray stopped; closing quits as usual");
+                }
+                self.stop_tray(if wanted {
+                    TrayState::Failed
+                } else {
+                    TrayState::Off
+                });
+            }
+            TrayState::Failed if !wanted => self.tray = TrayState::Off,
+            _ => {}
+        }
+
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && !self.quitting && close_to_tray && self.tray_can_hold_window() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_window();
+        } else if minimized
+            && !self.was_minimized
+            && !self.window_hidden
+            && minimize_to_tray
+            && self.tray_can_hold_window()
+        {
+            self.hide_window();
+        }
+        self.was_minimized = minimized;
+    }
+
+    /// Registers the tray icon with the desktop; the result comes back as
+    /// [`AppEvent::TrayStarted`]. Smoke runs skip it so they never claim a
+    /// name on the user's session bus.
+    fn start_tray(&mut self) {
+        if std::env::var_os("AULOS_SMOKE").is_some() {
+            self.tray = TrayState::Failed;
+            return;
+        }
+        self.tray = TrayState::Starting;
+        let (tx, ctx) = (self.app_tx.clone(), self.ctx.clone());
+        self.handle.spawn(async move {
+            let (events, wake) = (tx.clone(), ctx.clone());
+            let started = TrayIcon::start(move |event| {
+                if events.send(AppEvent::Tray(event)).is_ok() {
+                    wake.request_repaint();
+                }
+            })
+            .await;
+            if tx.send(AppEvent::TrayStarted(started)).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Removes the tray icon and brings the window back if it was hidden
+    /// there.
+    fn stop_tray(&mut self, next: TrayState) {
+        if let TrayState::Active { icon, .. } = std::mem::replace(&mut self.tray, next) {
+            icon.shutdown(&self.handle);
+        }
+        if self.window_hidden {
+            self.show_window();
+        }
+    }
+
     /// Carries out a command from the media session: window commands here,
     /// playback ones in the session.
     fn media_command(&mut self, command: MprisCommand) {
         match command {
-            MprisCommand::Raise => {
-                self.ctx
-                    .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
-            MprisCommand::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            MprisCommand::Raise => self.show_window(),
+            MprisCommand::Quit => self.quit(),
             MprisCommand::OpenUri(uri) => match aulos_core::file_uri_to_path(&uri) {
                 Some(path) => self.open_files(vec![path]),
                 None => tracing::warn!("MPRIS OpenUri: unsupported or invalid URI: {uri}"),
@@ -1005,6 +1199,60 @@ impl App {
         self.session.config.save();
         aulos_core::i18n::init_for(language);
         self.ctx.request_repaint();
+    }
+
+    /// How long the window geometry must stay unchanged before it is queued
+    /// for saving: a drag-resize then costs one save, not one per frame.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    const WINDOW_SAVE_DELAY: f64 = 0.5;
+
+    /// Keeps `config.window` at the window's size and place, so the next
+    /// launch opens it there; saved once the window has settled. A minimized
+    /// or full-screen window changes nothing, and a maximized one only the
+    /// flag (its size is not the one to come back to).
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn track_window_geometry(&mut self, ctx: &Context) {
+        // Smoke runs force their own window size.
+        if self.smoke.is_some() {
+            return;
+        }
+        let info = ctx.input(|i| i.viewport().clone());
+        if info.minimized == Some(true) || info.fullscreen == Some(true) {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        // The window builder takes points at the display's own scale, but the
+        // info is divided by the interface zoom on top of it.
+        let zoom = ctx.zoom_factor();
+        let maximized = info.maximized.unwrap_or(false);
+        let stored = self.session.config.config.window.clone();
+        let mut window = stored.clone().unwrap_or_default();
+        window.maximized = maximized;
+        if !maximized || stored.is_none() {
+            if let Some(inner) = info.inner_rect {
+                window.size = [
+                    (inner.width() * zoom).round(),
+                    (inner.height() * zoom).round(),
+                ];
+            }
+            if let Some(outer) = info.outer_rect {
+                window.position =
+                    Some([(outer.min.x * zoom).round(), (outer.min.y * zoom).round()]);
+            }
+        }
+        if stored.as_ref() != Some(&window) && info.inner_rect.is_some() {
+            self.session.config.config.window = Some(window);
+            self.window_changed_at = Some(now);
+        }
+        if let Some(changed) = self.window_changed_at {
+            let left = Self::WINDOW_SAVE_DELAY - (now - changed);
+            if left <= 0.0 {
+                self.window_changed_at = None;
+                self.session.config.save();
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64(left));
+            }
+        }
     }
 
     /// Applies `ui_scale` on top of the density base, capped so the layout
@@ -1265,6 +1513,7 @@ impl eframe::App for App {
         }
         #[cfg(not(feature = "visualizer"))]
         let _ = minimized;
+        self.sync_tray(ctx, minimized);
         self.session.set_seeking(self.seek_preview.is_some());
         while let Ok(event) = self.rx.try_recv() {
             let update = self.session.apply_session_event(event);
@@ -1281,6 +1530,10 @@ impl eframe::App for App {
         {
             self.zoom_base = Some(1.0 / native);
         }
+        // Before the zoom may change: the window info is in points of the
+        // zoom the frame started with.
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        self.track_window_geometry(ctx);
         // Every frame: a rotation or a window resize changes the cap.
         self.apply_zoom();
         self.covers.upload_pending(&self.session.library.covers);
@@ -1387,6 +1640,10 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         #[cfg(feature = "visualizer")]
         self.set_visualizer(false);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if self.window_changed_at.take().is_some() {
+            self.session.config.save();
+        }
         self.session.config.flush();
     }
 }

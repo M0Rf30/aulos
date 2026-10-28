@@ -16,6 +16,7 @@ mod dialogs;
 mod media_session;
 mod smoke;
 mod theme;
+mod tray;
 mod views;
 #[cfg(feature = "visualizer")]
 mod viz;
@@ -74,6 +75,10 @@ pub fn run() -> eframe::Result {
     result
 }
 
+/// Smallest window the layout is designed for (logical points).
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+const MIN_WINDOW_SIZE: [f32; 2] = [420.0, 190.0];
+
 /// How long closing the app waits for blocking jobs before abandoning them.
 #[cfg(not(target_arch = "wasm32"))]
 const RUNTIME_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis(500);
@@ -88,12 +93,31 @@ fn run_window(
     let _guard = runtime.enter();
     let handle = aulos_core::task::Spawner::new(runtime.handle().clone());
 
-    let size = smoke::window_size().unwrap_or([1280.0, 800.0]);
+    // The last window size and place come from the settings (not eframe's own
+    // persistence): one settings file, one save path. A smoke run takes its
+    // size from the environment and leaves the saved geometry alone.
+    let saved = match smoke::window_size() {
+        Some(_) => None,
+        None => aulos_core::config::Config::load()
+            .window
+            .and_then(|window| window.clamped(MIN_WINDOW_SIZE)),
+    };
+    let size = smoke::window_size()
+        .or_else(|| saved.as_ref().map(|window| window.size))
+        .unwrap_or([1280.0, 800.0]);
     let run = |backends| {
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_inner_size(size)
+            .with_min_inner_size(MIN_WINDOW_SIZE);
+        if let Some(window) = &saved {
+            // Wayland ignores the position; a compositor places the window.
+            if let Some(position) = window.position {
+                viewport = viewport.with_position(position);
+            }
+            viewport = viewport.with_maximized(window.maximized);
+        }
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size(size)
-                .with_min_inner_size([420.0, 190.0])
+            viewport: viewport
                 .with_title("Aulos")
                 .with_app_id("io.github.m0rf30.Aulos")
                 // X11 and desktops that don't resolve the icon from the

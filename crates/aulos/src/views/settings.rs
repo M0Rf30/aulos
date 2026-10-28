@@ -3662,6 +3662,40 @@ fn sec_desktop(app: &mut App, ui: &mut Ui) {
         app.run(effect);
         app.session.config.save();
     }
+    if crate::tray::SUPPORTED {
+        let cfg = &app.session.config.config;
+        let (close, minimize) = (cfg.close_to_tray, cfg.minimize_to_tray);
+        // Wayland cannot hide a window: say so instead of a switch that
+        // does nothing.
+        let hideable = app.can_hide_window();
+        let desc = |normal: String| {
+            if hideable {
+                normal
+            } else {
+                aulos_core::fl!("settings-tray-no-hide-desc")
+            }
+        };
+        if let Some(on) = toggle_row(
+            ui,
+            &pal,
+            &aulos_core::fl!("settings-close-tray-title"),
+            &desc(aulos_core::fl!("settings-close-tray-desc")),
+            false,
+            close,
+        ) {
+            app.session.set_close_to_tray(on);
+        }
+        if let Some(on) = toggle_row(
+            ui,
+            &pal,
+            &aulos_core::fl!("settings-minimize-tray-title"),
+            &desc(aulos_core::fl!("settings-minimize-tray-desc")),
+            false,
+            minimize,
+        ) {
+            app.session.set_minimize_to_tray(on);
+        }
+    }
 }
 
 fn sec_experimental(app: &mut App, ui: &mut Ui) {

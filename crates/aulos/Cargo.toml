@@ -49,6 +49,11 @@ eframe = { version = "0.36.2", default-features = false, features = ["accesskit"
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
+# Linux only: the system tray icon (StatusNotifierItem, pure Rust over D-Bus,
+# no GTK). Rides the zbus 5 / tokio stack already linked for MPRIS.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
+
 # Android: the NativeActivity glue `android_main` receives, and logcat output.
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }

@@ -1358,6 +1358,11 @@ settings-notify-title = Notify on track change
 settings-notify-desc = A desktop notification with the cover while the window isn't focused.
 settings-inhibit-title = Prevent suspend while playing
 settings-inhibit-desc = Holds a desktop inhibit lock during playback.
+settings-close-tray-title = Close to the system tray
+settings-close-tray-desc = Closing the window hides Aulos in the tray instead of quitting; quit from the tray menu. Needs a desktop with tray support.
+settings-minimize-tray-title = Minimize to the system tray
+settings-minimize-tray-desc = Minimizing the window hides it in the tray; click the tray icon to bring it back.
+settings-tray-no-hide-desc = Not available in this session: Wayland does not let an application hide its window. Start Aulos with WINIT_UNIX_BACKEND=x11 to use it.
 
 # Settings page: experimental
 settings-experimental-note = Features still being tested
@@ -1665,3 +1670,11 @@ web-file-not-in-root = { $path } is not a file of a music folder
 web-file-not-in-folder = “{ $file }” is not in “{ $root }” any more
 web-file-not-read = “{ $file }” could not be read: { $error }
 web-file-read-failed = The file could not be read: { $error }
+
+# System tray icon menu
+tray-show = Show Aulos
+tray-hide = Hide Aulos
+tray-play-pause = Play / Pause
+tray-next = Next
+tray-previous = Previous
+tray-quit = Quit

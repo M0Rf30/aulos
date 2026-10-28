@@ -238,6 +238,62 @@ impl ThemeMode {
     }
 }
 
+/// Where the desktop window was last: restored on the next launch. Sizes and
+/// positions are logical points at the display's own scale (before the
+/// interface zoom), what a window builder takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowGeometry {
+    /// Inner (content) size, `[width, height]`; while the window is
+    /// maximized, the size it had before.
+    pub size: [f32; 2],
+    /// Outer top-left corner; `None` where the platform does not tell it
+    /// (Wayland), so the compositor places the window.
+    pub position: Option<[f32; 2]>,
+    /// Whether the window was maximized.
+    pub maximized: bool,
+}
+
+impl Default for WindowGeometry {
+    fn default() -> Self {
+        Self {
+            size: [1280.0, 800.0],
+            position: None,
+            maximized: false,
+        }
+    }
+}
+
+impl WindowGeometry {
+    /// Largest window side restored; a saved value past it is corrupt.
+    const MAX_SIDE: f32 = 16_384.0;
+    /// Furthest a window corner may sit from the origin and still be restored.
+    const MAX_OFFSET: f32 = 32_768.0;
+
+    /// This geometry with the size raised to `min` and capped, and the
+    /// position dropped when it is not a plausible coordinate. `None` when
+    /// the size is not a number (a hand-edited file).
+    #[must_use]
+    pub fn clamped(&self, min: [f32; 2]) -> Option<Self> {
+        if !self.size.iter().all(|side| side.is_finite()) {
+            return None;
+        }
+        let size = [
+            self.size[0].clamp(min[0], Self::MAX_SIDE),
+            self.size[1].clamp(min[1], Self::MAX_SIDE),
+        ];
+        let position = self.position.filter(|p| {
+            p.iter()
+                .all(|c| c.is_finite() && c.abs() <= Self::MAX_OFFSET)
+        });
+        Some(Self {
+            size,
+            position,
+            maximized: self.maximized,
+        })
+    }
+}
+
 /// Persistent configuration, stored as RON in [`Config::path`].
 ///
 /// Every field has a default, so a file written by an older version (missing
@@ -395,6 +451,11 @@ pub struct Config {
     /// Keep playing (window minimized) instead of quitting when the
     /// window is closed during playback.
     pub background_playback: bool,
+    /// Closing the window hides it to the system tray (a StatusNotifierItem
+    /// on Linux) instead of quitting; the tray menu quits for real.
+    pub close_to_tray: bool,
+    /// Minimizing the window hides it to the system tray.
+    pub minimize_to_tray: bool,
     /// Show the "Various Artists" compilations entry in the Artists view.
     /// When off, compilations are only reachable from the Albums page.
     pub show_compilations_in_artists: bool,
@@ -433,6 +494,9 @@ pub struct Config {
     /// Prefer the Cover Art Archive front cover when applying a release in
     /// the tag editor.
     pub tagger_use_caa_cover: bool,
+    /// The desktop window's last size and position; `None` until it has
+    /// been shown once. Unused on the web and Android.
+    pub window: Option<WindowGeometry>,
 }
 
 impl Default for Config {
@@ -513,6 +577,8 @@ impl Default for Config {
             notify_track_change: true,
             inhibit_while_playing: true,
             background_playback: false,
+            close_to_tray: false,
+            minimize_to_tray: false,
             show_compilations_in_artists: true,
             m3u_relative_paths: true,
             scrobble_listenbrainz_enabled: false,
@@ -528,6 +594,7 @@ impl Default for Config {
             home_online_suggestions: true,
             acoustid_api_key: String::new(),
             tagger_use_caa_cover: true,
+            window: None,
         }
     }
 }
@@ -875,9 +942,16 @@ mod persistence_tests {
             watch_for_changes: false,
             tint_ui_with_cover: false,
             reduce_motion: true,
+            close_to_tray: true,
+            minimize_to_tray: true,
             fetch_artist_bio: true,
             fetch_artist_photos: true,
             fetch_radio_icons: false,
+            window: Some(WindowGeometry {
+                size: [1100.0, 720.0],
+                position: Some([-40.0, 64.0]),
+                maximized: true,
+            }),
             ..Config::default()
         };
         config.save_to(&path).unwrap();
@@ -962,6 +1036,48 @@ mod persistence_tests {
         assert_eq!(loaded.startup_page, defaults.startup_page);
         assert_eq!(loaded.music_dirs, defaults.music_dirs);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn window_geometry_is_absent_by_default_and_clamped_on_restore() {
+        assert_eq!(Config::default().window, None);
+        let min = [420.0, 190.0];
+        let tiny = WindowGeometry {
+            size: [10.0, 10.0],
+            position: Some([f32::NAN, 5.0]),
+            maximized: false,
+        };
+        assert_eq!(
+            tiny.clamped(min),
+            Some(WindowGeometry {
+                size: min,
+                position: None,
+                maximized: false,
+            })
+        );
+        let huge = WindowGeometry {
+            size: [1e9, 800.0],
+            position: Some([-3.0, 40.0]),
+            maximized: true,
+        };
+        let clamped = huge.clamped(min).unwrap();
+        assert_eq!(clamped.size, [16_384.0, 800.0]);
+        assert_eq!(clamped.position, Some([-3.0, 40.0]));
+        assert!(clamped.maximized);
+        let broken = WindowGeometry {
+            size: [f32::INFINITY, 800.0],
+            ..WindowGeometry::default()
+        };
+        assert_eq!(broken.clamped(min), None);
+        assert_eq!(
+            ron::from_str::<Config>("(window: Some((size: (900.0, 600.0))))")
+                .unwrap()
+                .window,
+            Some(WindowGeometry {
+                size: [900.0, 600.0],
+                ..WindowGeometry::default()
+            })
+        );
     }
 
     #[test]

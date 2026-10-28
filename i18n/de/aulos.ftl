@@ -1358,6 +1358,11 @@ settings-notify-title = Bei Titelwechsel benachrichtigen
 settings-notify-desc = Eine Desktop-Benachrichtigung mit dem Cover, solange das Fenster nicht im Fokus ist.
 settings-inhibit-title = Standby während der Wiedergabe verhindern
 settings-inhibit-desc = Hält während der Wiedergabe eine Desktop-Inhibit-Sperre.
+settings-close-tray-title = In den Infobereich schließen
+settings-close-tray-desc = Beim Schließen des Fensters bleibt Aulos im Infobereich, statt sich zu beenden; beenden über das Menü des Symbols. Benötigt einen Desktop mit Infobereich-Unterstützung.
+settings-minimize-tray-title = In den Infobereich minimieren
+settings-minimize-tray-desc = Beim Minimieren wird das Fenster im Infobereich versteckt; ein Klick auf das Symbol holt es zurück.
+settings-tray-no-hide-desc = In dieser Sitzung nicht verfügbar: Wayland erlaubt Anwendungen nicht, ihr Fenster auszublenden. Starte Aulos mit WINIT_UNIX_BACKEND=x11, um es zu nutzen.
 
 # Settings page: experimental
 settings-experimental-note = Funktionen, die noch getestet werden
@@ -1665,3 +1670,11 @@ web-file-not-in-root = { $path } ist keine Datei eines Musikordners
 web-file-not-in-folder = „{ $file }“ ist nicht mehr in „{ $root }“
 web-file-not-read = „{ $file }“ konnte nicht gelesen werden: { $error }
 web-file-read-failed = Die Datei konnte nicht gelesen werden: { $error }
+
+# System tray icon menu
+tray-show = Aulos anzeigen
+tray-hide = Aulos ausblenden
+tray-play-pause = Wiedergabe / Pause
+tray-next = Weiter
+tray-previous = Zurück
+tray-quit = Beenden

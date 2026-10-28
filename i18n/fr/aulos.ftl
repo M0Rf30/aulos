@@ -1359,6 +1359,11 @@ settings-notify-title = Notifier au changement de titre
 settings-notify-desc = Une notification de bureau avec la pochette lorsque la fenêtre n’a pas le focus.
 settings-inhibit-title = Empêcher la mise en veille pendant la lecture
 settings-inhibit-desc = Maintient un verrou d’inhibition du bureau pendant la lecture.
+settings-close-tray-title = Fermer dans la zone de notification
+settings-close-tray-desc = Fermer la fenêtre laisse Aulos dans la zone de notification au lieu de quitter ; quittez depuis le menu de l’icône. Nécessite un bureau prenant en charge la zone de notification.
+settings-minimize-tray-title = Réduire dans la zone de notification
+settings-minimize-tray-desc = Réduire la fenêtre la masque dans la zone de notification ; cliquez sur l’icône pour la rouvrir.
+settings-tray-no-hide-desc = Indisponible dans cette session : Wayland ne permet pas à une application de masquer sa fenêtre. Lancez Aulos avec WINIT_UNIX_BACKEND=x11 pour l’utiliser.
 
 # Settings page: experimental
 settings-experimental-note = Fonctionnalités encore en phase de test
@@ -1667,3 +1672,11 @@ web-file-not-in-root = { $path } n'est pas un fichier d'un dossier de musique
 web-file-not-in-folder = « { $file } » ne se trouve plus dans « { $root } »
 web-file-not-read = « { $file } » n'a pas pu être lu : { $error }
 web-file-read-failed = Le fichier n'a pas pu être lu : { $error }
+
+# System tray icon menu
+tray-show = Afficher Aulos
+tray-hide = Masquer Aulos
+tray-play-pause = Lecture / Pause
+tray-next = Suivant
+tray-previous = Précédent
+tray-quit = Quitter

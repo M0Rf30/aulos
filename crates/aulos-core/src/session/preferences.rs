@@ -82,6 +82,18 @@ impl Session {
         self.config.save();
     }
 
+    /// Turns "close to the system tray" on or off and saves it.
+    pub fn set_close_to_tray(&mut self, on: bool) {
+        self.config.config.close_to_tray = on;
+        self.config.save();
+    }
+
+    /// Turns "minimize to the system tray" on or off and saves it.
+    pub fn set_minimize_to_tray(&mut self, on: bool) {
+        self.config.config.minimize_to_tray = on;
+        self.config.save();
+    }
+
     /// Sets which artist info may be fetched online (Local and MPD
     /// libraries) and saves it. Already fetched bios and photos are
     /// dropped, so they are fetched again under the new rules; the update

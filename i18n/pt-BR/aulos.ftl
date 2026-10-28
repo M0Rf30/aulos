@@ -1360,6 +1360,11 @@ settings-notify-title = Notificar ao trocar de faixa
 settings-notify-desc = Uma notificação da área de trabalho com a capa enquanto a janela não está em foco.
 settings-inhibit-title = Impedir suspensão durante a reprodução
 settings-inhibit-desc = Mantém um bloqueio de inibição da área de trabalho durante a reprodução.
+settings-close-tray-title = Fechar para a bandeja do sistema
+settings-close-tray-desc = Ao fechar a janela, o Aulos fica na bandeja em vez de sair; saia pelo menu do ícone. Requer uma área de trabalho com suporte à bandeja.
+settings-minimize-tray-title = Minimizar para a bandeja do sistema
+settings-minimize-tray-desc = Ao minimizar, a janela fica oculta na bandeja; clique no ícone para trazê-la de volta.
+settings-tray-no-hide-desc = Indisponível nesta sessão: o Wayland não permite que um aplicativo oculte sua janela. Inicie o Aulos com WINIT_UNIX_BACKEND=x11 para usá-lo.
 
 # Settings page: experimental
 settings-experimental-note = Recursos ainda em teste
@@ -1667,3 +1672,11 @@ web-file-not-in-root = { $path } não é um arquivo de uma pasta de música
 web-file-not-in-folder = “{ $file }” não está mais em “{ $root }”
 web-file-not-read = Não foi possível ler “{ $file }”: { $error }
 web-file-read-failed = Não foi possível ler o arquivo: { $error }
+
+# System tray icon menu
+tray-show = Mostrar o Aulos
+tray-hide = Ocultar o Aulos
+tray-play-pause = Tocar / Pausar
+tray-next = Próxima
+tray-previous = Anterior
+tray-quit = Sair

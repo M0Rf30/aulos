@@ -1359,6 +1359,11 @@ settings-notify-title = Notifica al cambio di brano
 settings-notify-desc = Una notifica del desktop con la copertina quando la finestra non è in primo piano.
 settings-inhibit-title = Impedisci la sospensione durante la riproduzione
 settings-inhibit-desc = Mantiene un blocco di inibizione del desktop durante la riproduzione.
+settings-close-tray-title = Chiudi nell’area di notifica
+settings-close-tray-desc = Chiudendo la finestra Aulos resta nell’area di notifica invece di uscire; esci dal menu dell’icona. Richiede un desktop con supporto all’area di notifica.
+settings-minimize-tray-title = Riduci nell’area di notifica
+settings-minimize-tray-desc = Riducendo la finestra la nascondi nell’area di notifica; clicca l’icona per riportarla.
+settings-tray-no-hide-desc = Non disponibile in questa sessione: Wayland non permette a un’applicazione di nascondere la propria finestra. Avvia Aulos con WINIT_UNIX_BACKEND=x11 per usarla.
 
 # Settings page: experimental
 settings-experimental-note = Funzioni ancora in fase di test
@@ -1666,3 +1671,11 @@ web-file-not-in-root = { $path } non è un file di una cartella musicale
 web-file-not-in-folder = “{ $file }” non è più in “{ $root }”
 web-file-not-read = Impossibile leggere “{ $file }”: { $error }
 web-file-read-failed = Impossibile leggere il file: { $error }
+
+# System tray icon menu
+tray-show = Mostra Aulos
+tray-hide = Nascondi Aulos
+tray-play-pause = Riproduci / Pausa
+tray-next = Successivo
+tray-previous = Precedente
+tray-quit = Esci
