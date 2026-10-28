@@ -25,12 +25,15 @@
 //!   with no need to compare `Track`s by value (the type has no
 //!   `PartialEq` and duplicate tracks in one queue are legal).
 //!
-//! `append`/`insert_next` extend all three in lockstep (new tracks always
-//! land at the end of `unshuffled`); `remove` shrinks all three and shifts
-//! every `origin` value past the removed canonical index down by one;
-//! `move_item` (a pure play-order reorder) only ever touches `order` +
-//! `origin`, never `unshuffled` — reordering the shuffled play sequence
-//! shouldn't redefine what "unshuffled" means.
+//! `append` extends all three in lockstep (new tracks land at the end of
+//! `unshuffled`); `remove` shrinks all three and shifts every `origin`
+//! value past the removed canonical index down by one. While shuffle is
+//! off, `insert_next` and `move_item` edit `unshuffled` as well (and keep
+//! `origin` the identity mapping), so the edit survives a shuffle on/off
+//! cycle. While shuffle is on, `insert_next` adds its entries at the end
+//! of `unshuffled` and `move_item` only touches `order` + `origin` —
+//! reordering the shuffled play sequence shouldn't redefine what
+//! "unshuffled" means.
 
 use crate::config::RepeatMode;
 use crate::fl;
@@ -271,11 +274,25 @@ impl PlayQueue {
         if self.order.is_empty() {
             return self.append(new);
         }
+        let insert_at = self.index + 1;
+        if !self.shuffle {
+            // Play order is the canonical order: insert into both so the
+            // entries keep their place after a shuffle on/off cycle.
+            let count = new.len();
+            self.unshuffled
+                .splice(insert_at..insert_at, new.iter().cloned());
+            self.kinds.splice(
+                insert_at..insert_at,
+                std::iter::repeat_n(QueueOrigin::PlayNext, count),
+            );
+            self.order.splice(insert_at..insert_at, new);
+            self.origin = (0..self.order.len()).collect();
+            return;
+        }
         let base = self.unshuffled.len();
         self.unshuffled.extend(new.iter().cloned());
         self.kinds
             .extend(std::iter::repeat_n(QueueOrigin::PlayNext, new.len()));
-        let insert_at = self.index + 1;
         let origins: Vec<usize> = (base..base + new.len()).collect();
         self.order.splice(insert_at..insert_at, new);
         self.origin.splice(insert_at..insert_at, origins);
@@ -302,7 +319,17 @@ impl PlayQueue {
         } else if play_idx < self.index {
             self.index -= 1;
         } else if was_current && self.index >= self.order.len() {
-            self.index = self.order.len() - 1;
+            // The last entry was playing: this is the end of the queue, so
+            // behave like an explicit `advance` there — rewind to the top,
+            // which only keeps playing when a repeat mode is set.
+            self.index = 0;
+            if self.repeat == RepeatMode::None {
+                return Some(RemoveOutcome {
+                    removed,
+                    was_current,
+                    new_current: None,
+                });
+            }
         }
         let new_current = self.order.get(self.index).cloned();
         Some(RemoveOutcome {
@@ -321,9 +348,19 @@ impl PlayQueue {
             return;
         }
         let track = self.order.remove(from);
-        let origin = self.origin.remove(from);
         self.order.insert(to, track);
-        self.origin.insert(to, origin);
+        if self.shuffle {
+            let origin = self.origin.remove(from);
+            self.origin.insert(to, origin);
+        } else {
+            // Play order is the canonical order: move it there too (and
+            // its kind) so the reorder survives a shuffle on/off cycle.
+            // `origin` stays the identity mapping.
+            let track = self.unshuffled.remove(from);
+            self.unshuffled.insert(to, track);
+            let kind = self.kinds.remove(from);
+            self.kinds.insert(to, kind);
+        }
         self.index = if self.index == from {
             to
         } else if from < self.index && to >= self.index {
@@ -834,13 +871,46 @@ mod tests {
     }
 
     #[test]
-    fn remove_current_last_clamps_to_new_last() {
+    fn remove_current_last_ends_the_queue_without_repeat() {
         let mut q = PlayQueue::new();
         q.set(tracks(&[1, 2, 3]), 2); // current = id 3, last entry
         let outcome = q.remove(2).unwrap();
         assert!(outcome.was_current);
-        assert_eq!(outcome.new_current.as_ref().unwrap().id, 2);
-        assert_eq!(q.index(), 1);
+        assert!(outcome.new_current.is_none());
+        assert_eq!(q.index(), 0);
+    }
+
+    #[test]
+    fn remove_current_last_wraps_with_repeat_all() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2, 3]), 2);
+        q.set_repeat(RepeatMode::All);
+        let outcome = q.remove(2).unwrap();
+        assert_eq!(outcome.new_current.as_ref().unwrap().id, 1);
+        assert_eq!(q.index(), 0);
+    }
+
+    #[test]
+    fn reorder_with_shuffle_off_survives_shuffle_cycle() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2, 3, 4]), 0);
+        q.move_item(3, 1);
+        assert_eq!(ids(&q), [1, 4, 2, 3]);
+        q.set_shuffle(true);
+        q.set_shuffle(false);
+        assert_eq!(ids(&q), [1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn play_next_with_shuffle_off_survives_shuffle_cycle() {
+        let mut q = PlayQueue::new();
+        q.set(tracks(&[1, 2, 3]), 0);
+        q.insert_next(tracks(&[9]));
+        assert_eq!(ids(&q), [1, 9, 2, 3]);
+        q.set_shuffle(true);
+        q.set_shuffle(false);
+        assert_eq!(ids(&q), [1, 9, 2, 3]);
+        assert_eq!(q.origin_of(1), Some(QueueOrigin::PlayNext));
     }
 
     #[test]

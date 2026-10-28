@@ -39,12 +39,17 @@ impl EqualizerState {
     /// Loads every stored preset and restores the active preset name from
     /// the config.
     ///
-    /// # Panics
-    /// If the presets directory cannot be created.
+    /// If the presets directory cannot be created, a warning is logged and
+    /// only the built-in presets are available (saving custom ones fails).
     pub(super) fn new(config: &Config) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let preset_manager = EqPresetManager::new(crate::paths::config_dir().join("eq_presets"))
-            .expect("Failed to create EQ presets directory");
+        let preset_manager = {
+            let dir = crate::paths::config_dir().join("eq_presets");
+            EqPresetManager::new(dir.clone()).unwrap_or_else(|e| {
+                tracing::warn!("Failed to create the EQ presets directory: {e}");
+                EqPresetManager::at(dir)
+            })
+        };
         #[cfg(target_arch = "wasm32")]
         let preset_manager = EqPresetManager::in_browser();
         let all_presets = preset_manager.load_all();

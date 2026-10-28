@@ -31,7 +31,16 @@ impl EqPresetManager {
         if !presets_dir.exists() {
             std::fs::create_dir_all(&presets_dir)?;
         }
-        Ok(Self { presets_dir })
+        Ok(Self::at(presets_dir))
+    }
+
+    /// A manager over `presets_dir` that does not create it. Listing then
+    /// yields only the built-in presets and saving reports an error until
+    /// the directory exists; used when [`Self::new`] cannot create it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn at(presets_dir: PathBuf) -> Self {
+        Self { presets_dir }
     }
 
     /// A manager over the presets kept in the browser's `localStorage`.
