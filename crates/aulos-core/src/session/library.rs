@@ -555,6 +555,8 @@ impl Session {
                     if provider_id != self.providers.registry.active_id() {
                         return LibraryApplied::Stale;
                     }
+                    self.library.scanning = false;
+                    self.library.scan_progress.reset();
                     let pending = std::mem::take(&mut self.library.reload_after_scan);
                     if count == 0 && !pending {
                         return LibraryApplied::Stale;
@@ -618,7 +620,9 @@ impl Session {
                 if self.is_stale_reload(generation, &provider_id) {
                     return LibraryApplied::Stale;
                 }
-                self.library.scanning = false;
+                // A scan still running (the launch shows the stored library
+                // while it does) keeps its progress on screen.
+                self.library.scanning = self.library.scan_running;
                 self.library
                     .replace_loaded(tracks, albums, &self.config.config);
                 let covers = self.library.covers.replace(covers);
@@ -2340,6 +2344,35 @@ mod tests {
             LibraryApplied::ScanComplete { .. }
         ));
         assert!(!session.library.reload_after_scan);
+    }
+
+    #[test]
+    fn stored_library_shows_while_the_launch_scan_runs() {
+        let mut session = test_session();
+        session.library.scan_running = true;
+        session.library.scanning = true;
+        let scan = session.library.begin_reload_generation();
+        // The launch loads the stored library after starting the scan.
+        let load = session.library.begin_reload_generation();
+        let applied = session.apply_library_event(LibraryEvent::Loaded {
+            generation: load,
+            provider_id: session.providers.registry.active_id().to_string(),
+            tracks: Vec::new(),
+            albums: vec![album("A", "x", 1)],
+            covers: covers(&[]),
+        });
+        assert!(matches!(applied, LibraryApplied::Loaded { .. }));
+        assert_eq!(visible_names(&session), ["A"]);
+        // The scan's progress stays up until the scan itself ends.
+        assert!(session.library.scanning);
+
+        assert!(matches!(
+            scan_complete(&mut session, scan, 0),
+            LibraryApplied::Stale
+        ));
+        assert!(!session.library.scanning);
+        assert!(!session.library.scan_running);
+        assert_eq!(visible_names(&session), ["A"]);
     }
 
     #[test]

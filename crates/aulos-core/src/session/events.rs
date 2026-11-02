@@ -407,8 +407,25 @@ impl Session {
         // The covers of the scan's reload are empty at launch: nothing is
         // shown yet that could be out of date.
         let scan = self.scan_library().effect;
+        // Show the library stored in the database right away instead of
+        // after the scan: walking and stat-ing every file is slow on some
+        // storage (Android's shared storage), and an empty library until it
+        // ends looks like a rebuild. The load starts after the scan, so it
+        // supersedes the scan's generation; the scan's completion still
+        // reloads when it changed anything (see `ScanComplete`).
+        let local = self
+            .providers
+            .registry
+            .active_shared()
+            .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local);
+        let stored = if local {
+            self.reload_library().effect
+        } else {
+            Effect::none()
+        };
         Effect::batch([
             scan.into_session(),
+            stored.into_session(),
             self.config.startup_checks().into_session(),
         ])
     }
