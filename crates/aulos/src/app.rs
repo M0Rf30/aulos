@@ -727,6 +727,12 @@ impl App {
         self.run(effect);
     }
 
+    /// Rates `track` with `stars` (0 clears it).
+    pub fn rate(&mut self, track: &Track, stars: u8) {
+        let effect = self.session.set_rating(track.key(), stars);
+        self.run(effect);
+    }
+
     pub fn toggle_play(&mut self) {
         let update = self.session.toggle_playback();
         self.run(update);

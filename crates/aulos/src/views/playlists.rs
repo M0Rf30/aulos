@@ -229,6 +229,11 @@ enum Act {
     CreateSmart(String),
     Rename(String, String),
     Delete(Sel),
+    /// Rate a track (`stars` 0 clears it).
+    Rate {
+        id: String,
+        stars: u8,
+    },
     RemoveTrack {
         id: String,
         index: usize,
@@ -1097,6 +1102,9 @@ fn mosaic(ui: &mut Ui, app: &App, keys: &[String], seed: &str) {
 }
 
 /// `view` is the scroll viewport and the y of the content's top.
+/// Width of one rating star in a track row.
+const STAR_STEP: f32 = 13.0;
+
 fn track_rows(
     ui: &mut Ui,
     app: &App,
@@ -1266,8 +1274,16 @@ fn track_rows(
             pos2(time.left() - 12.0 - quality_w, rect.top()),
             vec2(quality_w, ROW_H),
         );
+        // Rating stars left of the quality badge (wide layouts only).
+        let stars = (!app.narrow()).then(|| {
+            Rect::from_min_size(
+                pos2(quality.left() - 12.0 - 5.0 * STAR_STEP, rect.top()),
+                vec2(5.0 * STAR_STEP, ROW_H),
+            )
+        });
         let title_x = cover.right() + 12.0;
-        let title_w = (quality.left() - 12.0 - title_x).max(20.0);
+        let title_end = stars.map_or(quality.left(), |s| s.left());
+        let title_w = (title_end - 12.0 - title_x).max(20.0);
         let title_color = if current { app.accent.text } else { pal.text };
         let mut job = LayoutJob::default();
         job.append(
@@ -1321,7 +1337,35 @@ fn track_rows(
             pal.text_2,
         );
 
-        let on_remove = remove.as_ref().is_some_and(|r| r.hovered());
+        let mut on_star = false;
+        if let Some(stars) = stars {
+            let current = track.rating.unwrap_or(0);
+            for i in 0..5u8 {
+                let c = pos2(
+                    stars.left() + STAR_STEP * (f32::from(i) + 0.5),
+                    rect.center().y,
+                );
+                let hit = Rect::from_center_size(c, vec2(STAR_STEP, ROW_H - 6.0));
+                let star = ui.interact(hit, resp.id.with(("star", i)), Sense::click());
+                on_star |= star.hovered();
+                let on = i < current;
+                let (glyph, color) = if on {
+                    (fill::STAR, pal.text)
+                } else if star.hovered() {
+                    (regular::STAR, pal.text_2)
+                } else {
+                    (regular::STAR, pal.text_5)
+                };
+                paint_icon(ui.painter(), c, glyph, 12.0, color, on);
+                if star.clicked() {
+                    out.acts.push(Act::Rate {
+                        id: track.key(),
+                        stars: if current == i + 1 { 0 } else { i + 1 },
+                    });
+                }
+            }
+        }
+        let on_remove = remove.as_ref().is_some_and(|r| r.hovered()) || on_star;
         if resp.clicked() && !on_remove {
             st.row_sel = Some(i);
             out.acts.push(Act::Play {
@@ -2038,6 +2082,10 @@ fn apply(app: &mut App, out: Out) {
                 }
             }
             Act::Delete(sel) => delete(app, &sel),
+            Act::Rate { id, stars } => {
+                let effect = app.session.set_rating(id, stars);
+                app.run(effect);
+            }
             Act::RemoveTrack { id, index } => {
                 if let Some(idx) = playlist_index(app, &id) {
                     let effect = app.session.remove_track_from_playlist(idx, index);

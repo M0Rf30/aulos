@@ -47,6 +47,7 @@ startup-provider-description = Die Musikquelle, die beim Öffnen von Aulos ausge
 # RowFoundation
 favorite-add = Zu Favoriten hinzufügen
 favorite-remove = Aus Favoriten entfernen
+rate-track = Bewerten
 
 equalizer-section-preset = Preset
 equalizer-section-preamp = Vorverstärker

@@ -697,7 +697,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
         track.title.clone(),
         theme::semibold(26.0),
         Color32::WHITE,
-        w - 68.0,
+        w - 102.0,
     );
     title_job.wrap.max_rows = 2;
     title_job.wrap.overflow_character = Some('\u{2026}');
@@ -755,7 +755,7 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" \u{00B7} ");
-    let sub_rect = Rect::from_min_size(pos2(x0, info + 33.0 + extra), vec2(w - 68.0, 20.0));
+    let sub_rect = Rect::from_min_size(pos2(x0, info + 33.0 + extra), vec2(w - 102.0, 20.0));
     crate::widgets::marquee_text(
         ui,
         sub_rect,
@@ -775,6 +775,25 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
     let heart = Rect::from_min_size(pos2(x0 + w - 30.0, info + 28.0 + extra), vec2(30.0, 30.0));
     // Track menu ("…") left of the heart.
     let more = Rect::from_min_size(pos2(x0 + w - 64.0, info + 28.0 + extra), vec2(30.0, 30.0));
+    // Rating star left of the menu; it opens into five stars.
+    let star = Rect::from_min_size(pos2(x0 + w - 98.0, info + 28.0 + extra), vec2(30.0, 30.0));
+    let colors = crate::widgets::RatingColors {
+        on: Color32::WHITE,
+        off: SUB,
+        hover: Color32::WHITE,
+        backdrop: rgba(6, 14, 18, 0.9),
+    };
+    let current = track.rating.unwrap_or(0);
+    if let Some(stars) = crate::widgets::rating_stars(
+        ui,
+        ui.id().with("expanded-rating"),
+        star,
+        current,
+        20.0,
+        &colors,
+    ) {
+        app.rate(track, stars);
+    }
     let more_resp = ui
         .scope_builder(UiBuilder::new().max_rect(more), |ui| {
             IconBtn::new(regular::DOTS_THREE)

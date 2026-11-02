@@ -3,7 +3,8 @@
 use crate::app::{App, Sheet};
 use crate::theme::{self, Theme};
 use crate::widgets::{
-    IconBtn, cover_image, paint_icon, paint_text, quality_badge, seek_bar, slider_bar,
+    IconBtn, RatingColors, cover_image, paint_icon, paint_text, quality_badge, rating_stars,
+    seek_bar, slider_bar,
 };
 use aulos_core::config::RepeatMode;
 use aulos_core::format::format_duration;
@@ -234,7 +235,8 @@ fn track_info(app: &mut App, ui: &mut Ui) {
         .library
         .favorite_state(Some(&track), &track.key())
         .unwrap_or(track.is_favorite);
-    let heart_w = 16.0 + 12.0 + 2.0;
+    // Heart and rating star.
+    let heart_w = 16.0 + 12.0 + 2.0 + STAR_W;
     let quality = App::quality_of(&track);
     // The block is as wide as its widest line (as in the design), so the heart
     // sits right after it; long titles stop at the column edge.
@@ -280,7 +282,25 @@ fn track_info(app: &mut App, ui: &mut Ui) {
             }
         });
     });
-    let (hrect, hresp) = ui.allocate_exact_size(vec2(heart_w - 2.0, 24.0), Sense::click());
+    let (hrect, hresp) = ui.allocate_exact_size(vec2(heart_w - 2.0 - STAR_W, 24.0), Sense::click());
+    let (srect, _) = ui.allocate_exact_size(vec2(STAR_W, 24.0), Sense::hover());
+    let colors = RatingColors {
+        on: t.accent.fill,
+        off: t.pal.text_3,
+        hover: t.pal.text,
+        backdrop: t.pal.bg_bar,
+    };
+    let current = track.rating.unwrap_or(0);
+    if let Some(stars) = rating_stars(
+        ui,
+        ui.id().with("nowbar-rating"),
+        srect,
+        current,
+        15.0,
+        &colors,
+    ) {
+        app.rate(&track, stars);
+    }
     let (glyph, filled, color) = if fav {
         (fill::HEART, true, t.accent.fill)
     } else {
@@ -306,6 +326,9 @@ fn track_info(app: &mut App, ui: &mut Ui) {
         app.toggle_favorite(&track);
     }
 }
+
+/// Width of one rating star cell (the folded star, and each of the five).
+const STAR_W: f32 = 20.0;
 
 /// Width of the elapsed / remaining labels: fits `\u{2212}1:00:00`.
 const LABEL_W: f32 = 56.0;

@@ -203,15 +203,21 @@ impl Session {
     }
 
     /// Apply `f` to every copy of the track with `track_id`: the library
-    /// lists and the current track.
+    /// lists, the playlists' tracks and the current track.
     fn for_each_track(&mut self, track_id: &str, mut f: impl FnMut(&mut Track)) {
         self.library.for_each_track(track_id, &mut f);
         let active = self.providers.registry.active_id();
-        if let Some(ct) = self.playback.current_track.as_mut()
-            && &*ct.provider_id == active
-            && ct.has_key(track_id)
-        {
-            f(ct);
+        let playlists = &mut self.playlists;
+        let copies = playlists
+            .playlists
+            .iter_mut()
+            .flat_map(|p| p.tracks.iter_mut())
+            .chain(playlists.smart_playlist_tracks.iter_mut())
+            .chain(self.playback.current_track.as_mut());
+        for track in copies {
+            if &*track.provider_id == active && track.has_key(track_id) {
+                f(track);
+            }
         }
     }
 
@@ -2344,6 +2350,35 @@ mod tests {
             LibraryApplied::ScanComplete { .. }
         ));
         assert!(!session.library.reload_after_scan);
+    }
+
+    #[test]
+    fn rating_reaches_playlist_copies_and_the_current_track() {
+        let mut session = test_session();
+        let db = crate::library::LibraryDb::open_memory().expect("db");
+        let local = crate::provider::local::LocalProvider::new(db, Vec::new());
+        session.providers.registry.register(Arc::new(local));
+        assert!(session.providers.registry.set_active("local"));
+        let rated = track(7);
+        session.playlists.playlists.push(Playlist {
+            id: "p".into(),
+            name: "P".into(),
+            tracks: vec![rated.clone(), track(8)],
+            track_count: 2,
+            total_duration: Duration::ZERO,
+        });
+        session.playlists.smart_playlist_tracks = vec![rated.clone()];
+        session.playback.current_track = Some(rated.clone());
+
+        session.set_rating_local(&rated.key(), Some(4));
+        let p = &session.playlists.playlists[0];
+        assert_eq!(p.tracks[0].rating, Some(4));
+        assert_eq!(p.tracks[1].rating, None);
+        assert_eq!(session.playlists.smart_playlist_tracks[0].rating, Some(4));
+        assert_eq!(
+            session.playback.current_track.as_ref().unwrap().rating,
+            Some(4)
+        );
     }
 
     #[test]
