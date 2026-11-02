@@ -47,6 +47,7 @@ startup-provider-description = La fuente de música seleccionada al abrir Aulos
 # RowFoundation
 favorite-add = Añadir a favoritos
 favorite-remove = Quitar de favoritos
+rate-track = Valorar
 
 equalizer-section-preset = Preajuste
 equalizer-section-preamp = Preamplificación

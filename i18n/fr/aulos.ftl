@@ -47,6 +47,7 @@ startup-provider-description = La source musicale sélectionnée à l'ouverture 
 # RowFoundation
 favorite-add = Ajouter aux favoris
 favorite-remove = Retirer des favoris
+rate-track = Noter
 
 equalizer-section-preset = Préréglage
 equalizer-section-preamp = Préampli

@@ -8,6 +8,7 @@ mod bar;
 mod button;
 mod cover;
 mod input;
+mod rating;
 mod states;
 mod text;
 mod track_row;
@@ -22,6 +23,7 @@ pub use cover::{Covers, avatar_tile, cover_image, gradient_fill, more_trigger, s
 #[cfg(target_os = "android")]
 pub use input::is_password;
 pub use input::{mark_password, reveal_focused, search_field, text_field};
+pub use rating::{RatingColors, rating_stars};
 pub use states::{empty_state, empty_state_actions, empty_state_tinted, skeleton};
 pub use text::{
     caps_label, label_text, marquee_id, marquee_text, paint_icon, paint_text, paint_text_spaced,
