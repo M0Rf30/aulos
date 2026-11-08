@@ -53,7 +53,9 @@ use playcore::resample::ResamplerQuality;
 
 use super::cpal_utils;
 use super::dop_output::DopOutput;
-use super::output::{AudioFormat as OutputFormat, CpalOutput, DEVICE_LOST_MESSAGE};
+use super::output::{
+    AudioFormat as OutputFormat, CpalOutput, DEVICE_LOST_MESSAGE, sleep_unless_stopped,
+};
 use crate::player::backend::PlayerError;
 use crate::player::eq_source::{EqFilter, SharedCoeffs};
 use crate::player::http_range_reader::HttpRangeReader;
@@ -1241,10 +1243,13 @@ impl PcmSink {
     fn finish(&mut self, buf: &mut [f32], ctx: &ThreadContext) -> Result<()> {
         self.eq.apply(buf);
         self.volume.apply(buf);
-        self.output
-            .write(buf)
-            .map(|_| ())
-            .inspect_err(|e| ctx.report_failure(e.to_string()))
+        self.output.write(buf).map(|_| ()).inspect_err(|e| {
+            // A lost device is reported by [`Self::device_lost`], once the
+            // caller has had the chance to reopen the output.
+            if !self.output.device_failed() {
+                ctx.report_failure(e.to_string());
+            }
+        })
     }
 
     /// Whether the device reported a fatal error; if so, records the output
@@ -1333,6 +1338,84 @@ impl PcmSink {
     }
 }
 
+/// How many times the output of one `run_pcm` stretch is reopened after the
+/// device reported a fatal stream error, within [`REBUILD_WINDOW`].
+const MAX_OUTPUT_REBUILDS: u32 = 3;
+
+/// A reopen budget that refills once this long passes without a rebuild.
+const REBUILD_WINDOW: Duration = Duration::from_secs(60);
+
+/// Pause between dropping a failed output and opening its replacement, so
+/// the sound server can finish tearing the dead stream down.
+const REBUILD_SETTLE: Duration = Duration::from_millis(250);
+
+/// Bounds how often a failing output is reopened: a stream that dies once
+/// (a PipeWire/Pulse ALSA plugin stream erroring on a track change) is
+/// replaced and playback goes on; one that keeps dying is given up on.
+struct RebuildBudget {
+    used: u32,
+    last: Option<Instant>,
+}
+
+impl RebuildBudget {
+    fn new() -> Self {
+        Self {
+            used: 0,
+            last: None,
+        }
+    }
+
+    /// Spend one rebuild; `false` once the budget is exhausted.
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) > REBUILD_WINDOW)
+        {
+            self.used = 0;
+        }
+        if self.used >= MAX_OUTPUT_REBUILDS {
+            return false;
+        }
+        self.used += 1;
+        self.last = Some(now);
+        true
+    }
+}
+
+/// Replace `sink`'s failed output with a freshly opened one. `false` when
+/// the budget is spent, the thread was told to stop or the device cannot be
+/// reopened; `sink` then still holds the failed output so the caller reports
+/// the loss through [`PcmSink::device_lost`].
+fn rebuild_sink(
+    sink: &mut PcmSink,
+    format: DecoderFormat,
+    dsd_target_rate: Option<u32>,
+    budget: &mut RebuildBudget,
+    ctx: &ThreadContext,
+) -> bool {
+    if !budget.take() {
+        return false;
+    }
+    tracing::warn!("{DEVICE_LOST_MESSAGE}; reopening the audio output");
+    // The failed output skips its drain, so this only drops the stream.
+    sink.stop();
+    sleep_unless_stopped(REBUILD_SETTLE, Some(&ctx.stop_flag));
+    if ctx.stop_flag.load(Ordering::Acquire) {
+        return false;
+    }
+    match PcmSink::new(format, dsd_target_rate, ctx) {
+        Ok(fresh) => {
+            *sink = fresh;
+            true
+        }
+        Err(e) => {
+            tracing::error!("failed to reopen the audio output: {e}");
+            false
+        }
+    }
+}
+
 /// PCM decode loop, handling every consecutive track whose format matches
 /// the one this output was opened for. Returns [`PcmOutcome::Advance`] (with
 /// the output already torn down) the moment a transition needs a different
@@ -1376,12 +1459,18 @@ fn run_pcm(
     // Set once a crossfade was abandoned because the look-ahead is shorter
     // than the blend window; cleared when the current track changes.
     let mut crossfade_suppressed = false;
+    let mut rebuilds = RebuildBudget::new();
     'buf: loop {
         if ctx.stop_flag.load(Ordering::Acquire) {
             sink.stop();
             return PcmOutcome::Done;
         }
 
+        if sink.output.device_failed()
+            && rebuild_sink(&mut sink, format, dsd_target_rate, &mut rebuilds, ctx)
+        {
+            continue 'buf;
+        }
         if sink.device_lost(ctx) {
             sink.stop();
             return PcmOutcome::Done;
@@ -1466,6 +1555,9 @@ fn run_pcm(
                                 continue 'buf;
                             }
                             CrossfadeOutcome::Stopped => {
+                                // No-op unless the blend ended on a lost
+                                // device, whose loss `finish` left unreported.
+                                sink.device_lost(ctx);
                                 sink.stop();
                                 return PcmOutcome::Done;
                             }
@@ -1590,6 +1682,11 @@ fn run_pcm(
 
         let chunk = &mut buffer[..samples_read];
         if let Err(e) = sink.process(chunk, gain, ctx) {
+            if sink.output.device_failed() {
+                // Dropping this chunk is fine: the top of the loop reopens
+                // the output (or reports the loss once that is exhausted).
+                continue 'buf;
+            }
             tracing::warn!("output write failed: {e}");
             sink.stop();
             return PcmOutcome::Done;
@@ -1837,6 +1934,15 @@ mod tests {
             engine.status.failed.load(Ordering::Acquire),
             "the thread end still sees the failure after it was taken"
         );
+    }
+
+    #[test]
+    fn rebuild_budget_allows_a_few_reopens_in_a_row() {
+        let mut budget = RebuildBudget::new();
+        for _ in 0..MAX_OUTPUT_REBUILDS {
+            assert!(budget.take());
+        }
+        assert!(!budget.take());
     }
 
     #[test]

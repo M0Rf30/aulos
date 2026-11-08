@@ -51,15 +51,75 @@ pub(crate) fn is_fatal_stream_error(kind: cpal::ErrorKind) -> bool {
     )
 }
 
-/// The cpal stream error callback shared by the PCM and DoP outputs: logs,
-/// and on a fatal error raises `failed` for the playback thread to see
-/// (instead of it noticing seconds later through a stalled write).
+/// Collapses a stream's repeated identical errors into one log line.
+///
+/// cpal's ALSA worker calls the error callback on every pass of its poll
+/// loop and only leaves that loop for `DeviceNotAvailable`; a PCM that
+/// keeps failing the same way (the PipeWire/Pulse ALSA plugin answering
+/// `snd_pcm_avail_delay` with `EIO` once its stream died) therefore reports
+/// the same error dozens of times per millisecond until the stream is
+/// dropped. The first occurrence is logged; repeats are only counted and
+/// summed up in one line when a different error arrives or the stream (and
+/// with it this callback) is dropped.
+struct ErrorThrottle {
+    label: &'static str,
+    last: Option<String>,
+    repeats: u64,
+}
+
+impl ErrorThrottle {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            last: None,
+            repeats: 0,
+        }
+    }
+
+    /// Account for `message`; `true` when it is new (not a repeat of the
+    /// previous error) and should be logged.
+    fn record(&mut self, message: &str) -> bool {
+        if self.last.as_deref() == Some(message) {
+            self.repeats += 1;
+            return false;
+        }
+        self.flush();
+        self.last = Some(message.to_owned());
+        true
+    }
+
+    fn flush(&mut self) {
+        if self.repeats > 0 {
+            tracing::warn!(
+                "{} error repeated {} more times (suppressed)",
+                self.label,
+                self.repeats
+            );
+            self.repeats = 0;
+        }
+    }
+}
+
+impl Drop for ErrorThrottle {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+/// The cpal stream error callback shared by the PCM and DoP outputs: logs
+/// (each distinct error once, see [`ErrorThrottle`]), and on a fatal error
+/// raises `failed` for the playback thread to see (instead of it noticing
+/// seconds later through a stalled write).
 pub(crate) fn stream_error_callback(
     label: &'static str,
     failed: Arc<AtomicBool>,
 ) -> impl FnMut(cpal::Error) + Send + 'static {
+    let mut throttle = ErrorThrottle::new(label);
     move |err| {
-        tracing::error!("{label} error: {err}");
+        let message = err.to_string();
+        if throttle.record(&message) {
+            tracing::error!("{label} error: {message}");
+        }
         if is_fatal_stream_error(err.kind()) {
             failed.store(true, Ordering::Release);
         }
@@ -602,6 +662,13 @@ impl CpalOutput {
                                     // playback loop sees the flag next.
                                     return Ok(0);
                                 }
+                                // A device that failed mid-wait never drains
+                                // the channel again: report it now instead
+                                // of after the full timeout (during which a
+                                // failing stream keeps erroring).
+                                if self.device_failed() {
+                                    return Err(PlayerError(DEVICE_LOST_MESSAGE.to_owned()));
+                                }
                                 if web_time::Instant::now() >= deadline {
                                     return Err(PlayerError(
                                         "Audio device stopped consuming samples".to_owned(),
@@ -793,6 +860,20 @@ mod tests {
         assert!(!is_fatal_stream_error(cpal::ErrorKind::DeviceChanged));
         assert!(!is_fatal_stream_error(cpal::ErrorKind::Xrun));
         assert!(!is_fatal_stream_error(cpal::ErrorKind::RealtimeDenied));
+    }
+
+    #[test]
+    fn throttle_logs_only_the_first_of_identical_errors() {
+        let mut throttle = ErrorThrottle::new("test");
+        assert!(throttle.record("EIO"));
+        assert!(!throttle.record("EIO"));
+        assert!(!throttle.record("EIO"));
+        assert_eq!(throttle.repeats, 2);
+        // A different error is logged and resets the repeat count.
+        assert!(throttle.record("ENODEV"));
+        assert_eq!(throttle.repeats, 0);
+        // The first error may be reported again after another one.
+        assert!(throttle.record("EIO"));
     }
 
     #[test]
