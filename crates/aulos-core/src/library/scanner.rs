@@ -290,7 +290,7 @@ impl LibraryScanner {
     pub(crate) fn is_audio_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(crate::player::engine::format_registry::is_supported_extension)
+            .is_some_and(playcore::format::is_audio_only_extension)
     }
 
     /// Read metadata from an audio file via symphonia (see `super::tags`).

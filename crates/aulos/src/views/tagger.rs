@@ -16,8 +16,6 @@ use crate::widgets::{
     pill_button_enabled, skeleton, text_width,
 };
 use aulos_core::library::Track;
-use aulos_core::library::tagio::keys;
-use aulos_core::library::tagio::model::KNOWN_KEYS;
 use aulos_core::online::{acoustid, musicbrainz};
 use aulos_core::tagger::edit::{PICTURE_KINDS, join_values};
 use aulos_core::tagger::labels::{self, Tone};
@@ -41,6 +39,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
+use tagcore::ImageType;
+use tagcore::keys::{self, KNOWN_KEYS};
 
 /// Repaint interval of the busy spinner and the indeterminate rail.
 const BUSY_FRAME: Duration = Duration::from_millis(50);
@@ -591,9 +591,10 @@ async fn pick_files() -> TaggerEvent {
     let filter_name = aulos_core::fl!("tagger-ui-filter-audio");
     let filter = Filter::new(
         &filter_name,
-        aulos_core::player::engine::format_registry::SCAN_EXTENSIONS
+        playcore::format::SCAN_EXTENSIONS
             .iter()
-            .copied(),
+            .copied()
+            .filter(|e| !playcore::format::VIDEO_CONTAINER_EXTENSIONS.contains(e)),
     );
     TaggerEvent::FilesPicked(Ok(dialogs::pick_files(
         &aulos_core::fl!("tagger-ui-pick-files"),
@@ -610,7 +611,7 @@ async fn pick_folder() -> TaggerEvent {
     }
 }
 
-async fn pick_image(kind: u8) -> TaggerEvent {
+async fn pick_image(kind: ImageType) -> TaggerEvent {
     let filter_name = aulos_core::fl!("tagger-ui-filter-images");
     let filter = Filter::new(&filter_name, ["png", "jpg", "jpeg", "webp", "bmp"]);
     match dialogs::pick_file(&aulos_core::fl!("tagger-ui-pick-image"), Some(&filter)).await {
@@ -3281,7 +3282,7 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                     .auto_shrink([false, true])
                     .show_rows(ui, CANDIDATE_H, items.len(), |ui, range| {
                         for candidate in &items[range] {
-                            let chosen = lookup.chosen.as_deref() == Some(candidate.id.as_str());
+                            let chosen = lookup.chosen.as_deref() == Some(candidate.id.id.as_str());
                             candidate_row(ui, &pal, candidate, chosen, acts);
                         }
                     });
@@ -3296,7 +3297,7 @@ fn lookup_card(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
 fn candidate_row(
     ui: &mut Ui,
     pal: &Palette,
-    candidate: &aulos_core::online::musicbrainz::ReleaseCandidate,
+    candidate: &tagcore::ReleaseCandidate,
     chosen: bool,
     acts: &mut Vec<Act>,
 ) {
@@ -3316,7 +3317,7 @@ fn candidate_row(
     }
     let inner = rect.shrink2(vec2(6.0, 6.0));
     let mut right = inner.right();
-    if candidate.score > 0 {
+    if candidate.search_score > 0 {
         let ink = if chosen { pal.ok } else { pal.text_2 };
         let w = paint_text(
             ui.painter(),
@@ -3325,16 +3326,18 @@ fn candidate_row(
                 pos2(right, inner.bottom()),
             ),
             Align::Max,
-            &format!("{}%", candidate.score),
+            &format!("{}%", candidate.search_score),
             theme::mono_semibold(11.0),
             ink,
         );
         right -= w + 8.0;
     }
-    let title = if candidate.disambiguation.trim().is_empty() {
-        candidate.title.clone()
+    let title_text = labels::candidate_title(candidate);
+    let disambiguation = labels::candidate_disambiguation(candidate);
+    let title = if disambiguation.trim().is_empty() {
+        title_text
     } else {
-        format!("{} ({})", candidate.title, candidate.disambiguation)
+        format!("{} ({})", title_text, disambiguation)
     };
     let text_w = (right - inner.left()).max(20.0);
     paint_text(
@@ -3354,7 +3357,9 @@ fn candidate_row(
         pal.text_2,
     );
     if resp.clicked() {
-        acts.push(Act::Msg(TaggerMessage::ChooseRelease(candidate.id.clone())));
+        acts.push(Act::Msg(TaggerMessage::ChooseRelease(
+            candidate.id.id.clone(),
+        )));
     }
 }
 
@@ -3449,7 +3454,9 @@ fn release_state(app: &App, ui: &mut Ui, lookup: &LookupState, acts: &mut Vec<Ac
                 )
                 .clicked()
                 {
-                    acts.push(Act::Msg(TaggerMessage::OpenReleasePage(release.id.clone())));
+                    acts.push(Act::Msg(TaggerMessage::OpenReleasePage(
+                        release.id.id.clone(),
+                    )));
                 }
                 if lookup.applied()
                     && pill_button_enabled(

@@ -697,7 +697,7 @@ mod tests {
 
         let file = File::open(path).expect("reopen encoded file");
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut reader = crate::player::engine::format_registry::probe()
+        let mut reader = playcore::format::probe()
             .probe(
                 &Default::default(),
                 mss,

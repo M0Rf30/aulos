@@ -10,10 +10,10 @@
 //! engine, so it never touches the queue, now-playing state, EQ or MPRIS.
 
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
-use crate::player::engine::decoder::SymphoniaDecoder;
-use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, StreamTrait};
+use playcore::decoder::{DecoderOptions, SymphoniaDecoder};
+use playcore::resample::{ResamplerQuality, StreamResampler};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,13 +47,13 @@ fn decode() -> Result<(Vec<f32>, u32, usize), String> {
         Cursor::new(JINGLE_MP3),
         Some(JINGLE_MP3.len() as u64),
         Some("mp3"),
-        true,
+        DecoderOptions::default(),
     )
-    .map_err(|e| e.0)?;
+    .map_err(|e| e.message().to_owned())?;
     let mut samples = Vec::new();
     let mut buf = vec![0.0f32; 8192];
     loop {
-        let n = decoder.read(&mut buf).map_err(|e| e.0)?;
+        let n = decoder.read(&mut buf).map_err(|e| e.message().to_owned())?;
         if n == 0 {
             break;
         }

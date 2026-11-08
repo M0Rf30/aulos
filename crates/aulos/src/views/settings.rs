@@ -2258,7 +2258,7 @@ fn sec_playback(app: &mut App, ui: &mut Ui) {
         cfg.auto_play_mode,
         cfg.party_mode,
     );
-    let max_fade = aulos_core::player::engine::fade::MAX_FADE_SECS;
+    let max_fade = playcore::fade::MAX_FADE_SECS;
 
     if let Some(on) = toggle_row(
         ui,

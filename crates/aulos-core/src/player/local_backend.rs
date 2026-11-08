@@ -116,7 +116,7 @@ impl LocalBackend {
 
     /// Set the fade in/out duration in seconds (`0` = fades disabled).
     /// Applies to play, pause, stop and manual skips; see
-    /// [`super::engine::fade`].
+    /// [`playcore::fade`].
     pub fn set_fade_secs(&mut self, secs: f32) {
         self.engine.set_fade_secs(secs.max(0.0));
     }

@@ -43,16 +43,17 @@ use web_time::Instant;
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::{BitOrder, ChannelDataLayout};
 
-use super::conversion::db_to_linear;
+use playcore::convert::db_to_linear;
+use playcore::crossfade;
+use playcore::decoder::{AudioFormat as DecoderFormat, DecoderOptions, SymphoniaDecoder};
+use playcore::dsd::{DopEncoder, dsd_output_target_rate, select_dsd_pcm_rate};
+use playcore::fade::{FadeControl, MAX_FADE_SECS};
+use playcore::filter::{AudioFilter, VolumeFilter};
+use playcore::resample::ResamplerQuality;
+
 use super::cpal_utils;
-use super::crossfade;
-use super::decoder::{AudioFormat as DecoderFormat, SymphoniaDecoder};
-use super::dop::DopEncoder;
 use super::dop_output::DopOutput;
-use super::fade::{FadeControl, MAX_FADE_SECS};
-use super::filter::{AudioFilter, VolumeFilter};
 use super::output::{AudioFormat as OutputFormat, CpalOutput, DEVICE_LOST_MESSAGE};
-use super::resampler::ResamplerQuality;
 use crate::player::backend::PlayerError;
 use crate::player::eq_source::{EqFilter, SharedCoeffs};
 use crate::player::http_range_reader::HttpRangeReader;
@@ -73,65 +74,6 @@ const DEFAULT_BUFFER_TIME_MS: u32 = 500;
 const RUN_STOPPED: u8 = 0;
 const RUN_PLAYING: u8 = 1;
 const RUN_PAUSED: u8 = 2;
-
-/// Valid DSD-to-PCM decode rates, ascending. DSD decimates cleanly only by an
-/// integer power of two, so every target is 44.1 kHz-family.
-const DSD_PCM_RATES: [u32; 4] = [44_100, 88_200, 176_400, 352_800];
-
-/// Choose the DSD-to-PCM decode rate for a device running at `device_rate`.
-///
-/// Returns the SMALLEST DSD-family rate that both covers `device_rate` and is
-/// reported as supported, falling back to the largest supported family rate
-/// and finally to 88.2 kHz.
-///
-/// Decoding to the highest rate a device merely *advertises* is harmful:
-/// systems like PipeWire advertise enormous ranges (up to ~768 kHz) but
-/// resample internally, so an over-high PCM rate (a) gives a punishingly
-/// short real-time callback period that underruns on scheduling jitter
-/// (audible crackle), and (b) leaves DSD's ultrasonic shaped noise in the
-/// PCM, muddying the sound. A moderate rate lets the decimation filter
-/// remove that noise and keeps the buffer period comfortable.
-///
-/// Ported near-verbatim from rmpd's `engine.rs` (see the report's §5/§9) —
-/// zero rmpd-specific dependencies.
-fn select_dsd_pcm_rate(device_rate: u32, supports_rate: impl Fn(u32) -> bool) -> u32 {
-    DSD_PCM_RATES
-        .iter()
-        .copied()
-        .find(|&r| r >= device_rate && supports_rate(r))
-        .or_else(|| {
-            DSD_PCM_RATES
-                .iter()
-                .rev()
-                .copied()
-                .find(|&r| supports_rate(r))
-        })
-        .unwrap_or(88_200)
-}
-
-/// The device rate the cpal output should open at for a DSD-to-PCM stream
-/// decoded at `decode_rate` on a device whose native rate is `device_rate`.
-///
-/// Returns `None` (open the stream at `decode_rate`, no resampling) when the
-/// rates already match, or when `native_decode_ok` — the resolved output is
-/// an explicitly-configured device that natively supports `decode_rate`, so
-/// it is safe to play bit-perfect. Otherwise returns `Some(device_rate)` so
-/// the engine resamples to the device's native rate itself, rather than
-/// letting a sound server (e.g. PipeWire) resample a rate it merely
-/// advertises — which underruns and leaves DSD ultrasonic noise in-band.
-///
-/// Ported verbatim from rmpd's `engine.rs` (see the report's §5/§9).
-fn dsd_output_target_rate(
-    decode_rate: u32,
-    device_rate: u32,
-    native_decode_ok: bool,
-) -> Option<u32> {
-    if native_decode_ok || decode_rate == device_rate {
-        None
-    } else {
-        Some(device_rate)
-    }
-}
 
 /// A playable source. `LocalFile` is opened synchronously (a fast header
 /// probe) by [`PlaybackEngine::play`] so a bad/missing file surfaces
@@ -166,8 +108,9 @@ impl PlaySource {
     /// Open the decoder for this source. For `Reader`/`LiveStream`, this is
     /// where the (potentially slow) HTTP connect + probe actually happens.
     fn open_decoder(self, stop: &Arc<AtomicBool>, gapless: bool) -> Result<SymphoniaDecoder> {
+        let options = DecoderOptions { gapless };
         match self {
-            PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path, gapless),
+            PlaySource::LocalFile(path) => Ok(SymphoniaDecoder::open(&path, options)?),
             PlaySource::Reader {
                 url,
                 client,
@@ -178,7 +121,12 @@ impl PlaySource {
                     let len = reader.content_length();
                     (len > 0).then_some(len)
                 };
-                SymphoniaDecoder::open_reader(reader, byte_len, hint_extension.as_deref(), gapless)
+                Ok(SymphoniaDecoder::open_reader(
+                    reader,
+                    byte_len,
+                    hint_extension.as_deref(),
+                    options,
+                )?)
             }
             PlaySource::LiveStream {
                 url,
@@ -194,7 +142,12 @@ impl PlaySource {
                     let (reader, hint) =
                         crate::player::hls::HlsReader::open(client, &url, Arc::clone(stop))
                             .map_err(PlayerError)?;
-                    return SymphoniaDecoder::open_stream(reader, hint.as_deref(), None, gapless);
+                    return Ok(SymphoniaDecoder::open_stream(
+                        reader,
+                        hint.as_deref(),
+                        None,
+                        options,
+                    )?);
                 }
                 let response = client
                     .get(&url)
@@ -227,19 +180,19 @@ impl PlaySource {
                                     metadata.and_then(|m| m.stream_title().map(str::to_string));
                                 *icy_title.lock() = title;
                             });
-                        SymphoniaDecoder::open_stream(
+                        Ok(SymphoniaDecoder::open_stream(
                             reader,
                             hint_extension.as_deref(),
                             mime.as_deref(),
-                            gapless,
-                        )
+                            options,
+                        )?)
                     }
-                    None => SymphoniaDecoder::open_stream(
+                    None => Ok(SymphoniaDecoder::open_stream(
                         response,
                         hint_extension.as_deref(),
                         mime.as_deref(),
-                        gapless,
-                    ),
+                        options,
+                    )?),
                 }
             }
         }
@@ -718,7 +671,12 @@ impl PlaybackEngine {
         // thread instead — see `PlaySource::open_decoder` / `ThreadStart::Pending`.
         let start = match source {
             PlaySource::LocalFile(path) => {
-                match SymphoniaDecoder::open(&path, self.gapless.load(Ordering::Acquire)) {
+                match SymphoniaDecoder::open(
+                    &path,
+                    DecoderOptions {
+                        gapless: self.gapless.load(Ordering::Acquire),
+                    },
+                ) {
                     Ok(decoder) => {
                         self.status
                             .duration_nanos
@@ -733,7 +691,7 @@ impl PlaybackEngine {
                         // forever (position pinned to zero, `is_finished` false).
                         self.run_state.store(RUN_STOPPED, Ordering::Release);
                         self.status.reset_for_stop();
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
             }
@@ -1231,7 +1189,7 @@ impl PcmSink {
         let out_format = OutputFormat {
             sample_rate: format.sample_rate,
             channels: format.channels,
-            bits_per_sample: format.bits_per_sample,
+            bits_per_sample: u32::from(format.bits_per_sample),
         };
         let mut output = match dsd_target_rate {
             Some(rate) => CpalOutput::with_target_rate(

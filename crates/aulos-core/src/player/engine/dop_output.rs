@@ -12,9 +12,9 @@
 //! reliably latch onto (and release) the DoP marker pattern.
 
 use crate::player::backend::PlayerError;
-use crate::player::engine::conversion::SampleBuffer;
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
 use crate::player::engine::output::{DEVICE_LOST_MESSAGE, drain_channel, stream_error_callback};
+use crate::player::engine::sample_buffer::SampleBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::Arc;

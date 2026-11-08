@@ -10,39 +10,48 @@
 //! fields — is kept. Files are matched to tracks first by recording MBID
 //! (a hit from an AcoustID scan, or the `musicbrainz_recordingid` the file
 //! already carries), then by title, number and duration
-//! ([`crate::online::musicbrainz::match_files`]).
+//! (`tagcore::matching::assign_files`).
 
 use super::file::{AcoustIdHit, FileId, TagFile, TrackAssignment};
-use crate::library::tagio::{TagSet, keys, model::split_position};
-use crate::online::musicbrainz::{FileForMatch, Release, ReleaseQuery, TrackMatch, match_files};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tagcore::metadata::split_position;
+use tagcore::{Metadata, Release, ReleaseQuery, keys};
 
-/// `existing` with every field of `release_tags` replacing the same field;
-/// everything `release_tags` doesn't mention (and all pictures) is kept.
+/// Files below this similarity to every free track stay unmatched.
+const MATCH_THRESHOLD: f32 = 0.35;
+
+/// Whether `key` is a hidden variable (`~length`, `~multiartist`, …): never
+/// shown, diffed, merged into a file's tags or written.
+fn is_hidden(key: &str) -> bool {
+    key.starts_with('~')
+}
+
+/// `existing` with every visible field of `release_tags` replacing the same
+/// field; everything `release_tags` doesn't mention (and all pictures) is kept.
 #[must_use]
-pub fn overlay(existing: &TagSet, release_tags: &TagSet) -> TagSet {
+pub fn overlay(existing: &Metadata, release_tags: &Metadata) -> Metadata {
     let mut merged = existing.clone();
-    for (key, values) in release_tags.iter() {
-        merged.set(key, values.iter().cloned());
+    for (key, values) in release_tags.iter().filter(|(k, _)| !is_hidden(k)) {
+        merged.set_all(key, values.iter().cloned());
     }
     merged
 }
 
 /// The keys whose values differ between `before` and `after`, in display
-/// order.
+/// order. Hidden keys are skipped.
 #[must_use]
-pub fn diff_keys(before: &TagSet, after: &TagSet) -> Vec<String> {
+pub fn diff_keys(before: &Metadata, after: &Metadata) -> Vec<String> {
     let mut changed: Vec<String> = before
-        .iter()
-        .map(|(k, _)| k)
-        .chain(after.iter().map(|(k, _)| k))
+        .visible_keys()
+        .chain(after.visible_keys())
         .filter(|k| before.get_all(k) != after.get_all(k))
         .map(str::to_owned)
         .collect();
     changed.sort_by_key(|k| {
         (
-            crate::library::tagio::model::KNOWN_KEYS
+            keys::KNOWN_KEYS
                 .iter()
                 .position(|known| known == k)
                 .unwrap_or(usize::MAX),
@@ -57,17 +66,17 @@ pub fn diff_keys(before: &TagSet, after: &TagSet) -> Vec<String> {
 /// from `baseline`. An AcoustID hit adds its `acoustid_id`.
 #[must_use]
 pub fn tags_for(
-    baseline: &TagSet,
+    baseline: &Metadata,
     release: &Release,
     assignment: &TrackAssignment,
     acoustid: Option<&AcoustIdHit>,
-) -> TagSet {
-    let mut tags = overlay(
-        baseline,
-        &release.track_tags(assignment.medium, assignment.track),
-    );
+) -> Metadata {
+    let mut tags = match release.tracks.get(assignment.track) {
+        Some(track) => overlay(baseline, &track.metadata),
+        None => baseline.clone(),
+    };
     if let Some(hit) = acoustid {
-        tags.set_one(keys::ACOUSTID_ID, hit.acoustid.as_str());
+        tags.set(keys::ACOUSTID_ID, hit.acoustid.as_str());
     }
     tags
 }
@@ -110,7 +119,7 @@ impl ReleasePlan {
     /// Tracks of the release no file was matched to.
     #[must_use]
     pub fn unused_tracks(&self) -> usize {
-        self.release.track_count().saturating_sub(self.matched())
+        self.release.tracks.len().saturating_sub(self.matched())
     }
 
     #[must_use]
@@ -122,21 +131,42 @@ impl ReleasePlan {
     }
 }
 
-fn assignment_for(release: &Release, m: TrackMatch) -> Option<TrackAssignment> {
-    let medium = release.media.get(m.medium)?;
-    let track = medium.tracks.get(m.track)?;
-    let number = if release.media.len() > 1 {
-        format!("{}-{:02}", medium.position.max(1), track.position)
-    } else {
-        format!("{:02}", track.position)
+fn assignment_for(release: &Release, track: usize, score: f32) -> Option<TrackAssignment> {
+    let md = &release.tracks.get(track)?.metadata;
+    let position = md.get(keys::TRACKNUMBER).unwrap_or_default().trim();
+    let position = match position.parse::<u32>() {
+        Ok(n) => format!("{n:02}"),
+        Err(_) => position.to_owned(),
+    };
+    let discs = md
+        .get(keys::TOTALDISCS)
+        .and_then(|v| split_position(v).0)
+        .unwrap_or(1);
+    let number = match md.get(keys::DISCNUMBER).and_then(|v| split_position(v).0) {
+        Some(disc) if discs > 1 => format!("{disc}-{position}"),
+        _ => position,
     };
     Some(TrackAssignment {
-        medium: m.medium,
-        track: m.track,
-        score: m.score,
+        track,
+        score,
         number,
-        title: track.display_title().to_owned(),
+        title: md.get(keys::TITLE).unwrap_or_default().to_owned(),
     })
+}
+
+/// What the file says about itself for matching: its on-disk tags, its
+/// length, and its file name as the title when it has none.
+fn match_metadata(file: &TagFile) -> Metadata {
+    let mut md = file.original.clone();
+    if let Some(secs) = file.duration_secs.filter(|s| s.is_finite() && *s > 0.0) {
+        md.set_length(Duration::from_secs_f64(secs));
+    }
+    if md.get(keys::TITLE).is_none()
+        && let Some(stem) = file.path.file_stem()
+    {
+        md.set(keys::TITLE, stem.to_string_lossy().into_owned());
+    }
+    md
 }
 
 /// Matches `files` to the tracks of `release`.
@@ -144,16 +174,17 @@ fn assignment_for(release: &Release, m: TrackMatch) -> Option<TrackAssignment> {
 /// `hints` maps a file to recording MBIDs it is known to be (from AcoustID).
 /// A file whose recording is on the release takes that track (the first one
 /// not yet taken, when a recording appears twice); the others are matched
-/// by title, number and duration, and lose a track a recording-matched file
-/// already holds. Each track goes to at most one file.
+/// by `tagcore::matching::assign_files` (title, number, length, …) and lose
+/// a track a recording-matched file already holds. Each track goes to at
+/// most one file.
 #[must_use]
 pub fn plan_release(
     files: &[&TagFile],
     release: &Arc<Release>,
     hints: &HashMap<FileId, Vec<String>>,
 ) -> ReleasePlan {
-    let mut matches: Vec<Option<TrackMatch>> = vec![None; files.len()];
-    let mut claimed: HashSet<(usize, usize)> = HashSet::new();
+    let mut matches: Vec<Option<(usize, f32)>> = vec![None; files.len()];
+    let mut claimed: HashSet<usize> = HashSet::new();
 
     // 1. Recordings we know.
     for (slot, file) in matches.iter_mut().zip(files) {
@@ -169,48 +200,42 @@ pub fn plan_release(
         if known.is_empty() {
             continue;
         }
-        let found = release.media.iter().enumerate().find_map(|(m, medium)| {
-            medium.tracks.iter().enumerate().find_map(|(t, track)| {
-                (known.contains(&track.recording.id.as_str()) && !claimed.contains(&(m, t)))
-                    .then_some((m, t))
-            })
-        });
-        if let Some((medium, track)) = found {
-            claimed.insert((medium, track));
-            *slot = Some(TrackMatch {
-                medium,
-                track,
-                score: 1.0,
+        let found = release
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(index, track)| {
+                (!claimed.contains(&index)
+                    && track
+                        .metadata
+                        .get_all(keys::MUSICBRAINZ_RECORDINGID)
+                        .iter()
+                        .any(|id| known.contains(&id.as_str())))
+                .then_some(index)
             });
+        if let Some(index) = found {
+            claimed.insert(index);
+            *slot = Some((index, 1.0));
         }
     }
 
     // 2. Everything else by what the files say about themselves.
     let rest: Vec<usize> = (0..files.len()).filter(|&i| matches[i].is_none()).collect();
-    if !rest.is_empty() {
-        let stems: Vec<Option<String>> = rest
-            .iter()
-            .map(|&i| {
-                files[i]
-                    .path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-            })
-            .collect();
-        let claims: Vec<FileForMatch<'_>> = rest
-            .iter()
-            .zip(&stems)
-            .map(|(&i, stem)| FileForMatch {
-                tags: &files[i].original,
-                duration_secs: files[i].duration_secs,
-                file_stem: stem.as_deref(),
-            })
-            .collect();
-        for (&i, found) in rest.iter().zip(match_files(&claims, release)) {
-            if let Some(m) = found
-                && claimed.insert((m.medium, m.track))
-            {
-                matches[i] = Some(m);
+    let free: Vec<usize> = (0..release.tracks.len())
+        .filter(|t| !claimed.contains(t))
+        .collect();
+    if !rest.is_empty() && !free.is_empty() {
+        let file_md: Vec<Metadata> = rest.iter().map(|&i| match_metadata(files[i])).collect();
+        let file_refs: Vec<&Metadata> = file_md.iter().collect();
+        let track_refs: Vec<&Metadata> =
+            free.iter().map(|&t| &release.tracks[t].metadata).collect();
+        let assigned = tagcore::matching::assign_files(&file_refs, &track_refs, MATCH_THRESHOLD);
+        for ((&i, md), found) in rest.iter().zip(&file_md).zip(assigned) {
+            if let Some(slot) = found {
+                let track = free[slot];
+                let score =
+                    tagcore::matching::track_similarity(md, &release.tracks[track].metadata);
+                matches[i] = Some((track, score));
             }
         }
     }
@@ -222,7 +247,7 @@ pub fn plan_release(
             .zip(matches)
             .map(|(file, m)| PlanEntry {
                 file: file.id,
-                assignment: m.and_then(|m| assignment_for(release, m)),
+                assignment: m.and_then(|(track, score)| assignment_for(release, track, score)),
             })
             .collect(),
     }
@@ -278,7 +303,7 @@ pub fn lookup_query(files: &[&TagFile]) -> ReleaseQuery {
             .and_then(|v| split_position(v).0)
             .is_some_and(|n| n > 1)
     });
-    let track_count = if multi_disc {
+    let tracks = if multi_disc {
         None
     } else {
         files
@@ -294,9 +319,7 @@ pub fn lookup_query(files: &[&TagFile]) -> ReleaseQuery {
     ReleaseQuery {
         artist,
         album,
-        track_count,
-        barcode: None,
-        catalog_number: None,
+        tracks,
     }
 }
 
@@ -304,14 +327,15 @@ pub fn lookup_query(files: &[&TagFile]) -> ReleaseQuery {
 mod tests {
     use super::super::file::testing::*;
     use super::*;
+    use tagcore::settings::MetadataSettings;
+    use tagcore::{CoverImage, ImageType};
 
     fn moderat_ii() -> Arc<Release> {
-        Arc::new(
-            serde_json::from_str(include_str!(
-                "../../tests/fixtures/musicbrainz/release_lookup.json"
-            ))
-            .unwrap(),
-        )
+        let json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/musicbrainz/release_lookup.json"
+        ))
+        .unwrap();
+        Arc::new(tagcore::mb::map_release(&json, &MetadataSettings::default()).unwrap())
     }
 
     fn files_of_disc_one() -> Vec<TagFile> {
@@ -329,20 +353,28 @@ mod tests {
         .collect()
     }
 
+    fn title_of(release: &Release, assignment: &TrackAssignment) -> String {
+        release.tracks[assignment.track]
+            .metadata
+            .get(keys::TITLE)
+            .unwrap()
+            .to_owned()
+    }
+
     #[test]
     fn overlay_replaces_provided_fields_and_keeps_the_rest() {
-        let mut existing = TagSet::new();
-        existing.set_one(keys::TITLE, "bad kingdom");
-        existing.set_one(keys::COMMENT, "ripped by me");
-        existing.set_one(keys::LYRICS, "la la");
-        existing.set_one(keys::REPLAYGAIN_TRACK_GAIN, "-6.5 dB");
-        existing.set_one(keys::ENCODEDBY, "LAME");
-        existing.set_one("x-custom", "mine");
-        existing.set(keys::GENRE, ["Rock".to_owned(), "Pop".to_owned()]);
-        let mut release = TagSet::new();
-        release.set_one(keys::TITLE, "Bad Kingdom");
-        release.set(keys::GENRE, ["Electronic".to_owned()]);
-        release.set_one(keys::ALBUM, "II");
+        let mut existing = Metadata::new();
+        existing.set(keys::TITLE, "bad kingdom");
+        existing.set(keys::COMMENT, "ripped by me");
+        existing.set(keys::LYRICS, "la la");
+        existing.set(keys::REPLAYGAIN_TRACK_GAIN, "-6.5 dB");
+        existing.set(keys::ENCODEDBY, "LAME");
+        existing.set("x-custom", "mine");
+        existing.set_all(keys::GENRE, ["Rock".to_owned(), "Pop".to_owned()]);
+        let mut release = Metadata::new();
+        release.set(keys::TITLE, "Bad Kingdom");
+        release.set_all(keys::GENRE, ["Electronic".to_owned()]);
+        release.set(keys::ALBUM, "II");
 
         let merged = overlay(&existing, &release);
         assert_eq!(merged.get(keys::TITLE), Some("Bad Kingdom"));
@@ -364,29 +396,35 @@ mod tests {
     }
 
     #[test]
-    fn overlay_keeps_pictures() {
-        let mut existing = TagSet::new();
-        existing.pictures.push(crate::library::tagio::EditPicture {
-            kind: 3,
-            mime: "image/png".into(),
-            description: String::new(),
-            data: vec![1],
-        });
-        let merged = overlay(&existing, &TagSet::new());
-        assert_eq!(merged.pictures, existing.pictures);
+    fn overlay_keeps_pictures_and_skips_hidden_keys() {
+        let mut existing = Metadata::new();
+        existing.images.push(CoverImage::new(
+            vec![1u8],
+            "image/png",
+            ImageType::Front,
+            "",
+        ));
+        let mut release = Metadata::new();
+        release.set("~length", "1000");
+        release.set("~multiartist", "1");
+        let merged = overlay(&existing, &release);
+        assert_eq!(merged.images, existing.images);
+        assert!(merged.get("~length").is_none());
+        assert!(merged.get("~multiartist").is_none());
     }
 
     #[test]
     fn diff_lists_the_changed_keys_in_display_order() {
-        let mut a = TagSet::new();
-        a.set_one(keys::TITLE, "A");
-        a.set_one(keys::GENRE, "Rock");
-        a.set_one("x-custom", "1");
+        let mut a = Metadata::new();
+        a.set(keys::TITLE, "A");
+        a.set(keys::GENRE, "Rock");
+        a.set("x-custom", "1");
         let mut b = a.clone();
-        b.set_one(keys::TITLE, "B");
+        b.set(keys::TITLE, "B");
         b.remove(keys::GENRE);
-        b.set_one(keys::ALBUM, "X");
-        b.set_one("x-other", "2");
+        b.set(keys::ALBUM, "X");
+        b.set("x-other", "2");
+        b.set("~length", "5");
         assert_eq!(diff_keys(&a, &b), ["title", "album", "genre", "x-other"]);
         assert!(diff_keys(&a, &a).is_empty());
     }
@@ -399,10 +437,9 @@ mod tests {
         let plan = plan_release(&refs, &release, &HashMap::new());
         assert_eq!(plan.matched(), 3);
         let a = plan.assignment_of(2).unwrap();
-        assert_eq!((a.medium, a.track), (0, 1));
         assert_eq!(a.number, "1-02");
         assert_eq!(a.title, "Bad Kingdom");
-        assert_eq!(plan.unused_tracks(), 11 - 3);
+        assert_eq!(plan.unused_tracks(), release.tracks.len() - 3);
         assert!(plan.unmatched().is_empty());
     }
 
@@ -424,7 +461,7 @@ mod tests {
     fn a_files_own_recording_id_matches_it() {
         let release = moderat_ii();
         let mut f = file(1, &[(keys::TITLE, "???")]);
-        f.original.set_one(
+        f.original.set(
             keys::MUSICBRAINZ_RECORDINGID,
             "b0762d25-6a79-4801-8aec-bba8cae4f361",
         );
@@ -475,8 +512,9 @@ mod tests {
         let refs: Vec<&TagFile> = files.iter().collect();
         let plan = plan_release(&refs, &release, &HashMap::new());
         let assignment = plan.assignment_of(2).unwrap();
+        assert_eq!(title_of(&release, assignment), "Bad Kingdom");
         let mut baseline = files[1].edited.clone();
-        baseline.set_one(keys::COMMENT, "keep me");
+        baseline.set(keys::COMMENT, "keep me");
         let hit = AcoustIdHit {
             acoustid: "11111111-2222-3333-4444-555555555555".into(),
             recording_ids: vec![],
@@ -490,6 +528,7 @@ mod tests {
             Some("00398749-1816-4c98-8a39-377627740365")
         );
         assert_eq!(tags.get(keys::COMMENT), Some("keep me"));
+        assert!(tags.get("~length").is_none());
         assert_eq!(
             tags.get(keys::ACOUSTID_ID),
             Some("11111111-2222-3333-4444-555555555555")
@@ -507,17 +546,17 @@ mod tests {
         let q = lookup_query(&refs);
         assert_eq!(q.artist, "Moderat");
         assert_eq!(q.album, "II");
-        assert_eq!(q.track_count, None);
+        assert_eq!(q.tracks, None);
     }
 
     #[test]
     fn the_query_takes_the_track_count_from_single_disc_tags_only() {
         let mut a = track(1, "A", "B", 1, "t");
-        a.original.set_one(keys::TOTALTRACKS, "12");
+        a.original.set(keys::TOTALTRACKS, "12");
         let q = lookup_query(&[&a]);
-        assert_eq!(q.track_count, Some(12));
-        a.original.set_one(keys::TOTALDISCS, "2");
-        assert_eq!(lookup_query(&[&a]).track_count, None);
+        assert_eq!(q.tracks, Some(12));
+        a.original.set(keys::TOTALDISCS, "2");
+        assert_eq!(lookup_query(&[&a]).tracks, None);
     }
 
     #[test]

@@ -1,47 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Gianluca Boiano
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Shared sample format conversion utilities for audio output backends.
+//! The sample queue read by cpal output callbacks.
 //!
-//! No external dependencies beyond `std`.
+//! Aulos pauses and flushes by pausing/dropping the cpal stream itself, so it
+//! needs none of the pause/flush-generation machinery of
+//! `playcore::convert::SampleBuffer` (which rmpd's multi-output engine uses).
 
 use std::sync::mpsc::Receiver;
-
-/// Convert f32 samples to s16le bytes, writing into the provided buffer.
-/// The buffer is cleared and filled with the converted bytes.
-pub fn samples_to_s16le_into(samples: &[f32], buf: &mut Vec<u8>) {
-    buf.clear();
-    buf.reserve(samples.len() * 2);
-    for &s in samples {
-        let v = f32_to_i16(s);
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
-/// Convert interleaved f32 PCM samples (range −1.0…+1.0) to little-endian
-/// signed 16-bit bytes.
-pub fn samples_to_s16le(samples: &[f32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(samples.len() * 2);
-    samples_to_s16le_into(samples, &mut buf);
-    buf
-}
-
-/// Linear amplitude factor of a gain in decibels (replay gain).
-pub fn db_to_linear(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
-}
-
-/// Clamp and scale a single f32 sample to `i16` range.
-#[inline]
-pub fn f32_to_i16(val: f32) -> i16 {
-    (val.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-}
-
-/// Clamp and scale a single f32 sample to `i32` range.
-#[inline]
-pub fn f32_to_i32(val: f32) -> i32 {
-    (f64::from(val.clamp(-1.0, 1.0)) * f64::from(i32::MAX)) as i32
-}
 
 /// A bounded sample buffer fed from a `SyncSender`/`Receiver` channel.
 ///
@@ -93,49 +59,25 @@ mod tests {
     use std::sync::mpsc::sync_channel;
 
     #[test]
-    fn f32_to_i16_clamps_and_scales() {
-        assert_eq!(f32_to_i16(0.0), 0);
-        assert_eq!(f32_to_i16(1.0), i16::MAX);
-        assert_eq!(f32_to_i16(-1.0), -i16::MAX);
-        assert_eq!(f32_to_i16(2.0), i16::MAX);
-        assert_eq!(f32_to_i16(-2.0), -i16::MAX);
-    }
-
-    #[test]
-    fn f32_to_i32_clamps_and_scales() {
-        assert_eq!(f32_to_i32(0.0), 0);
-        assert_eq!(f32_to_i32(1.0), i32::MAX);
-        assert_eq!(f32_to_i32(-1.0), -i32::MAX);
-    }
-
-    #[test]
-    fn samples_to_s16le_round_trips_length() {
-        let samples = [0.0f32, 0.5, -0.5, 1.0, -1.0];
-        let bytes = samples_to_s16le(&samples);
-        assert_eq!(bytes.len(), samples.len() * 2);
-    }
-
-    #[test]
-    fn sample_buffer_underrun_yields_silence() {
+    fn underrun_yields_silence() {
         let (_tx, rx) = sync_channel::<Vec<f32>>(1);
         let mut buf = SampleBuffer::new(rx);
         assert_eq!(buf.next_sample(), 0.0);
     }
 
     #[test]
-    fn sample_buffer_drains_then_underruns() {
+    fn drains_then_underruns() {
         let (tx, rx) = sync_channel::<Vec<i16>>(1);
         tx.send(vec![1, 2, 3]).unwrap();
         let mut buf = SampleBuffer::new(rx);
         assert_eq!(buf.next_sample(), 1);
         assert_eq!(buf.next_sample(), 2);
         assert_eq!(buf.next_sample(), 3);
-        // Underrun once the chunk and the channel are both exhausted.
         assert_eq!(buf.next_sample(), 0);
     }
 
     #[test]
-    fn sample_buffer_refills_from_channel() {
+    fn refills_from_channel() {
         let (tx, rx) = sync_channel::<Vec<f32>>(2);
         tx.send(vec![1.0]).unwrap();
         tx.send(vec![2.0, 3.0]).unwrap();

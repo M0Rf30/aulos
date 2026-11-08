@@ -12,7 +12,6 @@ mod cover_art;
 pub mod covers;
 mod db;
 pub mod display;
-pub mod fingerprint;
 pub mod folder_tree;
 pub mod genre;
 pub mod history;
@@ -32,7 +31,6 @@ pub mod search;
 pub mod smart_playlist;
 pub mod sparse;
 pub mod state;
-pub mod tagio;
 pub mod tags;
 pub mod tech_info;
 pub mod top_tracks;
@@ -73,7 +71,7 @@ pub enum TrackSource {
     },
     /// An internet radio / Shoutcast/Icecast live stream URL. Unlike
     /// `HttpStream`, the byte length is never known up front and seeking is
-    /// never supported — see `player::engine::decoder::SymphoniaDecoder::open_stream`.
+    /// never supported — see `playcore::decoder::SymphoniaDecoder::open_stream`.
     LiveStream(String),
     /// An MPD-relative file path — sent to the MPD server, not decoded locally.
     MpdFile(String),

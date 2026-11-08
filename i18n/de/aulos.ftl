@@ -508,9 +508,7 @@ tagger-unmatched = Kein passender Titel im Release
 tagger-acoustid-open = Diese AcoustID auf acoustid.org öffnen
 tagger-recording-open = Die Aufnahme auf MusicBrainz öffnen
 tagger-submission-pending = Wird übermittelt…
-tagger-submission-pending-status = Übermittelt, wartet auf Verarbeitung
-tagger-submission-imported-status = Übermittelt und importiert
-tagger-submission-submitted = Übermittelt ({ $status })
+tagger-submission-submitted = Übermittelt
 tagger-submission-failed = Übermittlung fehlgeschlagen: { $error }
 
 ## Tag editor: metadata
@@ -549,7 +547,6 @@ tagger-picture-front = Frontcover
 tagger-picture-back = Backcover
 tagger-picture-leaflet = Booklet
 tagger-picture-media = Medium
-tagger-picture-artist = Künstler
 tagger-picture-other = Sonstiges
 tagger-picture-type = Typ { $kind }
 tagger-size-kb = { $value } KB
@@ -1678,3 +1675,6 @@ tray-play-pause = Wiedergabe / Pause
 tray-next = Weiter
 tray-previous = Zurück
 tray-quit = Beenden
+tagger-submission-incomplete = Übermittlung unvollständig: einige AcoustID-Anfragen sind fehlgeschlagen
+tagger-submission-batch-size-zero = Übermittlung fehlgeschlagen: AcoustID hat die Anfrage als zu groß abgelehnt
+tagger-submission-too-many-retries = Übermittlung fehlgeschlagen: nach zu vielen Versuchen aufgegeben

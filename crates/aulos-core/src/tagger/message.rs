@@ -8,9 +8,8 @@
 use super::cluster::ClusterKey;
 use super::file::FileId;
 use super::state::{LoadedFile, ScanFileResult, SubmitResult};
-use crate::library::tagio::EditPicture;
-use crate::online::musicbrainz::{Release, ReleaseCandidate};
 use std::path::PathBuf;
+use tagcore::{CoverImage, ImageType, Release, ReleaseCandidate};
 
 /// Direct UI actions, emitted by `views::tagger`.
 #[derive(Debug, Clone)]
@@ -67,12 +66,12 @@ pub enum TaggerMessage {
     NewPictureKind(usize),
     RemovePicture {
         hash: u64,
-        kind: u8,
+        kind: ImageType,
     },
     SetPictureKind {
         hash: u64,
-        kind: u8,
-        new_kind: u8,
+        kind: ImageType,
+        new_kind: ImageType,
     },
     /// Put the pictures back to what is on disk.
     RevertPictures,
@@ -136,7 +135,7 @@ pub enum TaggerEvent {
     /// The "Add folder" picker finished.
     FolderPicked(Result<PathBuf, String>),
     /// The image picked for "Add image…", read and checked.
-    ImagePicked(Result<EditPicture, String>),
+    ImagePicked(Result<CoverImage, String>),
     /// A batch of files was read. `generation` is the load it belongs to.
     FilesLoaded {
         generation: u64,
@@ -158,7 +157,7 @@ pub enum TaggerEvent {
     },
     CoverFetched {
         request: u64,
-        result: Result<Option<EditPicture>, String>,
+        result: Result<Option<CoverImage>, String>,
     },
     /// One file of a scan was fingerprinted and looked up.
     FileScanned {

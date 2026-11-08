@@ -3,20 +3,19 @@
 
 //! Pure helpers of the tag editor's background work: what the pickers
 //! return, how work is split up, how AcoustID calls are spaced, and how a
-//! submission response maps back onto files.
+//! submission report maps back onto files.
 
 use super::{FileId, SubmitResult};
-use crate::library::fingerprint::Fingerprint;
-use crate::online::acoustid::SubmissionStatus;
-use crate::online::musicbrainz::{ReleaseCandidate, ReleaseQuery};
+use crate::fl;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tagcore::acoustid::submit::{Failure, Outcome, Report};
+use tagcore::fingerprint::Fingerprint;
+use tagcore::{ReleaseCandidate, ReleaseQuery};
 use web_time::Instant;
 
 /// Files read per background task.
 pub const LOAD_CHUNK: usize = 16;
-/// Fingerprints sent to AcoustID per `submit` call.
-pub const SUBMIT_BATCH: usize = 50;
 /// Least time between two AcoustID lookups (the service allows 3 per second).
 pub const LOOKUP_MIN_GAP: Duration = Duration::from_millis(350);
 
@@ -35,7 +34,7 @@ pub fn split_batches<T>(items: Vec<T>, size: usize) -> Vec<Vec<T>> {
 pub fn is_audio_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(crate::player::engine::format_registry::is_supported_extension)
+        .is_some_and(playcore::format::is_audio_only_extension)
 }
 
 /// Every audio file under `root` (recursively), sorted by path.
@@ -67,9 +66,9 @@ pub fn search_with_retry(
     search: impl Fn(&ReleaseQuery) -> Result<Vec<ReleaseCandidate>, String>,
 ) -> Result<Vec<ReleaseCandidate>, String> {
     let hits = search(query)?;
-    if hits.is_empty() && query.track_count.is_some() {
+    if hits.is_empty() && query.tracks.is_some() {
         let relaxed = ReleaseQuery {
-            track_count: None,
+            tracks: None,
             ..query.clone()
         };
         return search(&relaxed);
@@ -77,52 +76,47 @@ pub fn search_with_retry(
     Ok(hits)
 }
 
-/// The file extension, lowercase, for AcoustID's `file_format`.
-pub fn file_format(path: &Path) -> String {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default()
+/// The words for why AcoustID did not take every fingerprint: the first
+/// request error when there is one, else what the overall outcome says.
+pub fn submit_failure_text<K>(report: &Report<K>) -> String {
+    if let Some(error) = report.errors.first() {
+        return error.clone();
+    }
+    match report.outcome() {
+        Outcome::Failed(Failure::BatchSizeZero) => fl!("tagger-submission-batch-size-zero"),
+        Outcome::Failed(Failure::TooManyRetries) => fl!("tagger-submission-too-many-retries"),
+        Outcome::Incomplete | Outcome::Success => fl!("tagger-submission-incomplete"),
+    }
 }
 
-/// Maps the response of one `submit` call onto the files it carried, in
+/// Maps the report of one `submit` call onto the files it carried, in
 /// order. `batch` is each file with the fingerprint computed for it (kept
-/// for later). A failed call, or a response with fewer statuses than files,
-/// fails the files it does not cover.
-pub fn map_submit_response(
+/// for later). Files the report lists as submitted succeed; the others fail
+/// with [`submit_failure_text`].
+pub fn map_submit_report(
     batch: Vec<(FileId, Option<Fingerprint>)>,
-    response: Result<Vec<SubmissionStatus>, String>,
+    report: &Report<FileId>,
 ) -> Vec<SubmitResult> {
-    match response {
-        Err(error) => batch
-            .into_iter()
-            .map(|(file, fingerprint)| SubmitResult {
-                file,
-                fingerprint,
-                outcome: Err(error.clone()),
-            })
-            .collect(),
-        Ok(statuses) => {
-            let mut statuses = statuses.into_iter();
-            batch
-                .into_iter()
-                .map(|(file, fingerprint)| SubmitResult {
-                    file,
-                    fingerprint,
-                    outcome: statuses
-                        .next()
-                        .map(|s| s.status)
-                        .ok_or_else(|| "AcoustID returned no status for this file".to_owned()),
-                })
-                .collect()
-        }
-    }
+    batch
+        .into_iter()
+        .map(|(file, fingerprint)| SubmitResult {
+            file,
+            fingerprint,
+            outcome: if report.submitted.contains(&file) {
+                Ok(())
+            } else {
+                Err(submit_failure_text(report))
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use tagcore::Metadata;
+    use tagcore::release::{ReleaseId, Source};
 
     #[test]
     fn batches_keep_order_and_bound_their_size() {
@@ -191,8 +185,12 @@ mod tests {
 
     fn candidate(id: &str) -> ReleaseCandidate {
         ReleaseCandidate {
-            id: id.to_owned(),
-            ..ReleaseCandidate::default()
+            id: ReleaseId {
+                source: Source::MusicBrainz,
+                id: id.to_owned(),
+            },
+            search_score: 100,
+            metadata: Metadata::new(),
         }
     }
 
@@ -202,12 +200,11 @@ mod tests {
         let query = ReleaseQuery {
             artist: "A".into(),
             album: "B".into(),
-            track_count: Some(9),
-            ..ReleaseQuery::default()
+            tracks: Some(9),
         };
         let result = search_with_retry(&query, |q| {
-            seen.borrow_mut().push(q.track_count);
-            Ok(if q.track_count.is_some() {
+            seen.borrow_mut().push(q.tracks);
+            Ok(if q.tracks.is_some() {
                 Vec::new()
             } else {
                 vec![candidate("x")]
@@ -222,8 +219,8 @@ mod tests {
         let calls = RefCell::new(0);
         let query = ReleaseQuery {
             artist: "A".into(),
-            track_count: Some(9),
-            ..ReleaseQuery::default()
+            album: "B".into(),
+            tracks: Some(9),
         };
         let hit = search_with_retry(&query, |_| {
             *calls.borrow_mut() += 1;
@@ -240,7 +237,8 @@ mod tests {
         // Without a track count there is nothing to relax.
         let plain = ReleaseQuery {
             artist: "A".into(),
-            ..ReleaseQuery::default()
+            album: "B".into(),
+            tracks: None,
         };
         let none = search_with_retry(&plain, |_| {
             *calls.borrow_mut() += 1;
@@ -250,23 +248,27 @@ mod tests {
         assert_eq!(*calls.borrow(), 3);
     }
 
-    fn status(text: &str) -> SubmissionStatus {
-        SubmissionStatus {
-            id: 1,
-            status: text.to_owned(),
-            acoustid: None,
+    fn report(
+        submitted: Vec<FileId>,
+        errors: Vec<String>,
+        failure: Option<Failure>,
+    ) -> Report<FileId> {
+        Report {
+            submitted,
+            errors,
+            failure,
         }
     }
 
     #[test]
-    fn submission_statuses_map_onto_files_in_order() {
-        let results = map_submit_response(
+    fn submitted_files_succeed_and_the_rest_fail_with_the_first_error() {
+        let results = map_submit_report(
             vec![(1, None), (2, None), (3, None)],
-            Ok(vec![status("pending"), status("imported")]),
+            &report(vec![1, 3], vec!["HTTP 503".into(), "other".into()], None),
         );
-        assert_eq!(results[0].outcome.as_deref(), Ok("pending"));
-        assert_eq!(results[1].outcome.as_deref(), Ok("imported"));
-        assert!(results[2].outcome.is_err(), "no status for the third file");
+        assert_eq!(results[0].outcome, Ok(()));
+        assert_eq!(results[1].outcome, Err("HTTP 503".to_owned()));
+        assert_eq!(results[2].outcome, Ok(()));
         assert_eq!(
             results.iter().map(|r| r.file).collect::<Vec<_>>(),
             [1, 2, 3]
@@ -274,17 +276,28 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_submission_call_fails_every_file_but_keeps_fingerprints() {
-        let fp = Fingerprint::from_raw(10, vec![1, 2, 3]);
-        let results = map_submit_response(
+    fn a_report_without_errors_fails_unsubmitted_files_with_the_outcome() {
+        let results = map_submit_report(
+            vec![(1, None)],
+            &report(vec![], vec![], Some(Failure::TooManyRetries)),
+        );
+        assert_eq!(
+            results[0].outcome,
+            Err(fl!("tagger-submission-too-many-retries"))
+        );
+    }
+
+    #[test]
+    fn computed_fingerprints_are_kept_even_when_the_submission_fails() {
+        let fp = Fingerprint {
+            fingerprint: "AQAA".into(),
+            duration: Duration::from_secs(10),
+        };
+        let results = map_submit_report(
             vec![(1, Some(fp.clone())), (2, None)],
-            Err("HTTP 503".to_owned()),
+            &report(vec![], vec!["HTTP 503".into()], None),
         );
-        assert!(
-            results
-                .iter()
-                .all(|r| r.outcome == Err("HTTP 503".to_owned()))
-        );
+        assert!(results.iter().all(|r| r.outcome.is_err()));
         assert_eq!(results[0].fingerprint, Some(fp));
         assert!(results[1].fingerprint.is_none());
     }

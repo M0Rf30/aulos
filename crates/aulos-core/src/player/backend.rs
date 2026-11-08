@@ -24,6 +24,12 @@ impl std::fmt::Display for PlayerError {
 
 impl std::error::Error for PlayerError {}
 
+impl From<playcore::Error> for PlayerError {
+    fn from(e: playcore::Error) -> Self {
+        Self(e.message().to_owned())
+    }
+}
+
 impl From<String> for PlayerError {
     fn from(s: String) -> Self {
         Self(s)

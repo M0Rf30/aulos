@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 # UI-only crate: depends on `aulos-core` (the backend), never the other way round.
 [dependencies]
 aulos-core.workspace = true
+tagcore.workspace = true
+playcore.workspace = true
 i18n-embed-fl.workspace = true
 # eframe's default features pull in the X11/Wayland backends, which Android
 # does not have: they are listed per target below instead.

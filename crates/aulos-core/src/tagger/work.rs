@@ -11,19 +11,21 @@
 //! after its files were removed or its lookup replaced is dropped by the
 //! state instead of landing on the wrong files.
 
-use super::jobs::{self, LOAD_CHUNK, LOOKUP_MIN_GAP, SUBMIT_BATCH};
+use super::jobs::{self, LOAD_CHUNK, LOOKUP_MIN_GAP};
 use super::state::{CoverRequest, ReleaseRequest, SearchRequest, SeedFile};
 use super::{
     FileId, LoadRequest, LoadedFile, SaveJob, ScanFileResult, ScanStart, SubmitJob, SubmitResult,
     SubmitStart, TaggerEvent, edit, thumbs,
 };
 use crate::fl;
-use crate::library::tagio::{self, EditPicture};
-use crate::library::{LibraryDb, LibraryScanner, fingerprint, tags};
-use crate::online::acoustid::{self, Submission};
-use crate::online::musicbrainz::{self, FileForMatch};
+use crate::library::{LibraryDb, LibraryScanner};
+use crate::online::musicbrainz::{self, SeedInput};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tagcore::acoustid::submit::{Submission, SubmissionTags};
+use tagcore::file::WriteOptions;
+use tagcore::fingerprint::{self, Fingerprint};
+use tagcore::{CoverImage, ImageType};
 use tokio::sync::{Mutex, Semaphore};
 use web_time::Instant;
 
@@ -76,7 +78,7 @@ pub async fn folder_files(dir: PathBuf) -> TaggerEvent {
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 
 /// Reads a picked image file as a picture of type `kind`.
-pub async fn read_image(path: PathBuf, kind: u8) -> TaggerEvent {
+pub async fn read_image(path: PathBuf, kind: ImageType) -> TaggerEvent {
     let result = blocking(move || {
         let len = std::fs::metadata(&path)
             .map_err(|e| format!("Could not read {}: {e}", path.display()))?
@@ -140,19 +142,32 @@ async fn load_chunk(generation: u64, chunk: Vec<PathBuf>) -> TaggerEvent {
     TaggerEvent::FilesLoaded { generation, files }
 }
 
+/// Reads one file's tags, container and duration. The hidden `~length` that
+/// `tagcore::file::load` adds is dropped: the editor only works on what is
+/// stored in the file.
 fn read_file(path: PathBuf) -> LoadedFile {
-    let read = tagio::read(&path).map_err(|e| e.to_string());
-    let duration_secs = if read.is_ok() {
-        tags::probe(&path, false)
-            .map(|p| p.properties.duration.as_secs_f64())
-            .filter(|d| *d > 0.0)
-    } else {
-        None
-    };
-    LoadedFile {
-        path,
-        read,
-        duration_secs,
+    let loaded = tagcore::file::sniff(&path)
+        .and_then(|container| tagcore::file::load(&path).map(|file| (container, file)));
+    match loaded {
+        Ok((container, file)) => {
+            let duration_secs = file
+                .properties
+                .duration
+                .map(|d| d.as_secs_f64())
+                .filter(|d| *d > 0.0);
+            let mut tags = file.metadata;
+            tags.remove(tagcore::metadata::LENGTH);
+            LoadedFile {
+                path,
+                read: Ok((container, tags)),
+                duration_secs,
+            }
+        }
+        Err(e) => LoadedFile {
+            path,
+            read: Err(e.to_string()),
+            duration_secs: None,
+        },
     }
 }
 
@@ -185,7 +200,7 @@ pub async fn cover(request: CoverRequest) -> TaggerEvent {
         request,
         release_id,
     } = request;
-    let result: Result<Option<EditPicture>, String> =
+    let result: Result<Option<CoverImage>, String> =
         blocking(move || musicbrainz::fetch_front_cover(&release_id)).await;
     TaggerEvent::CoverFetched { request, result }
 }
@@ -193,15 +208,15 @@ pub async fn cover(request: CoverRequest) -> TaggerEvent {
 /// Opens MusicBrainz's "add release" page, seeded with `files`.
 pub async fn open_seed(files: Vec<SeedFile>) -> TaggerEvent {
     let result = blocking(move || {
-        let for_match: Vec<FileForMatch<'_>> = files
+        let inputs: Vec<SeedInput<'_>> = files
             .iter()
-            .map(|file| FileForMatch {
+            .map(|file| SeedInput {
                 tags: &file.tags,
                 duration_secs: file.duration_secs,
                 file_stem: file.file_stem.as_deref(),
             })
             .collect();
-        let page = musicbrainz::seed_release_add(&for_match)?;
+        let page = musicbrainz::seed_release_add(&inputs)?;
         crate::desktop::browser::open_path(&page)
     })
     .await;
@@ -214,7 +229,11 @@ pub async fn open_seed(files: Vec<SeedFile>) -> TaggerEvent {
 pub async fn save(job: SaveJob) -> TaggerEvent {
     let SaveJob { file, path, tags } = job;
     let permit = SAVE_PERMITS.acquire().await;
-    let result = blocking(move || tagio::write(&path, &tags).map_err(|e| e.to_string())).await;
+    let result = blocking(move || {
+        tagcore::file::save(&path, &tags, &WriteOptions::default(), false)
+            .map_err(|e| e.to_string())
+    })
+    .await;
     drop(permit);
     TaggerEvent::FileSaved { file, result }
 }
@@ -288,7 +307,8 @@ async fn scan_file(generation: u64, path: PathBuf, key: String) -> ScanFileResul
     if ACTIVE_SCAN.load(Ordering::Relaxed) != generation {
         return cancelled();
     }
-    let fingerprint = blocking(move || fingerprint::compute(&path)).await;
+    let fingerprint =
+        blocking(move || fingerprint::compute(&path).map_err(|e| e.to_string())).await;
     drop(permit);
     let fingerprint = match fingerprint {
         Ok(fp) => fp,
@@ -304,7 +324,13 @@ async fn scan_file(generation: u64, path: PathBuf, key: String) -> ScanFileResul
         return cancelled();
     }
     let sent = fingerprint.clone();
-    let lookup = blocking(move || acoustid::lookup(&key, &sent)).await;
+    let lookup = blocking(move || {
+        if key.trim().is_empty() {
+            return Err("No AcoustID application key configured".to_owned());
+        }
+        tagcore::acoustid::lookup(&key, &sent).map_err(|e| e.to_string())
+    })
+    .await;
     ScanFileResult {
         fingerprint: Ok(fingerprint),
         lookup: Some(lookup),
@@ -314,17 +340,18 @@ async fn scan_file(generation: u64, path: PathBuf, key: String) -> ScanFileResul
 /// A file ready to submit, or why it can't be.
 struct Prepared {
     /// Computed here (to keep for later), as opposed to taken from the file.
-    computed: Option<fingerprint::Fingerprint>,
+    computed: Option<Fingerprint>,
     submission: Result<Submission, String>,
 }
 
 async fn prepare_submission(job: SubmitJob) -> Prepared {
     let (fingerprint, computed) = match &job.fingerprint {
-        Some(fp) => (Ok(fingerprint::Fingerprint::clone(fp)), None),
+        Some(fp) => (Ok(Fingerprint::clone(fp)), None),
         None => {
             let permit = FINGERPRINT_PERMITS.acquire().await;
             let path = job.path.clone();
-            let result = blocking(move || fingerprint::compute(&path)).await;
+            let result =
+                blocking(move || fingerprint::compute(&path).map_err(|e| e.to_string())).await;
             drop(permit);
             match result {
                 Ok(fp) => (Ok(fp.clone()), Some(fp)),
@@ -333,10 +360,16 @@ async fn prepare_submission(job: SubmitJob) -> Prepared {
         }
     };
     let submission = fingerprint.map(|fp| {
-        let mut submission = Submission::from_tags(fp, &job.tags, Some(job.recording_id.clone()));
-        submission.file_format = jobs::file_format(&job.path);
-        submission.bitrate_kbps = None;
-        submission
+        // AcoustID only takes the MBID when the file is about as long as the
+        // recording; the file's own length is what the tags describe.
+        let mut tags = job.tags.clone();
+        tags.set_length(fp.duration);
+        Submission::new(
+            fp.fingerprint,
+            u32::try_from(fp.duration.as_secs()).unwrap_or(u32::MAX),
+            Some(job.recording_id.clone()),
+            Some(SubmissionTags::from_metadata(&tags)),
+        )
     });
     Prepared {
         computed,
@@ -367,7 +400,7 @@ pub async fn submit(start: SubmitStart, app_key: String) -> TaggerEvent {
             .collect();
 
     let mut results: Vec<SubmitResult> = Vec::with_capacity(files.len());
-    let mut ready: Vec<(FileId, Option<fingerprint::Fingerprint>, Submission)> = Vec::new();
+    let mut ready: Vec<(FileId, Option<Fingerprint>, Submission)> = Vec::new();
     for (file, item) in files.into_iter().zip(prepared) {
         match item {
             Some(Prepared {
@@ -390,14 +423,27 @@ pub async fn submit(start: SubmitStart, app_key: String) -> TaggerEvent {
         }
     }
 
-    for batch in jobs::split_batches(ready, SUBMIT_BATCH) {
-        let (meta, submissions): (Vec<_>, Vec<_>) = batch
-            .into_iter()
-            .map(|(file, computed, submission)| ((file, computed), submission))
-            .unzip();
-        let (app_key, user_key) = (app_key.clone(), user_key.clone());
-        let response = blocking(move || acoustid::submit(&app_key, &user_key, &submissions)).await;
-        results.extend(jobs::map_submit_response(meta, response));
+    let (meta, items): (Vec<_>, Vec<_>) = ready
+        .into_iter()
+        .map(|(file, computed, submission)| ((file, computed), (file, submission)))
+        .unzip();
+    if !items.is_empty() {
+        let sent = blocking(move || {
+            Ok(tagcore::acoustid::submit::submit(
+                &app_key, &user_key, items,
+            ))
+        })
+        .await;
+        match sent {
+            Ok(report) => results.extend(jobs::map_submit_report(meta, &report)),
+            Err(error) => {
+                results.extend(meta.into_iter().map(|(file, fingerprint)| SubmitResult {
+                    file,
+                    fingerprint,
+                    outcome: Err(error.clone()),
+                }))
+            }
+        }
     }
     TaggerEvent::Submitted {
         generation,

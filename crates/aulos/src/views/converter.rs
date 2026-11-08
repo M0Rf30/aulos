@@ -1625,7 +1625,7 @@ async fn pick_files() -> Vec<PathBuf> {
     let filter_name = aulos_core::fl!("converter-filter-name");
     let filter = Filter::new(
         &filter_name,
-        aulos_core::player::engine::format_registry::SUPPORTED_EXTENSIONS
+        playcore::format::SUPPORTED_EXTENSIONS
             .iter()
             .chain(["cue", "mkv", "mov", "avi"].iter())
             .copied(),

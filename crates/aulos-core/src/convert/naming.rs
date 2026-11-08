@@ -17,7 +17,8 @@
 //! segment is sanitized (see [`sanitize_filename`]) and empty folder
 //! segments are dropped, so a tag value can never escape the output folder.
 
-use crate::library::tagio::{TagSet, keys, split_position};
+use tagcore::metadata::split_position;
+use tagcore::{Metadata, keys};
 
 /// Pattern used when none is configured.
 pub const DEFAULT_PATTERN: &str = "{track:02} {title}";
@@ -41,7 +42,7 @@ impl NameFields {
     /// Fields read from `tags` (`None` for an unreadable source) of the file
     /// whose stem is `stem`.
     #[must_use]
-    pub fn from_tags(tags: Option<&TagSet>, stem: &str) -> Self {
+    pub fn from_tags(tags: Option<&Metadata>, stem: &str) -> Self {
         let mut fields = Self {
             stem: stem.to_owned(),
             ..Self::default()
@@ -300,13 +301,13 @@ mod tests {
 
     #[test]
     fn fields_are_read_from_tags() {
-        let mut tags = TagSet::new();
-        tags.set_one(keys::TITLE, " Salt Glass ");
-        tags.set_one(keys::ARTIST, "Mira");
-        tags.set_one(keys::ALBUM, "Tapes");
-        tags.set_one(keys::DATE, "2019-05-01");
-        tags.set_one(keys::TRACKNUMBER, "6/11");
-        tags.set_one(keys::DISCNUMBER, "2");
+        let mut tags = Metadata::new();
+        tags.set(keys::TITLE, " Salt Glass ");
+        tags.set(keys::ARTIST, "Mira");
+        tags.set(keys::ALBUM, "Tapes");
+        tags.set(keys::DATE, "2019-05-01");
+        tags.set(keys::TRACKNUMBER, "6/11");
+        tags.set(keys::DISCNUMBER, "2");
         let f = NameFields::from_tags(Some(&tags), "stem");
         assert_eq!(f.title, "Salt Glass");
         assert_eq!(f.year, "2019");

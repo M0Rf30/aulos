@@ -508,9 +508,7 @@ tagger-unmatched = Nessun brano corrispondente nella release
 tagger-acoustid-open = Apri questo AcoustID su acoustid.org
 tagger-recording-open = Apri la registrazione su MusicBrainz
 tagger-submission-pending = Invio…
-tagger-submission-pending-status = Inviato, in attesa di elaborazione
-tagger-submission-imported-status = Inviato e importato
-tagger-submission-submitted = Inviato ({ $status })
+tagger-submission-submitted = Inviato
 tagger-submission-failed = Invio non riuscito: { $error }
 
 ## Tag editor: metadata
@@ -549,7 +547,6 @@ tagger-picture-front = Copertina frontale
 tagger-picture-back = Retro di copertina
 tagger-picture-leaflet = Libretto
 tagger-picture-media = Supporto
-tagger-picture-artist = Artista
 tagger-picture-other = Altro
 tagger-picture-type = Tipo { $kind }
 tagger-size-kb = { $value } KB
@@ -1679,3 +1676,6 @@ tray-play-pause = Riproduci / Pausa
 tray-next = Successivo
 tray-previous = Precedente
 tray-quit = Esci
+tagger-submission-incomplete = Invio incompleto: alcune richieste ad AcoustID sono fallite
+tagger-submission-batch-size-zero = Invio non riuscito: AcoustID ha rifiutato la richiesta perché troppo grande
+tagger-submission-too-many-retries = Invio non riuscito: rinuncia dopo troppi tentativi

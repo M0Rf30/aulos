@@ -12,6 +12,8 @@ pub mod radio;
 pub mod scrobble;
 pub mod similar;
 pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transport;
 
 use std::sync::LazyLock;
 use std::time::Duration;

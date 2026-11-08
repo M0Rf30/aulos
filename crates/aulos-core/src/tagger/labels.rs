@@ -6,8 +6,8 @@
 
 use super::{AddFieldError, SubmissionState};
 use crate::fl;
-use crate::library::tagio::{TagSet, keys, model::split_position, picture_type};
-use crate::online::musicbrainz::ReleaseCandidate;
+use tagcore::metadata::split_position;
+use tagcore::{ImageType, Metadata, ReleaseCandidate, keys};
 
 /// Semantic colour of a chip, banner or icon; the UI maps it to its theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,25 +93,24 @@ pub fn field_label(key: &str) -> String {
     }
 }
 
-/// The name of a picture type (`type N` for the ones the editor doesn't
-/// offer).
-pub fn picture_kind_label(kind: u8) -> String {
+/// The name of a picture type (the type's own name for the ones the editor
+/// doesn't offer).
+pub fn picture_kind_label(kind: ImageType) -> String {
     match kind {
-        picture_type::FRONT_COVER => fl!("tagger-picture-front"),
-        picture_type::BACK_COVER => fl!("tagger-picture-back"),
-        picture_type::LEAFLET => fl!("tagger-picture-leaflet"),
-        picture_type::MEDIA => fl!("tagger-picture-media"),
-        picture_type::ARTIST => fl!("tagger-picture-artist"),
-        picture_type::OTHER => fl!("tagger-picture-other"),
-        other => fl!("tagger-picture-type", kind = other),
+        ImageType::Front => fl!("tagger-picture-front"),
+        ImageType::Back => fl!("tagger-picture-back"),
+        ImageType::Booklet => fl!("tagger-picture-leaflet"),
+        ImageType::Medium => fl!("tagger-picture-media"),
+        ImageType::Other => fl!("tagger-picture-other"),
+        other => fl!("tagger-picture-type", kind = other.name().to_owned()),
     }
 }
 
-/// The type choices for a picture of `kind`: the six the editor offers,
+/// The type choices for a picture of `kind`: the ones the editor offers,
 /// plus the picture's own when it is none of them. Returns the labels and
 /// the index of `kind` among them.
 #[must_use]
-pub fn picture_kind_choices(kind: u8) -> (Vec<String>, Option<usize>) {
+pub fn picture_kind_choices(kind: ImageType) -> (Vec<String>, Option<usize>) {
     let mut names: Vec<String> = super::edit::PICTURE_KINDS
         .iter()
         .map(|k| picture_kind_label(*k))
@@ -167,7 +166,7 @@ pub fn format_size(bytes: usize) -> String {
 
 /// The track number of a file's tags (the part before `/`), empty when
 /// there is none.
-pub fn track_label(tags: &TagSet) -> String {
+pub fn track_label(tags: &Metadata) -> String {
     tags.get(keys::TRACKNUMBER)
         .and_then(|v| split_position(v).0)
         .map(|n| n.to_string())
@@ -180,14 +179,7 @@ pub fn submission_text(state: &SubmissionState) -> Option<(String, Tone)> {
     match state {
         SubmissionState::NotSubmitted => None,
         SubmissionState::Pending => Some((fl!("tagger-submission-pending"), Tone::Accent)),
-        SubmissionState::Submitted { status } => Some((
-            match status.as_str() {
-                "pending" => fl!("tagger-submission-pending-status"),
-                "imported" => fl!("tagger-submission-imported-status"),
-                other => fl!("tagger-submission-submitted", status = other.to_owned()),
-            },
-            Tone::Success,
-        )),
+        SubmissionState::Submitted => Some((fl!("tagger-submission-submitted"), Tone::Success)),
         SubmissionState::Failed(error) => Some((
             fl!("tagger-submission-failed", error = error.clone()),
             Tone::Danger,
@@ -204,16 +196,44 @@ pub fn dotted(parts: impl IntoIterator<Item = String>) -> String {
         .join(" · ")
 }
 
+/// The title of a release candidate: its album.
+#[must_use]
+pub fn candidate_title(candidate: &ReleaseCandidate) -> String {
+    candidate
+        .metadata
+        .get(keys::ALBUM)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The disambiguation comment of a release candidate (empty when none).
+#[must_use]
+pub fn candidate_disambiguation(candidate: &ReleaseCandidate) -> String {
+    candidate
+        .metadata
+        .get("~releasecomment")
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// The details line of a release candidate: everything but title and score.
 pub fn candidate_details(candidate: &ReleaseCandidate) -> String {
+    let md = &candidate.metadata;
+    let country = md
+        .get(keys::RELEASECOUNTRY)
+        .map_or_else(|| md.get_all("~releasecountries").join(", "), str::to_owned);
+    let tracks = md
+        .get(keys::TOTALTRACKS)
+        .and_then(|v| split_position(v).0)
+        .unwrap_or(0);
     dotted([
-        candidate.artist.clone(),
-        candidate.date.clone(),
-        candidate.country.clone(),
-        candidate.label.clone(),
-        candidate.formats.clone(),
-        if candidate.track_count > 0 {
-            fl!("tagger-lookup-tracks", count = candidate.track_count)
+        md.get(keys::ALBUMARTIST).unwrap_or_default().to_owned(),
+        md.get(keys::DATE).unwrap_or_default().to_owned(),
+        country,
+        md.get_all(keys::LABEL).join(", "),
+        md.get_all(keys::MEDIA).join(", "),
+        if tracks > 0 {
+            fl!("tagger-lookup-tracks", count = tracks)
         } else {
             String::new()
         },
@@ -235,18 +255,18 @@ pub fn name_list(names: &[String], limit: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::tagio::model::KNOWN_KEYS;
+    use tagcore::keys::KNOWN_KEYS;
 
     #[test]
     fn picture_choices_select_an_offered_kind_in_place() {
-        let (names, selected) = picture_kind_choices(picture_type::FRONT_COVER);
+        let (names, selected) = picture_kind_choices(ImageType::Front);
         assert_eq!(names.len(), super::super::edit::PICTURE_KINDS.len());
         assert_eq!(selected, Some(0));
     }
 
     #[test]
     fn picture_choices_append_a_kind_the_editor_does_not_offer() {
-        let (names, selected) = picture_kind_choices(200);
+        let (names, selected) = picture_kind_choices(ImageType::Obi);
         assert_eq!(names.len(), super::super::edit::PICTURE_KINDS.len() + 1);
         assert_eq!(selected, Some(names.len() - 1));
     }
@@ -287,11 +307,11 @@ mod tests {
 
     #[test]
     fn track_label_takes_the_number_before_the_slash() {
-        let mut tags = TagSet::new();
+        let mut tags = Metadata::new();
         assert_eq!(track_label(&tags), "");
-        tags.set_one(keys::TRACKNUMBER, "3/12");
+        tags.set(keys::TRACKNUMBER, "3/12");
         assert_eq!(track_label(&tags), "3");
-        tags.set_one(keys::TRACKNUMBER, "A1");
+        tags.set(keys::TRACKNUMBER, "A1");
         assert_eq!(track_label(&tags), "");
     }
 

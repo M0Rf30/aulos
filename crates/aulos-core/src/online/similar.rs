@@ -503,21 +503,12 @@ impl Throttle {
 static LASTFM_THROTTLE: Throttle = Throttle::new(Duration::from_millis(250));
 
 fn get_json(url: &str) -> Result<Value, SimilarError> {
-    let resp = crate::online::musicbrainz::http_client()
-        .get(url)
-        .send()
-        .map_err(|e| SimilarError::Network(e.without_url().to_string()))?;
-    let status = resp.status().as_u16();
-    let body =
-        super::read_capped_text(resp, super::API_MAX_BYTES).map_err(SimilarError::Network)?;
-    match status {
-        200..=299 => serde_json::from_str(&body)
-            .map_err(|_| SimilarError::Network("unexpected response".into())),
+    tagcore::http::get_json(url, &[]).map_err(|e| match tagcore::http::status_code(&e) {
         // Rate limited or server trouble: try again another day.
-        429 | 500..=599 => Err(SimilarError::Network(format!("HTTP {status}"))),
+        Some(429 | 500..=599) | None => SimilarError::Network(e.to_string()),
         // Lookup refused (unknown artist, bad request): no answer.
-        _ => Err(SimilarError::Unavailable),
-    }
+        Some(_) => SimilarError::Unavailable,
+    })
 }
 
 /// Last.fm `artist.getSimilar`.
@@ -653,11 +644,8 @@ impl SimilarArtists for ListenBrainzSimilar {
     }
 
     fn similar(&self, artist: &str, limit: usize) -> Result<Vec<SimilarArtist>, SimilarError> {
-        crate::online::musicbrainz::throttle();
-        let query = format!(
-            "artist:\"{}\"",
-            crate::online::musicbrainz::escape_lucene(artist)
-        );
+        tagcore::http::throttle_mb();
+        let query = format!("artist:\"{}\"", tagcore::mb::escape_lucene(artist));
         let url = format!(
             "{MUSICBRAINZ_URL}?query={}&fmt=json&limit=5",
             urlencoding::encode(&query)

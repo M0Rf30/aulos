@@ -11,8 +11,18 @@
 
 use std::path::{Path, PathBuf};
 
-use super::matching::FileForMatch;
-use crate::library::tagio::{TagSet, keys, model::split_position};
+use tagcore::metadata::split_position;
+use tagcore::{Metadata, keys};
+
+/// One file of the cluster being seeded.
+#[derive(Debug, Clone, Copy)]
+pub struct SeedInput<'a> {
+    pub tags: &'a Metadata,
+    /// Length in seconds, when known.
+    pub duration_secs: Option<f64>,
+    /// File name without extension: the title when the tags have none.
+    pub file_stem: Option<&'a str>,
+}
 
 const ADD_URL: &str = "https://musicbrainz.org/release/add";
 /// The "Various Artists" special-purpose artist.
@@ -83,7 +93,7 @@ fn mb_name(lower: &str) -> String {
     }
 }
 
-fn first_value<'a>(files: &[FileForMatch<'a>], key: &str) -> Option<&'a str> {
+fn first_value<'a>(files: &[SeedInput<'a>], key: &str) -> Option<&'a str> {
     files
         .iter()
         .filter_map(|f| f.tags.get(key))
@@ -116,7 +126,7 @@ fn push_credit(fields: &mut Vec<(String, String)>, prefix: &str, parts: &[Credit
 /// level data comes from the first file that has each value, files are
 /// ordered by disc and track number and split into mediums by disc number.
 #[must_use]
-pub fn seed_fields(files: &[FileForMatch<'_>]) -> Vec<(String, String)> {
+pub fn seed_fields(files: &[SeedInput<'_>]) -> Vec<(String, String)> {
     let mut fields = Vec::new();
     push(
         &mut fields,
@@ -126,7 +136,7 @@ pub fn seed_fields(files: &[FileForMatch<'_>]) -> Vec<(String, String)> {
 
     // Release artist: the album artist, else the common track artist, else
     // Various Artists.
-    let track_artist = |f: &FileForMatch<'_>| {
+    let track_artist = |f: &SeedInput<'_>| {
         f.tags
             .get(keys::ARTIST)
             .map(str::trim)
@@ -227,7 +237,7 @@ pub fn seed_fields(files: &[FileForMatch<'_>]) -> Vec<(String, String)> {
 
     // Mediums: files ordered by (disc, track), grouped by disc number.
     let number =
-        |tags: &TagSet, key: &str| tags.get(key).and_then(|v| split_position(v).0).unwrap_or(0);
+        |tags: &Metadata, key: &str| tags.get(key).and_then(|v| split_position(v).0).unwrap_or(0);
     let mut order: Vec<usize> = (0..files.len()).collect();
     order.sort_by_key(|&i| {
         (
@@ -354,7 +364,7 @@ pub fn seed_html(fields: &[(String, String)]) -> String {
 
 /// Writes the seeding page for `files` into Aulos's cache directory and
 /// returns its path, for the caller to open in the browser.
-pub fn seed_release_add(files: &[FileForMatch<'_>]) -> Result<PathBuf, String> {
+pub fn seed_release_add(files: &[SeedInput<'_>]) -> Result<PathBuf, String> {
     let dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("aulos")
@@ -377,7 +387,7 @@ fn remove_old_seed_pages(dir: &Path) {
     }
 }
 
-fn write_seed_page(files: &[FileForMatch<'_>], dir: &Path) -> Result<PathBuf, String> {
+fn write_seed_page(files: &[SeedInput<'_>], dir: &Path) -> Result<PathBuf, String> {
     if files.is_empty() {
         return Err("No files to seed a release from".to_owned());
     }
@@ -400,16 +410,16 @@ fn write_seed_page(files: &[FileForMatch<'_>], dir: &Path) -> Result<PathBuf, St
 mod tests {
     use super::*;
 
-    fn tags(pairs: &[(&str, &[&str])]) -> TagSet {
-        let mut t = TagSet::new();
+    fn tags(pairs: &[(&str, &[&str])]) -> Metadata {
+        let mut t = Metadata::new();
         for (k, vs) in pairs {
-            t.set(k, vs.iter().map(|v| (*v).to_owned()));
+            t.set_all(k, vs.iter().map(|v| (*v).to_owned()));
         }
         t
     }
 
-    fn file<'a>(tags: &'a TagSet, secs: f64) -> FileForMatch<'a> {
-        FileForMatch {
+    fn file<'a>(tags: &'a Metadata, secs: f64) -> SeedInput<'a> {
+        SeedInput {
             tags,
             duration_secs: Some(secs),
             file_stem: None,

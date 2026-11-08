@@ -468,6 +468,7 @@ fn android_main(android: AndroidApp) {
     #[cfg(feature = "visualizer")]
     install_presets(&android);
     aulos_core::i18n::init_from_system();
+    aulos_core::online::transport::install();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

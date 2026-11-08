@@ -1082,7 +1082,7 @@ impl Session {
 
     /// Sets the fade in/out duration (seconds, clamped).
     pub fn set_fade_duration(&mut self, secs: f32) {
-        let secs = secs.clamp(0.0, crate::player::engine::fade::MAX_FADE_SECS);
+        let secs = secs.clamp(0.0, playcore::fade::MAX_FADE_SECS);
         self.config.config.fade_duration_secs = secs;
         if let Some(player) = &mut self.playback.player {
             player.set_fade_secs(secs);

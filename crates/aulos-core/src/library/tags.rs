@@ -12,7 +12,7 @@
 //! fields — those are read independently by
 //! [`crate::convert::pipeline::AudioSource`] for the converter's own
 //! needs). Symphonia is read-only: writing tags is handled by
-//! `crate::library::tagio`.
+//! `tagcore::file`.
 
 use std::fs;
 use std::path::Path;
@@ -29,7 +29,8 @@ use symphonia::core::meta::{
 use symphonia::core::units::Duration as SymDuration;
 
 use super::sparse::SparseFile;
-use crate::player::engine::decoder::{chain_duration_secs, local_file_format_options};
+use playcore::decoder::chain_duration_secs;
+use playcore::format::local_file_format_options;
 
 /// An embedded picture (cover art), as extracted from a tag.
 #[derive(Debug, Clone)]
@@ -140,7 +141,7 @@ fn probe_source(
 
     let mss = MediaSourceStream::new(source, Default::default());
 
-    let mut reader = crate::player::engine::format_registry::probe()
+    let mut reader = playcore::format::probe()
         .probe(
             &hint,
             mss,
@@ -301,28 +302,12 @@ fn push_pictures(visuals: Vec<Visual>, out: &mut Vec<Picture>) {
         let mime_type = v
             .media_type
             .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| infer_mime(&v.data).to_owned());
+            .unwrap_or_else(|| tagcore::image::mime_of("", &v.data));
         out.push(Picture {
             mime_type,
             is_front_cover: matches!(v.usage, Some(StandardVisualKey::FrontCover)),
             data: Vec::from(v.data),
         });
-    }
-}
-
-/// Sniff an image's MIME type from its magic bytes, for pictures whose
-/// container didn't record one.
-pub(crate) fn infer_mime(data: &[u8]) -> &'static str {
-    if data.starts_with(b"\xFF\xD8\xFF") {
-        "image/jpeg"
-    } else if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if data.starts_with(b"GIF8") {
-        "image/gif"
-    } else if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-        "image/webp"
-    } else {
-        "application/octet-stream"
     }
 }
 

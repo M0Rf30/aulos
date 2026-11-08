@@ -41,9 +41,6 @@
 
 use super::PlaybackState;
 use super::backend::{PlaybackBackend, PlayerError, extension_hint};
-use super::engine::conversion::db_to_linear;
-use super::engine::decoder::SymphoniaDecoder;
-use super::engine::resampler::{ResamplerQuality, StreamResampler};
 use super::eq_source::{EqController, NUM_BANDS, new_shared_coeffs};
 use super::equalizer::BAND_FREQUENCIES;
 #[cfg(feature = "visualizer")]
@@ -52,6 +49,9 @@ use super::pcm::PcmBuffer;
 use super::web_tap;
 use super::web_timeline::Timeline;
 use crate::library::TrackSource;
+use playcore::convert::db_to_linear;
+use playcore::decoder::{DecoderOptions, SymphoniaDecoder};
+use playcore::resample::{ResamplerQuality, StreamResampler};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -442,7 +442,7 @@ impl Feeder {
             Cursor::new(data.bytes.clone()),
             Some(len),
             data.hint.as_deref(),
-            gapless,
+            DecoderOptions { gapless },
         )
         .map_err(|e| format!("This file cannot be played: {e}"))?;
         if decoder.is_dsd() {

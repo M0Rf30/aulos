@@ -53,6 +53,7 @@ pub fn run() -> eframe::Result {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     aulos_core::i18n::init_from_system();
+    aulos_core::online::transport::install();
 
     // Files from "Open With" (`Exec=aulos %U`) or the command line. A running
     // instance takes them over, so a second player never starts.

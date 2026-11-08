@@ -14,6 +14,8 @@ repository = "https://github.com/M0Rf30/aulos"
 # pinned once here.
 [workspace.dependencies]
 aulos-core = { path = "crates/aulos-core" }
+tagcore = { git = "https://github.com/M0Rf30/tagcore", tag = "v0.1.0" }
+playcore = { git = "https://github.com/M0Rf30/playcore", tag = "v0.1.0", features = ["resample"] }
 
 # Features are chosen per target by each crate: the native build uses "full",
 # the browser build only the runtime-free parts (`sync`, `macros`); there are

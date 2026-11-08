@@ -7,21 +7,22 @@
 //! releases (the album, singles, compilations, regional editions…). For a
 //! cluster the right release is the one most of its files appear on; ties
 //! go to the release whose size fits the cluster (the same number of tracks
-//! as files, or a medium of that size), then to the one AcoustID is surest
+//! as files), then to the one AcoustID is surest
 //! about, then to the earliest release.
 
 use super::file::FileId;
-use crate::online::acoustid::{AcoustIdRelease, AcoustIdResult};
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use tagcore::acoustid::{LookupResult, ReleaseRef};
+use tagcore::keys;
 
 /// Results below this score are guesses and ignored.
-pub const MIN_SCORE: f64 = 0.8;
+pub const MIN_SCORE: f32 = 0.8;
 
 /// The result to use for a fingerprint: the highest-scoring one that is
 /// good enough and maps to at least one recording.
 #[must_use]
-pub fn best_result(results: &[AcoustIdResult]) -> Option<&AcoustIdResult> {
+pub fn best_result(results: &[LookupResult]) -> Option<&LookupResult> {
     results
         .iter()
         .filter(|r| r.score >= MIN_SCORE && !r.recordings.is_empty())
@@ -35,25 +36,34 @@ pub struct ReleaseChoice {
     pub release_id: String,
     pub title: String,
     pub date: Option<String>,
-    /// Tracks on the release, as AcoustID reports them (0 when unknown).
+    /// Tracks on the release (`totaltracks`), as AcoustID reports them (0 when unknown).
     pub track_count: u32,
     /// The files whose fingerprint appears on the release.
     pub covered: Vec<FileId>,
 }
 
-struct Candidate {
-    release: AcoustIdRelease,
+struct Candidate<'a> {
+    release: &'a ReleaseRef,
     covered: Vec<FileId>,
-    score_sum: f64,
+    score_sum: f32,
 }
 
-impl Candidate {
-    /// The release has as many tracks as there are files, or a medium that
-    /// does.
+impl Candidate<'_> {
+    fn date(&self) -> Option<&str> {
+        self.release.metadata.get(keys::DATE)
+    }
+
+    /// The release has as many tracks as there are files.
     fn fits(&self, file_count: usize) -> bool {
-        let count = file_count as u32;
-        self.release.track_count == count
-            || self.release.mediums.iter().any(|m| m.track_count == count)
+        self.track_count() as usize == file_count
+    }
+
+    fn track_count(&self) -> u32 {
+        self.release
+            .metadata
+            .get(keys::TOTALTRACKS)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
     }
 }
 
@@ -74,34 +84,24 @@ fn date_order(a: Option<&str>, b: Option<&str>) -> Ordering {
 /// `file_count` is the number of files that were scanned (hit or not).
 /// `None` when no file has a hit with a release.
 #[must_use]
-pub fn choose_release(
-    hits: &[(FileId, AcoustIdResult)],
-    file_count: usize,
-) -> Option<ReleaseChoice> {
-    let mut candidates: Vec<Candidate> = Vec::new();
+pub fn choose_release(hits: &[(FileId, LookupResult)], file_count: usize) -> Option<ReleaseChoice> {
+    let mut candidates: Vec<Candidate<'_>> = Vec::new();
     for (file, result) in hits {
         let mut seen: HashSet<&str> = HashSet::new();
-        for recording in &result.recordings {
-            for (_, release) in recording.all_releases() {
-                if release.id.is_empty() || !seen.insert(release.id.as_str()) {
-                    continue;
+        for release in result.recordings.iter().flat_map(|r| &r.releases) {
+            if release.id.is_empty() || !seen.insert(release.id.as_str()) {
+                continue;
+            }
+            match candidates.iter_mut().find(|c| c.release.id == release.id) {
+                Some(c) => {
+                    c.covered.push(*file);
+                    c.score_sum += result.score;
                 }
-                match candidates.iter_mut().find(|c| c.release.id == release.id) {
-                    Some(c) => {
-                        c.covered.push(*file);
-                        c.score_sum += result.score;
-                        // Releases nested under a release group tend to carry
-                        // the medium details; keep whichever has them.
-                        if c.release.mediums.is_empty() && !release.mediums.is_empty() {
-                            c.release = release.clone();
-                        }
-                    }
-                    None => candidates.push(Candidate {
-                        release: release.clone(),
-                        covered: vec![*file],
-                        score_sum: result.score,
-                    }),
-                }
+                None => candidates.push(Candidate {
+                    release,
+                    covered: vec![*file],
+                    score_sum: result.score,
+                }),
             }
         }
     }
@@ -116,14 +116,19 @@ pub fn choose_release(
                 .then(a.score_sum.total_cmp(&b.score_sum))
                 // `max_by`: the *better* candidate must compare greater, so
                 // an earlier date / smaller id compares greater.
-                .then_with(|| date_order(b.release.date.as_deref(), a.release.date.as_deref()))
+                .then_with(|| date_order(b.date(), a.date()))
                 .then_with(|| b.release.id.cmp(&a.release.id))
         })
         .map(|c| ReleaseChoice {
-            release_id: c.release.id,
-            title: c.release.title,
-            date: c.release.date,
-            track_count: c.release.track_count,
+            release_id: c.release.id.clone(),
+            title: c
+                .release
+                .metadata
+                .get(keys::ALBUM)
+                .unwrap_or_default()
+                .to_owned(),
+            date: c.date().map(str::to_owned),
+            track_count: c.track_count(),
             covered: c.covered,
         })
 }
@@ -131,35 +136,31 @@ pub fn choose_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::online::acoustid::{AcoustIdMedium, AcoustIdRecording, AcoustIdReleaseGroup};
+    use tagcore::Metadata;
+    use tagcore::acoustid::Recording;
 
-    fn release(id: &str, tracks: u32, date: Option<&str>) -> AcoustIdRelease {
-        AcoustIdRelease {
+    fn release(id: &str, tracks: u32, date: Option<&str>) -> ReleaseRef {
+        let mut metadata = Metadata::new();
+        metadata.set(keys::ALBUM, format!("Release {id}"));
+        metadata.set(keys::TOTALTRACKS, tracks.to_string());
+        if let Some(date) = date {
+            metadata.set(keys::DATE, date);
+        }
+        ReleaseRef {
             id: id.into(),
-            title: format!("Release {id}"),
-            date: date.map(Into::into),
-            track_count: tracks,
-            medium_count: 1,
-            mediums: vec![AcoustIdMedium {
-                position: 1,
-                track_count: tracks,
-                ..AcoustIdMedium::default()
-            }],
-            ..AcoustIdRelease::default()
+            metadata,
         }
     }
 
-    fn result(score: f64, releases: Vec<AcoustIdRelease>) -> AcoustIdResult {
-        AcoustIdResult {
-            id: "acoustid".into(),
+    fn result(score: f32, releases: Vec<ReleaseRef>) -> LookupResult {
+        LookupResult {
+            acoustid: "acoustid".into(),
             score,
-            recordings: vec![AcoustIdRecording {
+            recordings: vec![Recording {
                 id: "rec".into(),
-                release_groups: vec![AcoustIdReleaseGroup {
-                    releases,
-                    ..AcoustIdReleaseGroup::default()
-                }],
-                ..AcoustIdRecording::default()
+                metadata: Metadata::new(),
+                sources: 1,
+                releases,
             }],
         }
     }
@@ -175,6 +176,9 @@ mod tests {
         ];
         let choice = choose_release(&hits, 12).unwrap();
         assert_eq!(choice.release_id, "album");
+        assert_eq!(choice.title, "Release album");
+        assert_eq!(choice.date.as_deref(), Some("2013"));
+        assert_eq!(choice.track_count, 12);
         assert_eq!(choice.covered, vec![1, 2, 3]);
     }
 
@@ -197,27 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn a_medium_of_the_right_size_counts_as_a_fit() {
-        let mut two_discs = release("box", 24, None);
-        two_discs.medium_count = 2;
-        two_discs.mediums = vec![
-            AcoustIdMedium {
-                position: 1,
-                track_count: 12,
-                ..AcoustIdMedium::default()
-            },
-            AcoustIdMedium {
-                position: 2,
-                track_count: 12,
-                ..AcoustIdMedium::default()
-            },
-        ];
-        let other = release("other", 30, None);
-        let hits = vec![(1, result(0.9, vec![other, two_discs]))];
-        assert_eq!(choose_release(&hits, 12).unwrap().release_id, "box");
-    }
-
-    #[test]
     fn then_the_surer_score_then_the_earlier_release() {
         let early = release("early", 10, Some("2001"));
         let late = release("late", 10, Some("2005"));
@@ -232,7 +215,12 @@ mod tests {
     fn a_release_listed_twice_for_one_file_counts_once() {
         let album = release("album", 10, None);
         let mut r = result(0.9, vec![album.clone()]);
-        r.recordings[0].releases = vec![album];
+        r.recordings.push(Recording {
+            id: "rec2".into(),
+            metadata: Metadata::new(),
+            sources: 1,
+            releases: vec![album],
+        });
         let choice = choose_release(&[(1, r)], 10).unwrap();
         assert_eq!(choice.covered, vec![1]);
     }
@@ -240,11 +228,7 @@ mod tests {
     #[test]
     fn no_hits_no_release() {
         assert!(choose_release(&[], 5).is_none());
-        let no_releases = AcoustIdResult {
-            id: "x".into(),
-            score: 0.99,
-            recordings: vec![AcoustIdRecording::default()],
-        };
+        let no_releases = result(0.99, vec![]);
         assert!(choose_release(&[(1, no_releases)], 5).is_none());
     }
 
@@ -252,8 +236,8 @@ mod tests {
     fn best_result_ignores_weak_matches_and_empty_ones() {
         let strong = result(0.93, vec![release("a", 1, None)]);
         let weak = result(0.4, vec![release("b", 1, None)]);
-        let empty = AcoustIdResult {
-            id: "e".into(),
+        let empty = LookupResult {
+            acoustid: "e".into(),
             score: 0.99,
             recordings: vec![],
         };

@@ -7,7 +7,7 @@
 //! Coefficients and bypass state are shared via atomics so the audio thread
 //! never blocks on a mutex when the UI adjusts a slider.
 //!
-//! [`AudioFilter`]: crate::player::engine::filter::AudioFilter
+//! [`AudioFilter`]: playcore::filter::AudioFilter
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -114,25 +114,19 @@ pub fn compute_peaking_eq(
         return BiquadCoeffs::IDENTITY;
     }
 
-    let a = 10.0_f32.powf(gain_db / 40.0); // sqrt(10^(dB/20))
-    let w0 = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
-    let cos_w0 = w0.cos();
-    let alpha = peaking_alpha(w0, bandwidth_octaves);
-
-    let b0 = 1.0 + alpha * a;
-    let b1 = -2.0 * cos_w0;
-    let b2 = 1.0 - alpha * a;
-    let a0 = 1.0 + alpha / a;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha / a;
-
-    // Normalize by a0
+    let q = f64::from(peaking_q(freq_hz, sample_rate, bandwidth_octaves));
+    let c = playcore::dsp::BiquadCoeffs::peaking(
+        f64::from(sample_rate),
+        f64::from(freq_hz),
+        f64::from(gain_db),
+        q,
+    );
     BiquadCoeffs {
-        b0: b0 / a0,
-        b1: b1 / a0,
-        b2: b2 / a0,
-        a1: a1 / a0,
-        a2: a2 / a0,
+        b0: c.b0 as f32,
+        b1: c.b1 as f32,
+        b2: c.b2 as f32,
+        a1: c.a1 as f32,
+        a2: c.a2 as f32,
     }
 }
 
@@ -330,7 +324,7 @@ impl EqController {
 // EqFilter — AudioFilter adapter
 // ---------------------------------------------------------------------------
 
-/// An [`AudioFilter`](crate::player::engine::filter::AudioFilter) that applies
+/// An [`AudioFilter`](playcore::filter::AudioFilter) that applies
 /// a 10-band parametric EQ to a whole interleaved buffer per call.
 ///
 /// Reads coefficients from shared atomics (lock-free) and applies cascaded
@@ -381,7 +375,7 @@ impl EqFilter {
     }
 }
 
-impl crate::player::engine::filter::AudioFilter for EqFilter {
+impl playcore::filter::AudioFilter for EqFilter {
     fn name(&self) -> &str {
         "eq"
     }
@@ -429,7 +423,7 @@ impl crate::player::engine::filter::AudioFilter for EqFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::engine::filter::AudioFilter;
+    use playcore::filter::AudioFilter;
 
     #[test]
     fn identity_coefficients_pass_through() {

@@ -508,9 +508,7 @@ tagger-unmatched = No matching track on the release
 tagger-acoustid-open = Open this AcoustID on acoustid.org
 tagger-recording-open = Open the recording on MusicBrainz
 tagger-submission-pending = Submitting…
-tagger-submission-pending-status = Submitted, waiting to be processed
-tagger-submission-imported-status = Submitted and imported
-tagger-submission-submitted = Submitted ({ $status })
+tagger-submission-submitted = Submitted
 tagger-submission-failed = Submission failed: { $error }
 
 ## Tag editor: metadata
@@ -549,7 +547,6 @@ tagger-picture-front = Front cover
 tagger-picture-back = Back cover
 tagger-picture-leaflet = Leaflet
 tagger-picture-media = Media
-tagger-picture-artist = Artist
 tagger-picture-other = Other
 tagger-picture-type = Type { $kind }
 tagger-size-kb = { $value } KB
@@ -1678,3 +1675,6 @@ tray-play-pause = Play / Pause
 tray-next = Next
 tray-previous = Previous
 tray-quit = Quit
+tagger-submission-incomplete = Submission incomplete: some AcoustID requests failed
+tagger-submission-batch-size-zero = Submission failed: AcoustID rejected the request as too large
+tagger-submission-too-many-retries = Submission failed: gave up after too many attempts

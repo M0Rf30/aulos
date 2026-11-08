@@ -17,13 +17,15 @@ use super::file::{AcoustIdHit, FileId, FileStatus, SubmissionState, TagFile};
 use super::pick::{self, ReleaseChoice};
 use super::release::{self, ReleasePlan};
 use crate::library::CoverArt;
-use crate::library::fingerprint::Fingerprint;
-use crate::library::tagio::{EditPicture, FileTags, TagSet, keys, model::KNOWN_KEYS, picture_type};
-use crate::online::acoustid::AcoustIdResult;
-use crate::online::musicbrainz::{self, Release, ReleaseCandidate, ReleaseQuery};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tagcore::acoustid::LookupResult;
+use tagcore::file::Container;
+use tagcore::fingerprint::Fingerprint;
+use tagcore::keys::{self, KNOWN_KEYS};
+use tagcore::release::{Artwork, CaaSummary};
+use tagcore::{CoverImage, ImageType, Metadata, Release, ReleaseCandidate, ReleaseQuery};
 
 /// A result that is still coming, has arrived, or failed.
 #[derive(Debug, Clone, Default)]
@@ -64,7 +66,7 @@ impl<T> Remote<T> {
 #[derive(Debug, Clone)]
 pub struct LoadedFile {
     pub path: PathBuf,
-    pub read: Result<FileTags, String>,
+    pub read: Result<(Container, Metadata), String>,
     pub duration_secs: Option<f64>,
 }
 
@@ -101,7 +103,7 @@ pub struct CoverRequest {
 pub struct SaveJob {
     pub file: FileId,
     pub path: PathBuf,
-    pub tags: TagSet,
+    pub tags: Metadata,
 }
 
 /// Outcome of the last write of a save batch.
@@ -119,7 +121,7 @@ pub struct SaveSummary {
 #[derive(Debug, Clone)]
 pub struct SeedFile {
     /// The edited tags, without pictures.
-    pub tags: TagSet,
+    pub tags: Metadata,
     pub duration_secs: Option<f64>,
     /// The file name without extension, a title fallback.
     pub file_stem: Option<String>,
@@ -137,7 +139,7 @@ pub struct ScanStart {
 pub struct ScanFileResult {
     pub fingerprint: Result<Fingerprint, String>,
     /// `None` when there was no fingerprint to look up.
-    pub lookup: Option<Result<Vec<AcoustIdResult>, String>>,
+    pub lookup: Option<Result<Vec<LookupResult>, String>>,
 }
 
 /// Where a scan goes after a file's result.
@@ -163,7 +165,7 @@ pub struct SubmitJob {
     pub file: FileId,
     pub path: PathBuf,
     /// The file's tags without pictures.
-    pub tags: TagSet,
+    pub tags: Metadata,
     pub recording_id: String,
     /// `None`: compute it first.
     pub fingerprint: Option<Arc<Fingerprint>>,
@@ -174,8 +176,8 @@ pub struct SubmitResult {
     pub file: FileId,
     /// A fingerprint computed for the submission, to keep for later.
     pub fingerprint: Option<Fingerprint>,
-    /// The AcoustID submission status (`pending`, `imported`), or why it failed.
-    pub outcome: Result<String, String>,
+    /// `Ok` when AcoustID received the fingerprint, else why it did not.
+    pub outcome: Result<(), String>,
 }
 
 // --- Sessions ----------------------------------------------------------------
@@ -218,7 +220,7 @@ pub struct LookupState {
     pub plan: Option<ReleasePlan>,
     /// The front cover from the Cover Art Archive; `Ready(None)` when the
     /// release has none.
-    pub cover: Remote<Option<EditPicture>>,
+    pub cover: Remote<Option<CoverImage>>,
     /// The AcoustID scan's pick, for the summary line.
     pub acoustid_choice: Option<ReleaseChoice>,
     /// Whether the plan's cover is added to the matched files.
@@ -231,7 +233,7 @@ pub struct LookupState {
     /// The targets' edits before the first release was applied; every
     /// release applied afterwards starts from these, so switching release
     /// doesn't pile one release's fields on another's.
-    baseline: HashMap<FileId, TagSet>,
+    baseline: HashMap<FileId, Metadata>,
     /// Recording MBIDs AcoustID identified per file.
     hints: HashMap<FileId, Vec<String>>,
 }
@@ -269,7 +271,7 @@ pub struct ScanState {
     pub failures: Vec<(FileId, String)>,
     pub phase: ScanPhase,
     generation: u64,
-    hits: Vec<(FileId, AcoustIdResult)>,
+    hits: Vec<(FileId, LookupResult)>,
 }
 
 /// Fingerprint submission in progress.
@@ -350,7 +352,7 @@ struct SaveBatch {
 /// The library album key a file's tags put it under (see the scanner's
 /// album-artist fallback): used to invalidate cached covers.
 #[must_use]
-pub fn library_album_key(tags: &TagSet) -> String {
+pub fn library_album_key(tags: &Metadata) -> String {
     let artist = tags
         .get(keys::ALBUMARTIST)
         .filter(|a| !a.is_empty())
@@ -390,7 +392,8 @@ pub struct TaggerState {
     edit_buffer: Option<EditBuffer>,
     add_field: AddFieldDraft,
     add_field_error: Option<AddFieldError>,
-    new_picture_kind: u8,
+    /// Index into [`PICTURE_KINDS`].
+    new_picture_kind: usize,
 
     lookup: Option<LookupState>,
     scan: Option<ScanState>,
@@ -403,10 +406,7 @@ pub struct TaggerState {
 impl TaggerState {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            new_picture_kind: picture_type::FRONT_COVER,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     fn request_id(&mut self) -> u64 {
@@ -493,7 +493,7 @@ impl TaggerState {
             .filter_map(|id| self.file(*id))
             .map(|f| {
                 let mut tags = f.edited.clone();
-                tags.pictures.clear();
+                tags.images.clear();
                 SeedFile {
                     tags,
                     duration_secs: f.duration_secs,
@@ -557,8 +557,8 @@ impl TaggerState {
 
     /// The type new pictures are added as.
     #[must_use]
-    pub fn new_picture_kind(&self) -> u8 {
-        self.new_picture_kind
+    pub fn new_picture_kind(&self) -> ImageType {
+        PICTURE_KINDS[self.new_picture_kind]
     }
 
     #[must_use]
@@ -868,7 +868,9 @@ impl TaggerState {
 
     /// Removes `key` from the selected files.
     pub fn delete_field(&mut self, key: &str) {
-        if self.edit_selection(|file| file.edited.remove(key)) {
+        if self.edit_selection(|file| {
+            file.edited.remove(key);
+        }) {
             self.edit_buffer = None;
             self.refresh_rows();
         }
@@ -952,20 +954,20 @@ impl TaggerState {
     // --- Pictures ---------------------------------------------------------------
 
     /// Chooses the type new pictures are added as (one of [`PICTURE_KINDS`]).
-    pub fn set_new_picture_kind(&mut self, kind: u8) {
-        if PICTURE_KINDS.contains(&kind) {
-            self.new_picture_kind = kind;
+    pub fn set_new_picture_kind(&mut self, kind: ImageType) {
+        if let Some(index) = PICTURE_KINDS.iter().position(|k| *k == kind) {
+            self.new_picture_kind = index;
         }
     }
 
     /// Adds `picture` to the selected files (see [`edit::add_picture`]).
-    pub fn add_picture(&mut self, picture: &EditPicture) {
+    pub fn add_picture(&mut self, picture: &CoverImage) {
         if self.edit_selection(|file| edit::add_picture(&mut file.edited, picture.clone())) {
             self.refresh_pictures();
         }
     }
 
-    pub fn remove_picture(&mut self, hash: u64, kind: u8) {
+    pub fn remove_picture(&mut self, hash: u64, kind: ImageType) {
         if self.edit_selection(|file| {
             edit::remove_picture(&mut file.edited, hash, kind);
         }) {
@@ -973,7 +975,7 @@ impl TaggerState {
         }
     }
 
-    pub fn set_picture_kind(&mut self, hash: u64, kind: u8, new_kind: u8) {
+    pub fn set_picture_kind(&mut self, hash: u64, kind: ImageType, new_kind: ImageType) {
         if self.edit_selection(|file| {
             edit::set_picture_kind(&mut file.edited, hash, kind, new_kind);
         }) {
@@ -983,7 +985,7 @@ impl TaggerState {
 
     /// Puts the selected files' pictures back to what is on disk.
     pub fn revert_pictures(&mut self) {
-        if self.edit_selection(|file| file.edited.pictures = file.original.pictures.clone()) {
+        if self.edit_selection(|file| file.edited.images = file.original.images.clone()) {
             self.refresh_pictures();
         }
     }
@@ -993,9 +995,9 @@ impl TaggerState {
     pub fn picture_data(&self, hash: u64) -> Option<Vec<u8>> {
         self.table_files()
             .iter()
-            .flat_map(|f| f.edited.pictures.iter())
+            .flat_map(|f| f.edited.images.iter())
             .find(|p| edit::picture_hash(p) == hash)
-            .map(|p| p.data.clone())
+            .map(|p| p.data.to_vec())
     }
 
     // --- Removing and clearing -----------------------------------------------------
@@ -1195,7 +1197,7 @@ impl TaggerState {
             targets,
             artist: query.artist.clone(),
             album: query.album.clone(),
-            track_count: query.track_count,
+            track_count: query.tracks,
             candidates: Remote::Idle,
             chosen: None,
             release: Remote::Idle,
@@ -1236,11 +1238,9 @@ impl TaggerState {
         let query = ReleaseQuery {
             artist: lookup.artist.clone(),
             album: lookup.album.clone(),
-            track_count: lookup.track_count,
-            barcode: None,
-            catalog_number: None,
+            tracks: lookup.track_count,
         };
-        if query.lucene().is_none() {
+        if query.artist.trim().is_empty() && query.album.trim().is_empty() {
             lookup.candidates = Remote::Idle;
             return None;
         }
@@ -1338,9 +1338,9 @@ impl TaggerState {
                 None => {
                     let mut tags = base;
                     if let Some(hit) = &file.acoustid {
-                        tags.set_one(keys::ACOUSTID_ID, hit.acoustid.as_str());
+                        tags.set(keys::ACOUSTID_ID, hit.acoustid.as_str());
                         if let [recording] = hit.recording_ids.as_slice() {
-                            tags.set_one(keys::MUSICBRAINZ_RECORDINGID, recording.as_str());
+                            tags.set(keys::MUSICBRAINZ_RECORDINGID, recording.as_str());
                         }
                     }
                     tags
@@ -1365,11 +1365,18 @@ impl TaggerState {
             return None;
         }
         let release = lookup.release.ready()?;
-        if !release.cover_art_archive.as_ref().is_some_and(|c| c.front) {
+        let has_front = matches!(
+            release.artwork,
+            Artwork::CoverArtArchive {
+                archive: Some(CaaSummary { front: true, .. }),
+                ..
+            }
+        );
+        if !has_front {
             lookup.cover = Remote::Ready(None);
             return None;
         }
-        let release_id = release.id.clone();
+        let release_id = release.id.id.clone();
         lookup.cover = Remote::Loading;
         lookup.cover_target = CoverTarget::Matched;
         lookup.cover_request = request;
@@ -1397,7 +1404,7 @@ impl TaggerState {
             Remote::Ready(None) => return None,
             Remote::Idle | Remote::Failed(_) => {}
         }
-        let release_id = lookup.release.ready()?.id.clone();
+        let release_id = lookup.release.ready()?.id.id.clone();
         lookup.cover = Remote::Loading;
         lookup.cover_target = CoverTarget::Selection;
         lookup.cover_request = request;
@@ -1409,7 +1416,7 @@ impl TaggerState {
 
     /// A downloaded cover: it replaces the front cover of the files it was
     /// requested for.
-    pub fn finish_cover(&mut self, request: u64, result: Result<Option<EditPicture>, String>) {
+    pub fn finish_cover(&mut self, request: u64, result: Result<Option<CoverImage>, String>) {
         let Some(lookup) = &mut self.lookup else {
             return;
         };
@@ -1429,7 +1436,7 @@ impl TaggerState {
         }
     }
 
-    fn apply_cover(&mut self, picture: &EditPicture, target: CoverTarget) {
+    fn apply_cover(&mut self, picture: &CoverImage, target: CoverTarget) {
         match target {
             CoverTarget::Selection => {
                 self.edit_selection(|file| edit::set_front_cover(&mut file.edited, picture));
@@ -1541,7 +1548,7 @@ impl TaggerState {
         }
         scan.done += 1;
 
-        let mut hit: Option<(AcoustIdResult, AcoustIdHit)> = None;
+        let mut hit: Option<(LookupResult, AcoustIdHit)> = None;
         let mut fingerprint = None;
         match result.fingerprint {
             Ok(fp) => fingerprint = Some(Arc::new(fp)),
@@ -1554,7 +1561,7 @@ impl TaggerState {
                     hit = Some((
                         best.clone(),
                         AcoustIdHit {
-                            acoustid: best.id.clone(),
+                            acoustid: best.acoustid.clone(),
                             recording_ids,
                         },
                     ));
@@ -1612,7 +1619,7 @@ impl TaggerState {
             targets,
             artist: query.artist,
             album: query.album,
-            track_count: query.track_count,
+            track_count: query.tracks,
             candidates: Remote::Idle,
             chosen: Some(choice.release_id.clone()),
             release: Remote::Loading,
@@ -1647,7 +1654,7 @@ impl TaggerState {
     fn recording_id(file: &TagFile) -> Option<String> {
         file.edited
             .get(keys::MUSICBRAINZ_RECORDINGID)
-            .filter(|id| musicbrainz::is_mbid(id))
+            .filter(|id| tagcore::mb::is_mbid(id))
             .map(str::to_owned)
     }
 
@@ -1694,7 +1701,7 @@ impl TaggerState {
             };
             file.submission = SubmissionState::Pending;
             let mut tags = file.edited.clone();
-            tags.pictures.clear();
+            tags.images.clear();
             jobs.push(SubmitJob {
                 file: id,
                 path: file.path.clone(),
@@ -1727,7 +1734,7 @@ impl TaggerState {
                 file.fingerprint = Some(Arc::new(fp));
             }
             file.submission = match result.outcome {
-                Ok(status) => SubmissionState::Submitted { status },
+                Ok(()) => SubmissionState::Submitted,
                 Err(error) => SubmissionState::Failed(error),
             };
         }
@@ -1758,18 +1765,37 @@ impl TaggerState {
 mod tests {
     use super::super::file::testing::*;
     use super::*;
+    use std::time::Duration;
+    use tagcore::acoustid::{Recording, ReleaseRef};
+    use tagcore::release::{ReleaseId, Source};
+    use tagcore::settings::MetadataSettings;
+
+    fn candidate() -> ReleaseCandidate {
+        ReleaseCandidate {
+            id: ReleaseId {
+                source: Source::MusicBrainz,
+                id: "x".into(),
+            },
+            search_score: 100,
+            metadata: Metadata::new(),
+        }
+    }
+
+    fn fingerprint() -> Fingerprint {
+        Fingerprint {
+            fingerprint: "AQAA".into(),
+            duration: Duration::from_secs(200),
+        }
+    }
 
     fn loaded(path: &str, tags: &[(&str, &str)]) -> LoadedFile {
-        let mut set = TagSet::new();
+        let mut set = Metadata::new();
         for (k, v) in tags {
-            set.push(k, *v);
+            set.add(k, *v);
         }
         LoadedFile {
             path: PathBuf::from(path),
-            read: Ok(FileTags {
-                container: crate::library::tagio::Container::Flac,
-                tags: set,
-            }),
+            read: Ok((Container::Flac, set)),
             duration_secs: Some(180.0),
         }
     }
@@ -2133,10 +2159,11 @@ mod tests {
     }
 
     fn fixture_release() -> Release {
-        serde_json::from_str(include_str!(
+        let json: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/musicbrainz/release_lookup.json"
         ))
-        .unwrap()
+        .unwrap();
+        tagcore::mb::map_release(&json, &MetadataSettings::default()).unwrap()
     }
 
     fn moderat_state() -> TaggerState {
@@ -2189,7 +2216,7 @@ mod tests {
         let mut state = moderat_state();
         let first = state.begin_lookup().unwrap();
         let second = state.search_again().unwrap();
-        state.finish_search(first.request, Ok(vec![ReleaseCandidate::default()]));
+        state.finish_search(first.request, Ok(vec![candidate()]));
         assert!(state.lookup().unwrap().candidates.is_loading());
         state.finish_search(second.request, Ok(Vec::new()));
         assert!(state.lookup().unwrap().candidates.ready().is_some());
@@ -2237,8 +2264,10 @@ mod tests {
         state.finish_release(req.request, Ok(fixture_release()));
         // A second "release" that provides no label.
         let mut other = fixture_release();
-        other.label_info.clear();
-        other.title = "Other".into();
+        for track in &mut other.tracks {
+            track.metadata.remove(keys::LABEL);
+            track.metadata.set(keys::ALBUM, "Other");
+        }
         let req = state.choose_release("b").unwrap();
         state.finish_release(req.request, Ok(other));
         assert!(
@@ -2298,11 +2327,16 @@ mod tests {
         state.begin_lookup().unwrap();
         let req = state.choose_release("a").unwrap();
         let mut release = fixture_release();
-        release.cover_art_archive = Some(crate::online::musicbrainz::CoverArtArchive {
-            front: true,
-            back: false,
-            count: 1,
-        });
+        release.artwork = Artwork::CoverArtArchive {
+            release_group_id: None,
+            archive: Some(CaaSummary {
+                artwork: true,
+                front: true,
+                back: false,
+                count: 1,
+            }),
+            links: Vec::new(),
+        };
         state.finish_release(req.request, Ok(release));
         assert!(
             state.take_cover_request(false).is_none(),
@@ -2310,15 +2344,10 @@ mod tests {
         );
         let cover_req = state.take_cover_request(true).unwrap();
         assert!(state.take_cover_request(true).is_none(), "handed out once");
-        let picture = EditPicture {
-            kind: picture_type::FRONT_COVER,
-            mime: "image/png".into(),
-            description: String::new(),
-            data: vec![1, 2, 3],
-        };
+        let picture = CoverImage::new(vec![1u8, 2, 3], "image/png", ImageType::Front, "");
         state.finish_cover(cover_req.request, Ok(Some(picture.clone())));
         for file in state.files() {
-            assert_eq!(file.edited.pictures, vec![picture.clone()]);
+            assert_eq!(file.edited.images, vec![picture.clone()]);
         }
     }
 
@@ -2328,33 +2357,34 @@ mod tests {
         state.begin_lookup().unwrap();
         let req = state.choose_release("a").unwrap();
         let mut release = fixture_release();
-        release.cover_art_archive = None;
+        release.artwork = Artwork::None;
         state.finish_release(req.request, Ok(release));
         assert!(state.take_cover_request(true).is_none());
         assert!(matches!(state.lookup().unwrap().cover, Remote::Ready(None)));
     }
 
-    fn acoustid_result(score: f64, release: &str, recording: &str) -> AcoustIdResult {
-        use crate::online::acoustid::{AcoustIdRecording, AcoustIdRelease};
-        AcoustIdResult {
-            id: format!("acoustid-{recording}"),
+    fn acoustid_result(score: f32, release: &str, recording: &str) -> LookupResult {
+        let mut metadata = Metadata::new();
+        metadata.set(keys::ALBUM, "II");
+        metadata.set(keys::TOTALTRACKS, "11");
+        LookupResult {
+            acoustid: format!("acoustid-{recording}"),
             score,
-            recordings: vec![AcoustIdRecording {
+            recordings: vec![Recording {
                 id: recording.into(),
-                releases: vec![AcoustIdRelease {
+                metadata: Metadata::new(),
+                sources: 1,
+                releases: vec![ReleaseRef {
                     id: release.into(),
-                    title: "II".into(),
-                    track_count: 11,
-                    ..AcoustIdRelease::default()
+                    metadata,
                 }],
-                ..AcoustIdRecording::default()
             }],
         }
     }
 
-    fn scan_result(results: Vec<AcoustIdResult>) -> ScanFileResult {
+    fn scan_result(results: Vec<LookupResult>) -> ScanFileResult {
         ScanFileResult {
-            fingerprint: Ok(Fingerprint::from_raw(200, vec![1, 2, 3])),
+            fingerprint: Ok(fingerprint()),
             lookup: Some(Ok(results)),
         }
     }
@@ -2478,17 +2508,12 @@ mod tests {
             start.generation,
             vec![SubmitResult {
                 file: ids[0],
-                fingerprint: Some(Fingerprint::from_raw(200, vec![1])),
-                outcome: Ok("pending".into()),
+                fingerprint: Some(fingerprint()),
+                outcome: Ok(()),
             }],
         );
         let file = state.file(ids[0]).unwrap();
-        assert_eq!(
-            file.submission,
-            SubmissionState::Submitted {
-                status: "pending".into()
-            }
-        );
+        assert_eq!(file.submission, SubmissionState::Submitted);
         assert!(
             file.fingerprint.is_some(),
             "a fingerprint computed for the submission is kept"
@@ -2515,14 +2540,14 @@ mod tests {
 
     #[test]
     fn library_album_keys_follow_the_scanners_artist_fallback() {
-        let mut tags = TagSet::new();
-        tags.set_one(keys::ALBUM, "Mix");
-        tags.set_one(keys::ARTIST, "Solo");
+        let mut tags = Metadata::new();
+        tags.set(keys::ALBUM, "Mix");
+        tags.set(keys::ARTIST, "Solo");
         assert_eq!(library_album_key(&tags), CoverArt::album_key("Solo", "Mix"));
-        tags.set_one(keys::ALBUMARTIST, "Band");
+        tags.set(keys::ALBUMARTIST, "Band");
         assert_eq!(library_album_key(&tags), CoverArt::album_key("Band", "Mix"));
         tags.remove(keys::ALBUMARTIST);
-        tags.set_one(keys::COMPILATION, "1");
+        tags.set(keys::COMPILATION, "1");
         assert_eq!(
             library_album_key(&tags),
             CoverArt::album_key("Various Artists", "Mix")

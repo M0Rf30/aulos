@@ -20,14 +20,15 @@
 //! depth before it's actually heard.
 
 use crate::player::backend::PlayerError;
-use crate::player::engine::conversion::{self, SampleBuffer};
 use crate::player::engine::cpal_utils::CpalDeviceConfig;
-use crate::player::engine::fade::{FadeControl, FadeRamp};
-use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
+use crate::player::engine::sample_buffer::SampleBuffer;
 #[cfg(feature = "visualizer")]
 use crate::player::pcm::PcmBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use playcore::convert as conversion;
+use playcore::fade::{FadeControl, FadeRamp};
+use playcore::resample::{ResamplerQuality, StreamResampler};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};

@@ -3,10 +3,11 @@
 
 //! One file loaded into the tag editor.
 
-use crate::library::fingerprint::Fingerprint;
-use crate::library::tagio::{Container, FileTags, TagSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tagcore::file::Container;
+use tagcore::fingerprint::Fingerprint;
+use tagcore::{Metadata, keys};
 
 /// Identity of a loaded file inside one editor session. Never reused, so a
 /// late async result for a removed file can't land on another one.
@@ -32,9 +33,7 @@ pub enum FileStatus {
 /// The release track a file was matched to by the last applied release.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackAssignment {
-    /// Index into the release's media.
-    pub medium: usize,
-    /// Index into that medium's tracks.
+    /// Index into the release's tracks.
     pub track: usize,
     /// Match similarity in `0.0..=1.0` (1.0 for an identified recording).
     pub score: f32,
@@ -58,11 +57,8 @@ pub enum SubmissionState {
     NotSubmitted,
     /// Being fingerprinted / sent.
     Pending,
-    /// AcoustID accepted it; `status` is its processing state
-    /// (`pending` / `imported`).
-    Submitted {
-        status: String,
-    },
+    /// AcoustID accepted it.
+    Submitted,
     Failed(String),
 }
 
@@ -74,9 +70,9 @@ pub struct TagFile {
     /// `None` when the file could not be read.
     pub container: Option<Container>,
     /// The tags as they are on disk.
-    pub original: TagSet,
+    pub original: Metadata,
     /// The tags being built; written on save.
-    pub edited: TagSet,
+    pub edited: Metadata,
     pub duration_secs: Option<f64>,
     pub status: FileStatus,
     /// Why the file could not be read; such files are listed read-only.
@@ -99,7 +95,7 @@ impl TagFile {
             .and_then(|hit| hit.recording_ids.first().cloned())
             .or_else(|| {
                 self.edited
-                    .get(crate::library::tagio::keys::MUSICBRAINZ_RECORDINGID)
+                    .get(keys::MUSICBRAINZ_RECORDINGID)
                     .map(str::to_owned)
             })
     }
@@ -109,12 +105,12 @@ impl TagFile {
     pub fn new(
         id: FileId,
         path: PathBuf,
-        read: Result<FileTags, String>,
+        read: Result<(Container, Metadata), String>,
         duration_secs: Option<f64>,
     ) -> Self {
         let (container, original, read_error) = match read {
-            Ok(FileTags { container, tags }) => (Some(container), tags, None),
-            Err(error) => (None, TagSet::new(), Some(error)),
+            Ok((container, tags)) => (Some(container), tags, None),
+            Err(error) => (None, Metadata::new(), Some(error)),
         };
         Self {
             id,
@@ -195,21 +191,17 @@ impl TagFile {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::library::tagio::keys;
 
     /// A writable (FLAC) file with the given tags.
     pub fn file(id: FileId, tags: &[(&str, &str)]) -> TagFile {
-        let mut set = TagSet::new();
+        let mut set = Metadata::new();
         for (key, value) in tags {
-            set.push(key, *value);
+            set.add(key, *value);
         }
         TagFile::new(
             id,
             PathBuf::from(format!("/music/{id:02}.flac")),
-            Ok(FileTags {
-                container: Container::Flac,
-                tags: set,
-            }),
+            Ok((Container::Flac, set)),
             Some(200.0),
         )
     }
@@ -233,7 +225,6 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
-    use crate::library::tagio::keys;
 
     #[test]
     fn unreadable_files_are_read_only_and_empty() {
@@ -252,10 +243,10 @@ mod tests {
     fn status_follows_the_edits() {
         let mut f = file(1, &[(keys::TITLE, "A")]);
         assert_eq!(f.status, FileStatus::Unchanged);
-        f.edited.set_one(keys::TITLE, "B");
+        f.edited.set(keys::TITLE, "B");
         f.refresh_status();
         assert_eq!(f.status, FileStatus::Modified);
-        f.edited.set_one(keys::TITLE, "A");
+        f.edited.set(keys::TITLE, "A");
         f.refresh_status();
         assert_eq!(f.status, FileStatus::Unchanged);
     }
@@ -263,7 +254,7 @@ mod tests {
     #[test]
     fn saving_files_keep_their_status() {
         let mut f = file(1, &[(keys::TITLE, "A")]);
-        f.edited.set_one(keys::TITLE, "B");
+        f.edited.set(keys::TITLE, "B");
         f.status = FileStatus::Saving;
         f.refresh_status();
         assert_eq!(f.status, FileStatus::Saving);

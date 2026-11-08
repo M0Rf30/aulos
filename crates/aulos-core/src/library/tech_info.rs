@@ -19,7 +19,7 @@ use symphonia::core::meta::{MetadataOptions, StandardTag, Tag as SymTag};
 
 use super::sparse::PositionalRead;
 use super::{Track, tags};
-use crate::player::engine::decoder::local_file_format_options;
+use playcore::format::local_file_format_options;
 
 mod layout;
 
@@ -342,7 +342,7 @@ pub fn probe(path: &Path) -> Result<TechInfo, String> {
         hint.with_extension(ext);
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut reader = crate::player::engine::format_registry::probe()
+    let mut reader = playcore::format::probe()
         .probe(
             &hint,
             mss,

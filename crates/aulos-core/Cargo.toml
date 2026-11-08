@@ -32,20 +32,16 @@ bytes = "1"
 # out of core) that rodio 0.22 doesn't compile against. Depending on the
 # fork directly (not via `[patch.crates-io]`) sidesteps that conflict
 # entirely, matching the working approach in the sibling `rmpd` project.
-symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "85aa84935574412f6e8a14e502138271ce634f4d", features = [
+symphonia = { git = "https://github.com/M0Rf30/Symphonia", branch = "rmpd-next", features = [
     "all",
     "dsd",
 ] }
-# Tag writing for the built-in tag editor (`src/library/tagio`): the fork's
-# `symphonia-tagging` crate (branch `rmpd-next`) shares its field mapping
-# tables with the readers, so what is written is read back identically. Same
-# rev as `symphonia`, so there is one `symphonia-core` in the graph.
-symphonia-tagging = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "85aa84935574412f6e8a14e502138271ce634f4d" }
-# Pure-Rust Chromaprint port: AcoustID fingerprints for the tag editor's
-# acoustic lookup/submission (`src/library/fingerprint.rs`).
-rusty-chromaprint = "0.3"
-rubato = "5.0"
-audioadapter-buffers = "5.2"
+# Shared tagging core (tag I/O, MusicBrainz, AcoustID, matching, fingerprints), also
+# used by Picardy. Its HTTP transport is installed by `online::transport`.
+tagcore.workspace = true
+# Shared playback core (decoder, DSD/DoP, resampler, fades, filters, format
+# registry), also used by rmpd.
+playcore.workspace = true
 # Internal-only locks in the playback engine (e.g. the gapless/crossfade
 # look-ahead slot) that are always locked and immediately unwrapped, never
 # held across an `.await` — parking_lot's non-poisoning guards are the
