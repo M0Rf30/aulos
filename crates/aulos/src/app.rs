@@ -244,6 +244,8 @@ pub struct App {
     saved_size: Option<egui::Vec2>,
     pub smoke: Option<Smoke>,
     tray: TrayState,
+    /// The "stop after current song" state last pushed to the tray menu.
+    tray_stop_after: bool,
     /// The window is hidden to the tray.
     window_hidden: bool,
     /// Whether the window was minimized in the previous frame (hiding on
@@ -379,6 +381,7 @@ impl App {
             saved_size: None,
             smoke: Smoke::from_env(),
             tray: TrayState::Off,
+            tray_stop_after: false,
             window_hidden: false,
             was_minimized: false,
             quitting: false,
@@ -630,6 +633,7 @@ impl App {
         if std::mem::take(&mut self.streams_dirty) {
             self.sync_streams();
         }
+        self.sync_tray_stop_after();
     }
 
     /// Starts the background streams whose key appeared and stops those
@@ -943,6 +947,8 @@ impl App {
             AppEvent::TrayStarted(Ok(icon)) => {
                 icon.set_window_visible(&self.handle, !self.window_hidden);
                 self.tray = TrayState::Active { icon, online: true };
+                // The new menu starts unchecked; the next pump pushes the flag.
+                self.tray_stop_after = false;
             }
             AppEvent::TrayStarted(Err(error)) => {
                 tracing::warn!("system tray unavailable, closing quits as usual: {error}");
@@ -1074,6 +1080,23 @@ impl App {
             TrayCommand::PlayPause => self.media_command(MprisCommand::PlayPause),
             TrayCommand::Next => self.media_command(MprisCommand::Next),
             TrayCommand::Previous => self.media_command(MprisCommand::Previous),
+            TrayCommand::StopAfter => {
+                let effect = self.session.toggle_stop_after();
+                self.run(effect);
+                self.sync_tray_stop_after();
+            }
+        }
+    }
+
+    /// Keeps the tray menu's "Stop after current song" checkmark in step
+    /// with the player (it clears itself when the track ends).
+    fn sync_tray_stop_after(&mut self) {
+        let on = aulos_core::player::party::stop_after_flag();
+        if on != self.tray_stop_after
+            && let TrayState::Active { icon, .. } = &self.tray
+        {
+            icon.set_stop_after(&self.handle, on);
+            self.tray_stop_after = on;
         }
     }
 

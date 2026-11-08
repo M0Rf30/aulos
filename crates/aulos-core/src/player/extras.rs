@@ -80,11 +80,10 @@ impl Default for PlaybackExtrasState {
     }
 }
 
-/// Toggles "stop after the current track" on the local backend.
+/// Toggles "stop after the current track". Works on every backend: the
+/// player's own queue ends the track (MPD only ever holds the one song
+/// Aulos sent it).
 pub fn toggle_stop_after(player: &mut Player) {
-    if player.active_backend_type() != ActiveBackend::Local {
-        return;
-    }
     let on = !player.stop_after_current();
     // Arming only makes sense while something is playing;
     // disarming is always allowed.

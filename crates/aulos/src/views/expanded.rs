@@ -804,9 +804,12 @@ fn left_column(app: &mut App, ui: &mut Ui, col: Rect, track: &Track) {
                 .show(ui)
         })
         .inner;
-    if let Some(action) =
-        super::menus::track_menu_click(&more_resp, track, &app.session.playlists.playlists)
-    {
+    if let Some(action) = super::menus::now_playing_menu_click(
+        &more_resp,
+        track,
+        &app.session.playlists.playlists,
+        aulos_core::player::party::stop_after_flag(),
+    ) {
         super::menus::apply(app, action);
     }
     let hresp = ui.interact(heart, ui.id().with("expanded-heart"), Sense::click());

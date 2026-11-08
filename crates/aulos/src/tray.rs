@@ -25,6 +25,8 @@ pub enum TrayCommand {
     PlayPause,
     Next,
     Previous,
+    /// Stop once the current song ends (toggles).
+    StopAfter,
     /// Quit for real, whatever the close setting says.
     Quit,
 }
@@ -45,7 +47,7 @@ pub enum TrayEvent {
 mod imp {
     use super::{Spawner, TrayCommand, TrayEvent};
     use aulos_core::fl;
-    use ksni::menu::StandardItem;
+    use ksni::menu::{CheckmarkItem, StandardItem};
     use ksni::{Icon, MenuItem, OfflineReason, Tray, TrayMethods};
     use std::sync::Arc;
 
@@ -56,6 +58,8 @@ mod imp {
         /// The window is shown (not hidden to the tray): picks the label of
         /// the Show/Hide entry.
         window_visible: bool,
+        /// Playback is set to stop after the current song: the checkmark.
+        stop_after: bool,
         icon: Vec<Icon>,
     }
 
@@ -111,6 +115,13 @@ mod imp {
                     "media-skip-backward",
                     TrayCommand::Previous,
                 ),
+                CheckmarkItem {
+                    label: fl!("tray-stop-after"),
+                    checked: self.stop_after,
+                    activate: Box::new(|tray: &mut Self| tray.send(TrayCommand::StopAfter)),
+                    ..Default::default()
+                }
+                .into(),
                 MenuItem::Separator,
                 item(fl!("tray-quit"), "application-exit", TrayCommand::Quit),
             ]
@@ -152,6 +163,7 @@ mod imp {
             let tray = AulosTray {
                 notify,
                 window_visible: true,
+                stop_after: false,
                 icon: icon_pixmap(),
             };
             // Inside a Flatpak the well-known bus name cannot be owned.
@@ -167,6 +179,13 @@ mod imp {
             let handle = self.0.clone();
             spawner.spawn(async move {
                 handle.update(|tray| tray.window_visible = visible).await;
+            });
+        }
+
+        pub fn set_stop_after(&self, spawner: &Spawner, on: bool) {
+            let handle = self.0.clone();
+            spawner.spawn(async move {
+                handle.update(|tray| tray.stop_after = on).await;
             });
         }
 
@@ -196,6 +215,8 @@ mod imp {
 
         pub fn set_window_visible(&self, _spawner: &Spawner, _visible: bool) {}
 
+        pub fn set_stop_after(&self, _spawner: &Spawner, _on: bool) {}
+
         pub fn is_closed(&self) -> bool {
             true
         }
@@ -222,6 +243,11 @@ impl TrayIcon {
     /// or hidden ("Show").
     pub fn set_window_visible(&self, spawner: &Spawner, visible: bool) {
         self.0.set_window_visible(spawner, visible);
+    }
+
+    /// Tells the menu whether "Stop after current song" is armed (checked).
+    pub fn set_stop_after(&self, spawner: &Spawner, on: bool) {
+        self.0.set_stop_after(spawner, on);
     }
 
     /// The tray service stopped by itself.

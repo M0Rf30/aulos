@@ -72,6 +72,8 @@ pub enum MenuAction {
         tracks: Vec<Track>,
         action: TagAction,
     },
+    /// Arm or disarm "stop after the current song" (the playing track's menu).
+    ToggleStopAfter,
 }
 
 /// Trailing content of a menu row.
@@ -104,7 +106,7 @@ pub fn track_menu(
     track: &Track,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
-    track_menu_with(response, track, playlists, false)
+    track_menu_with(response, track, playlists, false, None)
 }
 
 /// track_menu opened by a click on `response` (the "…" trigger).
@@ -113,7 +115,19 @@ pub fn track_menu_click(
     track: &Track,
     playlists: &[Playlist],
 ) -> Option<MenuAction> {
-    track_menu_with(response, track, playlists, true)
+    track_menu_with(response, track, playlists, true, None)
+}
+
+/// The menu of the track that is playing, opened by a click on the "…"
+/// trigger `response`: the track menu plus a "Stop after current song"
+/// row, checked while `stop_after` is armed.
+pub fn now_playing_menu_click(
+    response: &Response,
+    track: &Track,
+    playlists: &[Playlist],
+    stop_after: bool,
+) -> Option<MenuAction> {
+    track_menu_with(response, track, playlists, true, Some(stop_after))
 }
 
 fn track_menu_with(
@@ -121,6 +135,7 @@ fn track_menu_with(
     track: &Track,
     playlists: &[Playlist],
     click: bool,
+    stop_after: Option<bool>,
 ) -> Option<MenuAction> {
     show_menu(
         response,
@@ -142,6 +157,21 @@ fn track_menu_with(
             tail: &|ui: &mut Ui, pal: Palette| {
                 separator(ui, pal);
                 let mut out = None;
+                if let Some(armed) = stop_after
+                    && menu_item(
+                        ui,
+                        if armed {
+                            regular::CHECK_CIRCLE
+                        } else {
+                            regular::STOP_CIRCLE
+                        },
+                        &aulos_core::fl!("menu-stop-after"),
+                        Trailing::None,
+                    )
+                    .clicked()
+                {
+                    out = Some(MenuAction::ToggleStopAfter);
+                }
                 if menu_item(
                     ui,
                     regular::MICROPHONE,
@@ -629,6 +659,10 @@ fn pointer_in(ctx: &Context, rect: Rect) -> bool {
 /// actions go through the session, and dialogs open as overlays.
 pub fn apply(app: &mut App, action: MenuAction) {
     match action {
+        MenuAction::ToggleStopAfter => {
+            let effect = app.session.toggle_stop_after();
+            app.run(effect);
+        }
         MenuAction::PlayTracks(tracks) => {
             let update = app.session.play_tracks(tracks, 0);
             app.run(update);

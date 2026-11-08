@@ -1073,10 +1073,22 @@ impl Session {
 
     // -- Extras: stop-after, party, auto-play, inhibit, notifications ---
 
-    /// Toggles "stop after the current track".
-    pub fn toggle_stop_after(&mut self) {
-        if let Some(player) = &mut self.playback.player {
-            toggle_stop_after(player);
+    /// Toggles "stop after the current track". On MPD the same request is
+    /// mirrored to the server as `single oneshot` (cleared again when
+    /// disarmed), so a server queue holding more than the one song Aulos
+    /// sent also stops after the current song.
+    pub fn toggle_stop_after(&mut self) -> Effect<PlaybackEvent> {
+        let Some(player) = &mut self.playback.player else {
+            return Effect::none();
+        };
+        toggle_stop_after(player);
+        if player.active_backend_type() != ActiveBackend::Mpd {
+            return Effect::none();
+        }
+        let armed = player.stop_after_current();
+        match self.active_mpd_provider() {
+            Some(provider) => mpd::set_single_oneshot(provider, armed),
+            None => Effect::none(),
         }
     }
 

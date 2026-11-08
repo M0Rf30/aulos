@@ -119,6 +119,25 @@ mod native {
         })
     }
 
+    /// `single oneshot` (stop after the current song), or `single 0`.
+    pub(in crate::session) fn set_single_oneshot(
+        provider: Provider,
+        oneshot: bool,
+    ) -> Effect<PlaybackEvent> {
+        use mpd_client::commands::SingleMode;
+        let mode = if oneshot {
+            SingleMode::Oneshot
+        } else {
+            SingleMode::Disabled
+        };
+        command(async move {
+            provider
+                .send_single(mode)
+                .await
+                .map_err(|e| format!("single: {e}"))
+        })
+    }
+
     pub(in crate::session) fn set_replay_gain_mode(
         provider: Provider,
         mode: ReplayGainMode,
@@ -170,6 +189,13 @@ mod web {
     pub(in crate::session) fn set_crossfade(
         provider: Provider,
         _seconds: u64,
+    ) -> Effect<PlaybackEvent> {
+        match provider {}
+    }
+
+    pub(in crate::session) fn set_single_oneshot(
+        provider: Provider,
+        _oneshot: bool,
     ) -> Effect<PlaybackEvent> {
         match provider {}
     }

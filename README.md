@@ -71,7 +71,7 @@ The engine uses [Symphonia](https://github.com/pdeljanov/Symphonia) (a DSD-capab
 - **DSD**: sent bit-exact as DoP (DSD over PCM) to DACs that support it, otherwise converted to PCM.
 - **Gapless** playback and **crossfade** with an adjustable length.
 - **Fade in/out** on play, pause, stop and skip, with an adjustable length (off by default). Not applied to DSD played as DoP, which stays bit-exact.
-- **Stop after this track**, **party mode** (endless random playback, optionally limited to chosen genres) and **auto-play** when the queue ends: random albums, or albums by the same artist, genre and era from your library.
+- **Stop after this track** (from the tray menu or the now-playing "…" menu; on MPD it also sends `single oneshot`), **party mode** (endless random playback, optionally limited to chosen genres) and **auto-play** when the queue ends: random albums, or albums by the same artist, genre and era from your library.
 - **ReplayGain**: Off, Track, Album or Auto mode, read from file tags.
 - **10-band equalizer** with a preamp, built-in and user presets, and headphone correction profiles from [AutoEq](https://github.com/jaakkopasanen/AutoEq).
 - Automatic **resampling** when the output device doesn't support a file's sample rate.
@@ -113,7 +113,7 @@ English, Italian, German, French, Spanish and Brazilian Portuguese. The interfac
 
 - **Media keys and now playing**: MPRIS on Linux, System Media Transport Controls on Windows, Now Playing on macOS, including cover art and seeking.
 - **Notifications** with cover art on track change, only while the window isn't focused.
-- **System tray** (Linux): optional "close to tray" and "minimize to tray", with a StatusNotifierItem icon (Show/Hide, Play/Pause, Next, Previous, Quit). Needs a desktop with tray support; works on Wayland and X11 (the window is closed while the player keeps running, and reopened from the tray). Wayland does not report minimizing to apps, so "minimize to tray" only works on X11 there.
+- **System tray** (Linux): optional "close to tray" and "minimize to tray", with a StatusNotifierItem icon (Show/Hide, Play/Pause, Next, Previous, Stop after current song, Quit). Needs a desktop with tray support; works on Wayland and X11 (the window is closed while the player keeps running, and reopened from the tray). Wayland does not report minimizing to apps, so "minimize to tray" only works on X11 there.
 - **Sleep inhibit** while music plays: through the desktop portal on Linux (falling back to systemd-logind), natively on Windows and macOS.
 
 ### Visualizer
