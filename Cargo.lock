@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "aulos"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "android-activity",
  "aulos-core",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "aulos-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "apple-native-keyring-store",
  "ashpd",
