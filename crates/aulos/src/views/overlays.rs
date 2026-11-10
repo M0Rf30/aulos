@@ -37,7 +37,8 @@ struct AuthDraft {
     password: String,
 }
 
-type SubmitFn = Box<dyn FnOnce(&mut App, String)>;
+// `Send`: the host's watchdog may run the App off the UI thread.
+type SubmitFn = Box<dyn FnOnce(&mut App, String) + Send>;
 
 struct Prompt {
     title: String,
@@ -121,7 +122,7 @@ pub fn prompt(
     label: &str,
     hint: &str,
     submit: &str,
-    on_submit: impl FnOnce(&mut App, String) + 'static,
+    on_submit: impl FnOnce(&mut App, String) + Send + 'static,
 ) {
     app.views.overlays.prompt = Some(Prompt {
         title: title.to_owned(),

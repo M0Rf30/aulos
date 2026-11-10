@@ -218,6 +218,10 @@ pub struct App {
     /// not been queued for saving yet (see [`Self::track_window_geometry`]).
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     window_changed_at: Option<f64>,
+    /// Desktop: when the last UI frame ran; the host's watchdog pumps in
+    /// the UI's place once it stalls (see `frames_stalled`).
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    last_frame: std::time::Instant,
     art_pending: Option<String>,
     art_done: Option<String>,
     /// Blurred backdrop of the current cover (expanded and mini views).
@@ -360,6 +364,8 @@ impl App {
             zoom_base: std::env::var_os("AULOS_SMOKE").is_none().then_some(1.0),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             window_changed_at: None,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            last_frame: std::time::Instant::now(),
             art_pending: None,
             art_done: None,
             backdrop: None,
@@ -621,8 +627,8 @@ impl App {
 
     /// The part of a frame that needs no window: feeds the queued session and
     /// app events to the session and keeps the background streams in step.
-    /// The headless loop runs it alone while the window is closed to the tray.
-    fn pump_events(&mut self) {
+    /// The headless loop and the host's watchdog run it when no frame does.
+    pub fn pump_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             let update = self.session.apply_session_event(event);
             self.run(update);
@@ -1410,6 +1416,12 @@ impl App {
         self.window_hidden && !self.quitting
     }
 
+    /// Whether no UI frame has run for `limit`, so the watchdog pumps for it.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn frames_stalled(&self, limit: std::time::Duration) -> bool {
+        self.last_frame.elapsed() >= limit
+    }
+
     /// Applies `ui_scale` on top of the density base, capped so the layout
     /// never gets narrower than [`theme::size::MIN_WIDTH`] logical points (a
     /// 200% zoom on a phone would otherwise leave ~190pt).
@@ -1659,6 +1671,10 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            self.last_frame = std::time::Instant::now();
+        }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         self.session.set_window_focused(focused);
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
