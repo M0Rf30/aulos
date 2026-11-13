@@ -705,9 +705,25 @@ impl PlaybackEngine {
         let ctx = self.context();
         self.fade.request_fade_in();
 
-        self.thread = Some(thread::spawn(move || {
-            playback_thread_main(start, replay_gain_db, rx, ctx, prev);
-        }));
+        // Named explicitly: an unnamed thread inherits the comm name of
+        // whichever thread called `play`, which makes thread listings ambiguous.
+        let spawned = thread::Builder::new()
+            .name("aulos-playback".into())
+            .spawn(move || {
+                playback_thread_main(start, replay_gain_db, rx, ctx, prev);
+            });
+        self.thread = Some(match spawned {
+            Ok(handle) => handle,
+            Err(e) => {
+                // The retiring threads were already signalled to exit; undo
+                // `reset_for_play` as in the decoder-open failure above.
+                self.run_state.store(RUN_STOPPED, Ordering::Release);
+                self.status.reset_for_stop();
+                return Err(PlayerError(format!(
+                    "cannot spawn the playback thread: {e}"
+                )));
+            }
+        });
         self.run_state.store(RUN_PLAYING, Ordering::Release);
         Ok(())
     }
