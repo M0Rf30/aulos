@@ -1108,6 +1108,7 @@ fn run_dsd(
                     ctx.status
                         .position_nanos
                         .store(pos.as_nanos() as u64, Ordering::Release);
+                    output.flush();
                 }
                 Err(e) => tracing::error!("seek failed (DSD): {e}"),
             }
@@ -1277,6 +1278,11 @@ impl PcmSink {
         tracing::error!("{DEVICE_LOST_MESSAGE}; stopping playback");
         ctx.report_failure(DEVICE_LOST_MESSAGE);
         true
+    }
+
+    /// Discard the buffered output audio so a seek is audible at once.
+    fn flush(&self) {
+        self.output.flush();
     }
 
     /// Apply ReplayGain, then EQ/volume/tap/write via [`Self::finish`].
@@ -1493,13 +1499,15 @@ fn run_pcm(
         }
 
         if let Ok(EngineCommand::Seek(pos)) = command_rx.try_recv() {
-            apply_seek(
+            if apply_seek(
                 &mut decoder,
                 pos,
                 samples_per_second,
                 &mut total_samples,
                 ctx,
-            );
+            ) {
+                sink.flush();
+            }
             sink.eq.reset_states();
         }
 
@@ -1769,7 +1777,9 @@ fn run_crossfade(
         if let Ok(EngineCommand::Seek(pos)) = command_rx.try_recv() {
             // Also moves the caller's `total_samples`, which it keeps using
             // after the blend is abandoned.
-            apply_seek(decoder, pos, samples_per_second, total_samples, ctx);
+            if apply_seek(decoder, pos, samples_per_second, total_samples, ctx) {
+                sink.flush();
+            }
             sink.eq.reset_states();
             requeue_next(next_decoder, next_gain, ctx);
             return CrossfadeOutcome::Abandoned {
@@ -1887,21 +1897,27 @@ fn requeue_next(mut next_decoder: SymphoniaDecoder, next_gain: f32, ctx: &Thread
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Seek the decoder and move the reported position; `false` (and no position
+/// change) when the decoder cannot seek, so callers keep the buffered audio.
 fn apply_seek(
     decoder: &mut SymphoniaDecoder,
     position: Duration,
     samples_per_second: u64,
     total_samples: &mut u64,
     ctx: &ThreadContext,
-) {
+) -> bool {
     match decoder.seek(position.as_secs_f64()) {
         Ok(()) => {
             *total_samples = (position.as_secs_f64() * samples_per_second as f64).round() as u64;
             ctx.status
                 .position_nanos
                 .store(position.as_nanos() as u64, Ordering::Release);
+            true
         }
-        Err(e) => tracing::error!("seek failed: {e}"),
+        Err(e) => {
+            tracing::error!("seek failed: {e}");
+            false
+        }
     }
 }
 

@@ -18,7 +18,7 @@ use crate::player::engine::sample_buffer::SampleBuffer;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::Duration;
 use web_time::Instant;
@@ -88,6 +88,8 @@ pub struct DopOutput {
     /// Raised by the cpal error callback on a fatal stream error (device
     /// unplugged or invalidated); see [`Self::device_failed`].
     device_failed: Arc<AtomicBool>,
+    /// Seek generation shared with the callback (see [`Self::flush`]).
+    flush_gen: Arc<AtomicU64>,
 }
 
 impl DopOutput {
@@ -101,6 +103,12 @@ impl DopOutput {
     /// ends playback at once instead of looping on dropped writes.
     pub fn device_failed(&self) -> bool {
         self.device_failed.load(Ordering::Acquire)
+    }
+
+    /// Discard the DoP frames queued for the device (a seek); see
+    /// `CpalOutput::flush`. The DAC re-locks its DoP sync on the new frames.
+    pub fn flush(&self) {
+        self.flush_gen.fetch_add(1, Ordering::Release);
     }
 
     pub fn new(sample_rate: u32, channels: u8) -> Result<Self> {
@@ -119,6 +127,7 @@ impl DopOutput {
             is_paused: false,
             stop_flag: None,
             device_failed: Arc::new(AtomicBool::new(false)),
+            flush_gen: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -140,11 +149,12 @@ impl DopOutput {
 
         let stream = match sample_format {
             SampleFormat::I32 | SampleFormat::I24 => {
-                let mut buf = SampleBuffer::new(rx);
+                let mut buf = SampleBuffer::new(rx, self.flush_gen.clone());
                 self.device
                     .build_output_stream(
                         self.config,
                         move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                            buf.poll_flush();
                             for sample in data.iter_mut() {
                                 *sample = buf.next_sample();
                             }
@@ -156,11 +166,12 @@ impl DopOutput {
             }
             _ => {
                 tracing::warn!("no I32 format available, using fallback conversion");
-                let mut buf = SampleBuffer::new(rx);
+                let mut buf = SampleBuffer::new(rx, self.flush_gen.clone());
                 self.device
                     .build_output_stream(
                         self.config,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                            buf.poll_flush();
                             for sample in data.iter_mut() {
                                 let val = buf.next_sample();
                                 *sample = (val as f32) / 2147483648.0;
