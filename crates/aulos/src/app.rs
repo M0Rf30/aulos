@@ -1416,6 +1416,13 @@ impl App {
         self.window_hidden && !self.quitting
     }
 
+    /// Whether a quit is pending: the watchdog finishes it when no frame
+    /// comes to carry the window's close request (see `host.rs`).
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn is_quitting(&self) -> bool {
+        self.quitting
+    }
+
     /// Whether no UI frame has run for `limit`, so the watchdog pumps for it.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     pub fn frames_stalled(&self, limit: std::time::Duration) -> bool {

@@ -16,7 +16,9 @@
 //! and winit defers every requested repaint to the next callback, so the frame-driven pump
 //! can stall while the window is open: queued events (media keys, tray commands, playback ticks)
 //! then wait until the window is visible again. The [`Watchdog`] runs the same pump ([`App::pump_events`])
-//! on a timer whenever no frame comes.
+//! on a timer whenever no frame comes. A quit needs frames too (the window's close request
+//! rides them), so the watchdog also finishes a pending quit itself instead of letting it
+//! wait for a callback that may never come.
 
 use crate::app::{App, Hidden};
 use crate::smoke;
@@ -106,6 +108,10 @@ impl Watchdog {
                     // A window closed to the tray is the headless loop's.
                     if !app.is_hidden() && app.frames_stalled(FRAME_STALL) {
                         app.pump_events();
+                        if app.is_quitting() {
+                            app.on_exit();
+                            std::process::exit(0);
+                        }
                     }
                 }
             });
