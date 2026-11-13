@@ -9,7 +9,6 @@
 //! every UI frame.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use super::Album;
 use super::compilations::decade_of;
@@ -101,8 +100,9 @@ pub fn genres_present(albums: &[Arc<Album>]) -> Vec<String> {
     genres
 }
 
-/// `(visible positions, decades present, genres present)`.
-pub type FilterView = (Rc<Vec<usize>>, Rc<Vec<u32>>, Rc<Vec<String>>);
+/// `(visible positions, decades present, genres present)` — `Arc`, not `Rc`,
+/// so the session stays `Send` for the desktop host's watchdog.
+pub type FilterView = (Arc<Vec<usize>>, Arc<Vec<u32>>, Arc<Vec<String>>);
 
 /// Memoized derived data of the Albums page: positions of the albums that
 /// pass the chip filters, and the decades and genres present.
@@ -121,9 +121,9 @@ pub struct AlbumFilterCache {
 #[derive(Debug, Default)]
 struct CacheEntry {
     key: Option<(u64, AlbumFilter, usize)>,
-    visible: Rc<Vec<usize>>,
-    decades: Rc<Vec<u32>>,
-    genres: Rc<Vec<String>>,
+    visible: Arc<Vec<usize>>,
+    decades: Arc<Vec<u32>>,
+    genres: Arc<Vec<String>>,
     /// Number of recomputations (for tests).
     computed: usize,
 }
@@ -140,16 +140,16 @@ impl AlbumFilterCache {
         let key = (epoch, filter.clone(), albums.len());
         let mut entry = self.inner.borrow_mut();
         if self.stale.replace(false) || entry.key.as_ref() != Some(&key) {
-            entry.visible = Rc::new(filter.visible_indices(albums));
-            entry.decades = Rc::new(decades_present(albums));
-            entry.genres = Rc::new(genres_present(albums));
+            entry.visible = Arc::new(filter.visible_indices(albums));
+            entry.decades = Arc::new(decades_present(albums));
+            entry.genres = Arc::new(genres_present(albums));
             entry.key = Some(key);
             entry.computed += 1;
         }
         (
-            Rc::clone(&entry.visible),
-            Rc::clone(&entry.decades),
-            Rc::clone(&entry.genres),
+            Arc::clone(&entry.visible),
+            Arc::clone(&entry.decades),
+            Arc::clone(&entry.genres),
         )
     }
 }

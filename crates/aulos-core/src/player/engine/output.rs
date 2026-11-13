@@ -30,7 +30,7 @@ use playcore::convert as conversion;
 use playcore::fade::{FadeControl, FadeRamp};
 use playcore::resample::{ResamplerQuality, StreamResampler};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::Duration;
 
@@ -293,6 +293,8 @@ pub struct CpalOutput {
     viz_tap: Option<VizTapSlot>,
     /// Fade ramp control shared with the engine (see [`Self::set_fade`]).
     fade: Option<Arc<FadeControl>>,
+    /// Seek generation shared with the callback (see [`Self::flush`]).
+    flush_gen: Arc<AtomicU64>,
 }
 
 impl CpalOutput {
@@ -371,6 +373,7 @@ impl CpalOutput {
             #[cfg(feature = "visualizer")]
             viz_tap: None,
             fade: None,
+            flush_gen: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -490,7 +493,7 @@ impl CpalOutput {
 
         let stream = match sample_format {
             SampleFormat::F32 => {
-                let mut buf = SampleBuffer::new(rx);
+                let mut buf = SampleBuffer::new(rx, self.flush_gen.clone());
                 let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
@@ -501,6 +504,7 @@ impl CpalOutput {
                         self.config,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                             ramp.begin();
+                            buf.poll_flush();
                             for sample in data.iter_mut() {
                                 *sample = buf.next_sample() * ramp.next_gain();
                             }
@@ -518,7 +522,7 @@ impl CpalOutput {
                     .map_err(|e| PlayerError(format!("Failed to build F32 stream: {e}")))?
             }
             SampleFormat::I16 => {
-                let mut buf = SampleBuffer::new(rx);
+                let mut buf = SampleBuffer::new(rx, self.flush_gen.clone());
                 let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
@@ -536,6 +540,7 @@ impl CpalOutput {
                         self.config,
                         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                             ramp.begin();
+                            buf.poll_flush();
                             #[cfg(feature = "visualizer")]
                             if viz_scratch.len() < data.len() {
                                 viz_scratch.resize(data.len(), 0.0);
@@ -559,7 +564,7 @@ impl CpalOutput {
                     .map_err(|e| PlayerError(format!("Failed to build I16 stream: {e}")))?
             }
             SampleFormat::I32 => {
-                let mut buf = SampleBuffer::new(rx);
+                let mut buf = SampleBuffer::new(rx, self.flush_gen.clone());
                 let mut ramp = self.new_fade_ramp();
                 #[cfg(feature = "visualizer")]
                 let viz_tap = self.viz_tap.clone();
@@ -574,6 +579,7 @@ impl CpalOutput {
                         self.config,
                         move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
                             ramp.begin();
+                            buf.poll_flush();
                             #[cfg(feature = "visualizer")]
                             if viz_scratch.len() < data.len() {
                                 viz_scratch.resize(data.len(), 0.0);
@@ -705,6 +711,15 @@ impl CpalOutput {
             self.pause_state.set_paused(false);
         }
         Ok(())
+    }
+
+    /// Discard the audio queued for the device (a seek): the callback drops
+    /// its current chunk and everything still in the channel on its next
+    /// period, so the new position is audible at once instead of after the
+    /// whole buffer depth. Like the fade ramp, this runs in the callback —
+    /// the decode thread cannot reach the receiving end.
+    pub fn flush(&self) {
+        self.flush_gen.fetch_add(1, Ordering::Release);
     }
 
     pub fn stop(&mut self) -> Result<()> {
