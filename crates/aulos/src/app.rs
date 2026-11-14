@@ -1564,13 +1564,21 @@ impl App {
                 self.go_back();
             }
         }
-        if typing {
-            return;
-        }
         #[cfg(feature = "visualizer")]
         let viz_open = self.viz_open();
         #[cfg(not(feature = "visualizer"))]
         let viz_open = false;
+        // Mouse back/forward navigate even while typing, like a browser.
+        let (mouse_back, mouse_fwd) = ctx.input(mouse_history);
+        if mouse_back && !viz_open {
+            self.go_back();
+        }
+        if mouse_fwd && !viz_open {
+            self.go_forward();
+        }
+        if typing {
+            return;
+        }
         if back && !viz_open {
             self.go_back();
         }
@@ -1602,6 +1610,14 @@ impl App {
             self.navigate(routes[i].clone());
         }
     }
+}
+
+/// The mouse's back/forward buttons, which egui delivers as `Extra1`/`Extra2`.
+fn mouse_history(i: &egui::InputState) -> (bool, bool) {
+    (
+        i.pointer.button_pressed(egui::PointerButton::Extra1),
+        i.pointer.button_pressed(egui::PointerButton::Extra2),
+    )
 }
 
 /// Set for a frame by the input hook when the Android back gesture arrived.
@@ -1799,5 +1815,76 @@ impl eframe::App for App {
             self.session.config.save();
         }
         self.session.config.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mouse_history;
+    use crate::theme;
+    use egui::{Context, Event, PointerButton, RawInput, pos2, vec2};
+
+    /// Runs one frame with `events` and reports the history buttons pressed.
+    fn history_buttons(events: Vec<Event>) -> (bool, bool) {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        let input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                vec2(1000.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut buttons = (false, false);
+        let mut out = ctx.run_ui(input, |ui| {
+            buttons = ui.input(mouse_history);
+        });
+        out.textures_delta.clear();
+        buttons
+    }
+
+    fn button_event(button: PointerButton, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos: pos2(100.0, 100.0),
+            button,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn extra_buttons_navigate_history() {
+        assert_eq!(
+            history_buttons(vec![button_event(PointerButton::Extra1, true)]),
+            (true, false)
+        );
+        assert_eq!(
+            history_buttons(vec![button_event(PointerButton::Extra2, true)]),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn other_buttons_and_releases_do_not_navigate() {
+        assert_eq!(history_buttons(vec![]), (false, false));
+        for button in [
+            PointerButton::Primary,
+            PointerButton::Secondary,
+            PointerButton::Middle,
+        ] {
+            assert_eq!(
+                history_buttons(vec![button_event(button, true)]),
+                (false, false)
+            );
+        }
+        assert_eq!(
+            history_buttons(vec![button_event(PointerButton::Extra1, false)]),
+            (false, false)
+        );
+        assert_eq!(
+            history_buttons(vec![button_event(PointerButton::Extra2, false)]),
+            (false, false)
+        );
     }
 }
