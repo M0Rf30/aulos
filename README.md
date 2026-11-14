@@ -257,6 +257,7 @@ On the very first launch Aulos greets you with its intro jingle — a 4-second, 
 | `/` | Search |
 | `1`–`8` | Jump to a page |
 | `Alt+←` / `Alt+→` | Back / forward |
+| Mouse back / forward buttons | Back / forward |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / reset interface size |
 | `Esc` | Clear search, close sheets and the expanded view |
 
